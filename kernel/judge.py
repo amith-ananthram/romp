@@ -13101,25 +13101,47 @@ def _relay_tail_lines(text, room):
     return last.decode("utf-8", errors="ignore")
 
 
+_RELAY_EXCERPT_HEAD = 96      # the header line's room inside the bound
+_RELAY_EXCERPT_SEP = 40       # a turn's separator line and joins
+_RELAY_EXCERPT_RESERVE = 128  # kept back from a shortened own turn while earlier turns exist, so a one-line earlier
+#                               exchange rides beside it by design rather than by the shortener's line-rounding slack
+
+
+def _relay_wire_len(s):
+    """The bytes `s` takes on the bus: JSON-encoded UTF-8 without the quotes. A newline, a quote or a backslash is two
+    bytes there, so a newline-dense excerpt measured raw could double on the wire past the bound (the third verdict);
+    the bound is measured in this form."""
+    return len(json.dumps(s, ensure_ascii=False).encode("utf-8")) - 2
+
+
 def _relay_excerpt(turns, upto_t, budget, who=""):
     """The conversation a relayed question sits in, for the peer: whole turns only, selected newest first from the
-    turn the question ends (always included, shortened only when it alone exceeds the bound) back while they fit
-    the bound, shown oldest first under a line that says how many turns are shown and how many earlier ones were left
-    out. Turns are the parse's (event_model): the user's prompt text and the assistant's reply text, tool calls
-    collapsed to a count. Empty when there is nothing to show."""
+    turn the question ends (always included, shortened only when it alone exceeds the bound, to the bound less a small
+    reserve while earlier turns exist so a one-line earlier exchange still rides beside it) back while they fit
+    the bound, shown oldest first under a line that says how many turns are shown and how many were left out (the
+    earlier ones, and any holding no text). The bound is measured as the bus carries the excerpt (_relay_wire_len).
+    Turns are the parse's (event_model): the user's prompt text and the assistant's reply text, tool calls collapsed
+    to a count. Empty when there is nothing to show."""
     upto = int(upto_t or 0)
     sel = [t for t in turns or [] if int(t.get("t") or 0) <= upto]   # nothing at or before the block's evidence: no excerpt
     total = len(sel)
-    kept, size = [], 0
+    kept, size = [], _RELAY_EXCERPT_HEAD
     for i in range(total - 1, -1, -1):                     # newest first, rendered (and hydrated) one turn at a time: the
         txt = _relay_turn_text(sel[i], who)                #   walk stops at the bound, so a long session's history is
         if not txt:                                        #   never read for two turns' worth of excerpt (the review)
             continue
-        n = len(txt.encode("utf-8")) + 40
+        n = _relay_wire_len(txt) + _RELAY_EXCERPT_SEP
         if not kept:
-            if n > budget:
-                txt = _relay_shorten(txt, max(256, budget - 40))
-                n = len(txt.encode("utf-8")) + 40
+            if size + n > budget:
+                cap = budget - (_RELAY_EXCERPT_RESERVE if i > 0 else 0)   # the own turn's share of the bound
+                txt = _relay_shorten(txt, max(256, cap - size - _RELAY_EXCERPT_SEP))
+                for _ in range(4):                         # the shortener counts raw bytes: tighten while the wire form is over
+                    n = _relay_wire_len(txt) + _RELAY_EXCERPT_SEP
+                    raw = len(txt.encode("utf-8"))
+                    if size + n <= cap or raw <= 256:
+                        break
+                    txt = _relay_shorten(txt, max(256, int(raw * (cap - size - _RELAY_EXCERPT_SEP) / max(1, n - _RELAY_EXCERPT_SEP))))
+                n = _relay_wire_len(txt) + _RELAY_EXCERPT_SEP
             kept.append((i, txt)); size += n
             continue
         if size + n > budget:
@@ -13128,9 +13150,11 @@ def _relay_excerpt(turns, upto_t, budget, who=""):
     if not kept:
         return ""
     kept.reverse()
-    shown, left = len(kept), kept[0][0]                    # every turn before the oldest shown was left out (or empty)
-    head = "The conversation this question ends, oldest first: %d of %d turn%s" % (shown, total, "" if total == 1 else "s")
-    head += (", the %d earlier one%s left out." % (left, "" if left == 1 else "s")) if left else "."
+    shown = len(kept)
+    left = total - shown                                   # every other turn: earlier than the oldest shown, or holding no
+    head = "The conversation this question ends, oldest first: %d of %d turn%s shown" % (shown, total, "" if total == 1 else "s")
+    head += (", %d left out (earlier, or holding no text)." % left) if left else "."   # text (the third verdict: an
+    #   empty turn above the oldest shown left shown + left-out short of the total)
     parts = [head] + ["--- turn %d of %d ---\n%s" % (i + 1, total, txt) for i, txt in kept]
     return "\n\n".join(parts)
 

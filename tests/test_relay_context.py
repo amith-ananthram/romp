@@ -45,10 +45,29 @@ def turn(t, prompt, reply, tools=0):
 
 
 class Excerpt(unittest.TestCase):
+    def test_an_empty_turn_among_the_shown_counts_as_left_out_so_the_counts_close(self):
+        turns = [turn(T0, "first prompt", "first reply"),
+                 turn(T0 + 100, "<!-- romp-note: bookkeeping -->", "<!-- romp-msg-id: 1 -->"),   # markers only: renders empty
+                 turn(T0 + 200, "last prompt", "last reply")]
+        out = jd._relay_excerpt(turns, T0 + 200, 4000, who="api")
+        self.assertTrue(out.startswith("The conversation this question ends, oldest first: 2 of 3 turns shown, 1 left out (earlier, or holding no text)."), out[:140])
+        self.assertEqual(out.count("--- turn "), 2)
+        self.assertIn("--- turn 1 of 3 ---", out)
+        self.assertIn("--- turn 3 of 3 ---", out)
+
+    def test_the_bound_is_measured_as_the_bus_carries_the_excerpt(self):
+        dense = "\n".join("line %d \"quoted\"" % i for i in range(600))   # a newline or a quote is two bytes on the wire
+        raw = len(dense.encode("utf-8"))
+        self.assertGreater(jd._relay_wire_len(dense), raw * 1.1, "the wire form is wider than the raw text")
+        out = jd._relay_excerpt([turn(T0, dense, "ok")], T0, raw, who="api")   # a bound the RAW text alone would just fit
+        self.assertLessEqual(jd._relay_wire_len(out), raw, "the excerpt fits the bound on the wire, not only raw")
+        self.assertIn("(shortened:", out)
+        self.assertIn("line 599", out, "the turn's last lines ride")
+
     def test_whole_turns_newest_first_selected_oldest_first_shown_within_the_bound(self):
         turns = [turn(T0 + i * 100, "prompt %d " % i + "x" * 300, "reply %d " % i + "y" * 300) for i in range(8)]
         out = jd._relay_excerpt(turns, T0 + 700, 2200, who="api")   # three turns of ~670 bytes each fit; a fourth would not
-        self.assertTrue(out.startswith("The conversation this question ends, oldest first: 3 of 8 turns, the 5 earlier ones left out."), out[:120])
+        self.assertTrue(out.startswith("The conversation this question ends, oldest first: 3 of 8 turns shown, 5 left out (earlier, or holding no text)."), out[:140])
         shown = [int(m) for m in __import__("re").findall(r"--- turn (\d+) of 8 ---", out)]
         self.assertEqual(shown, [6, 7, 8], "the newest three, shown oldest first")
         self.assertIn("user: prompt 7", out)
@@ -59,7 +78,7 @@ class Excerpt(unittest.TestCase):
     def test_a_short_conversation_rides_whole(self):
         turns = [turn(T0, "which client?", "the exporter has two."), turn(T0 + 100, "the old one", "then the port stays; which port?")]
         out = jd._relay_excerpt(turns, T0 + 100, jd.RELAY_CONTEXT_BYTES_DEFAULT, who="api")
-        self.assertTrue(out.startswith("The conversation this question ends, oldest first: 2 of 2 turns."), out[:100])
+        self.assertTrue(out.startswith("The conversation this question ends, oldest first: 2 of 2 turns shown."), out[:100])
         self.assertLess(out.index("which client?"), out.index("which port?"), "oldest first")
 
     def test_turns_after_the_question_are_not_the_context(self):
@@ -98,7 +117,7 @@ class Excerpt(unittest.TestCase):
             out = jd._relay_excerpt(turns, T0 + 3999, 2000, who="api")
         finally:
             jd.em.hydrate = real
-        self.assertIn("4 of 4000 turns, the 3996 earlier ones left out", out)
+        self.assertIn("4 of 4000 turns shown, 3996 left out", out)
         self.assertLessEqual(len(hydrated), 5 * 2, "only the turns walked (the kept ones and the one that did not fit) are read: %d" % len(hydrated))
 
     def test_a_fenced_block_is_never_cut(self):
@@ -122,7 +141,7 @@ class Excerpt(unittest.TestCase):
         self.assertIn("item 399:", out, "the last lines of the turn")
         self.assertNotIn("item 000:", out)
         self.assertIn("shortened: this turn's earlier", out)
-        self.assertIn("2 of 2 turns.", out, "the small earlier turn still fits beside the shortened one")
+        self.assertIn("2 of 2 turns shown.", out, "the small earlier turn still fits beside the shortened one: the reserve is its room")
         self.assertLessEqual(len(out.encode()), 2048 + 200)
         one = "y" * 5000                                                       # a single line past the budget: its last bytes
         out2 = jd._relay_excerpt([turn(T0, "p", one + " END?")], T0, 600, who="api")
