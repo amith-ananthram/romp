@@ -7,7 +7,7 @@
 // modal over the pane that was clicked, the default and the only route where no shell exists.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { fileLinkRoute } from "./file-route";
+import { fileLinkRoute, browseRoute } from "./file-route";
 
 const SETTINGS = ["chat", "pane", undefined, null, "purple", 42];   // the gear's two values, an unset store, foreign values
 
@@ -28,6 +28,20 @@ test("fileLinkRoute: Files pane CLOSED, the setting decides; only the literal 'p
   assert.equal(fileLinkRoute(null, true, false), "here");
   assert.equal(fileLinkRoute("purple", true, false), "here", "a foreign stored value falls to the default");
   assert.equal(fileLinkRoute(42, true, false), "here");
+});
+
+// The Files CONTROL hidden by its gear setting (T317): there is no pane to bring forward, so the "pane" setting
+// reads as the default and the click opens here — the closed-pane road. An OPEN pane still takes the click (the
+// shell closes the pane when the control goes, so the two cannot disagree for long); no shell still means here.
+test("fileLinkRoute: the Files control hidden, the pane setting falls back to the pane you clicked", () => {
+  assert.equal(fileLinkRoute("pane", true, false, false), "here", "no control, no pane to open: over the pane clicked");
+  assert.equal(fileLinkRoute("chat", true, false, false), "here");
+  assert.equal(fileLinkRoute("pane", true, false, true), "pane", "the control shown: the setting still opts in");
+  assert.equal(fileLinkRoute("pane", true, false), "pane", "the argument defaults to shown (a shell that never said)");
+  assert.equal(fileLinkRoute("pane", true, true, false), "pane", "an OPEN pane takes the click whatever else is said");
+  assert.equal(fileLinkRoute("pane", false, false, false), "here");
+  assert.equal(browseRoute(true, "pane", true, false, false), "here", "a folder walks the same ladder");
+  assert.equal(browseRoute(false, "pane", true, false, false), "editor", "VS Code keeps the editor's opener");
 });
 
 test("fileLinkRoute names only the two targets this chat can open", () => {

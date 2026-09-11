@@ -239,7 +239,7 @@ export function initPalette(opts?: { onClose?: () => void; kbdFor?: (c: PaletteC
     openPick({
       placeholder: "Type a command…",
       // hidden commands are bindable but not listed (palette.toggle from the palette just blinks it)
-      items: commandList().filter((c) => !c.hidden)
+      items: commandList().filter((c) => !c.hidden && (!c.when || c.when()))
         .map((c) => ({ title: c.title, kbd: opts && opts.kbdFor ? opts.kbdFor(c) : undefined, run: c.run })),
     });
   }

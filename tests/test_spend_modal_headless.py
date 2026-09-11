@@ -193,6 +193,7 @@ class SpendModalServed(unittest.TestCase):
         self.assertIn("$1200", mg["rows"][0].replace(",", ""), "team = web 960 + api 240")
         self.assertIn("$540", mg["rows"][1].replace(",", ""), "ops = api 240 + worker 300")
         self.assertEqual(mg["tagColor"], "rgb(194, 65, 12)", "the tag row wears the tag store's color")
+        self.assertEqual((mg["tagBorder"], mg["tagWeight"]), ("rgb(194, 65, 12)", "400"), "…as the one tag chip: its colour on a thin border, never bold (T321)")
         self.assertTrue(any("1 session carries several tags" in n for n in mg["notes"]), mg["notes"])
         self.assertIn("team", mg["stackNames"]); self.assertIn("ops", mg["stackNames"])
         self.assertLessEqual(mg["dayBuckets"], 24, "1 day · by hour = the last 24 hourly buckets")

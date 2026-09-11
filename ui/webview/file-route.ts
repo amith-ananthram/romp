@@ -7,6 +7,9 @@
 //              other pane, so everything opens in place there.
 //   filesOpen  the shell's Files-pane bit (render.ts panesOn.files, cached from the shell's own broadcast):
 //              the pane is ON SCREEN, a desktop column toggled on or the tab showing on a phone.
+//   filesAvail the shell's word that the Files control exists (render.ts panesAvail.files, the same broadcast):
+//              the gear's "Files control in the dashboard bar" is on (the default). Off, there is no pane to
+//              bring forward, so a click that would have gone there opens here (T317).
 // A verdict names the TARGET: "pane" is the Files pane (the shell brings a closed one forward; the click is
 // the gesture), "here" is this document, the viewer or the file browser as a modal over the pane that was
 // clicked, and "editor" (a folder in VS Code) is the host editor's own opener.
@@ -17,9 +20,10 @@ export type BrowseRoute = FileRoute | "editor";
 /** A FILE link. An OPEN Files pane takes the click whatever the setting says: the pane being open IS the
  *  intent, and a file that opened as a modal over the chat while the pane sat there empty was the bug.
  *  Closed, the setting decides; "here" is the default. */
-export function fileLinkRoute(pane: unknown, framed: boolean, filesOpen: boolean): FileRoute {
+export function fileLinkRoute(pane: unknown, framed: boolean, filesOpen: boolean, filesAvail: boolean = true): FileRoute {
   if (!framed) return "here";
   if (filesOpen) return "pane";
+  if (!filesAvail) return "here";   // the Files control is hidden by its setting (T317): no pane to bring forward, so the pane clicked
   return pane === "pane" ? "pane" : "here";
 }
 
@@ -28,7 +32,7 @@ export function fileLinkRoute(pane: unknown, framed: boolean, filesOpen: boolean
  *  file link: an open Files pane takes the listing, a closed one only when the setting names it, and
  *  otherwise the browser opens over the chat as it always has. Web only: in VS Code the folder link keeps
  *  the editor's own opener (asFolderLink's openFolder act), so the ladder is never asked. */
-export function browseRoute(web: boolean, pane: unknown, framed: boolean, filesOpen: boolean): BrowseRoute {
+export function browseRoute(web: boolean, pane: unknown, framed: boolean, filesOpen: boolean, filesAvail: boolean = true): BrowseRoute {
   if (!web) return "editor";
-  return fileLinkRoute(pane, framed, filesOpen);
+  return fileLinkRoute(pane, framed, filesOpen, filesAvail);
 }

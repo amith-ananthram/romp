@@ -10,6 +10,7 @@ export type PaletteCommand = {
                     // actually answers to is effectiveChord(), and the palette's hotkey chip shows
                     // that, so a rebound command never advertises a stale default (the user 2026-08-09).
   hidden?: boolean; // bindable but not listed in the palette (palette.toggle: running "toggle the
+  when?: () => boolean;   // listed only while true, re-read at every open (a pane whose control the gear hid; T317)
                     // palette" FROM the palette would just blink it)
   run: () => void;
 };

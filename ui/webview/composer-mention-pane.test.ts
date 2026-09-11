@@ -5,7 +5,7 @@
 // stack. Skips by name when playwright or its browser is missing (md-sanitize-browser.test.ts's idiom; CI's
 // test step runs before its Chromium install, so the browser cases skip there). Source pins hold only the
 // wiring the slices cannot carry: the one clear helper every clear site calls, the keydown order, the roster
-// hook at the top of renderTabs, the transcript hook.
+// hook at the top of renderTabs, the transcript hook, the selection menu's Copy, the chips' stylesheet rules.
 // Synthetic names only (romp, rompdocs, web, api, TESTHOST; placeholder ids).
 import { test, after } from "node:test";
 import * as assert from "node:assert/strict";
@@ -16,6 +16,7 @@ import { createRequire } from "node:module";
 const PKG = process.cwd();                                   // vscode-extension, where npm test runs
 const UI = path.resolve(PKG, "..", "ui", "webview");
 const RENDER = fs.readFileSync(path.join(UI, "render.ts"), "utf8");
+const STYLES = fs.readFileSync(path.join(UI, "styles.css"), "utf8");
 const req = createRequire(path.join(PKG, "package.json"));   // runtime requires: esbuild must not bundle playwright
 
 let pw: any = null;
@@ -47,9 +48,10 @@ function bundle(): string {
 import { MENTION_MAX_ROWS, mentionQuery, rankMentions, mentionMoreNote, mentionToken, insertMention, mentionKeyAction, mentionSegments } from "./composer-mention";
 const CHIP_LABEL: any = { working: "Working", ready: "Ready", idle: "Idle", closed: "Closed", needsInput: "Blocked" };
 const el = (tag: string, cls?: string) => { const e = document.createElement(tag); if (cls) e.className = cls; return e; };
-import { hostNameNodes } from "./host-prefix";   // the real renderer: a remote chip's host must wear .host-prefix
+import { hostNameNodes, hostPartsNodes } from "./host-prefix";   // the real renderers: a remote chip's host must wear .host-prefix
 const isProvisionalId = (id: string) => id.startsWith("prov:");
 (window as any).__mention = {
+  hostPartsNodes,   // the awaiting chip names its peer through this one (updateStatusline); the page builds that chip by hand
   mount(ta: HTMLTextAreaElement, env: any) {
     const sessions: Map<string, any> = env.sessions;
     let activeId: string | null = env.activeId ?? null;
@@ -539,13 +541,176 @@ test("in Chromium: chips are exact-name only, keyed by session id, re-dressed on
   await h.page.close();
 });
 
+// ── copying a chip, executed ────────────────────────────────────────────────────────────────────────────
+
+test("in Chromium: copying a selection that holds a chip copies the @name as typed; a selection with no whole chip is left to the browser", async (t) => {
+  const h = await open(t); if (!h) return;
+  const r = await h.page.evaluate(([api, webId]: [string, string]) => {
+    const w = window as any;
+    const sessions = new Map<string, any>([
+      [api, { id: api, name: "api", color: { bg: "#d5643a", fg: "#ffffff" }, status: { state: "working" } }],
+      [webId, { id: webId, name: "web", color: null, status: { state: "ready" } }],
+      ["TESTHOST:" + webId, { id: "TESTHOST:" + webId, name: "TESTHOST:web", color: { bg: "#8899aa", fg: "#000000" }, status: { state: "working" } }],
+    ]);
+    const root = document.getElementById("content")!;
+    const thread = document.createElement("div"); root.appendChild(thread);
+    const chips = w.__mention.chips({ sessions, views: new Map([["v1", { el: thread }]]), refreshMentionCard: null });
+    const bubble = document.createElement("div"); bubble.className = "user-bubble md";
+    bubble.innerHTML = "<p>ask @web and @api, not <code>@api</code></p>";
+    thread.appendChild(bubble); chips.markMentions(bubble);
+    const far = document.createElement("div"); far.className = "user-bubble md";
+    far.innerHTML = "<p>ping @TESTHOST:web</p>";
+    thread.appendChild(far); chips.markMentions(far);
+    w.__ta.blur();                                    // __setup focused the composer; the selection goes to the transcript
+    const sel = document.getSelection()!;
+    // the browser's copy as a synthetic event with its own clipboard: what a listener writes, or nothing at all
+    const copy = (target: Element) => {
+      const dt = new DataTransfer();
+      const ev = new ClipboardEvent("copy", { clipboardData: dt, bubbles: true, cancelable: true });
+      target.dispatchEvent(ev);
+      return { prevented: ev.defaultPrevented, text: dt.getData("text/plain"), html: dt.getData("text/html") };
+    };
+    const select = (node: Node, start: number, end: number) => {
+      sel.removeAllRanges(); const rg = document.createRange(); rg.setStart(node, start); rg.setEnd(node, end); sel.addRange(rg);
+    };
+    const out: any = {};
+    sel.selectAllChildren(bubble);
+    out.selBefore = sel.toString();
+    out.whole = copy(bubble);
+    out.selAfter = sel.toString(); out.textAfter = bubble.textContent;
+    out.chipsAfter = Array.from(bubble.querySelectorAll(".mention-chip")).map((c) => [c.textContent, (c as HTMLElement).dataset.token]);
+    // the code span alone: no chip in the selection
+    const code = bubble.querySelector("code")!;
+    sel.removeAllRanges(); const rc = document.createRange(); rc.selectNodeContents(code); sel.addRange(rc);
+    out.code = copy(bubble);
+    // the double-clicked word: the api chip's own text node, edge to edge
+    const apiText = bubble.querySelectorAll(".mention-chip")[1].firstChild as Text;
+    select(apiText, 0, 3);
+    out.word = copy(bubble);
+    const rw = sel.getRangeAt(0);
+    out.wordRange = [rw.startContainer === apiText, rw.startOffset, rw.endContainer === apiText, rw.endOffset, sel.toString()];
+    // letters inside the chip: part of a name is not a mention
+    select(apiText, 1, 3);
+    out.part = copy(bubble);
+    out.partSel = sel.toString();
+    // a remote session's chip: its first text is the host prefix
+    sel.selectAllChildren(far);
+    out.remote = copy(far);
+    out.remoteAfter = far.textContent;
+    // a copy inside the composer: the document's selection holds no chip
+    const ta = w.__ta as HTMLTextAreaElement;
+    ta.value = "ask @api"; ta.focus(); ta.select();
+    out.composer = copy(ta);
+    out.composerSel = [ta.selectionStart, ta.selectionEnd];
+    return out;
+  }, [SID(2), SID(3)]);
+  assert.equal(r.whole.prevented, true, "the copy over a chip is the listener's");
+  assert.equal(r.whole.text, "ask @web and @api, not @api", "every chip as typed, the code span as rendered");
+  assert.match(r.whole.html, />@web<\/span>/, "the rich flavour carries the @ on the chip's text too");
+  assert.match(r.whole.html, />@api<\/span>/); assert.match(r.whole.html, /<code>@api<\/code>/, "the code span as rendered");
+  assert.match(r.whole.html, /class="mention-chip"/, "the chip's class travels");
+  assert.doesNotMatch(r.whole.html, /title=|data-/, "the chip's hover title and its ids do not");
+  assert.equal(r.textAfter, "ask web and api, not @api", "the chips read the bare names again");
+  assert.deepEqual(r.chipsAfter, [["web", "@web"], ["api", "@api"]], "the chips' text and token are as they were");
+  assert.equal(r.selBefore, "ask web and api, not @api");
+  assert.equal(r.selAfter, r.selBefore, "the selection is where it was");
+  assert.deepEqual(r.code, { prevented: false, text: "", html: "" }, "no chip in the selection: the browser's own copy");
+  assert.deepEqual([r.word.prevented, r.word.text], [true, "@api"], "a double-clicked chip word is the whole chip");
+  assert.deepEqual(r.wordRange, [true, 0, true, 3, "api"], "the range's offsets are back where the double-click put them");
+  assert.deepEqual(r.part, { prevented: false, text: "", html: "" }, "letters inside a chip are not a mention");
+  assert.equal(r.partSel, "pi");
+  assert.deepEqual([r.remote.prevented, r.remote.text], [true, "ping @TESTHOST:web"], "a remote session's token, host and all");
+  assert.match(r.remote.html, /class="host-prefix">@TESTHOST:<\/span>web<\/span>/, "in the rich flavour the @ sits on the host prefix, the chip's first text");
+  assert.equal(r.remoteAfter, "ping TESTHOST:web");
+  assert.deepEqual(r.composer, { prevented: false, text: "", html: "" }, "a copy inside the composer is the browser's");
+  assert.deepEqual(r.composerSel, [0, 8]);
+  assert.deepEqual(h.errors, []);
+  await h.page.close();
+});
+
+// ── the chips' host prefix, on the real sheet ───────────────────────────────────────────────────────────
+
+/** A computed colour as [r, g, b, a]; a hex token the same way. */
+function rgba(v: string): [number, number, number, number] {
+  const m = v.trim().match(/^rgba?\((\d+), (\d+), (\d+)(?:, ([\d.]+))?\)$/);
+  if (m) return [+m[1], +m[2], +m[3], m[4] === undefined ? 1 : +m[4]];
+  const hex = v.trim().match(/^#([0-9a-f]{6})$/i);
+  assert.ok(hex, "a colour: " + v);
+  const x = hex![1];
+  return [parseInt(x.slice(0, 2), 16), parseInt(x.slice(2, 4), 16), parseInt(x.slice(4, 6), 16), 1];
+}
+/** `top` composited over an opaque `under` (alpha blending, the theme-parity idiom). */
+function over(top: [number, number, number, number], under: [number, number, number, number]): [number, number, number, number] {
+  return [0, 1, 2].map((i) => top[i] * top[3] + under[i] * (1 - top[3])).concat([1]) as [number, number, number, number];
+}
+function lum(c: [number, number, number, number]): number {
+  const ch = (x: number) => { x /= 255; return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4); };
+  return 0.2126 * ch(c[0]) + 0.7152 * ch(c[1]) + 0.0722 * ch(c[2]);
+}
+function contrast(a: [number, number, number, number], b: [number, number, number, number]): number {
+  const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+/** The prefix's contrast on its chip: the prefix over the chip's backing over the surface the chip sits on over the page. */
+function prefixContrast(c: { prefix: string; backing: string; under: string; page: string }): number {
+  const ground = over(rgba(c.backing), over(rgba(c.under), rgba(c.page)));
+  return contrast(over(rgba(c.prefix), ground), ground);
+}
+
+test("in Chromium: a remote chip's host: prefix reads on the shared dark backing in both themes, on the user bubble and on the awaiting chip", async (t) => {
+  const h = await open(t); if (!h) return;
+  // the real sheet, so the cascade decides the colour; its @import lines are the bundler's to resolve, not the browser's
+  // (a sheet that fails to load one makes addStyleTag reject with a bare Event, not a message)
+  await h.page.addStyleTag({ content: STYLES.replace(/^@import [^\n]*\n/gm, "") });
+  const r = await h.page.evaluate((webId: string) => {
+    const w = window as any;
+    const sessions = new Map<string, any>([["TESTHOST:" + webId, { id: "TESTHOST:" + webId, name: "TESTHOST:web", color: { bg: "#8899aa", fg: "#000000" }, status: { state: "working" } }]]);
+    const root = document.getElementById("content")!;
+    const thread = document.createElement("div"); root.appendChild(thread);
+    const chips = w.__mention.chips({ sessions, views: new Map([["v1", { el: thread }]]), refreshMentionCard: null });
+    const bubble = document.createElement("div"); bubble.className = "user-bubble md";
+    bubble.innerHTML = "<p>ping @TESTHOST:web</p>"; thread.appendChild(bubble); chips.markMentions(bubble);
+    // the awaiting chip's peer name as updateStatusline builds it: the identity colour inline on the name, the host through hostPartsNodes
+    const chip = document.createElement("button"); chip.className = "chip chip-awaitingBg chip-btn"; chip.append("Awaiting ");
+    const nm = document.createElement("span"); nm.className = "chip-peer-name"; nm.style.color = "#8899aa";
+    nm.replaceChildren(...w.__mention.hostPartsNodes("TESTHOST", "web")); chip.appendChild(nm); root.appendChild(chip);
+    const cs = (e: Element, p: string) => (getComputedStyle(e) as any)[p] as string;
+    const read = () => {
+      const page = getComputedStyle(document.body).getPropertyValue("--bg").trim();
+      const dim = getComputedStyle(document.body).getPropertyValue("--dim").trim();
+      const mc = bubble.querySelector(".mention-chip")!, mp = bubble.querySelector(".mention-chip .host-prefix")!, ap = nm.querySelector(".host-prefix")!;
+      return { page, dim, texts: [mc.textContent, nm.textContent],
+               mention: { prefix: cs(mp, "color"), backing: cs(mc, "backgroundColor"), under: cs(bubble, "backgroundColor"), page },
+               awaiting: { prefix: cs(ap, "color"), backing: cs(nm, "backgroundColor"), under: cs(chip, "backgroundColor"), page } };
+    };
+    const dark = read();
+    document.body.classList.add("theme-light");
+    const light = read();
+    document.body.classList.remove("theme-light");
+    return { dark, light };
+  }, SID(3));
+  assert.deepEqual(r.dark.texts, ["TESTHOST:web", "TESTHOST:web"], "both chips carry the host prefix and the name");
+  assert.notEqual(r.dark.page, r.light.page, "the theme class took: the page token changed");
+  for (const [theme, got] of [["dark", r.dark], ["light", r.light]] as const) {
+    for (const which of ["mention", "awaiting"] as const) {
+      const c = prefixContrast(got[which]);
+      assert.ok(c >= 4.5, theme + " theme, the " + which + " chip: the host prefix " + got[which].prefix + " on the backing over " + got[which].under + " reads " + c.toFixed(2) + ":1, below 4.5:1");
+    }
+  }
+  // the reason the chips need a colour of their own: the sheet's dim tier is tuned for the page, and the light theme's dim
+  // sits under 4.5:1 on the chips' dark backing (the backing is the same in both themes, the page is not)
+  const lightDim = prefixContrast({ ...r.light.mention, prefix: r.light.dim });
+  assert.ok(lightDim < 4.5, "the light dim tier on the backing reads " + lightDim.toFixed(2) + ":1 (if it clears 4.5:1 the scoped rule can retire)");
+  assert.deepEqual(h.errors, []);
+  await h.page.close();
+});
+
 // ── source pins: the wiring the slices cannot carry ─────────────────────────────────────────────────────
 
 test("the mention chip wears the awaiting chip's dress: one shared rule for the dark backing, radius and padding, the identity colour as the name's own colour", () => {
   // (the user 2026-09-10, who wanted the two chips to look the same: no colour fill, no @). The page above loads
   // no sheet, so the look is pinned at the source: the shared selector list, and the mention chip's own rule
   // setting none of the shared properties (a later same-specificity rule would otherwise win the cascade).
-  const STYLES = fs.readFileSync(path.join(UI, "styles.css"), "utf8");
   const shared = STYLES.match(/^\.chip-peer-name, \.mention-chip \{([^}]*)\}/m);
   assert.ok(shared, "the backing, radius and padding are declared once for both chips");
   assert.match(shared![1], /background: rgba\(0, 0, 0, 0\.85\);/); assert.match(shared![1], /border-radius: 7px;/); assert.match(shared![1], /padding: 0 5px;/);
@@ -557,6 +722,40 @@ test("the mention chip wears the awaiting chip's dress: one shared rule for the 
   assert.doesNotMatch(chipBlock(), /--chip-fg/, "the fill's text colour is gone with the fill");
   assert.match(chipBlock(), /chip\.replaceChildren\(\.\.\.hostNameNodes\(sg\.text\.slice\(1\), sg\.hit\.id\)\)/,
     "the name through the house session-reference renderer, as the awaiting chip names its peer: a remote host wears .host-prefix");
+});
+
+test("the chips' host: prefix has one colour of its own for both chips, beside the shared backing rule, and it clears text contrast on that backing over each theme's page", () => {
+  // The page above loads the sheet only in the Chromium case; this pin runs everywhere. The prefix sits on the
+  // shared 85% black backing, the same in both themes, so its colour is scoped to the two chips and never
+  // inherit: on the mention chip that would be the identity colour, and the palette's dark swatches are the
+  // worst-off names on this backing already.
+  const rule = STYLES.match(/^\.chip-peer-name \.host-prefix, \.mention-chip \.host-prefix \{([^}]*)\}/m);
+  assert.ok(rule, "one rule for both chips' host prefix, chip class first so the global .host-prefix pins stay anchored");
+  const color = rule![1].match(/color: ([^;]+);/);
+  assert.ok(color, "the rule sets the colour");
+  assert.doesNotMatch(color![1], /inherit|var\(--dim/, "a colour for the backing, not the page's dim tier and not the chip's own");
+  assert.ok(STYLES.indexOf(rule![0]) > STYLES.indexOf(".chip-peer-name, .mention-chip {"), "declared beside the shared backing rule, after it");
+  const token = (block: string, name: string) => {
+    const at = STYLES.indexOf("\n" + block + " {");
+    assert.ok(at > 0, block);
+    const body = STYLES.slice(at, STYLES.indexOf("\n}", at));
+    const m = body.match(new RegExp("\\n\\s*" + name.replace(/-/g, "\\-") + ":\\s*([^;]+);"));
+    assert.ok(m, name + " in " + block);
+    const vr = m![1].trim().match(/^var\([^,]+,\s*(.+)\)$/);   // var(--vscode-x, #hex): the fallback is what this static read has
+    return vr ? vr[1].trim() : m![1].trim();
+  };
+  for (const block of [":root", "body.theme-light"]) {
+    const page = token(block, "--bg");
+    const c = prefixContrast({ prefix: color![1].trim(), backing: "rgba(0, 0, 0, 0.85)", under: page, page });
+    assert.ok(c >= 4.5, block + ": " + color![1].trim() + " on the backing over " + page + " reads " + c.toFixed(2) + ":1, below 4.5:1");
+    const dim = prefixContrast({ prefix: token(block, "--dim"), backing: "rgba(0, 0, 0, 0.85)", under: page, page });
+    if (block === "body.theme-light") assert.ok(dim < 4.5, "the light dim tier on the backing reads " + dim.toFixed(2) + ":1: the reason for the rule (if it clears 4.5:1 the rule can retire)");
+  }
+});
+
+test("a copy over a chip goes through mentionCopyText from both doors: the document's copy listener in the chip block, and the selection menu's Copy", () => {
+  assert.match(chipBlock(), /\ndocument\.addEventListener\("copy", \(e\) => \{/, "the listener lives in the sliced block, so the Chromium case above runs the real one");
+  assert.match(RENDER, /const text = sel \? \(mentionCopyText\(sel\)\?\.text \?\? sel\.toString\(\)\) : "";/, "the right-click Copy reads the same text a Ctrl+C would");
 });
 
 test("every clear of the composer goes through clearBox, which refreshes both menus; cancelComposerEdit clears through the module-level hook", () => {

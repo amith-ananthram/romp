@@ -1293,12 +1293,21 @@ class TransitionLedger(unittest.TestCase):
         ah = sb.ApiHealth(d)
         for e in _storm(T0 - 600, T0):
             ah._push(e)
-        self.assertEqual(os.listdir(d), [], "per-request events are never persisted")
+        # T316: the ledger's rollover write puts the file there on the first event of a minute, but it holds per-bin
+        # COUNTS only: no event, no transition yet (nothing has been observed by a read)
+        self.assertEqual(os.listdir(d), [sb.API_HEALTH_STATE_FILE])
+        doc = json.load(open(os.path.join(d, sb.API_HEALTH_STATE_FILE)))
+        self.assertEqual((doc["transitions"], doc["buckets"]), ([], {}), "per-request events are never persisted; no transition yet")
+        self.assertEqual(set(doc), {"schema", "transitions", "buckets", "ledger"})
+        for tier in doc["ledger"][KEY].values():
+            for row in tier.values():
+                self.assertEqual((len(row), all(isinstance(v, int) for v in row)), (5, True), "five counters per bin, nothing per attempt")
         ah.snapshot(T0)
-        self.assertEqual(os.listdir(d), [sb.API_HEALTH_STATE_FILE], "only the observed transition is")
+        self.assertEqual(os.listdir(d), [sb.API_HEALTH_STATE_FILE], "the observed transition joins it")
         head = open(os.path.join(BIN, "romp_sdk_backend.py")).read()
         self.assertIn("Only STATE TRANSITIONS a read observes are\n# written to disk", head)
         self.assertIn("persisting every attempt would add a write per API call", head, "the why is written down")
+        self.assertIn("The T316 ledger persists per-BIN counts", head, "and the ledger's exception to it")
 
 
 class StateFile(unittest.TestCase):
@@ -1357,7 +1366,8 @@ class StateFile(unittest.TestCase):
         d = tempfile.mkdtemp()
         ah = sb.ApiHealth(d)
         sizes = []
-        for i in range(40):                      # two transitions per cycle: unknown -> thrashing -> unknown
+        N = 200                                  # 200 cycles of 5000 s: 11.6 days, past the ledger's longest tier (7 days)
+        for i in range(N):                       # two transitions per cycle: unknown -> thrashing -> unknown
             base = T0 + i * 5000
             for e in _storm(base - 600, base):
                 ah._push(e)
@@ -1365,9 +1375,12 @@ class StateFile(unittest.TestCase):
             ah.snapshot(base + 2000)             # past retention: the ring is empty
             sizes.append(os.path.getsize(os.path.join(d, sb.API_HEALTH_STATE_FILE)))
         self.assertEqual(len(_rows(d)), sb.API_HEALTH_TRANSITIONS_KEEP)
-        self.assertEqual(_rows(d)[-1]["t"], T0 + 39 * 5000 + 2000, "newest last")
-        self.assertEqual(sizes[-1], sizes[-10], "full tail: the file stopped growing")
-        self.assertLess(sizes[-1], 32 * 1024)
+        self.assertEqual(_rows(d)[-1]["t"], T0 + (N - 1) * 5000 + 2000, "newest last")
+        # T316: the ledger grows with the bins a day and a week hold, then its tiers are full and the file plateaus (its
+        # size wobbles by a few bytes with the digits and the bins a cycle straddles, never climbs); every tier bounded
+        self.assertLess(abs(sizes[-1] - sizes[-30]), 600, "saturated tiers and a full tail: the file stopped growing")
+        self.assertLessEqual(sum(len(bins) for bins in ah._ledger[KEY].values()), 60 + 288 + 168, "516 bins at most per bucket")
+        self.assertLess(sizes[-1], 96 * 1024)
 
     def test_a_malformed_state_file_is_logged_and_never_the_backends_death(self):
         d = tempfile.mkdtemp()
