@@ -540,7 +540,10 @@ class _PerfStats:
                                sharedHits=int(getattr(jd, "parse_hits", lambda: 0)())),
                 # T323 stage 3: the folds' checkpoints: restored, written, swept at boot, folds skipped as unencodable,
                 # fallbacks per reason (version, path, shrunk, guard, rewrite, corrupt) and the bytes the reader read
-                "checkpoints": em.checkpoint_stats()}
+                "checkpoints": em.checkpoint_stats(),
+                # T323 stage 4a: the assembly documents: written, restored, fallbacks per reason, skips per reason (noEntry,
+                # restored, noBoundary, unsplittable, oversize, ...), hydrated bodies and bytes since boot
+                "asmCheckpoint": em.asm_checkpoint_stats()}
 
 
 _PERF_STATS = _PerfStats()
@@ -9091,8 +9094,6 @@ def _persist_checkpoints(now):
     event; a timer is not). Only dirty checkpoints are written; a session with no evidence change writes nothing.
     Exit writes everything dirty (_drain_and_exit). Returns how many files were written."""
     dirty = set(em.checkpoint_dirty())
-    if not dirty:
-        return 0
     written = 0
     for s in _sessions(now):
         sid, leaf = s.get("sid"), s.get("path")
@@ -9105,6 +9106,11 @@ def _persist_checkpoints(now):
         if mine:
             written += em.checkpoint_write_dirty(sorted(mine))
             dirty -= mine
+        try:                                   # the assembly document for the leaf (T323 stage 4a): from a whole entry
+            if em.asm_checkpoint_write(leaf, sid, _display_sdk_human(sid)):   # with a compaction boundary, else a
+                written += 1                   #  counted skip; the tree it comes from is the store's live tree
+        except Exception:
+            sys.stderr.write("assembly checkpoint: %s\n" % traceback.format_exc())
         _CKPT_SETTLE_SEEN[sid] = key
     if len(_CKPT_SETTLE_SEEN) > 4096:
         _CKPT_SETTLE_SEEN.clear()
@@ -56159,6 +56165,12 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
         pass
     try:
         em.checkpoint_write_dirty()       # every fold checkpoint that moved since its last write (T323 stage 3)
+    except Exception:
+        pass
+    try:                                  # the assembly documents of every session's leaf (T323 stage 4a): a whole entry
+        for _s in _sessions(time.time()):   # with a boundary writes, the rest are counted skips; bounded by the drain
+            if _s.get("sid") and _s.get("path"):
+                em.asm_checkpoint_write(_s["path"], _s["sid"], _display_sdk_human(_s["sid"]))
     except Exception:
         pass
     try:
