@@ -13,9 +13,9 @@ The third leak of that day came by a shape no spawn scan can see: a test module 
 IN-PROCESS (load_source of bin/romp-kernel, no subprocess at all) drove an attach whose bus call was refused, and the
 kernel's revive path ran `ensure` from inside the test process, with the test's environment and no trio. So the rule
 here scans every process spawn whose argv names the kernel (Popen, run, check_output, check_call, call; the argument
-span read across lines, whatever spells the path), and the BELT for the in-process shape lives in the bus itself:
-`romp-postal-service serve` and `ensure` refuse the fixed port under a test (PYTEST_CURRENT_TEST set, or the state root
-under a test runner's temporary directory) unless ROMP_POSTAL_PORT names a port, pinned by tests/test_postal_fixed_port_belt.py.
+span read across lines, whatever spells the path, a path held in a name included), and the in-process shape is met in
+the bus itself: `romp-postal-service serve` and `ensure` refuse the fixed port under a test (PYTEST_CURRENT_TEST set, or the
+state root under a temporary directory) unless ROMP_POSTAL_PORT names the port, pinned by tests/test_postal_fixed_port_belt.py.
 A module that loads the kernel in-process and exercises the bus should still carry the trio before its load (the tunnel
 tests do), so its kernel never even asks.
 
@@ -32,7 +32,10 @@ sys.path.insert(0, HERE)
 import test_ship_reship as _lab   # noqa: E402  the lab kernel's environment (the module, not its classes)
 
 CALL = re.compile(r"(?:subprocess\.(?:Popen|run|check_output|check_call|call)|(?<![\w.])Popen)\s*\(")
-KERNEL_ARGV = re.compile(r"""romp-kernel|bin/romp\b|\bBIN\b[^\]\n]*?["']romp["']""")   # a joined path: BIN, "romp"
+# the kernel's path as an argv spells it: the script's name, the bare CLI (not the other bin/romp-* scripts), a path
+# joined from BIN with "romp"
+KERNEL_ARGV = re.compile(r"""romp-kernel|bin/romp(?![\w-])|\bBIN\b[^\]\n]*?["']romp["']""")
+KERNEL_NAME = re.compile(r"^[ \t]*([A-Za-z_]\w*)\s*=\s*[^\n]*romp-kernel", re.M)   # a name bound to the kernel's path
 TRIO = ("ROMP_POSTAL_PORT", "ROMP_POSTAL_PEERS", "ROMP_POSTAL_CLIENT_ONLY")
 
 
@@ -51,7 +54,8 @@ def _call_spans(src):
 
 
 def _spawns_kernel(src):
-    return any(KERNEL_ARGV.search(span) for span in _call_spans(src))
+    names = [re.compile(r"\b%s\b" % re.escape(n)) for n in KERNEL_NAME.findall(src)]
+    return any(KERNEL_ARGV.search(span) or any(n.search(span) for n in names) for span in _call_spans(src))
 
 
 def _hermetic(src):
@@ -86,16 +90,20 @@ class HermeticKernelPostal(unittest.TestCase):
         for src in ('subprocess.Popen([os.path.join(BIN, "romp-kernel")], env=env)',
                     'subprocess.run(\n    [sys.executable, str(BIN / "romp-kernel")],\n    capture_output=True)',
                     'Popen(["python3", "bin/romp-kernel"])',
-                    'subprocess.check_output([os.path.join(BIN, "romp"), "kernel", "--serve"])'):
+                    'subprocess.check_output([os.path.join(BIN, "romp"), "kernel", "--serve"])',
+                    'KERNEL = os.path.join(BIN, "romp-kernel")\nproc = subprocess.Popen([sys.executable, KERNEL], env=env)'):
             self.assertTrue(_spawns_kernel(src), src)
-        self.assertFalse(_spawns_kernel('subprocess.run(["node", "esbuild.js"], cwd=EXT)'), "a build is not a kernel")
-        self.assertFalse(_spawns_kernel('load_source("romp_kernel", os.path.join(BIN, "romp-kernel"))'), "an in-process load is not a spawn: the bus's belt covers it")
+        for src in ('subprocess.run(["node", "esbuild.js"], cwd=EXT)',
+                    'subprocess.run(["bin/romp-postal-service", "ensure"])',
+                    'subprocess.run([os.path.join(BIN, "romp-judge"), "--once"])',
+                    'load_source("romp_kernel", os.path.join(BIN, "romp-kernel"))'):
+            self.assertFalse(_spawns_kernel(src), "not a kernel spawn (a build, the other scripts, an in-process load): " + src)
 
     def test_the_module_that_loads_the_kernel_in_process_and_attaches_carries_the_trio_before_its_load(self):
         src = open(os.path.join(HERE, "test_kernel_tunnels.py"), encoding="utf-8", errors="replace").read()
         load = src.index('load_source("romp_kernel"')
         for k in TRIO:
-            self.assertIn(k, src[:load], "%s is set before the kernel module loads (it binds the port at import)" % k)
+            self.assertIn(k, src[:load], "%s is set before the kernel module loads (it reads the port at import)" % k)
 
 
 if __name__ == "__main__":
