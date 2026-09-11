@@ -5958,6 +5958,8 @@ def _per_file_rewound(fsid, files):
             # transcript that yields ZERO records raises OSError there (the incremental reader swallows a
             # permissions break into an empty list): a failed read, not an empty file, and it must count like one.
             out |= em.file_rewound(fp, rompuuid=fsid if fp == leaf else None, sdk_human=_sdk_owned(fsid) if fp == leaf else None)
+            #     ^ the one-file walk asks for the leaf's document quietly: a lineage document (a /clear's anchor, a
+            #       resume fork) is not this walk's and stays the display's
         except Exception as e:
             fails += 1
             _log_judge_error("romp", fsid, "rewound-reconcile-file",

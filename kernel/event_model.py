@@ -969,10 +969,14 @@ def checkpoint_sweep():
     for cp in list(Path(d).glob("*.json")) + list(Path(d).glob("*.asm.json.gz")):
         keep = False
         try:
-            text = cp.read_bytes()
+            meta = cp.with_name(cp.name + ".meta") if cp.name.endswith(".gz") else None
+            if meta is not None and meta.exists():
+                text = meta.read_bytes()                      # the sidecar: the sweep never inflates a document
+            else:
+                text = cp.read_bytes()
+                if cp.name.endswith(".gz"):
+                    text = gzip.decompress(text)
             _count_read(str(cp), len(text))
-            if cp.name.endswith(".gz"):
-                text = gzip.decompress(text)
             doc = json.loads(text.decode("utf-8"))
             keep = isinstance(doc, dict) and isinstance(doc.get("path"), str) and os.path.exists(doc["path"])
         except (OSError, ValueError):
@@ -980,6 +984,8 @@ def checkpoint_sweep():
         if not keep:
             try:
                 cp.unlink(); gone += 1
+                if cp.name.endswith(".gz"):
+                    cp.with_name(cp.name + ".meta").unlink(missing_ok=True)
             except OSError:
                 pass
     with _CKPT_LOCK:
@@ -1178,10 +1184,11 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
             tail = fh.read(offset - tail_from)
             _count_read(path, len(tail))                  # the guard capture is a read too (/perf's count is what was pulled)
             if _READER_TRACE:
-                fr = sys._getframe(1)                     # the caller outside this module, for the diagnosis
+                fr, inner = sys._getframe(1), []          # the caller outside this module, and the path through it
                 while fr is not None and fr.f_code.co_filename == __file__:
+                    inner.append(fr.f_code.co_name)
                     fr = fr.f_back
-                who = "%s:%d" % (fr.f_code.co_name, fr.f_lineno) if fr is not None else "?"
+                who = ("%s:%d" % (fr.f_code.co_name, fr.f_lineno) if fr is not None else "?") + " via " + "<".join(inner[:6])
                 sys.stderr.write("reader: %s %s base=%d gen=%d size=%d by %s\n" % (kind, path, base, gen, st.st_size, who))
     except OSError as e:
         with _JSONL_CACHE_LOCK:
@@ -3251,7 +3258,7 @@ def _segment_id(rompuuid, seg_t, atoms, trigger_uuid):
 def _has_text(atom):
     lz = atom.get("lazy")
     if lz is not None:
-        return lz.get("nt", True)
+        return bool(lz.get("nt"))
     return bool(_text_of(_content(atom.get("message"))))
 
 
@@ -3305,6 +3312,7 @@ SEAM_PROSE_FLOOR = 80                     # tail "real work" = a tool_use atom o
 
 
 def _seam_real_work(atoms):
+    hydrate(atoms)                                            # bodies before the assembly cut: read on demand (T323 stage 4a)
     """True if `atoms` hold REAL work — any assistant tool_use, or assistant prose ≥ SEAM_PROSE_FLOOR
     chars (above connective stubs). The event condition that gates a seam split: post-settle wrap-up
     chatter never mints a noise segment."""
@@ -3467,7 +3475,7 @@ def file_rewound(path, rompuuid=None, sdk_human=None):
     path = Path(path)
     ad = None
     if rompuuid is not None and _CKPT_DIR_FN is not None:
-        doc = _asm_ckpt_load(path, rompuuid, sdk_human, [str(path)], {})
+        doc = _asm_ckpt_load(path, rompuuid, sdk_human, [str(path)], {}, quiet_inputs=True)
         if doc is not None:
             try:
                 seed, _landed = _seed_from_doc(doc)
@@ -3826,6 +3834,7 @@ def _asm_ckpt_note(path, reason, detail=""):
     if cp is not None:
         try:
             cp.unlink()
+            cp.with_name(cp.name + ".meta").unlink(missing_ok=True)
         except OSError:
             pass
 
@@ -3866,10 +3875,9 @@ def _atom_scalars(a):
 def _lazy_of(a, kind, rec_index):
     """The identity scalars a lazy atom carries in place of its body (what the ids, the segmentation and the gates read)."""
     text = _text_of(_content(a.get("message"))) if a.get("message") is not None else ""
-    lz = {"k": kind, "h": hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:8]}
-    if not text:
-        lz["nt"] = False                        # defaults left out: text present, not machine-written, not an interrupt,
-    if _machine_written(a):                     #  no stop reason, no structured tool result, no model
+    lz = {"k": kind, "h": hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:8], "nt": bool(text)}
+    if _machine_written(a):                     # defaults left out: not machine-written, not an interrupt, no stop reason,
+        #                                          no structured tool result, no model
         lz["mw"] = True
     if is_interrupt_record(a):
         lz["ir"] = True
@@ -3921,6 +3929,8 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
             return _asm_ckpt_skip("noEntry")
         if entry.get("prefix"):
             return _asm_ckpt_skip("restored")            # the document it came from stands
+        if entry.get("docWritten") and cp.exists():
+            return _asm_ckpt_skip("written")             # this entry's pre-cut part has not moved (a fold appends after the cut)
         ad = entry["ad"]
         atoms = entry["atoms"]
         bounds = [a for a in atoms if a.get("type") == "system" and a.get("subtype") == "compact_boundary"]
@@ -3956,7 +3966,7 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
         for fp, recs in ad._src.items():
             first_seq[fp] = n + 1
             n += len(recs)
-        files, cuts, fsid_paths = {}, {}, {}
+        files, cuts, fsid_paths, file_offs = {}, {}, {}, {}
         for fp, recs in ad._src.items():
             fsid = Path(fp).stem
             fsid_paths[fsid] = fp
@@ -3968,6 +3978,7 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
             offs = record_offsets(fp, 0)
             if offs is None or len(offs) != len(recs):
                 return _asm_ckpt_skip("offsets")
+            file_offs[fp] = offs
             pre_uuids = [r.get("uuid") for r in recs[:pre_n] if r.get("uuid")]
             f = {"path": fp, "size": st_.st_size, "mtime": st_.st_mtime, "pre": pre_n, "n": len(recs),
                  "first": pre_uuids[0] if pre_uuids else None, "last": pre_uuids[-1] if pre_uuids else None}
@@ -4028,6 +4039,9 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
                 if scal.get("type") == {"u": "user", "a": "assistant", "s": "system"}.get(rr[2]):
                     scal.pop("type", None)
             row = {"i": idx}
+            f_offs = file_offs.get(fp)
+            if f_offs is not None and 0 <= idx < len(f_offs):
+                row["at"] = list(f_offs[idx])                  # (byte offset, byte length): hydrate seeks straight to it
             if scal:
                 row["s"] = scal
             if ri is not None:
@@ -4061,8 +4075,12 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
             if q["seq"] < cut_seq and q["ts"] is not None and (q["uuid"] is None or q["uuid"] in entry["kept"]):
                 st["absorbed_keys"].add((q["ts"], _th(" ".join(q["text"].split()))))
         fsids = files_order.get("_", [])
+        pre_whole = [dict(a) for a in atoms if (ad.seq_of.get(a.get("uuid")) if a.get("uuid") in ad.seq_of else
+                                                 next((q["seq"] for q in ad.qatts if q["uuid"] == a.get("uuid")), cut_seq)) < cut_seq]
+        identity = _pre_tree_identity(pre_whole, rompuuid)     # the WHOLE parse's ids over the pre-cut atoms (bodies in hand)
         pre_lazy = _restore_prefix_atoms(pre_atoms, rompuuid, rows, fsids)
-        identity = _pre_tree_identity(pre_lazy, rompuuid)
+        if _pre_tree_identity(pre_lazy, rompuuid) != identity:
+            return _asm_ckpt_skip("reconstruction")            # the lazy reconstruction would not reproduce the whole parse's ids
         doc = {"av": _ASM_CKPT_V, "path": os.path.realpath(str(leaf_path)), "rompuuid": str(rompuuid), "sdkHuman": bool(sdk_human),
                "cands": list(entry["cands"]), "links": dict(entry["links"]), "files": files, "fsids": fsids, "cutSeq": cut_seq,
                "records": rows, "atoms": pre_atoms, "spine": spine, "seqTs": seq_ts, "lastTs": last_ts,
@@ -4082,8 +4100,13 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
             tmp = cp.with_name("%s.%d.%x.tmp" % (cp.name, os.getpid(), threading.get_ident()))
             tmp.write_bytes(data)
             os.replace(tmp, cp)
+            meta = cp.with_name(cp.name + ".meta")            # {"av", "path"}: what the boot sweep reads, never the document
+            mtmp = meta.with_name(meta.name + ".%d.tmp" % os.getpid())
+            mtmp.write_text(json.dumps({"av": _ASM_CKPT_V, "path": doc["path"]}))
+            os.replace(mtmp, meta)
         except OSError:
             return _asm_ckpt_skip("write")
+        entry["docWritten"] = True
         with _ASM_CKPT_LOCK:
             _ASM_CKPT_STATS["written"] += 1
         return True
@@ -4153,13 +4176,13 @@ def _restore_prefix_atoms(pre_atoms, rompuuid, rows, fsids):
         a["_seq"] = row.get("seq", seq)
         lz = row.get("lz")
         if lz is not None:
-            a["lazy"] = dict(lz, i=row["i"])
+            a["lazy"] = dict(lz, i=row["i"], at=tuple(row["at"]) if row.get("at") else None)
             a["message"] = _LazyBody(a.get("uuid"))
         out.append(a)
     return out
 
 
-def _asm_ckpt_load(leaf_path, rompuuid, sdk_human, candidate_files, links):
+def _asm_ckpt_load(leaf_path, rompuuid, sdk_human, candidate_files, links, quiet_inputs=False):
     """The verified document for `leaf_path`, or None after a counted fallback (a document that exists and does not
     verify) or quietly when there is none."""
     cp = _asm_ckpt_file(leaf_path)
@@ -4177,7 +4200,9 @@ def _asm_ckpt_load(leaf_path, rompuuid, sdk_human, candidate_files, links):
             or bool(doc.get("sdkHuman")) != bool(sdk_human):
         _asm_ckpt_note(leaf_path, "session"); return None
     if list(doc.get("cands") or []) != [str(f) for f in candidate_files] or dict(doc.get("links") or {}) != dict(links or {}):
-        _asm_ckpt_note(leaf_path, "inputs"); return None
+        if quiet_inputs:
+            return None                                       # a reader asking about other inputs (the one-file walk over a
+        _asm_ckpt_note(leaf_path, "inputs"); return None      #  lineage): not this document's failure, it stands
     try:
         for fsid, f in doc["files"].items():
             st_ = os.stat(f["path"])
@@ -4340,14 +4365,12 @@ def hydrate(atoms, rompuuid=None):
             raise LazyBodyRead("atom %s: no file known for fsid %s" % (u, a.get("fsid")))
         by_file.setdefault(path, []).append(a)
     for path, group in by_file.items():
-        offs = record_offsets(path, 0)
         with open(path, "rb") as fh:
-            for a in sorted(group, key=lambda x: x["lazy"]["i"]):
-                i = a["lazy"]["i"]
-                if offs is not None and 0 <= i < len(offs):
-                    at, ln = offs[i]
-                else:
-                    at, ln = _record_at(path, i)
+            for a in sorted(group, key=lambda x: x["lazy"].get("at") or (0, 0)):
+                at_ln = a["lazy"].get("at")
+                if not at_ln:
+                    raise LazyBodyRead("atom %s: the document carries no record location" % a.get("uuid"))
+                at, ln = at_ln
                 fh.seek(at)
                 raw = fh.read(ln)
                 _count_read(path, ln)
@@ -4365,18 +4388,6 @@ def hydrate(atoms, rompuuid=None):
     return filled
 
 
-def _record_at(path, index):
-    """(offset, length) of record `index` of `path` by a scan of the file's line starts (the reader held no offsets:
-    a session whose entry was evicted); one pass, no parsing."""
-    n, pos = 0, 0
-    with open(path, "rb") as fh:
-        for line in fh:
-            if line.strip():
-                if n == index:
-                    return pos, len(line)
-                n += 1
-            pos += len(line)
-    raise LazyBodyRead("record %d of %s is past the file's end" % (index, path))
 
 
 def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_human, leaf_override,
@@ -4603,6 +4614,7 @@ def declared_plan(session):
     result text (a creation-order `cN` fallback if the result is unreadable); `status` rides each
     TaskUpdate. Only TaskCreate/TaskUpdate are folded — plain TodoWrite (no durable ids) is not
     used by romp. Empty list if the session declared no plan."""
+    hydrate(session)                                          # bodies before the assembly cut: read on demand (T323 stage 4a)
     results = {}                                           # tool_use_id → result content (a TaskCreate's carries 'Task #N')
     rejected = set()                                       # tool_use_ids whose result came back is_error
     for turn in session["turns"]:

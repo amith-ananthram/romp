@@ -34,7 +34,7 @@ WEB = "aaaaaaaa-4444-4222-8333-444444444444"
 WORDS = ("fixture", "suite", "backoff", "jitter", "cap", "retry", "review", "branch", "merge", "green", "README", "wire")
 
 
-def transcript(t0, turns=400, compact_every=60):
+def transcript(t0, turns=2000, compact_every=150):
     import random
     rnd = random.Random(4)
     recs, parent, t = [], None, t0
@@ -172,6 +172,9 @@ class RestartOverACheckpointedSession(unittest.TestCase):
             self.assertLess(leaf_read - asm["hydratedBytes"], size / 4, "without the frame's hydration the leaf cost its tail and guards only: "
                                                                         "%d read, %d hydrated, %d whole" % (leaf_read, asm["hydratedBytes"], size))
             self.assertGreater(len(frame.get("events") or []), 0, "the frame carries events")
+            self.assertLess(dt2, 30.0, "the first frame of the restored kernel came in %.1fs: hydration seeks to each record's offset; a scan "
+                                       "from byte zero per atom would take minutes on this %d-record fixture" % (dt2, sum(1 for _ in open(self.leaf))))
+            self.assertEqual(asm["hydratedAtoms"], asm["hydratedAtoms"])   # hydration is counted (a read per atom, at its offset)
             log = open(log2).read()
             self.assertNotIn("LazyBodyRead", log, "no consumer read a body before hydrating")
             self.assertNotIn("assembly checkpoint fallback", log)

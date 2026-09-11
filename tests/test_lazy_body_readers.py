@@ -31,6 +31,27 @@ KERNEL_ALLOWED = {
     "_merge_live_atoms", "_interrupt_marks_atoms", "_stamp_agents", "_ask_fill_answers", "_ask_fill_chosen", "_patch_rows",
     "_claudemd_paths", "_stamp_steps", "_hydrate_postal", "build_subagent", "_agent_alive",
 }
+EVENT_MODEL_ALLOWED = {
+    # the emit and the adapter build atoms from raw records (never lazy); the readers of atoms hydrate first
+    "FileAdapter", "_emit_state", "_chrono", "synthesize_orphans", "synthesize_idle", "is_interrupt_record", "_is_opener",
+    "_turn_id", "segment_turns", "_finalize_turn", "_segment_id", "segments", "_seam_real_work", "split_segment",
+    "_text_hash8", "_stop_reason", "_has_text", "_machine_written", "_lazy_of", "_atom_kind", "_atom_scalars", "_hydrate_one",
+    "hydrate", "is_lazy", "atom_tool_uses", "atom_tool_results", "atom_model", "asm_checkpoint_write", "declared_plan",
+    "_pre_tree_identity", "_restore_prefix_atoms", "_asm_heal", "_asm_full", "_asm_fold", "_asm_restore",
+    # record-level helpers over jsonl rows and postal/state rows
+    "_norm_message", "_content", "_text_of", "author_of", "_record_origin", "_is_tool_result", "_scan_bg_tasks", "_bg_step",
+    "_bg_finish", "scan_bg_tasks_cached", "task_store_plan", "_load_postal_index", "postal_pairs", "injected_source",
+    "strip_harness_preamble", "parse_teammate_message", "_absorbed", "_absorbed_atom", "_landing_t", "chain_verdicts",
+    "_select_eclipsed_chains", "kept_uuids", "landed_text_uuids", "_adopt_detached_compactions", "_repair_compaction_stitches",
+    "_stitch_resume_forks", "active_path", "_prepass", "_emit_fold", "_ingest", "_asm_gates", "_asm_serve", "_assemble", "parse_session",
+    "chain_membership", "file_rewound", "_membership_of", "_seed_from_doc", "_entry_current", "_carry_encode", "_carry_decode",
+    "_LazyBody", "_LazyBody._refuse", "_Unhydrated", "_ckpt_encode", "_ckpt_decode", "_fold_eof_fragment", "_trailing_record",
+    "_atom_line", "_dump",                              # the module's own --test dump over a whole parse (never a restored tree)
+    "fold_records", "_read_jsonl_entry_unlocked", "_read_jsonl_entry", "record_offsets", "_scan_jsonl_bytes", "resume_fork_links",
+    "_lineage_closure", "_load_states", "_read_jsonl", "_read_jsonl_incremental", "_tail_read", "_pinned_entry",
+}
+SDK_BACKEND_ALLOWED = None        # the backend builds live atoms and reads raw records only: every site allowed, listed for the record
+
 JUDGE_ALLOWED = {
     "_atom_text", "_unit_text", "_has_asst_work", "_seg_launches", "_human_prompt_record", "_awaiting_bg_hold",
     # raw records, the states log, captions
@@ -82,6 +103,20 @@ class BodyReadersAreAudited(unittest.TestCase):
 
     def test_judge_body_readers_are_the_audited_ones(self):
         self._check("judge.py", JUDGE_ALLOWED)
+
+    def test_event_model_body_readers_are_the_audited_ones(self):
+        """The event model's own readers of atom bodies (the seam split's real-work test, the declared plan) hydrate; its
+        many other message reads are over raw records, which are never lazy, and are listed as such."""
+        sites = _sites(os.path.join(KERNEL, "event_model.py"))
+        strays = [(ln, fn, code) for ln, fn, code in sites if fn not in EVENT_MODEL_ALLOWED and not fn.startswith("FileAdapter")]
+        self.assertEqual(strays, [], "body reads outside the audited functions in event_model.py:\n%s"
+                         % "\n".join("  event_model.py:%d %s: %s" % s for s in strays))
+        src = open(os.path.join(KERNEL, "event_model.py")).read()
+        for fn in ("_seam_real_work", "declared_plan"):
+            i = src.index("def %s(" % fn)
+            body = src[i:src.index("\ndef ", i + 1)]
+            self.assertIn("hydrate(", body, "%s hydrates before it reads" % fn)
+            self.assertLess(body.index("hydrate("), body.index('.get("message")'), "%s hydrates first" % fn)
 
     def test_every_hydrating_leaf_calls_hydrate_before_its_read(self):
         """The leaves the audit named hydrate at the top of their body: the call sits before any body read."""

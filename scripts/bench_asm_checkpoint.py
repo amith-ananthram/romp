@@ -149,15 +149,17 @@ for p, n in rb.items():
     cls = ("checkpoint" if "/checkpoints/" in p else "agent" if "/subagents/" in p else "states" if "/states/" in p
            else "postal" if p.endswith("messages.jsonl") else "leaf" if p.startswith(proj) else "other")
     by[cls] += n
-written = 0
+written, write_ms = 0, 0.0
 if phase == "first":
     if hasattr(em, "checkpoint_write_dirty"): em.checkpoint_write_dirty()
     if hasattr(em, "asm_checkpoint_write"):
         for sid in sids:                                        # under the key the judges' parse used (their sdk_human answer)
+            t_w = time.time()
             written += 1 if em.asm_checkpoint_write(os.path.join(proj, sid + ".jsonl"), sid, bool(jd._sdk_owned(sid))) else 0
+            write_ms += (time.time() - t_w) * 1000.0            # the per-document write cost (once per whole parse, item L)
 stats = em.asm_checkpoint_stats() if hasattr(em, "asm_checkpoint_stats") else {}
 print(json.dumps({"phase": phase, "byClass": by, "total": sum(by.values()), "rssBytes": r1, "rssDelta": r1 - r0,
-                  "modes": {m: modes.count(m) for m in set(modes)}, "asmWritten": written,
+                  "modes": {m: modes.count(m) for m in set(modes)}, "asmWritten": written, "asmWriteMs": write_ms,
                   "asmRestored": stats.get("restored", 0), "asmFallbacks": stats.get("fallbacks", {}), "asmSkipped": stats.get("skipped", {})}))
 '''
 
@@ -205,6 +207,14 @@ def draw(rows, out):
     ax.clean(xlabel="Files on disk (MB)", ylabel="Bytes a restarted kernel reads (MB)")
     ax2.clean(xlabel="Same worlds (MB)", ylabel="Resident size the parses\nand folds add (MB)")
     ax.set_xlim(0, None); ax.set_ylim(0, None); ax2.set_xlim(0, None); ax2.set_ylim(0, None)
+    # the slope, stated on the figure: resident bytes added per byte of leaf transcript, per tree (a fit through the origin)
+    for i, label in enumerate(labels):
+        rs = sorted([r for r in rows if r["label"] == label and not r.get("error")], key=lambda r: r["worldBytes"])
+        if len(rs) >= 2:
+            xs = [r["sizes"]["leaf"] for r in rs]; ys = [r["second"]["rssDelta"] for r in rs]
+            slope = sum(x * y for x, y in zip(xs, ys)) / sum(x * x for x in xs)
+            ax2.text(xs[-1] / 1e6 * 0.55, ys[-1] / 1e6 * (0.92 - 0.12 * i), "%s: %.2f MB resident per MB of leaf" % (label, slope),
+                     fontsize=9, color=cols[i % len(cols)])
     newest = labels[-1]
     rs = sorted([r for r in rows if r["label"] == newest and not r.get("error")], key=lambda r: r["worldBytes"])
     names = {"leaf": "leaf transcripts", "agent": "agent files (stage 5)", "postal": "postal log", "states": "states logs", "checkpoint": "documents"}
@@ -214,8 +224,11 @@ def draw(rows, out):
     ax3.set_xlim(0, None); ax3.set_ylim(0, None)
     f.subplots_adjust(wspace=0.6)
     f.text(0.5, -0.16, "One measurement per point. Bytes are counted at the reader, documents included; resident size is the process's current VmRSS\n"
-                       "after the parses and folds, not a peak. Agent files get no assembly document until stage 5. Hydration of an old body is on demand\n"
-                       "and none happens at a boot; it is a cost the figure does not carry.", ha="center", va="top", fontsize=8, color="#555555", transform=f.transFigure)
+                       "after the parses and folds, not a peak. Both trees stay linear in transcript size: on this branch the slope is the pre-cut index\n"
+                       "(about 60 bytes per record, resident per session) and the documents (about 6 percent of the leaves); the step that flattens it is\n"
+                       "an index loaded on demand or 4b's tail-first frame keeping only the boundary-forward atoms resident. Agent files: stage 5.\n"
+                       "Hydration of an old body is on demand and none happens at a boot; it is a cost the figure does not carry.",
+           ha="center", va="top", fontsize=8, color="#555555", transform=f.transFigure)
     path = os.path.join(out, "boot_cost_vs_size.png")
     f.savefig(path, dpi=150, bbox_inches="tight")
     return path
