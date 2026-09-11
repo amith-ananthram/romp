@@ -261,8 +261,8 @@ entry carries a token of its own that the spend's re-read compares, so a
 fresh entry flushed over the path during a pass is never taken for the spent
 one; a question the far host carried on before it could be withdrawn, or one
 the host could not be reached to withdraw, leaves a note on the node that the
-brief, the card and the modal show beside the block until a later relay
-reaches the peer); a parked
+brief's owed why carries and the card and the modal show as their own line
+under the brief, dropped when the node's wait next settles); a parked
 question completes only on the far
 host's delivered row, never on a later message; a refused relay's note reaches
 the card's brief beside the question it could not carry; a dead worker's block is not relayed; each record lands

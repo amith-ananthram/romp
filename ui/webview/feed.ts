@@ -70,6 +70,7 @@ interface AskTreeNode {
   followupPending?: boolean;                                     // this sub was optimistically reopened by a per-sub follow-up → "↻ Followed up" chip (kernel flatten, judges 047264f)
   summary?: string | null;                                       // the DISTILLER's key takeaway for a completed goal (artifact or 1-3 sentences) → the modal's auto-line for a DONE node (kernel flatten 78fc97b)
   blockSummary?: string | null;                                  // the BLOCK-distiller's decision brief for a blocked goal → the modal's auto-line for a BLOCKED node (kernel 466393c); null until produced
+  relayNote?: string | null;   // a far host still holds a relayed question after its wait ended (kernel relayCarried) → its own dim line under the brief, never a brief paragraph
   trgb?: [number, number, number];                               // last-activity recency tint (timestamp)
   cleared?: boolean;                                             // user-cleared sub (nodeOverride op:clear) → struck-through faded row + "cleared" chip; the mark stays tied to status (box = done, the user 2026-07-26)
   reviewedEarlier?: boolean;                                     // this done sub predates the top's review boundary (kernel flatten ↔ jd.review_boundary, the distiller's own scoping) → collapsed behind one "N reviewed earlier" row (the user 2026-08-19)
@@ -119,6 +120,7 @@ interface AskItem {
   summary?: string | null;                         // distiller's key takeaway for a COMPLETED goal → the done card's one auto-written line (kernel asks.append); null until produced
   distillState?: "completed" | "blocked" | null;   // the GENUINE resolution state the distiller line keys on, so the brief/takeaway rides the real block instead of the transient `column` (which recheck/rejudging flicker to working) — the user 2026-07-21; absent from older/remote payloads → fall back to column
   blockSummary?: string | null;                    // block-distiller's decision brief for a BLOCKED goal → the blocked card's one auto-written line (kernel 466393c); null until produced
+  relayNote?: string | null;   // a far host still holds a relayed question after its wait ended (kernel relayCarried) → its own dim line under the brief, never a brief paragraph
   briefParts?: { id?: string; since: number }[] | null;   // MULTI-item brief: one {id, since} per paragraph IN ORDER (judge briefParts) → per-paragraph "Nm ago" stamps; null/absent = single ask, the card header's age is the stamp (the user 2026-07-24)
   summaryParts?: { id?: string; since: number }[] | null;   // the DONE twin: per-paragraph done-event stamps for a takeaway the distiller split by <completed-items> (the user 2026-07-24)
   summaryStale?: boolean;                          // the user followed up AFTER the shown takeaway (kernel: followupAt > distilledMt) → the summary section carries the stale note until the re-distill lands (the user 2026-08-19)
@@ -2294,6 +2296,18 @@ function updateAskCard(card: HTMLElement, it: AskItem) {
     sn.textContent = staleNote;
     (a._distill as HTMLElement).prepend(sn);
   }
+  // A far host still holds a relayed question after its wait ended (it.relayNote, kernel relayCarried: the
+  // question went on before it could be withdrawn, or the host could not be reached to withdraw it). Its OWN
+  // dim line under the brief, never a paragraph OF the brief: the per-paragraph stamps above map briefParts
+  // onto the brief's paragraphs and allow exactly one extra, so a note paragraph dropped every stamp and
+  // citation on a briefed top node. Appended after the parts-split and the stale note (both rewrite the
+  // element), so it survives either rendering; shown on its own while no brief exists yet.
+  if (it.relayNote) {
+    const rn = el("div", "fsum-relaynote");
+    rn.textContent = it.relayNote;
+    (a._distill as HTMLElement).append(rn);
+    (a._distill as HTMLElement).style.display = "";
+  }
   const dl = a._distill as HTMLElement;
   if (distillShown && it.summaryAnchorUuid) {
     dl.classList.add("fask-distill-link");
@@ -3276,6 +3290,13 @@ function renderTreeNode(box: HTMLElement, it: AskItem, node: AskTreeNode, byId: 
       sum.onclick = goWork;
     }
     box.appendChild(sum);
+  }
+  // The same note in the modal tree (node.relayNote): its own line under the node's brief, never part of it.
+  if (node.relayNote) {
+    const rn = el("div", "ftree-relaynote");
+    rn.style.paddingLeft = ((depth + 1) * TREE_INDENT_EM) + "em";
+    rn.textContent = node.relayNote;
+    box.appendChild(rn);
   }
   // The per-item STORY (the user 2026-07-20: 'I don't know if they're still active'): a non-done node
   // with verdict history shows a one-line gist — its newest event in outcome words + how long ago —

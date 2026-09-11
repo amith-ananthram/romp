@@ -1749,6 +1749,9 @@ class SaverFlushesItsOwn(_RelayFixture):
         with contextlib.redirect_stderr(io.StringIO()) as err:
             self.assertEqual(km._relay_tick(NOW), 1, "the question goes out; the junk list is skipped, never raised on")
         self.assertNotIn("Traceback", err.getvalue())
+        self.assertFalse(jd._relay_recall_entry_path(WORKER, step).exists(), "the junk list's entry is spent, not kept for good")
+        self.assertNotIn("relayRecall", jd.load_goals(WORKER)["nodes"][step], "and the junk list is dropped from the node")
+        self.assertEqual(jd._requeue_relays_all(), 0, "the boot pass re-queues nothing for it")
 
     def test_a_question_a_far_host_still_holds_is_noted_beside_the_block(self):
         st, top, step = self.store(delegated=True)
@@ -1768,10 +1771,11 @@ class SaverFlushesItsOwn(_RelayFixture):
         self.assertIn("still parked on TESTHOST", nd["relayCarried"])
         self.assertIn("before it could be withdrawn", nd["relayCarried"])
         self.assertTrue(jd._owed_why(nd).endswith("(%s)" % nd["relayCarried"]), "the brief's owed why carries the note in brackets")
-        nd["blockSummary"] = "Decide the retry policy."
-        self.assertEqual(km._brief_with_relay_note(nd), "Decide the retry policy.\n\n" + nd["relayCarried"], "the card and the modal show it under the brief")
-        self.assertEqual(km._brief_with_relay_note({"relayCarried": nd["relayCarried"]}), nd["relayCarried"], "and alone before the brief is distilled")
-        self.assertIsNone(km._brief_with_relay_note({}), "no note, no brief: null as before")
+        src = Path(km.__file__).read_text()                   # the card and the modal carry the note as their OWN field: a
+        self.assertIn('"relayNote": nodes[nid].get("relayCarried") or None,', src)   #   paragraph appended to the brief broke the
+        self.assertIn('"relayNote": nd.get("relayCarried") or None,', src)           #   feed's per-paragraph stamps (fourth verdict)
+        self.assertFalse(hasattr(km, "_brief_with_relay_note"), "the brief is the distiller's alone")
+        self.assertNotIn("_brief_with_relay_note", src)
         st = jd.load_goals(WORKER)                         # a later relay that reaches the peer drops the note
         jd.record_verdict(st, st["nodes"][step], "romp", "awaiting", NOW + 75, why="", lift=True, end_ev=NOW + 75)
         self._close(st, step, "a fresh question", NOW + 80)
@@ -1781,6 +1785,50 @@ class SaverFlushesItsOwn(_RelayFixture):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(km._relay_tick(NOW + 90), 1)
         self.assertNotIn("relayCarried", jd.load_goals(WORKER)["nodes"][step])
+
+    def _carried_note_then(self, outcome):
+        """A carried note on the node, then M2's wait settles by `outcome`: the note must go either way."""
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "first question", T0 + 400)
+        self._save(st)
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "px-any-1", "parked": "TESTHOST"})
+        self.assertEqual(km._relay_tick(NOW), 0)
+        st = jd.load_goals(WORKER)
+        jd.record_verdict(st, st["nodes"][step], "romp", "awaiting", NOW + 5, why="", lift=True, end_ev=NOW + 5)
+        self._close(st, step, "still stuck", NOW + 60)     # M1 retired while parked, M2 minted
+        self._save(st)
+        km._bus_recall_relay = lambda sid, mid: "carried"
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "px-any-2", "parked": "TESTHOST"})
+        with contextlib.redirect_stderr(io.StringIO()):
+            km._relay_tick(NOW + 70)
+        self.assertIn("relayCarried", jd.load_goals(WORKER)["nodes"][step])
+        km._bus_recall_relay = lambda sid, mid: "withdrawn"
+        if outcome == "refused":                           # M2 comes back: the block is the user's, with the refusal noted
+            real = km._relay_pending_status
+            km._relay_pending_status = lambda sid, peer, mid, at: ("bounced", "no live recipient on TESTHOST", NOW + 80)
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    km._relay_tick(NOW + 90)
+            finally:
+                km._relay_pending_status = real
+        else:                                              # M2's wait ended another way: stood down
+            st = jd.load_goals(WORKER)
+            jd.record_verdict(st, st["nodes"][step], "romp", "awaiting", NOW + 80, why="", lift=True, end_ev=NOW + 80)
+            jd.save_goals(WORKER, st)
+            with contextlib.redirect_stderr(io.StringIO()):
+                km._relay_tick(NOW + 90)
+        nd = jd.load_goals(WORKER)["nodes"][step]
+        self.assertNotIn("relayCarried", nd, "any settle of the wait drops the stale line: %s" % outcome)
+        self.assertNotIn("relayWanted", nd)
+        return nd
+
+    def test_the_parked_note_is_dropped_when_the_next_relay_is_refused(self):
+        nd = self._carried_note_then("refused")
+        self.assertIn("could not be asked", nd.get("relayRefusal") or "", "the refusal's own note stands")
+
+    def test_the_parked_note_is_dropped_when_the_next_wait_stands_down(self):
+        nd = self._carried_note_then("stood-down")
+        self.assertEqual((nd.get("relayDone") or {}).get("outcome"), "stood-down")
 
     def test_an_unanswerable_recall_is_said_once_and_backs_off(self):
         st, top, step = self.store(delegated=True)

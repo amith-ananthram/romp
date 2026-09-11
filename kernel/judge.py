@@ -13183,6 +13183,14 @@ def _relay_marker_id(ev_t, peer="", nid=""):
     return "%d-%s-%s" % (int(ev_t or 0), str(peer or "")[:8] or "peer", str(nid or "").rsplit(":", 1)[-1] or "node")
 
 
+def _relay_owes_recall(nd):
+    """True when the node owes at least one recall ROW (a dict in relayRecall). The flush, the boot pass and the tick's
+    recall entry all ask this rather than the raw list's truth, so a list holding no dict (a hand-edited store, a
+    future writer's shape) never writes, re-queues or keeps an entry (the manager's fourth verdict)."""
+    lst = nd.get("relayRecall") if isinstance(nd, dict) else None
+    return isinstance(lst, list) and any(isinstance(r, dict) for r in lst)
+
+
 def _relay_retire_marker(store, nd):
     """Retire the node's marker for a wait that ended (a new wait replaces it, or the block became the user's): it is
     settled (relaySettled), and when it had already been handed to a far host (pendingMid: parked or unacked) it is
@@ -13312,7 +13320,7 @@ def _relay_flush(fsid, store, pending):
         rw = nd.get("relayWanted") if isinstance(nd, dict) else None
         if isinstance(rw, dict):
             n += 1 if _relay_write_entry(str(fsid), str(nid), rw.get("id") or "", store.get("rev") or 0) else 0
-        if isinstance(nd, dict) and nd.get("relayRecall"):   # recalls owed ride their own entry, beside the marker's
+        if _relay_owes_recall(nd):                         # recalls owed ride their own entry, beside the marker's
             n += 1 if _relay_write_entry(str(fsid), str(nid), "recall", store.get("rev") or 0) else 0
     return n
 
@@ -13333,7 +13341,7 @@ def _requeue_relays_all():
                 continue
             if isinstance(nd.get("relayWanted"), dict) and not _relay_entry_path(p.stem, nid).exists():
                 n += 1 if _relay_write_entry(p.stem, nid, nd["relayWanted"].get("id") or "", (raw or {}).get("rev") or 0) else 0
-            if nd.get("relayRecall") and not _relay_recall_entry_path(p.stem, nid).exists():   # recalls owed: their own entry
+            if _relay_owes_recall(nd) and not _relay_recall_entry_path(p.stem, nid).exists():   # recalls owed: their own entry
                 n += 1 if _relay_write_entry(p.stem, nid, "recall", (raw or {}).get("rev") or 0) else 0
     return n
 
