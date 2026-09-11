@@ -213,8 +213,7 @@ def draw(rows, out):
         if len(rs) >= 2:
             xs = [r["sizes"]["leaf"] for r in rs]; ys = [r["second"]["rssDelta"] for r in rs]
             slope = sum(x * y for x, y in zip(xs, ys)) / sum(x * x for x in xs)
-            ax2.text(xs[-1] / 1e6 * 0.55, ys[-1] / 1e6 * (0.92 - 0.12 * i), "%s: %.2f MB resident per MB of leaf" % (label, slope),
-                     fontsize=9, color=cols[i % len(cols)])
+            ax2.text(xs[-1] / 1e6 * 1.03, ys[-1] / 1e6, "%.2f MB resident\nper MB of leaf" % slope, fontsize=8, va="center", color=cols[i % len(cols)])
     newest = labels[-1]
     rs = sorted([r for r in rows if r["label"] == newest and not r.get("error")], key=lambda r: r["worldBytes"])
     names = {"leaf": "leaf transcripts", "agent": "agent files (stage 5)", "postal": "postal log", "states": "states logs", "checkpoint": "documents"}
@@ -223,10 +222,12 @@ def draw(rows, out):
     ax3.clean(xlabel="Same worlds (MB)", ylabel="Bytes read at the restart on %s,\nper file class (MB)" % newest)
     ax3.set_xlim(0, None); ax3.set_ylim(0, None)
     f.subplots_adjust(wspace=0.6)
-    f.text(0.5, -0.16, "One measurement per point. Bytes are counted at the reader, documents included; resident size is the process's current VmRSS\n"
-                       "after the parses and folds, not a peak. Both trees stay linear in transcript size: on this branch the slope is the pre-cut index\n"
-                       "(about 60 bytes per record, resident per session) and the documents (about 6 percent of the leaves); the step that flattens it is\n"
-                       "an index loaded on demand or 4b's tail-first frame keeping only the boundary-forward atoms resident. Agent files: stage 5.\n"
+    f.text(0.5, -0.14, "One measurement per point. Bytes are counted at the reader, documents included; resident size is the process's current VmRSS\n"
+                       "after the parses and folds, not a peak. Both trees stay linear in transcript size: on this branch the slope is the restored pre-cut\n"
+                       "index held as Python objects (measured with tracemalloc on an 8052-record synthetic leaf: 2280 bytes per record restored against\n"
+                       "3854 whole; the document on disk is about 7 percent of the leaf). The step that flattens it is to keep that index in the document's\n"
+                       "row form and build an atom only when a consumer reaches it, which 4b's tail-first frame allows (nothing reads the pre-cut turns at a\n"
+                       "boot). Agent files: stage 5.\n"
                        "Hydration of an old body is on demand and none happens at a boot; it is a cost the figure does not carry.",
            ha="center", va="top", fontsize=8, color="#555555", transform=f.transFigure)
     path = os.path.join(out, "boot_cost_vs_size.png")
