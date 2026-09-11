@@ -29,12 +29,16 @@ PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd):$PATH"
 # it the way the manager and the kernel do, BEFORE the first tmux call below, so `romp new -t`, the resume picker
 # and every other client here dial the server the manager started (a tmpfs mounted over /tmp took the default
 # socket away from every session that day). A TMUX_TMPDIR already set wins; inside a pane $TMUX's socket applies.
-# A copy of this script run away from its siblings (the help test does that) keeps working: no helper, no export.
-_romp_tmux_env="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/romp-tmux-env"
+# Found through the RESOLVED path (readlink -f), so a `~/.local/bin/romp` symlink finds its siblings too. A copy of
+# this script run away from them (the help test does that) keeps working, and says so: tmux clients then dial tmux's
+# default socket, which on a systemd machine is a different server from the one the service started.
+_romp_tmux_env="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)/romp-tmux-env"
 if [[ -r "$_romp_tmux_env" ]]; then
     # shellcheck source=bin/romp-tmux-env
     source "$_romp_tmux_env"
     romp_tmux_tmpdir_export
+else
+    echo "[romp] romp-tmux-env is not beside this script: tmux clients here dial tmux's default socket, which may not be the server romp runs" >&2
 fi
 
 # --- Session name <-> Claude session-id map --------------------------------
@@ -3262,6 +3266,30 @@ fi
 # An old Claude Code falls back to pane-injected agent mail — say so once here,
 # where a session is being launched (see the version-floor helpers up top).
 _romp_claude_floor_nudge
+
+# The kernel's tmux socket directory must be this shell's (T325 review find): a cron job, a `sudo -u` or a
+# `docker exec` shell has no XDG_RUNTIME_DIR and resolves tmux's default, and a session started there lands on a
+# server romp cannot see: it never appears on the board, and a later interactive launch starts a namesake. So when a
+# kernel is reachable and reports where its socket lives (/version, auth-exempt, new kernels only), a different
+# answer here is a refusal that names the fix; no kernel reachable, or a kernel too old to say, compares nothing.
+_romp_tmux_dir_check() {
+    local _kport="${ROMP_KERNEL_PORT:-29855}" _v _kdir _mine
+    _v="$(curl -sf -m 3 "http://127.0.0.1:$_kport/version" 2>/dev/null)" || return 0
+    _kdir="$(printf '%s' "$_v" | python3 -c '
+import json, sys
+o = json.load(sys.stdin)
+if "tmuxSocketRule" not in o:
+    sys.exit(3)               # a kernel from before the rule: nothing to compare
+print(o.get("tmuxSocketDir") or "")
+' 2>/dev/null)" || return 0
+    _mine="${TMUX_TMPDIR:-}"
+    [[ "$_kdir" == "$_mine" ]] && return 0
+    local _mine_s="${_mine:-the tmux default}" _kdir_s="${_kdir:-the tmux default}" _fix="${_kdir:-/tmp}"
+    echo "[romp] refusing to start '$name': this shell's tmux socket directory ($_mine_s) is not the kernel's ($_kdir_s), so the session would start on a server romp cannot see." >&2
+    echo "  Fix: export TMUX_TMPDIR=$_fix (the kernel's), or launch from a login shell where XDG_RUNTIME_DIR is set: a cron job, sudo -u or docker exec drops it." >&2
+    return 1
+}
+_romp_tmux_dir_check || exit 1
 
 # --- Launch or attach ---
 if tmux has-session -t "=$name" 2>/dev/null; then

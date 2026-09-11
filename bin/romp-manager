@@ -342,7 +342,9 @@ function spawnKernel(spec) {
     log(exitLine(cur, code, sig, delay).line);
     setTimeout(() => {
       const c = kernels.get(spec.id);
-      if (c && c.child === child && !c.stopping) spawnKernel(spec);   // still ours & not asked to stop
+      if (!(c && c.child === child && !c.stopping)) return;   // superseded, or asked to stop
+      if (staleManagerYields(`respawning kernel '${spec.id}'`)) return;   // the fresh manager brings it back
+      spawnKernel(spec);                                     // still ours & not asked to stop
     }, delay);                                               // crash OR requested restart → bring it back
   });
 }
@@ -777,21 +779,48 @@ const TMUX_START_ARGV = ['tmux', 'start-server', ';', 'set', '-g', 'exit-empty',
 // and every tmux-backed session's terminal was unreachable for an hour. startManager resolves it once, before
 // it starts the server, into process.env, so the server, every kernel (specEnv copies the env) and every
 // session the kernels create dial the same socket. `fsi` is the fs to consult (tests hand a fake).
-function tmuxTmpdir({ env = process.env, fsi = fs } = {}) {
-  const op = String(env.TMUX_TMPDIR || '').trim();
-  if (op) return op;
-  const run = String(env.XDG_RUNTIME_DIR || '').trim();
-  if (!run) return null;
+// The rules, named as the Python twin names them (kernel/tmux_socket.py), so the log says which one fired.
+const TMUX_DIR_RULES = { operator: 'operator', runtime: 'runtime-dir', noRuntime: 'no XDG_RUNTIME_DIR',
+                         runtimeUnusable: 'XDG_RUNTIME_DIR is not a writable directory',
+                         subdirUnusable: 'XDG_RUNTIME_DIR/romp could not be made, or is not a writable directory' };
+function resolveTmuxTmpdir({ env = process.env, fsi = fs } = {}) {
+  const op = env.TMUX_TMPDIR || '';                 // as it stands: no trimming, the twins agree byte for byte
+  if (op) return { dir: op, rule: TMUX_DIR_RULES.operator };
+  const run = env.XDG_RUNTIME_DIR || '';
+  if (!run) return { dir: null, rule: TMUX_DIR_RULES.noRuntime };
   const usable = (p) => {
     try { if (!fsi.statSync(p).isDirectory()) return false; fsi.accessSync(p, fs.constants.W_OK | fs.constants.X_OK); return true; } catch { return false; }
   };
-  if (!usable(run)) return null;
+  if (!usable(run)) return { dir: null, rule: TMUX_DIR_RULES.runtimeUnusable };
   const d = path.join(run, 'romp');
   if (!usable(d)) {
-    try { fsi.mkdirSync(d, { mode: 0o700 }); } catch { /* refused, or made by a sibling meanwhile: judged below */ }
-    if (!usable(d)) return null;
+    try { fsi.mkdirSync(d, { mode: 0o700 }); } catch { /* refused, or made by a sibling this instant: judged below */ }
+    if (!usable(d)) return { dir: null, rule: TMUX_DIR_RULES.subdirUnusable };
   }
-  return d;
+  return { dir: d, rule: TMUX_DIR_RULES.runtime };
+}
+function tmuxTmpdir(opts) { return resolveTmuxTmpdir(opts).dir; }
+function describeTmuxTmpdir({ dir, rule }) {
+  if (rule === TMUX_DIR_RULES.operator) return `${dir} (TMUX_TMPDIR set by the operator)`;
+  if (rule === TMUX_DIR_RULES.runtime) return `${dir} (the user's runtime directory, out of /tmp's reach)`;
+  return `tmux default (${rule})`;
+}
+
+// A manager whose binary changed since it started must not bring a kernel up under itself (the stale-manager
+// shape restartAllOrSelf handles for `romp refresh`): the same for a single kernel's /restart and for the crash
+// respawn (T325 review: a new-code kernel under an old manager inherits its stale environment, the tmux socket
+// directory included, for as long as the checkout sits ahead of the running manager). Supervised → exit so the
+// supervisor respawns the new manager, which brings every kernel back on the new defaults; foreground → warn and
+// let the kernel come up anyway. Returns true when the manager is exiting instead.
+function staleManagerYields(why) {
+  if (!managerStale()) return false;
+  if (process.env.ROMP_SUPERVISED) {
+    log(`manager binary changed since start — exiting for a supervised respawn instead of ${why} under the stale manager`);
+    shutdownAll(0, 'refresh');
+    return true;
+  }
+  log(`WARNING: bin/romp-manager changed since this manager started — ${why} inherits STALE manager defaults. Restart the manager to load the new one.`);
+  return false;
 }
 
 // Is `name` an executable on the env's PATH? (Node has no `which`.)
@@ -971,9 +1000,9 @@ function startManager() {
   }
   // the socket directory first: the server started next, every kernel (specEnv copies process.env) and every
   // session they create must agree on it (T325)
-  const tmuxDir = tmuxTmpdir();
-  if (tmuxDir) { process.env.TMUX_TMPDIR = tmuxDir; log(`tmux socket dir: ${tmuxDir} (the user's runtime directory, out of /tmp's reach)`); }
-  else log('tmux socket dir: tmux default (no writable XDG_RUNTIME_DIR, or TMUX_TMPDIR unset by choice)');
+  const tmuxPick = resolveTmuxTmpdir();
+  if (tmuxPick.rule === TMUX_DIR_RULES.runtime) process.env.TMUX_TMPDIR = tmuxPick.dir;   // the operator's stands as it is; the default is the variable's absence
+  log(`tmux socket dir: ${describeTmuxTmpdir(tmuxPick)}`);
   startTmuxServer();
   const server = http.createServer((req, res) => {
     const url = new URL(req.url || '/', 'http://x');
@@ -1022,6 +1051,8 @@ function startManager() {
         return json(202, { ok: true, deferred: true, coalesced: queueQuietRestart(kid) });
       }
       clearPendingQuiet();                                       // the dashboard ↻ satisfies a pending deploy in passing
+      if (!kernels.has(kid)) return json(404, { ok: false, error: `no kernel '${kid}'` });
+      if (staleManagerYields(`restarting kernel '${kid}'`)) return json(200, { ok: true, restarted: kid, managerRestart: true });
       return restartKernel(kid) ? json(200, { ok: true, restarted: kid }) : json(404, { ok: false, error: `no kernel '${kid}'` });
     }
     if (req.method === 'POST' && url.pathname === '/stop') {
@@ -1094,7 +1125,7 @@ function ensureUp() {
 // file is executed directly, so require()-ing it from a test has no side effects.
 module.exports = { restartGate, quietGate, quietTick, loadSpecs, specEnv, fileStamp,
                    kernelToken, fetchBusy, resetDrainNotices, queueQuietRestart, clearPendingQuiet,
-                   tmuxStartArgv, scopedStartFailure, commandOnPath, TMUX_START_ARGV, tmuxTmpdir,
+                   tmuxStartArgv, scopedStartFailure, commandOnPath, TMUX_START_ARGV, tmuxTmpdir, resolveTmuxTmpdir, describeTmuxTmpdir, TMUX_DIR_RULES, staleManagerYields,
                    placementFromCgroup, tmuxServerPlacement, bareEnsuredLine, TMUX_SERVER_PID_ARGV,
                    withoutOpCredentials, retiredCredentialNames, retiredCredentialMessage, exitLine, auditSigterm,
                    ensureDecision, downMarkerHeld, clearDownMarker, DOWN_MARKER,

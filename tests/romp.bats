@@ -185,6 +185,7 @@ if [[ -n "${MOCK_CURL_WATCH_PR_REFUSE:-}" && "$url" == */watch-pr ]]; then
   echo '{"ok": false, "retryable": true, "error": "the watch could not be saved ([Errno 28] No space left on device) - nothing is watching TESTORG/testrepo#7; retry once the state directory takes writes again"}'
   exit 0
 fi
+if [[ -n "${MOCK_CURL_VERSION:-}" && "$url" == */version ]]; then echo "$MOCK_CURL_VERSION"; exit 0; fi
 if [[ -n "${MOCK_CURL_NEW_400:-}" && "$url" == */new ]]; then
   for a in "$@"; do
     if [[ "$a" == "-f" || "$a" == -[!-]*f* ]]; then exit 22; fi
@@ -1070,6 +1071,26 @@ _stale_server_globals() {
         run "$sh" -c 'exec env FOO=1 true'
         [ "$status" -eq 0 ]
     done
+}
+
+@test "a terminal launch is refused when the kernel's tmux socket directory is not this shell's, and proceeds when it is" {
+    # T325: a cron job, `sudo -u` or `docker exec` shell resolves tmux's default while the service's kernel dials the
+    # runtime-dir server; a session started there would never reach the board. /version says where the kernel's is.
+    _stub_claude 9.9.9; _stub_curl
+    MOCK_CURL_VERSION='{"tmuxSocketDir":"/elsewhere/romp","tmuxSocketRule":"runtime-dir"}' run "$ROMP_SCRIPT" new -t --detach myproject
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"refusing to start 'myproject'"* ]]
+    [[ "$output" == *"export TMUX_TMPDIR=/elsewhere/romp"* ]]
+    run grep -q 'new-session' "$MOCK_LOG"
+    [ "$status" -ne 0 ]
+    # the kernel on the same directory: the launch proceeds
+    MOCK_CURL_VERSION="{\"tmuxSocketDir\":\"$TMUX_TMPDIR\",\"tmuxSocketRule\":\"runtime-dir\"}" run "$ROMP_SCRIPT" new -t --detach myproject
+    [ "$status" -eq 0 ]
+    grep -q 'new-session -d -s myproject' "$MOCK_LOG"
+    # a kernel from before the rule (no tmuxSocketRule) compares nothing
+    : > "$MOCK_LOG"
+    MOCK_CURL_VERSION='{"kernel_ver":"0"}' run "$ROMP_SCRIPT" new -t --detach myproject2
+    [ "$status" -eq 0 ]
 }
 
 @test "launch hands the exec line to respawn-pane, never typed via send-keys (dropped-char bug)" {

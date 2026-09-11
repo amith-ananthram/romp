@@ -5,8 +5,9 @@ directory inside the lab creates a terminal session through POST /new (backend t
 same launch the dashboard's + runs); the session appears on the server at <XDG_RUNTIME_DIR>/romp/tmux-<uid>/default,
 a client on any other socket directory finds nothing there, and `romp new -t --detach <name>` from a plain shell with
 the lab's XDG_RUNTIME_DIR reports the session already running: server and clients pinned to agree. The server is
-started the way the manager starts it (exit-empty off), with zsh as its default shell, since the launcher's pane
-command is `exec VAR=value claude …`, which sh and bash refuse (status 127) and zsh runs. The machine's
+started the way the manager starts it (exit-empty off, so a pane's end never takes the server). The socket's root
+follows tests/README.md: the private temp root when the socket path fits sun_path, else the directory the run was
+handed (ROMP_TESTS_SYSTEM_TMPDIR), so the case runs on macOS and under a deep TMPDIR instead of skipping. The machine's
 own tmux server (/tmp/tmux-<uid>) is never dialed. A fake `claude` on PATH answers --version and otherwise sleeps, so
 the pane stays up without a real CLI. Synthetic names and directories only."""
 import json
@@ -32,6 +33,23 @@ FAKE_CLAUDE = """#!/usr/bin/env bash
 if [ "$1" = "--version" ]; then echo "9.9.9 (Claude Code)"; exit 0; fi
 exec sleep 600
 """
+_SUN_PATH_MAX = 104 if sys.platform == "darwin" else 108   # NUL included; the socket is <root>/run/romp/tmux-<uid>/default
+
+
+def _lab_root():
+    """A lab whose tmux socket path fits sun_path: the private temp root when it does, else the directory the run was
+    handed before the redirect (tests/README.md's one sanctioned exit from the root); removed by the caller."""
+    tail = os.path.join("run", "romp", "tmux-%d" % os.getuid(), "default")
+    lab = tempfile.mkdtemp(prefix="tmux-runtime-")
+    if len(os.fsencode(os.path.join(lab, tail))) < _SUN_PATH_MAX:
+        return lab
+    os.rmdir(lab)
+    handed = os.environ.get("ROMP_TESTS_SYSTEM_TMPDIR") or tempfile.gettempdir()
+    lab = tempfile.mkdtemp(prefix="tmux-runtime-", dir=handed)
+    if len(os.fsencode(os.path.join(lab, tail))) >= _SUN_PATH_MAX:
+        os.rmdir(lab)
+        raise unittest.SkipTest("the temp dir this run was handed is itself too deep for a tmux socket path (%d-byte sun_path): %s" % (_SUN_PATH_MAX, handed))
+    return lab
 
 
 def _free_port():
@@ -43,7 +61,8 @@ class TmuxSocketUnderTheRuntimeDir(unittest.TestCase):
     def setUpClass(cls):
         if not shutil.which("tmux"):
             raise unittest.SkipTest("tmux absent here; the terminal backend needs it")
-        cls.lab = tempfile.mkdtemp(prefix="tmux-runtime-")
+        cls.lab = _lab_root()
+        cls.addClassCleanup(shutil.rmtree, cls.lab, ignore_errors=True)
         cls.runtime = os.path.join(cls.lab, "run"); os.mkdir(cls.runtime, 0o700)
         cls.other = os.path.join(cls.lab, "other"); os.mkdir(cls.other, 0o700)   # a socket directory nobody serves
         fake = os.path.join(cls.lab, "fakebin"); os.mkdir(fake)
@@ -60,21 +79,23 @@ class TmuxSocketUnderTheRuntimeDir(unittest.TestCase):
         for k in ("TMUX", "TMUX_PANE", "TMUX_TMPDIR", "ROMP_TMUX_SOCKET", "ROMP_TMUX_AVAILABLE"):
             env.pop(k, None)
         cls.env = env
+        # the plain shell's environment: the lab's runtime dir and state root, the lab kernel's port (bin/romp compares
+        # its socket directory with the kernel's /version before a terminal launch), no TMUX of any kind
         cls.client_env = {"PATH": env["PATH"], "HOME": cls.lab, "XDG_RUNTIME_DIR": cls.runtime,
-                          "XDG_STATE_HOME": env["XDG_STATE_HOME"], "LANG": os.environ.get("LANG", "C.UTF-8")}
+                          "XDG_STATE_HOME": env["XDG_STATE_HOME"], "LANG": os.environ.get("LANG", "C.UTF-8"),
+                          "ROMP_KERNEL_PORT": str(cls.port)}
         # the server the way the manager starts it (exit-empty off, so a session's end never takes the server), on the
-        # runtime-dir socket the kernel will resolve; its default shell is zsh, which the launcher's pane command
-        # (`exec VAR=value claude …`) needs: sh and bash exec no assignment-led command (status 127)
-        zsh = shutil.which("zsh")
-        if not zsh:
-            raise unittest.SkipTest("zsh absent here; the launcher's pane command needs it as the server's shell")
+        # runtime-dir socket the kernel will resolve; the pane command is `exec env … claude …` since the launcher fix,
+        # which every shell runs, so the server's default shell needs no choosing
         cls.romp_dir = os.path.join(cls.runtime, "romp"); os.mkdir(cls.romp_dir, 0o700)
-        r = subprocess.run(["tmux", "start-server", ";", "set", "-g", "exit-empty", "off", ";", "set", "-g", "default-shell", zsh],
+        cls.addClassCleanup(cls._kill_server)
+        r = subprocess.run(["tmux", "start-server", ";", "set", "-g", "exit-empty", "off"],
                            env={**cls.client_env, "TMUX_TMPDIR": cls.romp_dir}, capture_output=True, text=True, timeout=20)
         if r.returncode != 0:
             raise unittest.SkipTest("no tmux server could start under the lab's runtime dir: " + r.stderr.strip()[:200])
         cls.klog_path = os.path.join(cls.lab, "kernel.log")
         cls.klog = open(cls.klog_path, "w")
+        cls.addClassCleanup(cls._kill_kernel)
         cls.kernel = subprocess.Popen([os.path.join(BIN, "romp-kernel")], stdout=cls.klog, stderr=subprocess.STDOUT,
                                       env=env, start_new_session=True)
         for _ in range(240):   # loop-ok: a bounded boot wait
@@ -84,13 +105,17 @@ class TmuxSocketUnderTheRuntimeDir(unittest.TestCase):
             except Exception:
                 time.sleep(0.5)
         else:
-            cls._stop()
-            raise unittest.SkipTest("hermetic kernel never served /healthz here")
+            raise unittest.SkipTest("hermetic kernel never served /healthz here")   # the class cleanups stop what started
 
+    # torn down by class cleanups armed right after each start (setUpClass's own failure or a Ctrl-C runs them
+    # too), so neither the lab's tmux server nor the kernel outlives the test in the tester's session scope
     @classmethod
-    def _stop(cls):
+    def _kill_server(cls):
         subprocess.run(["tmux", "kill-server"], env={**cls.client_env, "TMUX_TMPDIR": os.path.join(cls.runtime, "romp")},
                        capture_output=True, timeout=20)   # the lab's server, with the fake CLI's pane inside it
+
+    @classmethod
+    def _kill_kernel(cls):
         k = getattr(cls, "kernel", None)
         if k:
             try:
@@ -104,9 +129,8 @@ class TmuxSocketUnderTheRuntimeDir(unittest.TestCase):
             cls.klog.close()
 
     @classmethod
-    def tearDownClass(cls):
-        cls._stop()
-        shutil.rmtree(cls.lab, ignore_errors=True)
+    def _stop(cls):
+        cls._kill_server(); cls._kill_kernel()
 
     def _kernel(self, method, path, body=None):
         req = urllib.request.Request("http://127.0.0.1:%d%s" % (self.port, path), method=method,
@@ -127,6 +151,7 @@ class TmuxSocketUnderTheRuntimeDir(unittest.TestCase):
 
     def test_the_kernel_s_session_lands_under_the_runtime_dir_and_a_plain_shell_s_client_finds_it_there(self):
         klog = open(self.klog_path, encoding="utf-8", errors="replace").read()
+        # an unmanaged kernel (no ROMP_MANAGER_PID in the lab) resolves for itself and says which rule fired
         self.assertIn("tmux socket dir: %s (the user's runtime directory)" % os.path.join(self.runtime, "romp"), klog,
                       "the kernel says where the socket lives at boot: %s" % klog[-1500:])
         code, res = self._kernel("POST", "/new", {"name": "web", "dir": self.proj, "backend": "tmux"})

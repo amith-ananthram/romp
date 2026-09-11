@@ -1118,16 +1118,32 @@ running; the manager logged `error connecting to /tmp/tmux-<uid>/default` the
 whole time. A `TMUX_TMPDIR` the operator sets, in the service environment file
 or the shell, wins as it stands. Without a writable runtime directory (macOS
 under launchd, a shell with the variable unset) tmux's own default applies, as
-before.
+before. On a systemd machine that default is a DIFFERENT server from the one
+the service started: a shell without `XDG_RUNTIME_DIR` (a cron job, `sudo -u`,
+`docker exec`) would start its own, and a session made there would never
+appear on the board. So `romp new -t` compares its own answer with the kernel's
+(`/version` reports `tmuxSocketDir` and the rule that chose it) and refuses
+when they differ, naming the fix (`export TMUX_TMPDIR=<the kernel's>`, or a
+login shell); with no kernel reachable, or a kernel too old to say, it
+compares nothing and proceeds as before.
 
 One rule, resolved the same way in three places: the manager, before it starts
-the server, into the environment every kernel inherits; the kernel, before its
-first tmux call, so every dial and every `romp new -t` it spawns agree; and
-`bin/romp`, before its first tmux call (`bin/romp-tmux-env`, also runnable to
-print the directory), so a plain shell's `romp new -t` and the resume picker
-dial the server the manager started. A client already inside a pane uses the
-socket named in its own `$TMUX` and needs none of this. The kernel and the
-manager each log the directory they chose at start (`tmux socket dir: …`).
+the server, into the environment every kernel inherits; `bin/romp`, before its
+first tmux call (`bin/romp-tmux-env`, also runnable to print the directory), so
+a plain shell's `romp new -t` and the resume picker dial the server the manager
+started; and a kernel run WITHOUT a manager (`romp-serve` bare, a lab). A kernel
+under the manager resolves nothing: it takes the manager's `TMUX_TMPDIR` as it
+stands, absent meaning tmux's default, because the manager alone starts the
+server. So a new-code kernel that comes up under a manager from before this
+change (a crash respawn, a dashboard restart, while the checkout sits ahead of
+the running manager) keeps dialing the `/tmp` server that manager started; the
+runtime-directory server begins with the manager's own restart. A stale manager
+now yields on a single kernel's restart and on a crash respawn the way it does
+on `romp refresh`: under the service it exits for a supervised respawn, which
+brings every kernel up on the new defaults. A client already inside a pane uses
+the socket named in its own `$TMUX` and needs none of this. The kernel and the
+manager each log the directory they chose and the rule that chose it at start
+(`tmux socket dir: …`).
 
 Migration: a server already running on the `/tmp` socket keeps serving until
 the next `romp refresh` (or service restart), which starts the manager's server

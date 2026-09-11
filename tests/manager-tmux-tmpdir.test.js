@@ -12,7 +12,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 process.env.ROMP_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'romp-mgr-tmux-tmpdir-'));
-const { tmuxTmpdir } = require(path.join(__dirname, '..', 'bin', 'romp-manager'));
+const { tmuxTmpdir, resolveTmuxTmpdir, describeTmuxTmpdir, TMUX_DIR_RULES } = require(path.join(__dirname, '..', 'bin', 'romp-manager'));
 
 // a fake fs: `dirs` are usable directories, `files` plain files, `refuse` paths whose mkdir throws; mkdir records
 function fakeFs({ dirs = [], files = [], refuse = [] } = {}) {
@@ -26,10 +26,24 @@ function fakeFs({ dirs = [], files = [], refuse = [] } = {}) {
   };
 }
 
-test('the operator\'s TMUX_TMPDIR wins as it stands, and nothing is made', () => {
+test('the operator\'s TMUX_TMPDIR wins as it stands, untrimmed, and nothing is made', () => {
   const fsi = fakeFs({ dirs: ['/run/user/1000'] });
   assert.equal(tmuxTmpdir({ env: { TMUX_TMPDIR: '/op/dir', XDG_RUNTIME_DIR: '/run/user/1000' }, fsi }), '/op/dir');
+  assert.equal(tmuxTmpdir({ env: { TMUX_TMPDIR: ' /op/dir ', XDG_RUNTIME_DIR: '/run/user/1000' }, fsi }), ' /op/dir ', 'byte for byte, as the Python and shell twins');
+  assert.deepEqual(resolveTmuxTmpdir({ env: { TMUX_TMPDIR: '/op/dir' }, fsi }), { dir: '/op/dir', rule: TMUX_DIR_RULES.operator });
   assert.deepEqual(fsi.made, []);
+});
+
+test('every answer names the rule that chose it, and the log line says it', () => {
+  assert.deepEqual(resolveTmuxTmpdir({ env: { XDG_RUNTIME_DIR: '/run/user/1000' }, fsi: fakeFs({ dirs: ['/run/user/1000'] }) }), { dir: '/run/user/1000/romp', rule: 'runtime-dir' });
+  assert.deepEqual(resolveTmuxTmpdir({ env: {}, fsi: fakeFs() }), { dir: null, rule: 'no XDG_RUNTIME_DIR' });
+  assert.deepEqual(resolveTmuxTmpdir({ env: { XDG_RUNTIME_DIR: '/run/user/1000' }, fsi: fakeFs({ files: ['/run/user/1000'] }) }), { dir: null, rule: 'XDG_RUNTIME_DIR is not a writable directory' });
+  assert.deepEqual(resolveTmuxTmpdir({ env: { XDG_RUNTIME_DIR: '/run/user/1000' }, fsi: fakeFs({ dirs: ['/run/user/1000'], refuse: ['/run/user/1000/romp'] }) }), { dir: null, rule: 'XDG_RUNTIME_DIR/romp could not be made, or is not a writable directory' });
+  assert.equal(describeTmuxTmpdir({ dir: '/op', rule: TMUX_DIR_RULES.operator }), '/op (TMUX_TMPDIR set by the operator)');
+  assert.equal(describeTmuxTmpdir({ dir: null, rule: TMUX_DIR_RULES.noRuntime }), 'tmux default (no XDG_RUNTIME_DIR)');
+  // the same rule names as kernel/tmux_socket.py, so the two logs read alike
+  const py = fs.readFileSync(path.join(__dirname, '..', 'kernel', 'tmux_socket.py'), 'utf8');
+  for (const r of Object.values(TMUX_DIR_RULES)) assert.ok(py.includes(`"${r}"`), `python names the rule ${r}`);
 });
 
 test('a writable runtime dir gives its romp subdirectory, made 0700 when missing', () => {
@@ -49,9 +63,16 @@ test('no runtime dir, a missing one, a file, or a refused mkdir: tmux\'s default
   assert.equal(tmuxTmpdir({ env: { XDG_RUNTIME_DIR: '/run/user/1000' }, fsi: fakeFs({ dirs: ['/run/user/1000'], files: ['/run/user/1000/romp'] }) }), null, 'a file where the subdirectory should be');
 });
 
-test('startManager resolves it into process.env before starting the server, and says so', () => {
+test('startManager resolves it into process.env before starting the server (the runtime-dir rule only), and says which rule fired', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'bin', 'romp-manager'), 'utf8');
-  assert.match(src, /const tmuxDir = tmuxTmpdir\(\);\s*if \(tmuxDir\) \{ process\.env\.TMUX_TMPDIR = tmuxDir; log\(`tmux socket dir: \$\{tmuxDir\}/);
-  assert.match(src, /log\('tmux socket dir: tmux default/);
-  assert.ok(src.indexOf('const tmuxDir = tmuxTmpdir();') < src.indexOf('  startTmuxServer();\n  const server = http.createServer'), 'resolved BEFORE the server starts');
+  assert.match(src, /const tmuxPick = resolveTmuxTmpdir\(\);\s*if \(tmuxPick\.rule === TMUX_DIR_RULES\.runtime\) process\.env\.TMUX_TMPDIR = tmuxPick\.dir;/);
+  assert.match(src, /log\(`tmux socket dir: \$\{describeTmuxTmpdir\(tmuxPick\)\}`\);/);
+  assert.ok(src.indexOf('const tmuxPick = resolveTmuxTmpdir();') < src.indexOf('  startTmuxServer();\n  const server = http.createServer'), 'resolved BEFORE the server starts');
+});
+
+test('a stale manager yields on a single kernel restart and on a crash respawn, as it does on refresh', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'bin', 'romp-manager'), 'utf8');
+  assert.match(src, /function staleManagerYields\(why\) \{\s*if \(!managerStale\(\)\) return false;\s*if \(process\.env\.ROMP_SUPERVISED\) \{[\s\S]*?shutdownAll\(0, 'refresh'\);\s*return true;/);
+  assert.match(src, /if \(staleManagerYields\(`respawning kernel '\$\{spec\.id\}'`\)\) return;[^\n]*\n\s*spawnKernel\(spec\);/, 'the crash respawn consults it');
+  assert.match(src, /if \(staleManagerYields\(`restarting kernel '\$\{kid\}'`\)\) return json\(200, \{ ok: true, restarted: kid, managerRestart: true \}\);\s*return restartKernel\(kid\)/, '/restart consults it');
 });

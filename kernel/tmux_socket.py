@@ -8,58 +8,87 @@ RUNTIME directory (``XDG_RUNTIME_DIR``, ``/run/user/<uid>`` under systemd) is a 
 housekeeping, tmpfiles age sweep or ``/tmp`` mount-over can touch, so romp's server lives there when there is one.
 
 ONE rule, resolved the same way by the manager (before it starts the server, so every kernel inherits the value),
-the kernel (here, before its first tmux call, so every dial and every ``romp new -t`` it spawns agree) and ``bin/romp``
-(``bin/romp-tmux-env``, before its first tmux call, so a plain shell's client dials the server the manager started):
+``bin/romp`` (``bin/romp-tmux-env``, before its first tmux call, so a plain shell's client dials the server the
+manager started) and an UNMANAGED kernel (``romp-serve`` bare, a lab, a test), each naming which branch fired:
 
-* a ``TMUX_TMPDIR`` the operator set wins, as it stands;
-* else ``XDG_RUNTIME_DIR`` naming an existing, writable directory → ``<XDG_RUNTIME_DIR>/romp``, created 0700 when
-  missing (tmux 3.4 falls back to ``/tmp`` SILENTLY when ``TMUX_TMPDIR`` names a missing directory, so the directory
-  is made here, never assumed);
-* else None: tmux's own default, as before (macOS under launchd, a shell without the variable).
+* ``operator``: a ``TMUX_TMPDIR`` already set wins, AS IT STANDS (no trimming: the three twins agree byte for byte);
+* ``runtime-dir``: else ``XDG_RUNTIME_DIR`` naming an existing, writable directory gives ``<XDG_RUNTIME_DIR>/romp``,
+  created 0700 when missing (tmux 3.4 falls back to ``/tmp`` SILENTLY when ``TMUX_TMPDIR`` names a missing directory,
+  so the directory is made, never assumed; a mkdir lost to a sibling making it at the same moment is re-judged, not
+  reported as a failure);
+* else None, tmux's own default, as before, with the reason (``no XDG_RUNTIME_DIR``; the runtime dir not a writable
+  directory; its ``romp`` subdirectory not makeable or not a writable directory).
 
-A client already inside a pane uses the socket path in its own ``$TMUX`` and needs none of this. Pure over the
-environment it is handed; no tmux is run here.
+A MANAGED kernel (``ROMP_MANAGER_PID`` set) does not resolve at all: the manager alone starts the server, so the
+kernel takes the manager's ``TMUX_TMPDIR`` as it stands, absent meaning tmux's default (``manager``). A new-code
+kernel respawned under a manager that predates this rule therefore dials the ``/tmp`` server that manager started,
+instead of a runtime-dir socket nobody serves (which would have read every terminal session as dead and started a
+second, unscoped server on its next spawn). A client already inside a pane uses the socket path in its own ``$TMUX``
+and needs none of this. Pure over the environment it is handed; no tmux is run here. The node twin (``tmuxTmpdir``
+in ``bin/romp-manager``) and the shell twin make the directory the same way.
 """
 import os
 
 ROMP_SUBDIR = "romp"
+
+RULE_OPERATOR = "operator"
+RULE_MANAGER = "manager"
+RULE_RUNTIME = "runtime-dir"
+RULE_NO_RUNTIME = "no XDG_RUNTIME_DIR"
+RULE_RUNTIME_UNUSABLE = "XDG_RUNTIME_DIR is not a writable directory"
+RULE_SUBDIR_UNUSABLE = "XDG_RUNTIME_DIR/romp could not be made, or is not a writable directory"
 
 
 def _usable_dir(p):
     return bool(p) and os.path.isdir(p) and os.access(p, os.W_OK | os.X_OK)
 
 
-def tmux_tmpdir(env=None, mkdir=True):
-    """The TMUX_TMPDIR every romp tmux client and server should use, or None for tmux's own default (the rule in
-    the module docstring). `env` defaults to os.environ; `mkdir=False` only reports (the manager's node twin and
-    the tests read the rule without making directories)."""
+def resolve(env=None, mkdir=True, managed=False):
+    """(directory or None, rule): the TMUX_TMPDIR every romp tmux client and server should use, or None for tmux's
+    own default, and which branch of the module docstring's rule decided it. `env` defaults to os.environ;
+    `mkdir=False` only reports (nothing is made); `managed=True` is a kernel under the manager (see the docstring)."""
     env = os.environ if env is None else env
-    op = (env.get("TMUX_TMPDIR") or "").strip()
+    op = env.get("TMUX_TMPDIR") or ""
+    if managed:
+        return (op or None), RULE_MANAGER
     if op:
-        return op
-    run = (env.get("XDG_RUNTIME_DIR") or "").strip()
+        return op, RULE_OPERATOR
+    run = env.get("XDG_RUNTIME_DIR") or ""
+    if not run:
+        return None, RULE_NO_RUNTIME
     if not _usable_dir(run):
-        return None
+        return None, RULE_RUNTIME_UNUSABLE
     d = os.path.join(run, ROMP_SUBDIR)
     if mkdir and not os.path.isdir(d):
         try:
             os.mkdir(d, 0o700)
         except OSError:
-            return None
-    return d if _usable_dir(d) else None
+            pass                      # refused, or made by a sibling this instant: the re-judge below decides
+    return (d, RULE_RUNTIME) if _usable_dir(d) else (None, RULE_SUBDIR_UNUSABLE)
 
 
-def export_tmux_tmpdir(env=None):
-    """Write the resolved TMUX_TMPDIR into `env` (os.environ by default) so every tmux subprocess and every child
-    inherits it; returns the value, or None when tmux's default stands (nothing written)."""
+def tmux_tmpdir(env=None, mkdir=True, managed=False):
+    """resolve()'s directory alone."""
+    return resolve(env, mkdir=mkdir, managed=managed)[0]
+
+
+def export_tmux_tmpdir(env=None, managed=False):
+    """Resolve into `env` (os.environ by default) so every tmux subprocess and every child inherits the value:
+    written only when the runtime-dir rule fired (an operator's or the manager's value already stands in `env`, and
+    tmux's default is the variable's absence). Returns (directory or None, rule)."""
     env = os.environ if env is None else env
-    d = tmux_tmpdir(env)
-    if d and env.get("TMUX_TMPDIR") != d:
+    d, rule = resolve(env, managed=managed)
+    if rule == RULE_RUNTIME and env.get("TMUX_TMPDIR") != d:
         env["TMUX_TMPDIR"] = d
-    return d
+    return d, rule
 
 
-def socket_path(env=None):
-    """The default socket's path under the resolved directory, for log lines: <dir>/tmux-<uid>/default."""
-    d = tmux_tmpdir(env, mkdir=False) or "/tmp"
-    return os.path.join(d, "tmux-%d" % os.getuid(), "default")
+def describe(d, rule):
+    """One log line's worth: the directory (or tmux's default) and the rule that chose it, for the next incident."""
+    if rule == RULE_MANAGER:
+        return "%s (the manager's environment, as it stands)" % (d or "tmux default")
+    if rule == RULE_OPERATOR:
+        return "%s (TMUX_TMPDIR set by the operator)" % d
+    if rule == RULE_RUNTIME:
+        return "%s (the user's runtime directory)" % d
+    return "tmux default (%s)" % rule

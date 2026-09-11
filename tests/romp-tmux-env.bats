@@ -22,6 +22,9 @@ teardown() {
     [ "$status" -eq 0 ]
     [ "$output" = "/op/dir" ]
     [ ! -e "$RUN/romp" ]
+    # untrimmed: byte for byte what the operator set, as the Python and node twins answer
+    TMUX_TMPDIR=" /op/dir " XDG_RUNTIME_DIR="$RUN" run bash "$HELPER"
+    [ "$output" = " /op/dir " ]
 }
 
 @test "a writable runtime dir gives its romp subdirectory, made 0700" {
@@ -29,7 +32,8 @@ teardown() {
     [ "$status" -eq 0 ]
     [ "$output" = "$RUN/romp" ]
     [ -d "$RUN/romp" ]
-    [ "$(stat -c %a "$RUN/romp")" = "700" ]
+    perms="$(stat -c '%a' "$RUN/romp" 2>/dev/null || stat -f '%Lp' "$RUN/romp")"   # GNU first, BSD/macOS second (tests/romp.bats's form)
+    [ "$perms" = "700" ]
     XDG_RUNTIME_DIR="$RUN" run bash "$HELPER"
     [ "$output" = "$RUN/romp" ]
 }
