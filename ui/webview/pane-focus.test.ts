@@ -67,7 +67,8 @@ test("the wiring: the dismiss branch, the unfocused body, the composer, the rest
   assert.match(RENDER, /renderBgTasks\(\);\s*\n\s*\} else if \(!activeId\) \{[\s\S]{0,300}?showActive\(\);\s*\n\s*\}/, "a frame landing on an unfocused pane paints the body, adopting nothing");
   assert.match(fn("paintEmptyState"), /why: "awaited" as const, dialing: hostIsDialing\(awaited\)/);
   // the body repaints on the dial event; the view filter routes through the same rule; the keyboard picks the first tab
-  assert.match(RENDER, /window\.addEventListener\("romp:hostDial", \(\) => \{ if \(!activeId\) \{ const e = document\.getElementById\("empty-state"\); if \(e\) paintEmptyState\(e\); \} \}\);/);
+  assert.match(RENDER, /window\.addEventListener\("romp:hostDial", \(\) => \{ syncHostOfflineFoot\(\); repaintEmptyStateIfUnfocused\(\); \}\);/);
+  assert.match(fn("repaintEmptyStateIfUnfocused"), /if \(activeId\) return;[\s\S]*?if \(e\) paintEmptyState\(e\);/);
   assert.match(fn("renderTabs"), /if \(activeId !== next && activeId && !tabInView\(activeId\)\) unfocusHiddenByView\(activeId\);/, "the view filter never re-points at another session");
   assert.match(fn("renderTabs"), /if \(!activeId && vanishedId && vanishedWhy === "hidden" && visibleIds\.includes\(vanishedId\)\)/, "…and restores the hidden tab when the view shows it again");
   assert.match(fn("unfocusHiddenByView"), /activeId = null; vanishedId = id; vanishedWhy = "hidden";/);

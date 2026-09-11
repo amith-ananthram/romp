@@ -80,7 +80,7 @@ test("the foot's swirl sits after the sentence as the gist's flex sibling, only 
   assert.match(RENDER, /swirl\.src = mediaSrc\("romp-swirl-glyph\.svg"\); swirl\.alt = ""; swirl\.onerror = \(\) => swirl\.remove\(\);/);
   assert.match(RENDER, /const gistEl = card\.querySelector\("\.notice-head \.notice-gist"\);\n\s*if \(gistEl\) gistEl\.after\(swirl\);/,
     "a flex SIBLING right after the gist, never inside it (the gist ellipsizes on a narrow pane and would clip the swirl first)");
-  assert.match(RENDER, /window\.addEventListener\("romp:hostDial", \(\) => \{ syncHostOfflineFoot\(\); \}\);/,
+  assert.match(RENDER, /window\.addEventListener\("romp:hostDial", \(\) => \{ syncHostOfflineFoot\(\); repaintEmptyStateIfUnfocused\(\); \}\);/,   // (T357: the unfocused body's "reconnecting" rides the same event)
     "repainted on federation's dial event, and on nothing timed");
 });
 

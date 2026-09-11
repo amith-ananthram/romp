@@ -6997,7 +6997,7 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
 window.addEventListener("romp-hosts", () => { renderTabs(); syncComposerPh(); });
 // a dial attempt to a remote host began or ended (federation.ts dialEvent): the host-down foot's swirl
 // spins while one is in flight, as of the last /tunnels poll, so it repaints on this event and on nothing else
-window.addEventListener("romp:hostDial", () => { syncHostOfflineFoot(); });   // (the unfocused body repaints on the same event: paintEmptyState)
+window.addEventListener("romp:hostDial", () => { syncHostOfflineFoot(); repaintEmptyStateIfUnfocused(); });   // the unfocused body's "reconnecting" follows the dial state too (T357)
 window.addEventListener("mousedown", (e) => { if (ctxMenuEl && !ctxMenuEl.contains(e.target as Node)) dismissTabMenu(); }, true);
 // an Escape that closed the menu says so on the event (preventDefault), so the section view's own Escape
 // (installSnapshotEscape, armed at this same capture phase, later in the listener order) yields to it
@@ -11784,9 +11784,14 @@ function paintEmptyState(empty: HTMLElement): void {
   empty.classList.toggle("unfocused", !!v);
   empty.dataset.vanished = named || "";
 }
-// The body's "reconnecting" is the federation manager's dial state: re-painted on its change event, so a redial that
-// starts a moment after the paint says so (the review), never a timer.
-window.addEventListener("romp:hostDial", () => { if (!activeId) { const e = document.getElementById("empty-state"); if (e) paintEmptyState(e); } });
+// The body's "reconnecting" is the federation manager's dial state: re-painted on its change event (the romp:hostDial
+// listener beside syncHostOfflineFoot calls this), so a redial that starts a moment after the paint says so (the
+// review), never a timer.
+function repaintEmptyStateIfUnfocused(): void {
+  if (activeId) return;
+  const e = document.getElementById("empty-state");
+  if (e) paintEmptyState(e);
+}
 
 // The tab VIEW stopped showing the active tab (a tag the view selects on was removed; T357, the review): the same
 // rule as a dismissal — the pane goes UNFOCUSED naming the session the view no longer shows, and never re-points
