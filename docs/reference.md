@@ -2460,6 +2460,28 @@ message written but never placed, a store record never finished), closes each
 one's receipt as refused, and says so once. The sidecars are yours to inspect
 or delete.
 
+## The spend ceiling
+
+Every pusher cycle the kernel reads each live session's spend rate: the
+dollars its transcript and the agent transcripts beside it (the subagents and
+workflow agents it fanned out) record over the last ten minutes, priced by the
+same per-model table the cost view uses, scaled to an hour. The data is what
+the kernel already holds for the chat and the feed (the record cache), so the
+check reads nothing new; only an agent file that changed inside the window is
+read. The ceiling is the `spend-ceiling-usd-per-hour` setting, a bare value
+file under the state directory read at each check: 1000 dollars an hour with
+no file, any number in the file, and `0` disables the guard. When a session's
+rate crosses the ceiling, once per crossing, the kernel interrupts its turn
+(the Stop button's road, so the fan-out ends at once), hands it one message in
+your voice (about how much it is spending, and to stop whatever is fanning out
+and say what it was before doing anything else), warns every connected
+dashboard with a toast naming the session, the rate and the moment, and files
+a `spend.ceiling` row in `session-events.jsonl` (with `usdPerHour`,
+`ceilingUsdPerHour` and `windowS`), which the kernel log and the error center
+carry and restart metrics count. The crossing is the event: nothing repeats
+while the rate stays high. Once the rate falls under half the ceiling a
+`spend.ceiling.cleared` row and a toast say so, and the guard is armed again.
+
 ## Restart metrics
 
 `romp restart-metrics` reads what kernel restarts do to the sessions, from the
