@@ -25316,22 +25316,17 @@ def _subagent_meta_map(path):
     return out
 
 
-def _subagent_tree_key(path):
-    """The stamps a resolved agent path stays valid under: the session's own subagents directories' mtimes (a file landing
-    in one moves it) and the project directory's (a sibling fsid's directory appearing moves that). Cheap: one stat per
-    directory under subagents/ plus one, no file listed."""
-    own = _subagents_dir(path)
-    stamps = []
-    for sd in _subagent_dirs(str(own)):
+def _dir_stamps(dirs):
+    """(dir, mtime_ns) for each directory, stats only (a missing one stamps None): the resolver's memo key. A file landing
+    in a directory moves that directory's mtime; a directory appearing moves its parent's; so the directories a walk READ
+    are exactly what a later hit must re-stat, and nothing is listed on a hit."""
+    out = []
+    for sd in dirs:
         try:
-            stamps.append((sd, os.stat(sd).st_mtime_ns))
+            out.append((sd, os.stat(sd).st_mtime_ns))
         except OSError:
-            pass
-    try:
-        stamps.append(("..", os.stat(Path(str(path)).parent).st_mtime_ns))
-    except OSError:
-        pass
-    return tuple(stamps)
+            out.append((sd, None))
+    return tuple(out)
 
 
 def _subagent_meta(path, agent_id, apath=None):
@@ -25348,12 +25343,17 @@ def _subagent_meta(path, agent_id, apath=None):
     return meta if isinstance(meta, dict) else {}
 
 
-def _find_agent_file(subdir, name):
+def _find_agent_file(subdir, name, read=None):
     """`name` anywhere under the subagents directory `subdir`, one level or deeper (workflows/wf_<id>/agent-<id>.jsonl),
-    no symlink followed or taken; None when absent."""
-    for root in _subagent_dirs(str(subdir)):
+    no symlink followed or taken, and never a file reached THROUGH a symlink (its real path stays under the tree's);
+    None when absent. `read` collects the directories walked."""
+    dirs = _subagent_dirs(str(subdir))
+    if read is not None:
+        read.extend(dirs)
+    real_root = os.path.realpath(str(subdir))
+    for root in dirs:
         cand = os.path.join(root, name)
-        if os.path.isfile(cand) and not os.path.islink(cand):
+        if os.path.isfile(cand) and not os.path.islink(cand) and os.path.realpath(cand).startswith(real_root + os.sep):
             return Path(cand)
     return None
 
@@ -25366,37 +25366,41 @@ def _subagent_file(path, agent_id):
     if not path or not _AGENT_ID_RE.match(str(agent_id or "")):
         return None
     ckey = (str(path), str(agent_id))
-    tkey = _subagent_tree_key(path)
-    hit = _SUBAGENT_FILE_CACHE.get(ckey)           # the walk once per change of the tree (the pusher asks every cycle per
-    if hit is not None and hit[0] == tkey:          #  open viewer, the chat build once per Agent card): memoized on its stamps
-        return hit[1]
-    found = _subagent_file_walk(path, agent_id)
+    hit = _SUBAGENT_FILE_CACHE.get(ckey)           # the walk once per change of what it read (the pusher asks every cycle per
+    if hit is not None and _dir_stamps([d for d, _m in hit[0]]) == hit[0]:   # open viewer, the chat build once per Agent card):
+        return hit[1]                                 #  a hit re-stats the directories the walk read, own tree and siblings, never lists
+    read = []
+    found = _subagent_file_walk(path, agent_id, read)
     if len(_SUBAGENT_FILE_CACHE) > 1024:
         _SUBAGENT_FILE_CACHE.clear()
-    _SUBAGENT_FILE_CACHE[ckey] = (tkey, found)
-    return found
+    _SUBAGENT_FILE_CACHE[ckey] = (_dir_stamps(read), found)   # a miss is memoized too, on the same stamps: a file landing later
+    return found                                                #  under a sibling's tree moves that directory and re-walks
 
 
-def _subagent_file_walk(path, agent_id):
-    """_subagent_file's walk itself (no memo)."""
+def _subagent_file_walk(path, agent_id, read=None):
+    """_subagent_file's walk itself (no memo); `read` collects every directory it looked at, the memo's stamps."""
+    read = read if read is not None else []
     name = "agent-%s.jsonl" % agent_id
     own = _subagents_dir(path)
+    read.append(str(own))
     ap = own / name
-    if os.path.isfile(ap) and not os.path.islink(ap):  # a file, and this tree's own (a symlink at the flat depth is not taken)
-        return ap
-    nested = _find_agent_file(own, name)
+    if not os.path.islink(own) and os.path.isfile(ap) and not os.path.islink(ap):   # this tree's own file (a symlinked
+        return ap                                                                   #  subagents/ or file is not taken)
+    nested = _find_agent_file(own, name, read)
     if nested is not None:
         return nested
     # A miss is a dependency of the chat payload that asked (the taskout idiom, _chat_dep_note_taskout): the
     # file appearing at its own place, or a sibling fsid's directory gaining one, changes the Agent card.
     _chat_dep_note_taskout(str(ap), None)
     try:
+        read.append(str(Path(str(path)).parent))         # the project directory: a sibling fsid's directory appearing moves it
         for d in sorted(Path(str(path)).parent.iterdir()):
             if d.is_dir():                                # the directory the walk below reads: a file landing in
                 sd = d / "subagents"                      # <sib>/subagents/ moves ITS mtime, not the sibling's
                 _chat_dep_note_taskout(str(sd), _chat_stat_key(str(sd)))
                 if sd != own:
-                    cand = _find_agent_file(sd, name)
+                    read.append(str(sd))
+                    cand = _find_agent_file(sd, name, read)
                     if cand is not None:
                         return cand
     except OSError:

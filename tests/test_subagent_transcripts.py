@@ -158,7 +158,7 @@ class World(unittest.TestCase):
         self.live = {"state": "waiting", "since": T0, "model": "", "effort": "", "context": None,
                      "compactPct": None, "color": None, "backend": "sdk"}
         km._live_map = lambda: self.tm
-        for cache in (km._chat_fold, km._parse_cache, km._SUBAGENT_META_CACHE, km._AGENT_GIST_CACHE,
+        for cache in (km._chat_fold, km._parse_cache, km._SUBAGENT_META_CACHE, km._SUBAGENT_FILE_CACHE, km._AGENT_GIST_CACHE,
                       km._AGENT_LAUNCH_CACHE, km._SUBAGENT_FRAMES, km._bgtasks_cache, km._bgall_cache):
             cache.clear()
 
@@ -524,6 +524,38 @@ class NestedWorkflowAgent(World):
         self.assertEqual(km._subagent_file(str(self.tpath), AID_WF), moved / "subagents" / "workflows" / "wf_0123456789abcdef" / ("agent-%s.jsonl" % AID_WF))
         self.assertEqual(km._subagent_meta(str(self.tpath), AID_WF).get("toolUseId"), TU_WF)
         self.assertIsNone(km._subagent_file(str(self.tpath), "a9999999999999999"))
+
+    def test_a_miss_memoized_before_the_file_lands_under_a_sibling_tree_resolves_when_it_lands(self):
+        """Round 3's medium: the memo latched a miss when the file landed under a sibling fsid's tree (a /clear fork's agents
+        land under the old fsid), since only the own tree and the project directory were stamped; every directory the walk
+        read is stamped now, siblings included, and a hit re-stats those alone."""
+        aid = "a5555555555555555"
+        self.assertIsNone(km._subagent_file(str(self.tpath), aid), "absent everywhere: a miss, memoized")
+        sib = self.proj / "66666666-7777-8888-9999-000000000000" / "subagents"
+        sib.mkdir(parents=True)                                      # a sibling fsid's tree appears (the project directory moves)
+        self.assertIsNone(km._subagent_file(str(self.tpath), aid), "still absent")
+        wf = sib / "workflows" / "wf_00000000000000ff"; wf.mkdir(parents=True)
+        write_jsonl(wf / ("agent-%s.jsonl" % aid), self._agent_records(aid, T0 + 200, []))   # …and the file lands in it, nested
+        self.assertEqual(km._subagent_file(str(self.tpath), aid), wf / ("agent-%s.jsonl" % aid), "found without a restart")
+        # a hit re-stats the directories the walk read and lists nothing
+        real_listdir, real_walk, count = os.listdir, os.walk, [0]
+        os.listdir = lambda *a, **k: (count.__setitem__(0, count[0] + 1), real_listdir(*a, **k))[1]
+        os.walk = lambda *a, **k: (count.__setitem__(0, count[0] + 1), real_walk(*a, **k))[1]
+        try:
+            self.assertEqual(km._subagent_file(str(self.tpath), aid), wf / ("agent-%s.jsonl" % aid))
+            self.assertEqual(count[0], 0, "a memo hit: stats only")
+        finally:
+            os.listdir, os.walk = real_listdir, real_walk
+
+    def test_a_symlinked_subagents_directory_yields_no_file_and_no_sidecar_map(self):
+        """Round 3's low d: a file reached THROUGH a symlinked subagents/ is not this session's."""
+        outside = Path(self._td) / "elsewhere" / "subagents"; outside.mkdir(parents=True)
+        write_jsonl(outside / ("agent-%s.jsonl" % AID_BG), self._agent_records(AID_BG, T0, []))
+        (outside / ("agent-%s.meta.json" % AID_BG)).write_text(json.dumps({"agentType": "x", "toolUseId": TU_BG}))
+        shutil.rmtree(self.subdir); os.symlink(str(outside), str(self.subdir))
+        km._SUBAGENT_FILE_CACHE.clear(); km._SUBAGENT_META_CACHE.clear()
+        self.assertIsNone(km._subagent_file(str(self.tpath), AID_BG), "the own tree is a symlink: not taken")
+        self.assertEqual(km._subagent_meta_map(str(self.tpath)), {}, "…and its sidecars are not listed")
 
     def test_a_symlink_into_the_tree_is_neither_followed_nor_taken(self):
         outside = Path(self._td) / "outside"; outside.mkdir()

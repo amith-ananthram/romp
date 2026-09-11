@@ -25,7 +25,9 @@ test("render.ts asks through askSubagent with the wait armed, re-asks every open
   assert.ok(ask.includes("}, SUBAGENT_OPEN_WAIT_MS);"), "one timer per ask, the module's bound");
   assert.ok(ask.includes("if (!subagentStalled(cur.sub.loaded, Date.now() - asked)) return;"), "the rule decides");
   assert.ok(ask.includes("cur.sub.askedAt !== asked) return;"), "a later ask or a close disarms the earlier timer");
-  assert.ok(RENDER.includes('window.addEventListener("romp:wsup", () => reaskWaitingSubagents());'), "a reconnect re-asks the waiting viewers");
+  assert.ok(RENDER.includes('window.addEventListener("romp:wsup", () => reaskWaitingSubagents(""));'), "a reconnect re-asks the local kernel's waiting viewers");
+  assert.ok(RENDER.includes("reaskWaitingSubagents(h || undefined);") && RENDER.includes('(host === undefined || hostOf(s.sub.parentId) === host)'), "a relay's reopen re-asks that host's viewers alone");
+  assert.ok(RENDER.includes("s.sub.loaded = true; s.sub.stalled = false;"), "a frame clears the stall: an answered viewer is never re-asked");
   assert.ok(RENDER.includes("onRetry: () => askSubagent(id),"), "the stall's Retry asks through the same ask (pane-placeholder.test.ts drives the DOM)");
 });
 

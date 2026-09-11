@@ -12921,11 +12921,12 @@ function armSubagentWait(id: string): void {
 // "written nothing yet"). The reconnect-class events this pane can see: the local socket's romp:wsup, a remote host's relay
 // socket reopening (romp:hostRelayUp: a remote kernel's restart fires that and not wsup, the 2026-09-01 finding the upload
 // re-ship records), and the extension's pipeState up (the VS Code webview never sees wsup).
-function reaskWaitingSubagents(): void {
-  for (const [id, s] of sessions) if (s.sub && (!s.sub.loaded || s.sub.stalled)) askSubagent(id);
+function reaskWaitingSubagents(host?: string): void {
+  for (const [id, s] of sessions)
+    if (s.sub && (!s.sub.loaded || s.sub.stalled) && (host === undefined || hostOf(s.sub.parentId) === host)) askSubagent(id);
 }
-window.addEventListener("romp:wsup", () => reaskWaitingSubagents());
-window.addEventListener("romp:hostRelayUp", () => reaskWaitingSubagents());
+window.addEventListener("romp:wsup", () => reaskWaitingSubagents(""));   // the local kernel's own viewers (a host's relay
+//                                                                            reopening re-asks in the romp:hostRelayUp listener below)
 
 function closeSubagentView(id: string): void {
   const p = subParts(id);
@@ -12951,7 +12952,7 @@ function applySubagentFrame(m: any): void {
   const id = subTabId(parentId, agentId);
   const s = sessions.get(id);
   if (!s || !s.sub) { vscodeApi?.postMessage({ type: "closeSubagent", id: parentId, agentId }); return; }
-  s.sub.loaded = true;
+  s.sub.loaded = true; s.sub.stalled = false;   // answered, late or not: no re-ask puts the loader back over it (T355)
   s.sub.error = m.error ? String(m.error) : null;
   s.sub.running = !!m.running;
   s.sub.truncated = !!m.truncated;
@@ -14772,6 +14773,7 @@ window.addEventListener("romp:hostRelayUp", (e) => {
   // event a remote kernel's restart produces (it fires neither romp:wsup nor hostUp), so settled previews
   // make their one attempt here as well
   refreshSettledPreviews();
+  reaskWaitingSubagents(h || undefined);   // …and that host's subagent viewers still waiting ask again (T355: a remote kernel's restart)
   // …and the tab this pane is LOOKING AT, when that host owns it (T246, the user 2026-09-07): the relay's
   // open is the moment the remote kernel holds a FRESH client for this pane — after that kernel restarted,
   // one with no active tab at all. Its pusher builds and flushes a client's active tab first; every tab is

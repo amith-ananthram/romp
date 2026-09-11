@@ -83,7 +83,7 @@ test("render.ts paints through the module and re-asks only the viewers still wai
   assert.ok(branch.includes("const kind = placeholderKind({ sub: s.sub, failedRevive: failedRevives.get(id) || null,"), "the kind decided from the session's state");
   assert.ok(branch.includes('if (!only || !only.classList?.contains("tx-empty") || !placeholderStands(only, kind)) {'), "rebuilt when the kind changed");
   assert.ok(branch.includes("fillPlaceholder(ph, kind, {"), "…and filled by the module");
-  assert.ok(RENDER.includes("for (const [id, s] of sessions) if (s.sub && (!s.sub.loaded || s.sub.stalled)) askSubagent(id);"), "waiting viewers only");
-  for (const ev of ['window.addEventListener("romp:wsup", () => reaskWaitingSubagents());', 'window.addEventListener("romp:hostRelayUp", () => reaskWaitingSubagents());', 'if (m.type === "pipeState" && m.up) reaskWaitingSubagents();'])
+  assert.ok(RENDER.includes("if (s.sub && (!s.sub.loaded || s.sub.stalled) && (host === undefined || hostOf(s.sub.parentId) === host)) askSubagent(id);"), "waiting viewers only, the named host's alone");
+  for (const ev of ['window.addEventListener("romp:wsup", () => reaskWaitingSubagents(""));', 'reaskWaitingSubagents(h || undefined);', 'if (m.type === "pipeState" && m.up) reaskWaitingSubagents();'])
     assert.ok(RENDER.includes(ev), ev);
 });
