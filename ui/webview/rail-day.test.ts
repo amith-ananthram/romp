@@ -117,3 +117,21 @@ test("executed: no label (today) leaves the slot line AT the line — today's la
 test("executed: an anchor below the pane's bottom paints nothing", () => {
   assert.equal(placeDay({ ...G, label: "Yesterday", dayW: 45, slotTop: 701 }).show, false);
 });
+
+// T342 (the manager's review of T339): the day label read the top row's OWN epoch, so a stale echo at the top line (an
+// undelivered notice the kernel merges into the last turn by its send time) said "2 days ago" between rows the divider
+// walk keeps under one "Yesterday". The label now reads the WALK's day at that row: the high-water mark after the row's
+// unit, stamped on the marker as data-day by the walk itself (appendItem, the normal-mode tail loop); the row's own epoch
+// stays the fallback and the rail's HH:MM stays the row's own. DayWalk.pass returning the mark is executed in
+// time-marker.test.ts on the two reported sequences.
+test("the day label reads the walk's day at the top row (data-day), never the row's own moment (T342)", () => {
+  assert.match(RENDER, /const ep = anchorM \? Number\(anchorM\.dataset\.day \|\| anchorM\.dataset\.epoch \|\| 0\) : 0;/, "the walk's day first, the row's own as the fallback");
+  const st = RENDER.slice(RENDER.indexOf("function stampWalkDay("), RENDER.indexOf("function dayWalkBefore("));
+  assert.match(st, /const m = node\.firstChild as HTMLElement \| null;/);
+  assert.match(st, /if \(walk\.mark != null && m && m\.nodeType === 1 && m\.classList && m\.classList\.contains\("time-marker"\)\) m\.dataset\.day = String\(walk\.mark\);/, "the marker carries the mark; a divider or an untimed row is left alone");
+  // stamped by both walks that paint the chat: the unit path after its exit passed, the tail loop after each row
+  assert.match(RENDER, /walk\.pass\(unitExit\(s, it\)\);\s*\n\s*for \(const n of nodes\) stampWalkDay\(n, walk\);/);
+  assert.match(RENDER, /walk\.pass\(ep\);\s*\n\s*stampWalkDay\(node, walk\);/);
+  assert.match(RENDER, /const tag = \(node: HTMLElement\): HTMLElement => \{ node\.dataset\.unit = String\(u\); nodes\.push\(node\); return node; \};/, "every node the unit appends is collected for the stamp");
+  assert.match(RENDER, /m\.dataset\.epoch = String\(epoch\);/, "the row's own moment still rides the marker (deep links, hover, the fallback)");
+});

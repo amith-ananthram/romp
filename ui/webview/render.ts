@@ -2770,7 +2770,7 @@ function timeMarker(epoch: number, prevEpoch: number | null): HTMLElement {
   const { text, day, hm } = markerLabel(epoch, prevEpoch, Date.now());
   const m = el("div", "time-marker");
   m.dataset.hm = hm;
-  m.dataset.epoch = String(epoch);   // the top-of-view day-context label reads this (paintRailSticky)
+  m.dataset.epoch = String(epoch);   // the row's own moment; the top-of-view day-context label reads data-day, the walk's mark (stampWalkDay), and falls back to this (paintRailSticky)
   // The gutter shows the TIME and nothing else. The date rides a full-width day divider
   // instead (dayDividerFor below) — no date word has to fit 47px of rail any more.
   if (text) m.textContent = day ? hm : text;
@@ -3124,7 +3124,10 @@ function paintRailSticky(): void {
   // AT the line, so when a
   // label shows, the slot line drops by the label's height to make that room (the 2026-08-17 first
   // cut floated the label above the sticky without shifting it, and bled into the tab bar).
-  const ep = anchorM ? Number(anchorM.dataset.epoch || 0) : 0;
+  // the WALK's day at that row (data-day, stampWalkDay), not the row's own moment (T342): a stale echo at the top line
+  // used to say "2 days ago" between rows the divider walk keeps under one "Yesterday"; the row's own epoch is the
+  // fallback for a marker no walk stamped
+  const ep = anchorM ? Number(anchorM.dataset.day || anchorM.dataset.epoch || 0) : 0;
   const label = ep && gRect ? dayContext(ep, Date.now()) : "";
   let dayW = 0, dayH = 0;
   if (label) {
@@ -10935,6 +10938,7 @@ function syncViewInner(id: string, atBottom?: boolean): View {
     node.dataset.unit = String(i);   // unit === event in normal mode
     v.el.appendChild(node);
     walk.pass(ep);
+    stampWalkDay(node, walk);
   }
   patchWorkedFooters(v, s, from, working);
   v.winEnd = total; v.spacerCount = v.winStart ?? 0; v.spacerCountBot = 0; v.unitTotal = total; v.rendered = len;
@@ -10993,6 +10997,15 @@ function unitExit(s: Session, it: DisplayItem): number | null {
   const open = openFolds.has(toolGroupKey(s.events[it.indices[0]]));
   return eventEpoch(s.events[open ? it.indices[it.indices.length - 1] : it.indices[0]]);
 }
+// The day the WALK is in at a row (T342, the manager's review of T339): the top-of-view day-context label
+// (paintRailSticky) read the top row's own epoch, so a stale echo at the top line said "2 days ago" between rows the
+// divider walk keeps under one "Yesterday". Every turn a walk appends carries the walk's mark after its unit as
+// data-day on its marker; the label reads that, and the rail's HH:MM stays the row's own. A divider or an untimed
+// row has no marker and is left alone.
+function stampWalkDay(node: HTMLElement, walk: DayWalk): void {
+  const m = node.firstChild as HTMLElement | null;
+  if (walk.mark != null && m && m.nodeType === 1 && m.classList && m.classList.contains("time-marker")) m.dataset.day = String(walk.mark);
+}
 // the day walk's high-water mark a walk from the top would hold before unit `unitStart` (compact units) …
 function dayWalkBefore(s: Session, items: DisplayItem[], unitStart: number): DayWalk {
   const w = new DayWalk();
@@ -11044,7 +11057,8 @@ function lastCompactUnit(s: Session, items: DisplayItem[]): number {
 // rule); `walk` is the day walk's high-water mark, advanced over the unit's exit (unitExit) and never rewound (T339).
 function appendItem(v: View, s: Session, items: DisplayItem[], u: number, prevEpoch: number | null, walk: DayWalk, working: boolean): number | null {
   const it = items[u];
-  const tag = (node: HTMLElement): HTMLElement => { node.dataset.unit = String(u); return node; };
+  const nodes: HTMLElement[] = [];   // every node this unit appends: stamped with the walk's day on the way out (T342)
+  const tag = (node: HTMLElement): HTMLElement => { node.dataset.unit = String(u); nodes.push(node); return node; };
   const adv = (i: number) => { const ep = eventEpoch(s.events[i]); if (ep != null) prevEpoch = ep; };
   // A new day opens with its divider, above whatever unit starts that day (tagged with the same
   // data-unit so the scroll↔unit map still resolves every node it walks). The unit is placed and timed by its ANCHOR
@@ -11092,6 +11106,7 @@ function appendItem(v: View, s: Session, items: DisplayItem[], u: number, prevEp
     adv(it.index);
   }
   walk.pass(unitExit(s, it));
+  for (const n of nodes) stampWalkDay(n, walk);
   return prevEpoch;
 }
 

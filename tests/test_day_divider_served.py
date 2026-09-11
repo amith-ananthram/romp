@@ -19,8 +19,11 @@ yesterday's first row) and none above the notice run, whose head wears its lates
 segment is painted on the turns' own line (the same page x) and reaches the neighbouring turns' boxes above and below
 (painted geometry, not the rule text); a divider that leads the transcript (nothing on the rail above it: the first child,
 or the one after the pinned system-context card, which sits off the rail) draws no segment and the turn after it starts
-its rail where a first turn does. The browser's clock is pinned to the epoch the fixture was stamped from, so a run that
-crosses local midnight between the boot and the drive still agrees with itself.
+its rail where a first turn does. The top-of-view day-context label (render.ts paintRailSticky) over `api`'s stale run,
+scrolled to the top line in a short viewport, reads the walk's day, "Yesterday", while the run's head keeps its own HH:MM
+(T342: it used to read the top row's own epoch and said "2 days ago" there). The browser's clock is pinned to the epoch
+the fixture was stamped from, so a run that crosses local midnight between the boot and the drive still agrees with
+itself.
 
 With DD_SHOTS=<dir> the driver writes screenshots (dark and light, the `web` session); DD_BEFORE_DIST=<dist> serves another
 tree's bundle for the before shots and skips the assertions, unless DD_BEFORE_ASSERT=1 keeps them (how the test is proven
@@ -193,6 +196,26 @@ await show(cfg.api, 4);
 out.api.light = await measure();
 await page.evaluate(() => document.body.classList.remove("theme-light")); await page.waitForTimeout(300);
 out.api.dark = await measure();
+// the stale run's head at the TOP LINE of a short viewport: the sticky day label names the walk's day there (T342)
+await page.setViewportSize({ width: 1100, height: 330 });   // short enough that the rows after the run out-measure the pane, so the head can reach the top
+await page.evaluate(() => {
+  const h = Array.from(document.querySelectorAll("#content .turn-noticegroup")).find((t) => t.offsetParent !== null);
+  const c = document.getElementById("content");
+  h.scrollIntoView({ block: "start" });
+  c.scrollTop += h.getBoundingClientRect().top - c.getBoundingClientRect().top;   // the head's top exactly at the pane's top, past the pane's own padding
+});
+await page.waitForTimeout(500);
+out.api.sticky = await page.evaluate(() => {
+  const h = Array.from(document.querySelectorAll("#content .turn-noticegroup")).find((t) => t.offsetParent !== null);
+  const content = document.getElementById("content").getBoundingClientRect();
+  const day = document.querySelector(".rail-day"), sticky = document.querySelector(".rail-sticky");
+  const m = h.querySelector(":scope > .time-marker");
+  const vis = (n) => !!n && getComputedStyle(n).display !== "none";
+  const c = document.getElementById("content");
+  return { headTop: h.getBoundingClientRect().top - content.top, pane: [c.scrollTop, c.scrollHeight, c.clientHeight], headMarker: m ? m.textContent : null, headMarkerVisible: !!m && getComputedStyle(m).visibility !== "hidden",
+           headDay: m ? m.dataset.day : null, headEpoch: m ? m.dataset.epoch : null,
+           dayLabel: vis(day) ? day.textContent : null, stickyHm: vis(sticky) ? sticky.textContent : null };
+});
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
 process.exit(0);
@@ -335,6 +358,15 @@ class ServedDayDivider(unittest.TestCase):
             self.assertEqual(m["head"]["t"], str(b_later_t), "the run's head anchors on its latest member, stale as it is")
             self.assertTrue(m["divs"][0]["leads"])
             self._divider_shape(m["divs"][0], m, theme)
+        # T342: the stale run's head scrolled to the top line: the day-context label names the WALK's day there, "Yesterday",
+        # never the run's own "2 days ago"; the rail's HH:MM over it stays the run's own (its stale anchor's clock)
+        st = r["api"]["sticky"]
+        self.assertLessEqual(st["headTop"], 6.5, "the head sits at the top line: %r" % st)
+        self.assertEqual(st["dayLabel"], "Yesterday", "the day label over the stale run is the walk's day, not the run's own 2 days ago: %r" % st)
+        stale_hm = time.strftime("%H:%M", time.localtime(b_later_t))
+        self.assertIn(stale_hm, (st["headMarker"] if st["headMarkerVisible"] else None, st["stickyHm"]), "the HH:MM at the top is the run's own, stale as it is: %r" % st)
+        self.assertEqual(st["headDay"], str(_local_day(1, 9, 5, now) + 60), "the head's marker carries the walk's mark after the run: the row before it, yesterday: %r" % st)
+        self.assertEqual(st["headEpoch"], str(b_later_t), "…beside its own moment")
 
 
 if __name__ == "__main__":
