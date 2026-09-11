@@ -7,6 +7,7 @@ watermark, and still records a fresh process's whole first total.
 SYNTHETIC fixtures only: placeholder ids, an invented session, a fake host hello.
 """
 import asyncio
+import inspect
 import json
 import os
 import tempfile
@@ -54,15 +55,18 @@ class Rebill(unittest.TestCase):
         self.be._turn_completed = lambda sid: None
         sb.write_reg(Path(self.d), SID, {"sid": SID, "name": "web", "cwd": self.d, "alive": True})
 
-    def _session(self, attach=False, hello_cli=("4242", "s1")):
+    def _session(self, attach=False, hello_cli=("4242", "s1"), journal_next=10, attach_ack=5):
         s = sb.SdkSession(self.be, {"sid": SID, "name": "web", "cwd": self.d})
         async def _noop(): pass
         s._do_refresh_context = _noop
         s._do_refresh_usage = _noop
         if attach:
             s._host_is_attach = True
-            s._host = types.SimpleNamespace(hello={"host": {"pid": 1, "start": "h"}, "cli": {"pid": hello_cli[0], "start": hello_cli[1]}},
-                                            ack_offset=0, exit_info=None, detach_mode=False)
+            # the host's hello names the journal's next offset at the attach (records before it are the replay); the
+            # transport's ack_offset is the record being handled; attach_ack the offset acknowledged when it was made
+            s._host = types.SimpleNamespace(hello={"host": {"pid": 1, "start": "h"}, "cli": {"pid": hello_cli[0], "start": hello_cli[1]},
+                                                   "journal": {"next": journal_next}},
+                                            ack_offset=journal_next, attach_ack=attach_ack, journal_dir=None, exit_info=None, detach_mode=False)
         s._seed_spend_watermarks()                          # the connect-time step
         return s
 
@@ -222,28 +226,86 @@ class Rebill(unittest.TestCase):
         self.assertIn('if getattr(self, "_host_is_attach", False) and getattr(self, "_host", None) is not None:',
                       inspect.getsource(sb.SdkSession._seed_spend_watermarks))
 
-    def test_a_redelivered_result_below_the_watermark_folds_nothing_and_the_watermarks_stay(self):
-        # M2: hostAck is written at most once a second while the watermark moves per result, so a kernel death leaves
-        # processed results past the acknowledged offset and the attach's replay hands them over again (the whole
-        # journal when the ack names another host); folded whole as a "counter reset" they were the lifetime as one turn
+    def test_a_redelivered_result_is_known_by_its_journal_position_and_folds_nothing(self):
+        # M2 of the review, reshaped by its round two: hostAck is written at most once a second while the watermark
+        # moves per result, so a kernel death leaves processed results past the acknowledged offset and the attach's
+        # replay hands them over again. Redelivery is read from the JOURNAL POSITION: the hello names the journal's
+        # next offset (10 here), the attach acknowledged 5, the replay is offsets 6..9, live records start at 10
         self.be._update_reg(SID, costState={"total": 500.0, "tokens": {"input_tokens": 90000}, "cli": "4242:s1", "t": 1})
-        s = self._session(attach=True, hello_cli=("4242", "s1"))
-        self._run(s, _result(480.0, 89000))                 # redelivered: below the seeded 500
+        s = self._session(attach=True, hello_cli=("4242", "s1"), journal_next=10, attach_ack=5)
+        s._host.ack_offset = 6
+        self._run(s, _result(480.0, 89000))                 # replayed, processed by the dead kernel (below the watermark)
         self.assertEqual(self._day(), {}, "a result the ledger already holds folds nothing")
         self.assertEqual((s._last_cost_total, s._last_usage_totals["input_tokens"]), (500.0, 90000), "the watermarks did not move down")
-        self._run(s, _result(500.0, 90000))                 # redelivered: the very result the watermark came from
+        s._host.ack_offset = 7
+        self._run(s, _result(500.0, 90000))                 # replayed: the very result the watermark came from
         self.assertEqual(self._day(), {})
-        self._run(s, _result(512.5, 90400))                 # the first NEW result
-        self.assertAlmostEqual(self._day()["usd"], 12.5, msg="only the new spend: the true 12.5, not the lifetime's 512.5")
-        self.assertEqual(self._day()["tokIn"], 400)
-        self.assertEqual(self._cost_state()["total"], 512.5)
+        s._host.ack_offset = 8
+        self._run(s, _result(512.5, 90400))                 # replayed but ABOVE the watermark: the dead kernel never folded it
+        self.assertAlmostEqual(self._day()["usd"], 12.5, msg="a replay the ledger does not hold is real spend")
+        s._host.ack_offset = 10
+        self._run(s, _result(520.0, 91000))                 # live
+        self.assertAlmostEqual(self._day()["usd"], 20.0)
         rows = self._turns()
-        self.assertEqual([r["usd"] for r in rows], [0.0, 0.0, 12.5])
-        self.assertEqual([r["cumulativeUsd"] for r in rows], [480.0, 500.0, 512.5], "each row still names the CLI's total it carried")
-        # a fresh process is NOT hosted: a total below the watermark there is still the counter reset it always was
-        s2 = self._session()
-        self._run(s2, _result(10.0, 10)); self._run(s2, _result(4.0, 10))
-        self.assertAlmostEqual(self._day()["usd"], 12.5 + 10.0 + 4.0)
+        self.assertEqual([r["usd"] for r in rows], [0.0, 0.0, 12.5, 7.5])
+        self.assertEqual([r.get("redelivered", False) for r in rows], [True, True, False, False], "the row says so, a flag the repair can trust")
+        self.assertEqual([r["cumulativeUsd"] for r in rows], [480.0, 500.0, 512.5, 520.0], "each row still names the CLI's total it carried")
+
+    def test_a_replay_at_or_below_the_attach_ack_is_a_redelivery_whatever_its_total(self):
+        # the whole-journal replay (the ack named another host) of a CLI that ran a /clear mid-life: a pre-clear row
+        # replays ABOVE the post-clear watermark; at or below the acknowledged offset it is a replay all the same
+        self.be._update_reg(SID, costState={"total": 20.0, "tokens": {}, "cli": "4242:s1", "t": 1})
+        s = self._session(attach=True, journal_next=10, attach_ack=5)
+        s._host.ack_offset = 3
+        self._run(s, _result(600.0, 10))                    # pre-clear, above the watermark, at or below the ack: a replay
+        self.assertEqual(self._day(), {})
+        self.assertEqual(s._last_cost_total, 20.0)
+        s._host.ack_offset = 10
+        self._run(s, _result(25.0, 10))                     # live: the post-clear counter moving on
+        self.assertAlmostEqual(self._day()["usd"], 5.0)
+
+    def test_a_live_total_below_the_watermark_is_a_counter_reset_on_every_road_and_never_latches_zero(self):
+        # the round-two HIGH: read from the total alone, every real reset was a duplicate and the session stayed at $0
+        # (a) a /clear as the first turn after an attach: the event zeroes the counter and retires the pending seed
+        self.be._update_reg(SID, costState={"total": 500.0, "tokens": {}, "cli": "4242:s1", "t": 1})
+        s = self._session(attach=True)
+        self.assertEqual(s._spend_baseline, "attach-pending")
+        s._last_cost_total = 0.0; s._last_usage_totals = {}          # what the /clear event does…
+        if s._spend_baseline == "attach-pending":                    # …and the retirement it now carries (pinned below)
+            s._spend_baseline = "fresh"
+        s._host.ack_offset = 10
+        self._run(s, _result(3.0, 10)); self._run(s, _result(8.0, 10))
+        self.assertAlmostEqual(self._day()["usd"], 8.0, msg="3 then 5, never 0 and 0")
+        src = inspect.getsource(sb.SdkSession._on_message)
+        i = src.index("self._last_cost_total = 0.0" + chr(10) + "                    self._last_usage_totals = {}")
+        self.assertIn('if getattr(self, "_spend_baseline", "fresh") == "attach-pending":', src[i:i + 700], "the /clear event retires a pending attach seed")
+        # (b) a /clear the kernel never saw (unbracketed, in flight when the kernel died): live results below the seed
+        Path(self.d, "spend.json").unlink(missing_ok=True); Path(self.d, "turns.jsonl").unlink(missing_ok=True)
+        self.be._update_reg(SID, costState={"total": 500.0, "tokens": {}, "cli": "4242:s1", "t": 1})   # (a) moved the watermark to 8
+        s2 = self._session(attach=True)
+        s2._host.ack_offset = 10
+        self._run(s2, _result(512.5, 10))                   # the seeded 500: 12.5
+        self._run(s2, _result(3.0, 10)); self._run(s2, _result(8.0, 10))
+        self.assertAlmostEqual(self._day()["usd"], 12.5 + 3.0 + 5.0, msg="a live total below the watermark is a reset: folded whole, then its delta")
+        # (c) a resumed transcript's cost-state seed (baseline fresh) under a spawned host, against a print-mode CLI
+        Path(self.d, "spend.json").unlink(missing_ok=True); Path(self.d, "turns.jsonl").unlink(missing_ok=True)
+        s3 = self._session()
+        s3._host = types.SimpleNamespace(hello={"host": {"pid": 1, "start": "h"}, "cli": {"pid": "7", "start": "s7"}, "journal": {"next": 0}},
+                                         ack_offset=0, attach_ack=-1, journal_dir=None, exit_info=None, detach_mode=False)
+        s3._last_cost_total = 500.0                          # the cost-state record's seed
+        self._run(s3, _result(3.0, 10)); self._run(s3, _result(8.0, 10))
+        self.assertAlmostEqual(self._day()["usd"], 8.0, msg="3 then 5 on a spawn's empty replay window")
+        # (d) an orphan journal's reader replays only: below the dead CLI's watermark folds nothing, above it folds
+        Path(self.d, "spend.json").unlink(missing_ok=True); Path(self.d, "turns.jsonl").unlink(missing_ok=True)
+        self.be._update_reg(SID, costState={"total": 500.0, "tokens": {}, "cli": "4242:s1", "t": 1})   # (b) moved it again
+        s4 = self._session()
+        s4._seed_for_dead_cli("4242:s1")                     # seeded at 500
+        s4._host = types.SimpleNamespace(hello=None, journal_dir="/nonexistent/journal", ack_offset=7, attach_ack=6, exit_info=None, detach_mode=False)
+        self._run(s4, _result(480.0, 10))
+        self.assertEqual(self._day(), {})
+        s4._host.ack_offset = 8
+        self._run(s4, _result(512.5, 10))
+        self.assertAlmostEqual(self._day()["usd"], 12.5)
 
     def test_a_replayed_tail_with_no_result_leaves_the_spawn_to_seed_fresh_and_an_init_in_the_tail_never_clobbers_the_dead_seed(self):
         # low b: a dead host's tail with no result record folds nothing and the connect's seed for the spawn that follows

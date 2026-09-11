@@ -195,6 +195,8 @@ class HostTransport(_Base):
         self.sock_path = str(sock_path) if sock_path else None
         self.kernel = dict(kernel or {})
         self.ack_offset = int(ack)
+        self.attach_ack = int(ack)      # the offset acknowledged when this transport was made, unchanged after: records at
+        #                                 or below it were handed to an earlier kernel (the spend fold reads it, T354)
         self.end_grace = float(end_grace)
         self.on_ack, self.on_hello, self.on_stderr, self.on_exit, self.on_fault = on_ack, on_hello, on_stderr, on_exit, on_fault
         self.journal_dir = str(journal_dir) if journal_dir else None

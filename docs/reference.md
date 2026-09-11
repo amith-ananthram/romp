@@ -2469,11 +2469,16 @@ total. A surviving process with no matching watermark on record (a kernel
 before this rule wrote none) records nothing for that first result, since its
 total is the lifetime's and the turn's share is unknowable; the kernel log says
 so, and the watermark is written from there. The replay of a dead host's
-journal tail seeds the same way for the dead CLI before it drains; a result the
-replay hands over again (its total below the watermark) folds nothing, since
-one process's total only grows apart from a `/clear` the kernel zeroes by
-event; and the attach flag lives one connect, so a rollback to hosts off
-records a fresh child's first turn in full. Each `turns.jsonl` row carries
+journal tail seeds the same way for the dead CLI before it drains. A result the
+attach's replay hands over again folds nothing, decided from the journal
+position the transport tracks (a record before the offset the host's hello
+named as its next is a replay, and a replay at or below the offset acknowledged
+at the attach, or at or below the watermark, is one the ledger already holds;
+its turn row says `redelivered`); a live total below the watermark is a counter
+reset the kernel did not see and folds whole, as before. The attach flag lives
+one connect, so a rollback to hosts off records a fresh child's first turn in
+full, and a `/clear` as the first turn after an attach retires the pending seed
+so the zeroed counter stands. Each `turns.jsonl` row carries
 `cumulativeUsd`, the CLI's own total at that result, and a first result's
 `spendBaseline` (`fresh`, `seeded` or `attach-unknown`). Before this rule every
 restart re-billed each hosted session's lifetime as one turn (2026-09-11: a

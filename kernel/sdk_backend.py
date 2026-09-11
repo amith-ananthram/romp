@@ -6757,6 +6757,8 @@ class SdkSession:
         cum = getattr(self, "_turn_cumulative", None)     # the CLI's own cumulative total_cost_usd at this result (T354):
         if isinstance(cum, (int, float)) and not isinstance(cum, bool):   # the repair and the audits read the staircase off it
             row["cumulativeUsd"] = round(float(cum), 6)
+        if getattr(self, "_turn_redelivered", False):
+            row["redelivered"] = True                      # a replayed result the ledger already held: folded nothing (T354)
         bl = getattr(self, "_turn_baseline", None)        # a first result's baseline: fresh, seeded, attach-unknown (T354)
         if isinstance(bl, str) and bl:
             row["spendBaseline"] = bl
@@ -6943,6 +6945,34 @@ class SdkSession:
                                                              "none recorded" if not cs else "recorded for %s" % (cs.get("cli") or "?")),
                           problem=False)
         return False
+
+    def _spend_redelivered(self, total) -> bool:
+        """Is this result one an earlier kernel already folded? Decided from the host transport's journal position
+        (T354, the round-two review of the kernel fix): the record being handled sits at the transport's ack offset
+        (the transport advances it as it hands each record over), the host's hello names the journal's next offset at
+        the attach (records before it are the replay), and an orphan journal's reader replays only. A replay at or
+        below the offset acknowledged when the transport was made was handed to an earlier kernel; a replay at or
+        below the watermark was folded by the kernel that persisted it (hostAck lags the watermark by up to a second).
+        A live record is never a redelivery, whatever its total."""
+        t = getattr(self, "_host", None)
+        if t is None:
+            return False
+        try:
+            pos = int(getattr(t, "ack_offset", -1))
+        except (TypeError, ValueError):
+            return False
+        hello = getattr(t, "hello", None)
+        j = hello.get("journal") if isinstance(hello, dict) and isinstance(hello.get("journal"), dict) else None
+        nxt = j.get("next") if j else None
+        replay_only = getattr(t, "journal_dir", None) is not None and hello is None
+        in_window = replay_only or (isinstance(nxt, (int, float)) and pos < nxt)
+        if not in_window:
+            return False
+        try:
+            attach_ack = int(getattr(t, "attach_ack", -1))
+        except (TypeError, ValueError):
+            attach_ack = -1
+        return pos <= attach_ack or float(total) <= float(self._last_cost_total)
 
     def _persist_cost_state(self, total) -> None:
         """The watermark on the registry, every result (T354): the CLI's cumulative total, the token watermarks and
@@ -7161,9 +7191,15 @@ class SdkSession:
                     # The CLI zeroed total_cost_usd and modelUsage at this instant (a /clear resets both,
                     # same lifecycle); reset the spend watermarks on the EVENT rather than waiting for the
                     # next result to read below them (review find on #956, 2026-09-07). The shrunken-counter
-                    # rule in _turn_usage / the cost delta stays as the backstop for a reset we did not see.
+                    # rule in _turn_usage / the cost delta stays as the backstop for a reset we did not see, on
+                    # every LIVE result; only a record inside a host's replay window is read as a redelivery.
                     self._last_cost_total = 0.0
                     self._last_usage_totals = {}
+                    if getattr(self, "_spend_baseline", "fresh") == "attach-pending":
+                        # a /clear as the first turn after an attach (MEDIUM of 1450's round two): the deferred seed
+                        # from the registry would have restored the pre-clear cumulative over this zero at the first
+                        # paid result; the counter IS zero now, so the pending seed is retired and the baseline fresh
+                        self._spend_baseline = "fresh"
                     loaded_sid = None   # zero IS the seed here: the cwd re-seed below stands down (the loaded
                     #                     file may carry a record the /clear saver wrote as it abandoned it)
                 # A RESUME landing on a NEW fsid = a fresh-headed fork: record the old->new lineage
@@ -7448,15 +7484,17 @@ class SdkSession:
                         self._seed_from_reg_cost_state()
                         baseline = self._spend_baseline
                     unknown = first and baseline == "attach-unknown"
-                    # a REDELIVERED result (M2 of 1450's review): hostAck is written at most once a second while the
-                    # watermark moves per result, so a kernel death leaves processed results past the acknowledged
-                    # offset and the attach's replay hands them over again (the whole journal, when the ack names
-                    # another host). One CLI process's total is monotone apart from a /clear the kernel zeroes by
-                    # event, so under a host a total BELOW the watermark is a result the ledger already holds: folded
-                    # whole (the "counter reset" road below, meant for a process we never watched) it was the
-                    # process's lifetime as one turn
-                    hosted = getattr(self, "_host", None) is not None or baseline == "seeded"
-                    duplicate = hosted and total < self._last_cost_total
+                    # a REDELIVERED result (M2 of 1450's review, reshaped by its round two): hostAck is written at
+                    # most once a second while the watermark moves per result, so a kernel death leaves processed
+                    # results past the acknowledged offset and the attach's replay hands them over again (the whole
+                    # journal, when the ack names another host). Redelivery is decided from the JOURNAL POSITION the
+                    # transport tracks, never from the total: a record inside the replay window (before the offset
+                    # the host's hello named as its next, or any record of an orphan journal's replay) is a replay,
+                    # and a replay at or below the offset acknowledged at the attach, or at or below the watermark,
+                    # is one the ledger already holds. A LIVE total below the watermark is a counter reset (a /clear
+                    # the kernel did not see, a resumed cost-state seed against a print-mode CLI) and folds whole, as
+                    # it always did; read from the total alone, a reset latched the session at $0 for the process's life
+                    duplicate = self._spend_redelivered(total)
                     if unknown or duplicate:
                         delta = 0.0       # unknown: the lifetime's total, this turn's share unknowable; duplicate: already folded
                     else:
@@ -7477,7 +7515,7 @@ class SdkSession:
                         turn_u = {k: 0 for k in (turn_u or {})} if isinstance(turn_u, dict) else turn_u
                     self._turn_cumulative = float(total)          # the turn row carries the CLI's own cumulative (T354)
                     self._turn_baseline = baseline if first else None
-                    self._turn_duplicate = duplicate
+                    self._turn_redelivered = duplicate            # the turn row says so (a flag the repair can trust)
                     self._turn_spend = (delta, turn_u)   # for the turn ledger row the finally writes (T304)
                     self._persist_cost_state(self._last_cost_total)   # the watermark the next kernel's attach seeds from (T354)
                     self.backend._record_spend(delta, turn_u, keyed=self.api_key_auth,
@@ -7525,6 +7563,7 @@ class SdkSession:
                 self._turn_spend = None          # spent with the row, like the feed stamps below
                 self._turn_cumulative = None
                 self._turn_baseline = None
+                self._turn_redelivered = False
                 self._fed_t = None               # the turn's feed stamps are spent (see _turn_ledger_row)
                 self._first_out_t = None
                 # THE SETTLE — everything that makes the turn over for the kernel — runs whatever the
