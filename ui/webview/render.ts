@@ -24,8 +24,8 @@ import { mintWriteId, ackOutcome, adoptViews, seqOf, capsAdopts, announcedSeq, a
 import { lensVisible, surfaceLens } from "./tag-lens";
 import { openTagMenu, tagMenuButton, syncTagFilter, tagChip } from "./tag-menu";
 import { syncSessionsFromTabMeta, applyMetaToSession, notePendingMeta, PendingTabMeta } from "./tab-meta";
-import { markerLabel, dayContext } from "./time-marker";
-import { compactDisplay, toolCounts, type DisplayItem } from "./compact";
+import { markerLabel, dayContext, DayWalk } from "./time-marker";
+import { compactDisplay, toolCounts, itemAnchor, type DisplayItem } from "./compact";
 import { senderKind, SenderKind } from "./sender-identity";
 import { loadSettings, onExternalSettingsChange, installSettingsSync, type RompSettings } from "./settings";
 import { backendLabel, effectiveDefaultBackend } from "./backend-names";
@@ -2688,12 +2688,16 @@ function timeMarker(epoch: number, prevEpoch: number | null): HTMLElement {
 // It must be a SIBLING, never the turn's first child: .dot and .time-marker are absolutely
 // positioned against the TURN's top edge, so a divider inside it would shove the message down
 // and leave the dot stranded up beside the rule.
-function dayDividerFor(epoch: number, prevEpoch: number | null): HTMLElement | null {
-  const { day, date } = markerLabel(epoch, prevEpoch, Date.now());
-  if (!day || !date) return null;
+// Only a FORWARD crossing opens a day, against the walk's high-water mark (time-marker.ts DayWalk, T339): a row stamped
+// earlier than the rows around it draws no divider and never becomes the reference. The date sits CENTERED over the
+// column between two hairlines, and the divider carries its own segment of the rail (styles.css .day-divider::before) so
+// the line runs through it (the user 2026-09-11).
+function dayDividerFor(epoch: number, walk: DayWalk): HTMLElement | null {
+  const date = walk.open(epoch, Date.now());
+  if (!date) return null;
   const d = el("div", "day-divider");
   const lbl = el("span", "day-divider-label"); lbl.textContent = date;
-  d.appendChild(lbl);
+  d.append(el("span", "day-divider-rule"), lbl, el("span", "day-divider-rule"));
   return d;
 }
 
@@ -3821,14 +3825,15 @@ function fillClearBody(body: HTMLElement, got: { events: ChatEvent[]; truncated?
   }
   const wrap = el("div", "clear-episode");
   let prevEp: number | null = null;
+  const walk = new DayWalk();   // the fold divides days by the chat's own high-water mark (T339)
   for (const e of got.events) {
     try {
       const ep = eventEpoch(e);
-      const prior = prevEp;   // the PREVIOUS event's epoch — chained, so the fold divides days
+      const prior = prevEp;   // the PREVIOUS event's epoch — chained, so the rail's same-minute rule holds
       if (ep != null) {       // rather than re-stamping the full date on every turn in it
-        const dv = dayDividerFor(ep, prior);
+        const dv = dayDividerFor(ep, walk);
         if (dv) wrap.appendChild(dv);
-        prevEp = ep;
+        prevEp = ep; walk.pass(ep);
       }
       wrap.appendChild(renderEvent(e, prior));
     }
@@ -8931,7 +8936,8 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
     renderingSid = th.tid;
     renderingOwnerSid = sid;   // fold keys are per-thread; file/preview URLs belong to the thread's SESSION
     renderingIntoThread = true;   // same renderer, minus the transcript-coupled hover chrome (see the flag)
-    let prev: number | null = null;
+    let prev: number | null = null;       // the rail's raw previous epoch (the same-minute rule)
+    const walk = new DayWalk();           // the day walk's high-water mark (T339)
     let quoteHost: HTMLElement | null = null;   // the thread's OPENING message — the quote's home
     // the SAME display units the chat renders (the user 2026-08-24, leg C: the popover ignored the
     // compact/hide-thinking setting — thinking blocks and raw tool runs showed regardless of the
@@ -8946,14 +8952,15 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
     let relayNoted = !th.relayedT;   // T145: drop the sent-back marker at its place in time, once
     for (const it of items) {
       // a new day opens with the chat's own divider (the parity bundle, 2026-08-26) — same helper,
-      // same placement idiom as appendItem
-      const dayOpen = eventEpoch(evs[itemFirstEvent(it)]);
+      // same placement idiom as appendItem, the unit timed by its anchor member (T339)
+      const anchor = itemAnchor(it, (i) => eventEpoch(evs[i]));
+      const dayOpen = eventEpoch(evs[anchor]);
       if (!relayNoted && dayOpen != null && dayOpen > (th.relayedT || 0)) {
         list.appendChild(cmtRelayedNote(th.relayedT || 0));
         relayNoted = true;
       }
       if (dayOpen != null) {
-        const dv = dayDividerFor(dayOpen, prev);
+        const dv = dayDividerFor(dayOpen, walk);
         if (dv) list.appendChild(dv);
       }
       if (it.kind === "toolgroup" || it.kind === "noticegroup") {
@@ -8962,7 +8969,8 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
         const open = openFolds.has(key);
         list.appendChild(it.kind === "toolgroup"
           ? renderToolGroup(run as Extract<ChatEvent, { kind: "tool" }>[], prev, key, open)
-          : renderNoticeGroup(run, prev, key, open));
+          : renderNoticeGroup(run, evs[anchor], prev, key, open));
+        let exit: number | null;   // the epoch the run leaves the walk on (the rail chain and the day mark alike)
         if (open) {
           it.indices.forEach((ix, j) => {   // the run's own members — it.indices already excludes thinking
             const child = renderEvent(evs[ix], prev, turnWorkedSecs(evs, ix, thWorking));
@@ -8970,9 +8978,12 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
             list.appendChild(child);
             const ep = eventEpoch(evs[ix]); if (ep != null) prev = ep;
           });
+          exit = it.kind === "noticegroup" ? eventEpoch(evs[anchor]) : prev;   // a notice run leaves the walk on its anchor, whatever order its members came in (T339)
+          if (it.kind === "noticegroup" && exit != null) prev = exit;
         } else {
-          const ep = eventEpoch(run[run.length - 1]); if (ep != null) prev = ep;
+          exit = eventEpoch(it.kind === "noticegroup" ? evs[anchor] : run[run.length - 1]); if (exit != null) prev = exit;
         }
+        walk.pass(exit);
         continue;
       }
       const ev = evs[it.index];
@@ -8983,6 +8994,7 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
       if (!quoteHost && ev.kind === "user") quoteHost = node;
       const ep = eventEpoch(ev);
       if (ep != null) prev = ep;
+      walk.pass(ep);
     }
     if (!relayNoted) list.appendChild(cmtRelayedNote(th.relayedT || 0));   // relay at the tail — nothing new after it yet
     renderingIntoThread = false;
@@ -10749,16 +10761,18 @@ function syncViewInner(id: string, atBottom?: boolean): View {
   const unitOf = (n: ChildNode): number =>
     n instanceof HTMLElement && n.dataset.unit != null ? Number(n.dataset.unit) : -1;
   while (v.el.lastChild && unitOf(v.el.lastChild) >= from) v.el.removeChild(v.el.lastChild);
+  const walk = dayWalkBeforeEvent(s.events, from);   // the day walk's high-water mark up to here (T339)
   for (let i = from; i < len; i++) {
-    const prev = prevTimedEpoch(s.events, i);
+    const prev = prevTimedEpoch(s.events, i);   // the rail's raw previous epoch (the same-minute rule)
     const ep = eventEpoch(s.events[i]);
     if (ep != null) {   // a day boundary opens with its divider here too, or the tail append would drop it
-      const dv = dayDividerFor(ep, prev);
+      const dv = dayDividerFor(ep, walk);
       if (dv) { dv.dataset.unit = String(i); v.el.appendChild(dv); }
     }
     const node = renderEvent(s.events[i], prev, turnWorkedSecs(s.events, i, working));
     node.dataset.unit = String(i);   // unit === event in normal mode
     v.el.appendChild(node);
+    walk.pass(ep);
   }
   patchWorkedFooters(v, s, from, working);
   v.winEnd = total; v.spacerCount = v.winStart ?? 0; v.spacerCountBot = 0; v.unitTotal = total; v.rendered = len;
@@ -10807,6 +10821,29 @@ function prevTimedEpoch(events: ChatEvent[], i: number): number | null {
   return null;
 }
 
+// The epoch a display unit leaves the day walk on (T339): a lone event its own; a notice run its ANCHOR member (the
+// latest, compact.ts itemAnchor); a tool run its first member when collapsed and its last when expanded, exactly what
+// appendItem's rail chain (adv) leaves behind. One rule for the walk and for a window's seed, so a window opening
+// mid-transcript decides its first divider as a walk from the top would have.
+function unitExit(s: Session, it: DisplayItem): number | null {
+  if (it.kind === "event") return eventEpoch(s.events[it.index]);
+  if (it.kind === "noticegroup") return eventEpoch(s.events[itemAnchor(it, (i) => eventEpoch(s.events[i]))]);
+  const open = openFolds.has(toolGroupKey(s.events[it.indices[0]]));
+  return eventEpoch(s.events[open ? it.indices[it.indices.length - 1] : it.indices[0]]);
+}
+// the day walk's high-water mark a walk from the top would hold before unit `unitStart` (compact units) …
+function dayWalkBefore(s: Session, items: DisplayItem[], unitStart: number): DayWalk {
+  const w = new DayWalk();
+  for (let u = 0; u < unitStart && u < items.length; u++) w.pass(unitExit(s, items[u]));
+  return w;
+}
+// … and before event `i` in normal mode, where every unit is one event
+function dayWalkBeforeEvent(events: ChatEvent[], i: number): DayWalk {
+  const w = new DayWalk();
+  for (let j = 0; j < i && j < events.length; j++) w.pass(eventEpoch(events[j]));
+  return w;
+}
+
 // ── Unified bidirectional virtualization (the user 2026-06-25) ─────────────────────────────────────────
 // Both modes render a window of UNITS [winStart, winEnd): a unit is one event (normal) or one folded
 // compactDisplay item (compact). The hidden head [0, winStart) collapses into a TOP spacer and the hidden
@@ -10841,16 +10878,20 @@ function lastCompactUnit(s: Session, items: DisplayItem[]): number {
 }
 
 // Append one display unit's DOM to v.el (a turn, or a folded toolgroup + its expansion), tagging every node
-// with data-unit = u for the scroll↔unit map. Returns the advanced prevEpoch.
-function appendItem(v: View, s: Session, items: DisplayItem[], u: number, prevEpoch: number | null, working: boolean): number | null {
+// with data-unit = u for the scroll↔unit map. Returns the advanced prevEpoch (the rail's raw chain, for the same-minute
+// rule); `walk` is the day walk's high-water mark, advanced over the unit's exit (unitExit) and never rewound (T339).
+function appendItem(v: View, s: Session, items: DisplayItem[], u: number, prevEpoch: number | null, walk: DayWalk, working: boolean): number | null {
   const it = items[u];
   const tag = (node: HTMLElement): HTMLElement => { node.dataset.unit = String(u); return node; };
   const adv = (i: number) => { const ep = eventEpoch(s.events[i]); if (ep != null) prevEpoch = ep; };
   // A new day opens with its divider, above whatever unit starts that day (tagged with the same
-  // data-unit so the scroll↔unit map still resolves every node it walks).
-  const dayOpen = eventEpoch(s.events[itemFirstEvent(it)]);
+  // data-unit so the scroll↔unit map still resolves every node it walks). The unit is placed and timed by its ANCHOR
+  // member (compact.ts itemAnchor, T339): a run's latest member, the one in sequence with its neighbours, never a member
+  // stamped earlier than the rows around it.
+  const anchor = itemAnchor(it, (i) => eventEpoch(s.events[i]));
+  const dayOpen = eventEpoch(s.events[anchor]);
   if (dayOpen != null) {
-    const dv = dayDividerFor(dayOpen, prevEpoch);
+    const dv = dayDividerFor(dayOpen, walk);
     if (dv) v.el.appendChild(tag(dv));
   }
   if (it.kind === "toolgroup") {
@@ -10874,19 +10915,21 @@ function appendItem(v: View, s: Session, items: DisplayItem[], u: number, prevEp
     const notes = it.indices.map((i) => s.events[i]);
     const key = noticeGroupKey(notes[0]);
     const open = openFolds.has(key);
-    v.el.appendChild(tag(renderNoticeGroup(notes, prevEpoch, key, open)));
-    adv(it.indices[0]);
+    v.el.appendChild(tag(renderNoticeGroup(notes, s.events[anchor], prevEpoch, key, open)));   // timed by the anchor member (T339)
+    adv(anchor);
     if (open) {
       it.indices.forEach((i, j) => {
         const child = renderEvent(s.events[i], prevEpoch, turnWorkedSecs(s.events, i, working));
         child.classList.add("tg-child"); if (j === it.indices.length - 1) child.classList.add("tg-last");
         v.el.appendChild(tag(child)); adv(i);
       });
+      adv(anchor);   // the walk leaves the run on its latest member, whatever order its members came in
     }
   } else {
     v.el.appendChild(tag(renderEvent(s.events[it.index], prevEpoch, turnWorkedSecs(s.events, it.index, working))));
     adv(it.index);
   }
+  walk.pass(unitExit(s, it));
   return prevEpoch;
 }
 
@@ -10899,7 +10942,8 @@ function renderWindowItems(v: View, s: Session, items: DisplayItem[], unitStart:
   while (v.el.firstChild) v.el.removeChild(v.el.firstChild);
   if (unitStart > 0) v.el.appendChild(el("div", "tx-spacer tx-spacer-top"));
   let prevEpoch = unitStart > 0 && unitStart < total ? prevTimedEpoch(s.events, itemFirstEvent(items[unitStart])) : null;
-  for (let u = unitStart; u < unitEnd; u++) prevEpoch = appendItem(v, s, items, u, prevEpoch, working);
+  const walk = dayWalkBefore(s, items, unitStart);   // the mark a walk from the top would hold here (T339)
+  for (let u = unitStart; u < unitEnd; u++) prevEpoch = appendItem(v, s, items, u, prevEpoch, walk, working);
   if (unitEnd < total) v.el.appendChild(el("div", "tx-spacer tx-spacer-bot"));
   v.winStart = unitStart; v.winEnd = unitEnd;
   v.spacerCount = unitStart; v.spacerCountBot = total - unitEnd; v.unitTotal = total;
@@ -11030,18 +11074,21 @@ function noticeBrief(ev: ChatEvent): { src: string; glyph: NoticeGlyphKind; gist
   }
   return { src: "session", glyph: "session", gist: "" };
 }
-function renderNoticeGroup(evs: ChatEvent[], prevEpoch: number | null, key: string, open: boolean): HTMLElement {
+// `anchor` is the member the run is placed and timed by (compact.ts itemAnchor, T339): its latest, the one in sequence
+// with the rows around it. The head's rail time, data-t, uuid and hover wiring all read it; the words (the source, the
+// glyph, the first gist) stay the first member's, which is what the run reads as.
+function renderNoticeGroup(evs: ChatEvent[], anchor: ChatEvent, prevEpoch: number | null, key: string, open: boolean): HTMLElement {
   const b = noticeBrief(evs[0]);
   const turn = notice({ src: b.src, glyph: b.glyph, gist: `${evs.length} notices`, meta: open ? undefined : b.gist,
                         group: { key, open }, cls: "turn-toolgroup turn-noticegroup" + (open ? " expanded" : ""),
                         tip: open ? "click to collapse" : "click to expand" });
-  const epoch = eventEpoch(evs[0]);
-  const anchorUuid = evs[0].uuid ?? null;
+  const epoch = eventEpoch(anchor);
+  const anchorUuid = anchor.uuid ?? null;
   if (anchorUuid) turn.dataset.uuid = anchorUuid;
   if (epoch != null) turn.dataset.t = String(epoch);
   if (epoch != null) turn.insertBefore(timeMarker(epoch, prevEpoch ?? null), turn.firstChild);
   const railDot = turn.querySelector(".dot") as HTMLElement | null;
-  if (anchorUuid || epoch != null) wireTurnHover(turn, railDot, anchorUuid, epoch ?? 0, evs[0].tlId ?? null);
+  if (anchorUuid || epoch != null) wireTurnHover(turn, railDot, anchorUuid, epoch ?? 0, anchor.tlId ?? null);
   return turn;
 }
 
