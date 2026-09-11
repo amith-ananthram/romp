@@ -104,7 +104,9 @@ test("a reconnect clears parked asks — a dead socket's pending needFull can ne
 test("the kernel's ready branch resets the client's WHOLE chat base before its push", () => {
   const i = KERNEL.indexOf('msg.get("type") == "ready"');
   assert.ok(i > 0);
-  const body = KERNEL.slice(i, i + 1600);
+  // the arm's window: it grew with the focused-session send (T347) and the metrics team's connect-time reads
+  // landing together on 2026-09-11, past the 1600 characters this read; the connect push sits near 1700 now
+  const body = KERNEL.slice(i, i + 2400);
   assert.ok(body.includes("_client_reset_chat_base(client)"), "ready = the renderer holds nothing");
   assert.ok(body.indexOf("_client_reset_chat_base(client)") < body.indexOf("_push_one(client)"),
     "…reset first, so the push that follows is full frames");

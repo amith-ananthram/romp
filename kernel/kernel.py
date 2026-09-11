@@ -533,6 +533,7 @@ class _PerfStats:
                 # T323 stage 3: the folds' checkpoints: restored, written, swept at boot, folds skipped as unencodable,
                 # fallbacks per reason (version, path, shrunk, guard, rewrite, corrupt) and the bytes the reader read
                 "checkpoints": em.checkpoint_stats(),
+                "recordCache": em.record_cache_stats(),   # the shared reader's byte budget and its evictions (2026-09-11)
                 # T323 stage 4a: the assembly documents: written, restored, fallbacks per reason, skips per reason (noEntry,
                 # restored, noBoundary, unsplittable, oversize, ...), hydrated bodies and bytes since boot
                 "asmCheckpoint": em.asm_checkpoint_stats(),
@@ -1533,6 +1534,10 @@ background:#9cd2ff;color:#0c1a2e;font-weight:600;cursor:pointer">Open</button>
 
 _clients = []                                # connected WS clients: {app, wid, send, alive}
 _clients_lock = threading.Lock()
+# wid -> the session id the chat pane of that dashboard window shows (None: no tab), from the chat's activeTab
+# (T347: the feed's focused-session section is a view of the chat pane's active tab; one window's panes share
+# a wid, so the chat's report is filed under it and read by that window's feed — _relay_active_chat below)
+_ACTIVE_CHAT_BY_WID = {}   # type: dict[str, str | None]
 _client_seen = [0.0]
 # SIDs seen ALIVE at any point during THIS kernel run. (Retained for diagnostics; it no longer drives
 # tabs — the user 2026-06-17 reversed the earlier keep-a-tab-when-it-dies rule: a dead session is now TIMELINE-ONLY,
@@ -9051,6 +9056,8 @@ except Exception:
 
 
 _CKPT_SETTLE_SEEN = {}          # sid -> (turn-end key, states-log stat) at the last checkpoint write of its files
+_CKPT_PERIODIC_SEEN = {}        # sid -> (leaf stat, monotonic time) at the last PERIODIC write (see _persist_checkpoints)
+CKPT_PERIOD_S = float(os.environ.get("ROMP_CKPT_PERIOD_S", "30"))   # a session mid-turn for hours writes at least this often
 
 
 def _session_fold_files(sid, leaf):
@@ -9097,15 +9104,25 @@ def _persist_checkpoints(now):
     it. A session whose turn runs for hours still writes at every states-log row (a working/awaiting transition is an
     event; a timer is not). Only dirty checkpoints are written; a session with no evidence change writes nothing.
     Every leaf fold is brought current first (_prime_leaf_folds), so the write holds a cursor for each of them.
-    Exit writes everything dirty (_drain_and_exit). Returns how many files were written."""
+    A second trigger (the restart-path work, 2026-09-11): a session whose LEAF moved since its last periodic
+    write, at most once per CKPT_PERIOD_S, so a turn that runs for an hour with no states-log row still keeps
+    its checkpoints and assembly document close to current, and the exit path finds little left to write (the
+    exit's own writes cost 4 to 6 s of a 20 s restart when they carried everything). Exit still writes everything
+    dirty (_drain_and_exit). Returns how many files were written."""
     written = 0
+    mono = time.monotonic()
     for s in _sessions(now):
         sid, leaf = s.get("sid"), s.get("path")
         if not sid or not leaf:
             continue
         key = (_turn_end_key(sid), _stat_key(jd.STATE / "states" / (sid + ".jsonl")))
-        if _CKPT_SETTLE_SEEN.get(sid) == key:
+        settle_due = _CKPT_SETTLE_SEEN.get(sid) != key
+        leaf_stat = _stat_key(leaf)
+        last = _CKPT_PERIODIC_SEEN.get(sid)
+        periodic_due = last is None or (last[0] != leaf_stat and mono - last[1] >= CKPT_PERIOD_S)
+        if not settle_due and not periodic_due:
             continue
+        _CKPT_PERIODIC_SEEN[sid] = (leaf_stat, mono)
         _prime_leaf_folds(leaf)
         dirty = set(em.checkpoint_dirty())
         mine = _session_fold_files(sid, leaf) & dirty
@@ -9119,6 +9136,8 @@ def _persist_checkpoints(now):
         _CKPT_SETTLE_SEEN[sid] = key
     if len(_CKPT_SETTLE_SEEN) > 4096:
         _CKPT_SETTLE_SEEN.clear()
+    if len(_CKPT_PERIODIC_SEEN) > 4096:
+        _CKPT_PERIODIC_SEEN.clear()
     return written
 
 
@@ -14996,6 +15015,7 @@ def _sdk_locked():
                 log=_backend_log,   # best-effort, through _exit_log: SdkBackend.drain logs its summary after
                 #                     its work is done, and a stderr that raises there must not carry the result away
                 reconcile=True,   # boot reconcile: reap orphaned CLIs, resume cut turns, deliver persisted queues
+                boot_phase=_mark_boot,   # censusDone / attachDone land on the boot row and release the judges' first pass
                 # the API-health aggregator's boot clock: this kernel's own _STARTED, which the aggregator
                 # truncates to the millisecond (the precision of every stamp in the payload) and serves as
                 # /api-health's bootAt, so a bucket the boot seeded is unknown since the kernel's own start
@@ -15937,8 +15957,25 @@ def _drive(msg, client):
         else:
             _push_soon()
     elif t == "interrupt":
-        be.interrupt(sid)                                 # Esc/stop AND settle idle (in the backend)
-        _interrupt_clicked[str(sid)] = time.time()        # chip → "interrupting" NOW (event-cleared on settle)
+        # The stamp lands only when the backend TOOK the stop (2026-09-11). A session with no turn in flight
+        # (Ctrl+C in an idle composer, a Stop click reaching the kernel just as the turn ends, a dead tab)
+        # has nothing to interrupt: the Codex backend answers False and sends nothing, and since the merged
+        # liveness row carries no `interrupting` flag, _interrupting could clear the stamp only on a stop
+        # record that never comes or at its 120 s cap — so the chip, the lane and the feed badge read
+        # Interrupting… for two minutes with nothing in flight, and a turn started inside that window read
+        # Interrupting… over Working. Only an explicit False is a refusal (the ABC's bool; the SDK's False
+        # is an unknown sid): a backend with no verdict keeps the optimistic chip.
+        if be.interrupt(sid) is not False:                # Esc/stop AND settle idle (in the backend)
+            _interrupt_clicked[str(sid)] = time.time()    # chip → "interrupting" NOW (event-cleared on settle)
+        elif be.busy(sid):
+            # A refusal WITH work in flight is a stop that did NOT land, not a stop with nothing to stop
+            # (review find, 2026-09-11): the Codex backend also answers False while a turn's start is still
+            # being acknowledged (queued, no turn id yet), when its app-server client is gone, and when the
+            # interrupt RPC raised (kernel log only). Read as an idle press those left the chip on Working
+            # and the click with no visible effect at all. busy() is the ABC's authoritative in-flight
+            # signal: True in exactly those cases, None or False when there was nothing to stop, so an idle
+            # Ctrl+C stays quiet. The sendMessage arm's warn idiom (fail loudly).
+            client["send"](json.dumps({"type": "warn", "text": "the stop was not delivered: the session is still working"}))
         err = _suppress_session_retry(sid)                # interrupting a thread STOPS romp's auto-retry into it until a
                                                           # successful turn re-arms (the user 2026-07-06) — the interrupt
                                                           # already aborted any in-flight CLI retry; this stops the relapse
@@ -21797,7 +21834,10 @@ def _audit_parent_gone(manager_pid, now=None):
 RESTART_CUTS_FILE = jd.STATE / "restart-cuts.jsonl"
 
 
-def _restart_cut_row(drain_res, watches_armed=0, audit_reason="", now=None):
+EXIT_ASM_BUDGET_S = float(os.environ.get("ROMP_EXIT_ASM_BUDGET_S", "1.5"))   # the exit's assembly-document writes, bounded
+
+
+def _restart_cut_row(drain_res, watches_armed=0, audit_reason="", now=None, phases=None):
     """One ledger row per restart — what THIS restart cut (T121: the drain's effect is measurable
     only if every restart writes its row, so a clean drain's row with an empty cutTurns list is the
     success metric, not noise). cutTurns names the sessions whose in-flight turns the drain
@@ -21820,6 +21860,8 @@ def _restart_cut_row(drain_res, watches_armed=0, audit_reason="", now=None):
            "reaped": int(d.get("reaped") or 0),
            "watchesArmed": int(watches_armed or 0),
            "reason": str(audit_reason or "")}
+    if isinstance(phases, dict):           # the exit's phases: ckptS (folds primed, checkpoints and assembly documents
+        row.update({k: v for k, v in phases.items() if k in ("ckptS", "drainS")})   # written), drainS (the sessions closed)
     row.update(_kernel_process_sample())   # T304: the kernel's own size and CPU at the end of its life
     return row
 
@@ -21848,10 +21890,22 @@ def _append_restart_cut(row):
         pass
 
 
-_BOOT_MARKS = {}                                   # {"firstServe": t, "reconcileDone": t} — see _mark_boot
-_BOOT_MARKS_LOCK = threading.Lock()                # the two marks land on DIFFERENT threads (main vs the
-#                                                    lazy backend builder) — without this, both could see
-#                                                    "both present" and double-append the boot row
+_BOOT_MARKS = {}                                   # {"firstServe": t, "reconcileDone": t, "censusDone": t, "attachDone": t} — see _mark_boot
+_BOOT_MARKS_LOCK = threading.Lock()                # the marks land on DIFFERENT threads (main, the lazy backend
+#                                                    builder, the boot reconcile) — without this, two could see
+#                                                    "all present" and double-append the boot row
+_BOOT_ATTACHED = threading.Event()                 # set at attachDone: every boot re-attach to a live session host has
+#                                                    its hello (or died), or there was none — the producer's first
+#                                                    judges' pass waits on this (bounded) so the census and the
+#                                                    attaches are not slowed by cold refolds in the same interpreter
+BOOT_JUDGE_HOLD_S = float(os.environ.get("ROMP_BOOT_JUDGE_HOLD_S", "8"))   # the bound on that wait
+BOOT_ROW_BACKSTOP_S = 30.0                         # the boot row is written without attachDone after this long (the pusher's tick)
+
+
+def _wait_boot_attached(timeout=None):
+    """The producer's first pass waits here: True when attachDone landed, False when the bound passed first
+    (a wedged attach must never hold the judges; the bound is loud in the boot row's attachTimedOut)."""
+    return _BOOT_ATTACHED.wait(BOOT_JUDGE_HOLD_S if timeout is None else timeout)
 
 
 def _append_boot_settled(first_serve, reconcile_done):
@@ -21875,6 +21929,13 @@ def _append_boot_settled(first_serve, reconcile_done):
         row = {"t": int(time.time()), "pid": os.getpid(), "bootSettled": True,
                "firstServe": round(first_serve, 2), "reconcileDone": round(reconcile_done, 2),
                "settleS": round(reconcile_done - first_serve, 2)}
+        with _BOOT_MARKS_LOCK:                 # the restart-path phases (2026-09-11): when the census ended and when
+            marks = dict(_BOOT_MARKS)          # the last boot re-attach settled, both relative to firstServe
+        for kind, field in (("censusDone", "censusS"), ("attachDone", "attachS")):
+            if isinstance(marks.get(kind), float):
+                row[field] = round(marks[kind] - first_serve, 2)
+        if "attachDone" not in marks:
+            row["attachTimedOut"] = True       # the backstop wrote the row: an attach never settled in time
         row.update(_kernel_process_sample())   # T304: the just-born kernel's size, the series' other bookend
         if prev_cut and isinstance(prev_cut.get("t"), int) and first_serve >= prev_cut["t"]:
             row["prevCutT"] = prev_cut["t"]
@@ -21885,23 +21946,52 @@ def _append_boot_settled(first_serve, reconcile_done):
 
 
 def _mark_boot(kind):
-    """One boot milestone (firstServe = the accept loop starts; reconcileDone = the SDK backend's
-    boot reconcile returned, or was found unavailable — the phase is over either way). The backend
-    builds LAZILY, so the two marks land in either order; whichever lands second appends the
-    boot-settled row. Idempotent per kind, never raises."""
+    """One boot milestone: firstServe (the accept loop starts), reconcileDone (the SDK backend was built, or found
+    unavailable), censusDone (the boot reconcile has read the process table, the leases and every registry row)
+    and attachDone (every boot re-attach to a live session host has its hello or died; immediate when there is
+    none). The marks land on different threads in any order. The boot-settled row is appended once, when
+    firstServe, reconcileDone and attachDone are all in, or BOOT_ROW_BACKSTOP_S after reconcileDone when an
+    attach never settles (the row then says attachTimedOut). attachDone also releases the producer's first
+    judges' pass (_wait_boot_attached). Idempotent per kind, never raises."""
     try:
         with _BOOT_MARKS_LOCK:
             if kind in _BOOT_MARKS:
                 return
             _BOOT_MARKS[kind] = time.time()
-            write = "firstServe" in _BOOT_MARKS and "reconcileDone" in _BOOT_MARKS \
-                and not _BOOT_MARKS.get("_row")
-            if write:
-                _BOOT_MARKS["_row"] = True         # exactly one row per boot, whichever thread wins
+            write = _boot_row_due_locked()
+        if kind == "attachDone":
+            _BOOT_ATTACHED.set()
         if write:
             _append_boot_settled(_BOOT_MARKS["firstServe"], _BOOT_MARKS["reconcileDone"])
     except Exception:
         pass
+
+
+def _boot_row_due_locked():
+    """Under _BOOT_MARKS_LOCK: claim the one boot row when its three marks are in."""
+    if _BOOT_MARKS.get("_row"):
+        return False
+    if all(k in _BOOT_MARKS for k in ("firstServe", "reconcileDone", "attachDone")):
+        _BOOT_MARKS["_row"] = True             # exactly one row per boot, whichever thread wins
+        return True
+    return False
+
+
+def _boot_row_backstop(now=None):
+    """The pusher's tick (no thread of its own): BOOT_ROW_BACKSTOP_S after reconcileDone with attachDone still missing,
+    write the row without it (the row then says attachTimedOut). Idempotent; a no-op once the row is written."""
+    try:
+        now = time.time() if now is None else now
+        with _BOOT_MARKS_LOCK:
+            if _BOOT_MARKS.get("_row") or "firstServe" not in _BOOT_MARKS or "reconcileDone" not in _BOOT_MARKS:
+                return False
+            if now - _BOOT_MARKS["reconcileDone"] < BOOT_ROW_BACKSTOP_S:
+                return False
+            _BOOT_MARKS["_row"] = True
+        _append_boot_settled(_BOOT_MARKS["firstServe"], _BOOT_MARKS["reconcileDone"])
+        return True
+    except Exception:
+        return False
 
 
 # ── going down (`romp down`) ─────────────────────────────────────────────────────
@@ -25301,7 +25391,7 @@ def _agent_launch_ids(agent_path):
     transcript half of _awaiting_nest's attribution: a background command whose tool_use id is in THIS
     file was launched by THIS agent. set() when unreadable."""
     try:
-        return em.fold_records(_AGENT_LAUNCH_IDS_CACHE, str(agent_path), _launch_ids_fresh, _launch_ids_step, ckpt="agentLaunchIds")
+        return em.fold_records(_AGENT_LAUNCH_IDS_CACHE, str(agent_path), _launch_ids_fresh, _launch_ids_step, ckpt="agentLaunchIds", drop_after="quiescent")
     except Exception:
         return set()
 
@@ -25315,7 +25405,7 @@ def _agent_steps(agent_path):
     either way); the running preview's clock (agentGist: calls/since/last) rides only while it runs."""
     _chat_dep_note_taskout(str(agent_path), _chat_stat_key(str(agent_path)))   # a growing agent file moves the key
     try:
-        st = em.fold_records(_AGENT_GIST_CACHE, str(agent_path), _gist_fresh, _gist_step, ckpt="agentGist")
+        st = em.fold_records(_AGENT_GIST_CACHE, str(agent_path), _gist_fresh, _gist_step, ckpt="agentGist", drop_after="quiescent")
     except Exception:
         return None
     if not st["since"]:
@@ -25357,7 +25447,7 @@ def _launch_step(state, o):
 
 
 def _agent_launch_state(path):
-    return em.fold_records(_AGENT_LAUNCH_CACHE, str(path), _launch_fresh, _launch_step, ckpt="agentLaunches")
+    return em.fold_records(_AGENT_LAUNCH_CACHE, str(path), _launch_fresh, _launch_step, ckpt="agentLaunches", drop_after="quiescent")
 
 
 def _agent_alive(row, agent_id, tm, spawned_at):
@@ -30221,7 +30311,20 @@ def _route_meta_command(be, sid, text, client=None, floating=False, state=None):
     # ours to swallow: it stays the CLI's, verbatim, and the user sees the CLI's own error.
     if not value or len(value.split()) != 1:
         return False
-    is_meta = ((head == "/model" and _vouched_model(value)) or (head == "/effort" and value in _EFFORT_VALUES)
+    # A Codex session's model vocabulary is its engine's (gpt-…), which the catalog behind _vouched_model
+    # never carries, so such a pick is vouched by the owning backend's own acceptance rule instead
+    # (CodexBackend.set_model refuses every other value). Before this the lane menu's "/model gpt-…" was no
+    # meta command at all and fell through to _send_or_park, so the Codex agent read the pick as a literal
+    # prompt (idle: sent; working: parked as a command chip that fired alone) while the chat statusline's
+    # setModel op landed the same pick — the two surfaces disagreed on one gesture (review find, 2026-09-11).
+    # The unowned route is vouched for the same shape: a DEAD Codex session still reports its backend (the
+    # lane reads the durable row, _session_backend), so its menu still offers gpt-… while backend_for says
+    # _UNOWNED (CodexBackend.owns is False once dead) — and the refusal arm below is the one place the client
+    # hears that the pick went nowhere; _UNOWNED.send refuses on stderr alone (review find, 2026-09-11).
+    model_pick = head == "/model" and (_vouched_model(value)
+                                        or (value.startswith("gpt") and be is not None
+                                            and (be is _UNOWNED or be is _codex())))
+    is_meta = (model_pick or (head == "/effort" and value in _EFFORT_VALUES)
                or (head == "/fast" and value in ("on", "off")))
     if is_meta and be is _UNOWNED:
         # a session no running backend owns takes no setting: refuse before any stamp (the switching dots
@@ -30234,7 +30337,7 @@ def _route_meta_command(be, sid, text, client=None, floating=False, state=None):
             client["send"](json.dumps({"type": "warn", "text": why}))
         sys.stderr.write("meta command %s for %s refused: no backend owns this session\n" % (head, sid))
         return True
-    if head == "/model" and _vouched_model(value):
+    if model_pick:
         # the model setter has its OWN rule (an open turn fires it live only on a backend that declares
         # model_switches_live — none shipped does yet, so the SDK still parks; #923), so its verdict is
         # read, not inferred from _ops_gate, which would say `queued` for a pick that had already applied
@@ -40130,7 +40233,12 @@ def _client_reset_chat_base(client):
         # is nothing it could lazily reload — every tab must arrive whole, and the status slots go with the set
         client.pop("skeleton", None); client.pop("skeletonOrder", None); client.pop("reconnect", None)
         snt = client.get("sent", {})
-        for k in [k for k in snt if isinstance(k, tuple) and k and k[0] in ("chat", "status", "taborder")]:
+        # …and the ("activeChat",) slot (T347): a feed page that reloads registers while its bundle still
+        # evaluates, and a tab switch in its window relays a frame to a document with no listener yet; the
+        # slot remembers that frame, so the ready arm's re-send would be deduped for _DEDUP_REPOST_S and the
+        # section would read "no session is focused" until the next tab click. A renderer that just
+        # evaluated holds nothing: the slot goes with the others.
+        for k in [k for k in snt if isinstance(k, tuple) and k and k[0] in ("chat", "status", "taborder", "activeChat")]:
             snt.pop(k, None)
 
 
@@ -44822,6 +44930,58 @@ def _apih_resend(client):
             pass
 
 
+def _active_chat_wid(client):
+    """The window key a chat's active tab is filed under: the client's wid as a string, "" for a pane that reported
+    none (a page opened outside a dashboard), so the record and every read use one key shape."""
+    return str(client.get("wid") or "")
+
+
+def _send_active_chat(client):
+    """Tell ONE feed client which session the chat pane of its window shows — {type: "activeChat", id: sid|null},
+    the value recorded for its wid — on the ("activeChat",) dedup slot, so an unchanged value is not re-sent
+    (_send_client, within _DEDUP_REPOST_S). Nothing when no chat of that window has reported yet: the feed keeps
+    its own resting state rather than reading a null the kernel never learned. Returns whether a frame was
+    offered to the slot. A socket that fails is marked dead by _client_send; the relay's other feeds go on.
+
+    Called from two arms of Handler._dispatch_ws: the chat's activeTab (through _relay_active_chat, every feed of
+    the window) and a FEED client's `ready`, between that arm's reset and its connect push, so a reloaded feed's
+    first paint already knows its focused session. The ready arm and not the WS handshake: a frame sent before
+    the bundle's ready lands in a document with no message listener (the ready arm's own comment), and a
+    reloaded feed is exactly the client that has to learn the focus."""
+    wid = _active_chat_wid(client)
+    if wid not in _ACTIVE_CHAT_BY_WID:
+        return False
+    try:
+        _send_client(client, ("activeChat",), {"type": "activeChat", "id": _ACTIVE_CHAT_BY_WID[wid]})
+    except Exception:
+        return False
+    return True
+
+
+def _forget_active_chat_if_last(client):
+    """Drop the window's active-chat record when the client leaving was the last pane of that wid: the dict
+    is keyed by dashboard window id, and a window closed for good must not keep an entry for the kernel's
+    life (one per window ever opened). Called under _clients_lock, after the client left _clients; a window
+    with another pane still connected (its chat, a second feed) keeps the record for that pane's reload."""
+    wid = _active_chat_wid(client)
+    if wid in _ACTIVE_CHAT_BY_WID and not any(_active_chat_wid(c) == wid for c in _clients):
+        _ACTIVE_CHAT_BY_WID.pop(wid, None)
+
+
+def _relay_active_chat(client, sid):
+    """A chat client's activeTab: record the session under its window's wid (None for no tab) and send the window's
+    live feed clients the frame (T347: the feed's focused-session section is a view of the chat pane's active tab,
+    never a move of a card; one window's panes share a wid, and a pane outside a dashboard files under ""). The
+    two chat columns of a split window both report here and the later report stands. The client list is copied
+    under _clients_lock; the sends run outside it, as every other fan-out does."""
+    wid = _active_chat_wid(client)
+    _ACTIVE_CHAT_BY_WID[wid] = str(sid) if sid else None
+    with _clients_lock:
+        feeds = [c for c in _clients if c.get("alive") and c.get("app") == "feed" and _active_chat_wid(c) == wid]
+    for c in feeds:
+        _send_active_chat(c)
+
+
 # ── Web Push: the same bell events, delivered to the phone (plans/ios-app.md proposal 2; the user
 # 2026-08-07, who wants "needs you" to reach them wherever they are, not just the kernel box's
 # desktop). A device opts in from the shell's bell (mobile tab bar → _LANDING_PUSH_JS): it
@@ -45992,6 +46152,11 @@ def _run_tier(fn):
 
 def _producer():
     _prev_wall = _prev_mono = None
+    # the FIRST pass waits (bounded) for the boot's census and re-attaches: the producer's cold refolds and the
+    # boot reconcile share one interpreter, and a census that competes with them took 5.6 s where 1.4 s is the
+    # uncontended figure (the restart-path work, 2026-09-11); a wedged attach never holds the judges past the bound
+    if not _wait_boot_attached():
+        sys.stderr.write("producer: the boot's attaches did not settle within %.0f s; judging anyway\n" % BOOT_JUDGE_HOLD_S)
     while not _LOOPS_STOP.is_set():
         _nw, _nm = time.time(), time.monotonic()        # detect a host suspension (laptop slept) since the
         _iv = _detect_suspend(_prev_wall, _prev_mono, _nw, _nm)   # last tick: wall jumped past monotonic
@@ -46182,6 +46347,10 @@ def _pusher_cycle_jobs(now, live_map, any_client):
         _persist_checkpoints(now)         # move (T323 stage 3): the next kernel folds the tails, not the files
     except Exception:
         sys.stderr.write("checkpoints: %s\n" % traceback.format_exc())
+    try:                                  # the boot row's backstop: written without attachDone once the bound has passed
+        _boot_row_backstop(now)
+    except Exception:
+        pass
     try:                                  # hitting a usage limit auto-engages the retry-pause (before the resume check)
         _auto_pause_on_limit()
     except Exception:
@@ -53725,8 +53894,15 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, json.dumps(res), "application/json")
                 be = Sessions.backend_for(sid)
                 if u.path == "/interrupt":
-                    be.interrupt(sid)                           # Esc/stop AND settle idle (in the backend)
-                    _interrupt_clicked[str(sid)] = time.time()  # chip → "interrupting" NOW, same as the WS op
+                    # the WS op's gate: a stop the backend refused (nothing in flight) paints nothing
+                    if be.interrupt(sid) is not False:          # Esc/stop AND settle idle (in the backend)
+                        _interrupt_clicked[str(sid)] = time.time()  # chip → "interrupting" NOW, same as the WS op
+                    elif be.busy(sid):
+                        # …and a refusal WITH work in flight is a stop that did not land (the WS arm's toast):
+                        # said, never answered ok, so `romp interrupt` prints this and exits non-zero — the
+                        # /send route's refusal shape (review find, 2026-09-11)
+                        return self._send(200, json.dumps({"ok": False, "error":
+                            "the stop was not delivered: %s is still working" % who}), "application/json")
                 elif isinstance(b, dict) and b.get("when") == "idle":
                     # SELF-CLOSE deferral (the user 2026-08-15): record the wish; the pusher's sweep
                     # kills at the turn's settle, so a session ending itself finishes its goodbye first
@@ -54631,7 +54807,10 @@ class Handler(BaseHTTPRequestHandler):
             if msg.get("id"):
                 _release_skeleton(client, str(msg["id"]))   # a skeleton tab clicked: its full rides that push (2026-09-07)
             _pusher_wake.set()                 # …and that push starts when the in-flight cycle ends, not
-            return                             #    after the 0.5 s backstop (the tab switch IS the event)
+            #                                     after the 0.5 s backstop (the tab switch IS the event)
+            if client.get("app") == "chat":
+                _relay_active_chat(client, msg.get("id"))   # …and the window's feed learns which session is focused (T347)
+            return
         if msg and msg.get("type") == "needSlot" and msg.get("slot") in _DELTA_SLOTS:
             # The shim could not apply a view delta (its base revision did not match what it holds — a
             # frame it never saw, a reload mid-stream): forget what we believe it holds and re-send the
@@ -54776,6 +54955,8 @@ class Handler(BaseHTTPRequestHandler):
             # because cached bundles win the race). Same repair as needFull above, client-wide;
             # ready is posted once per renderer life, so this cannot loop.
             _client_reset_chat_base(client)
+            if client.get("app") == "feed":
+                _send_active_chat(client)      # T347: the window's focus, ahead of the first paint
             # Capture the seq of the views blob the pushes below serve — from the frames THIS thread
             # enqueues, so a pusher-thread frame landing meanwhile is not mistaken for the connect push's
             # (the caps frame's viewsSeq, see KERNEL_WS_CAPS)
@@ -55822,6 +56003,8 @@ class Handler(BaseHTTPRequestHandler):
                 if client in _clients:
                     _clients.remove(client)
             _release_client_holds(client)          # its open editors' holds go with it: the disconnect is the event (T306)
+            with _clients_lock:
+                _forget_active_chat_if_last(client)   # the window's focus record goes with its last pane (T347)
 
     def _remote_ws(self, host, query):
         """GET /remote/<host>/ws — relay a federated-dashboard WebSocket to an attached host's
@@ -56356,6 +56539,7 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
         _drain_sessions = [_s for _s in _sessions(time.time()) if _s.get("sid") and _s.get("path")]
     except Exception:
         _drain_sessions = []
+    _phases = {}                          # the exit's phase timings, for the cut row (the restart-path work, 2026-09-11)
     _prime_t0, _primed, _skipped = time.monotonic(), 0, 0
     for _s in _drain_sessions:            # every RESIDENT leaf's folds current, so each leaves a cursor for the next kernel;
         if time.monotonic() - _prime_t0 > 1.0:   # bounded: the SDK drain keeps its 2 s under the manager's 5 s grace
@@ -56367,11 +56551,18 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
         em.checkpoint_write_dirty()       # every fold checkpoint that moved since its last write (T323 stage 3)
     except Exception:
         pass
+    _asm_t0, _asm_skipped = time.monotonic(), 0
     try:                                  # the assembly documents of every session's leaf (T323 stage 4a): a whole entry
-        for _s in _drain_sessions:        # with a boundary writes, the rest are counted skips; bounded by the drain
+        for _s in _drain_sessions:        # with a boundary writes, the rest are counted skips; BOUNDED (the periodic
+            if time.monotonic() - _asm_t0 > EXIT_ASM_BUDGET_S:   # writer keeps them close; what is left waits for the next settle)
+                _asm_skipped += 1; continue
             em.asm_checkpoint_write(_s["path"], _s["sid"], _display_sdk_human(_s["sid"]))
     except Exception:
         pass
+    if _asm_skipped:
+        _exit_log("romp-kernel: drain left %d assembly document(s) unwritten (%.1f s budget)\n" % (_asm_skipped, EXIT_ASM_BUDGET_S))
+    _phases["ckptS"] = round(time.monotonic() - _prime_t0, 2)
+    _drain_t0 = time.monotonic()
     try:
         if be is not None and hasattr(be, "drain"):
             res = be.drain(2.0)
@@ -56397,8 +56588,9 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
                     reason_err = traceback.format_exc().strip().splitlines()[-1][:200]
                     _exit_log("romp-kernel: the signal's reason helper failed, the cut row carries the "
                               "plain verdict and reasonError: %s\n" % reason_err)
+            _phases["drainS"] = round(time.monotonic() - _drain_t0, 2)
             row = _restart_cut_row(res, watches_armed=len(_pr_watches) + len(_watches),
-                                   audit_reason=reason)
+                                   audit_reason=reason, phases=_phases)
             if audit:
                 row["auditT"] = int(audit["t"])     # the audit row this cut CONSUMED (see _recent_restart_audit)
             if err:

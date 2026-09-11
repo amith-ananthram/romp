@@ -18,6 +18,7 @@ import { CMT_POP_SIZE_KEY, CMT_POP_THREAD_DEFAULT, parseCmtPopSize, clampCmtPopP
          centerCmtPop, cmtPopCapPx } from "./comment-pop-size";
 import { ctxFallbackColor, pickTone, readableRgb } from "./ctx-color";
 import { applyTheme } from "./theme";
+import { installPostalWash } from "./postal-wash";   // the incoming postal card's tint lightness, measured from the page (T337c)
 import { applyDenseChrome } from "./dense-chrome";
 import { SessionViews, viewVisible, viewsKey, revealIn, viewTagUnion, viewTags, type TagUnion, type SessionTag } from "./session-views";
 import { prependHead, appendMore, mergeWindow, historyLabel, indexOfUuid, keyOf, windowDetached, fullFrameMerges, afterMore, reattachKeys } from "./chat-window";   // the uuid-anchored wire (T323 stage 4b)
@@ -5017,8 +5018,10 @@ function deliveryIcon(d: PostalDelivery): HTMLElement {
 function renderPostalService(ev: Extract<ChatEvent, { kind: "postal-service" }>): HTMLElement {
   // BOTH ENDS in the head, each in its session's colour (T302, the user 2026-09-10, after seeing old and new
   // renderings): "from <peer> to <this session>" for incoming, "to <peer> from <this session>" for sent — the
-  // peer's chip in the peer's identity colour, this session's chip in its own, and NO wash of either colour on
-  // the card (a wash read as this session's colour). Click a name → that session's tab.
+  // peer's chip in the peer's identity colour, this session's chip in its own. The card's wash of the peer's
+  // colour, which that ruling removed as reading like this session's, is back since 2026-09-11 (the user asked
+  // where the tint had gone): styles.css paints the incoming card's ground from its rail, which is the peer's
+  // colour here (`rail` below), so nothing more is set on the card. Click a name → that session's tab.
   const peer = el("span", "notice-src-chip");
   peer.textContent = ev.peer;
   if (ev.color) { peer.style.setProperty("--peer-bg", ev.color.bg); peer.style.setProperty("--peer-fg", ev.color.fg); }
@@ -18418,6 +18421,7 @@ function applyChatScheme(s: RompSettings): void {
   // the overall theme (T113 promoted 2026-08-28): the shared applier toggles the strip-aesthetic
   // and light-theme classes from s.theme. Applies live — onExternalSettingsChange re-runs this.
   applyTheme(document, s);
+  installPostalWash(document);   // once: the observers; every later call re-measures the ground (a theme just applied)
   // compact tabs and agents (the user 2026-09-08): a body class the strip's and the #bg-tasks panel's dense
   // rules key on (styles.css body.dense-chrome). The same two moments as the scheme and the theme, so the
   // gear's flip repaints both surfaces at once through the cascade; neither is rebuilt.
