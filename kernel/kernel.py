@@ -8405,6 +8405,9 @@ def _main_drift_check():
         # is ADVISORY here (audit + the bus arm): the skip VERDICT itself came from
         # _kernel_code_changed, which fails toward restarting on any error.
         if _in_place_converge(target):
+            _CONVERGE_CRASH_T[0] = 0.0                # a converge that ran and succeeded clears the crash hold on this
+            #                                           road too (the follow-up review's second round: it returned with
+            #                                           the stamp standing, and a later converge waited out a cool-down)
             return
     if not kind:
         _MAIN_DRIFT[0] = _MAIN_DRIFT[1] = ""          # in sync: a future drift is new information again
@@ -8492,7 +8495,10 @@ def _main_drift_check():
                     _MAIN_DRIFT[slot] = ""
                     return
             _LAST_AUTO_CONVERGE[0] = time.time()
-            _run_main_update(kind, target=target)
+            if _run_main_update(kind, target=target):
+                _CONVERGE_CRASH_T[0] = 0.0                # a converge that ran and SUCCEEDED clears the crash hold (the
+                #                                           follow-up review; its second round: a refusal returned too, and
+                #                                           a clear keyed on the return alone cleared on a refused pull)
         except Exception:
             # a crash in the hold branches (the T352 round-two review: a None running sha inside the cool-down raised
             # at a [:8] AFTER the latch above took the target, and the hold's own reset never ran, so every later
@@ -8533,7 +8539,10 @@ def _run_main_update(kind, immediate=True, manager_port=_PORT_FROM_ENV, target="
     Every step reads its own exit code: a failing `git status` is UNKNOWN, never clean (a tree that
     cannot be read is not a tree that may be moved), and a failed fetch aborts instead of checking
     out whatever the stale local ref points at. Every refusal is said on the sync surface
-    (_sync_notice, ok=False — the row every updater failure already lands on) and re-arms the notice."""
+    (_sync_notice, ok=False — the row every updater failure already lands on) and re-arms the notice.
+    Returns True when a converge ran and succeeded (the in-place rebuild, or the restart requested of the
+    manager) and False on every refusal, so the caller's crash-hold clear keys on the outcome and not on the
+    return (the follow-up review's second round)."""
     if kind == "pull":
         remote = _release_remote()
         target = _sha8(target)
@@ -8550,35 +8559,35 @@ def _run_main_update(kind, immediate=True, manager_port=_PORT_FROM_ENV, target="
             if not target:
                 refuse("the checkout was left alone: no commit was named for the move. Update again "
                        "once the next check has read main")
-                return
+                return False
             st = subprocess.run(["git", "status", "--porcelain"], cwd=str(ROOT),
                                 capture_output=True, text=True, timeout=10)
             if st.returncode != 0:
                 refuse("the checkout was left alone: its state could not be read, so it was not "
                        "assumed clean", st)
-                return
+                return False
             if st.stdout.strip():
                 refuse("the romp checkout has uncommitted work, so it was left alone. Commit or "
                        "stash it, then Update again")
-                return
+                return False
             f = subprocess.run(["git", "fetch", remote, "main"], cwd=str(ROOT),
                                capture_output=True, text=True, timeout=60)
             if f.returncode != 0:
                 refuse("the checkout was left alone: the fetch failed", f)
-                return
+                return False
             anc = subprocess.run(["git", "merge-base", "--is-ancestor", "HEAD", target], cwd=str(ROOT),
                                  capture_output=True, text=True, timeout=10)
             if anc.returncode == 1:
                 # a real non-ancestor: the histories diverged — never merged on the user's behalf
                 refuse("the checkout was left alone: %s is not a fast-forward of it — the histories "
                        "diverged, which is yours to move by hand" % target)
-                return
+                return False
             if anc.returncode != 0:
                 # git could not even name it (128): the fetch did not bring the advertised commit
                 # (main was rewound), or the short prefix is ambiguous — the next check re-reads main
                 refuse("the checkout was left alone: the fetch did not bring %s, so it could not be "
                        "verified; the next check re-reads main" % target, anc)
-                return
+                return False
             # The local `main` BRANCH moves too (the user 2026-09-08): the converge used to check the
             # target out DETACHED and never touch `main`, so a later `git checkout main` landed on a
             # months-old pointer and the user pulled "an enormous amount". When main is an ANCESTOR of the
@@ -8597,20 +8606,23 @@ def _run_main_update(kind, immediate=True, manager_port=_PORT_FROM_ENV, target="
                                    capture_output=True, text=True, timeout=30)
             if r.returncode != 0:
                 refuse("the checkout did not advance onto %s" % target, r)
-                return
+                return False
             if mb.returncode == 1:
                 _sync_notice("main moved at %s: the checkout is at %s, detached. Your local main branch has "
                              "commits that are not on %s/main, so it was left where it is; merge or rebase it "
                              "yourself when you want it on the new main." % (remote, target, remote), ok=True)
         except Exception as e:
             refuse("the pull step failed: %s" % e)
-            return
+            return False
     if kind == "pull":
         pulled = _checkout_sha()   # ONE read: verdict input and converge target must be the same
         #                            sha — two reads raced a moving checkout and latched a target
         #                            the verdict never examined (T216 review)
         if not _kernel_code_changed(_kernel_sha(reask=True), pulled) and _in_place_converge(pulled):
-            return
+            _CONVERGE_CRASH_T[0] = 0.0                    # an in-place converge is a success too: the crash hold clears
+            #                                               (the follow-up review: a stale stamp held a later converge
+            #                                               for up to a cool-down after a success that bypassed the gate)
+            return True
     # Pay the bundle rebuild BEFORE the old kernel dies (T216): the checkout is already at the
     # target here, so this builds the NEW code's bundles while the old kernel still serves — the
     # fresh kernel's pre-bind _ensure_bundles then finds them current instead of paying esbuild
@@ -8642,6 +8654,8 @@ def _run_main_update(kind, immediate=True, manager_port=_PORT_FROM_ENV, target="
     except Exception as e:
         _sync_notice("romp is updated on disk but the restart request failed (%s) — "
                      "restart it yourself: romp refresh" % e, ok=False)
+        return False
+    return True
 
 
 def _update_check_loop():
