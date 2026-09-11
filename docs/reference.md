@@ -1125,8 +1125,7 @@ appear on the board; nor would one started from a pane on another server (the
 old `/tmp` server kept serving after the move, a personal `tmux`), since a
 pane's tmux calls dial the socket named in its own `$TMUX`. So `romp new -t`
 compares the directory its tmux calls would reach (`$TMUX`'s socket, else
-`TMUX_TMPDIR`, else the default) with the kernel's (`/version` reports
-`tmuxSocketDir` and the rule that chose it), as canonical paths, and refuses
+`TMUX_TMPDIR`, else the default) with the kernel's, as canonical paths, and refuses
 when they differ, worded by the kernel's rule: a pane on another server needs a
 shell outside it; a kernel under a manager from before the change (the manager
 passes its own rule to its kernels, so no word means an old manager) needs
@@ -1136,9 +1135,18 @@ launchd, `romp up` from a shell without the variable) is named as such, with
 shell without `XDG_RUNTIME_DIR` needs `export TMUX_TMPDIR=<the kernel's>` or a
 login shell. Paths compare as real paths, tmux's default included, since `/tmp`
 is a symlink on macOS and a pane's `$TMUX` names the socket by its real path. With no kernel reachable, or a kernel too old to say,
-it compares nothing and proceeds as before. A kernel's own terminal spawn that
-is refused this way says so: one line in the kernel log and one row in the
-dashboard's error center, instead of a tab that never appears.
+it compares nothing and proceeds as before. The kernel's side of the comparison
+is three fields on `/version`: `tmuxSocketDir`, the directory (`""` for tmux's
+default); `tmuxSocketRule`, the branch that chose it (`operator`, `runtime-dir`,
+`manager` for a kernel under the manager, or the reason the default stands:
+`no XDG_RUNTIME_DIR`, `XDG_RUNTIME_DIR is not a writable directory`,
+`XDG_RUNTIME_DIR/romp could not be made, or is not a writable directory`); and
+`tmuxSocketManagerRule`, the manager's own rule passed to its kernels, `""`
+under a manager from before this change, which is how the refusal tells that
+manager (restart it) from a current one that has no runtime directory. A
+kernel's own terminal spawn that is refused this way says so: one line in the
+kernel log and one row in the dashboard's error center, instead of a tab that
+never appears.
 
 One rule, resolved the same way in three places: the manager, before it starts
 the server, into the environment every kernel inherits; `bin/romp`, before its
