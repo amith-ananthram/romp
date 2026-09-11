@@ -500,7 +500,32 @@ class EventModelReaders(Harness):
 
     def test_the_declared_plan_over_a_restored_tree_hydrates(self):
         whole, tree = self._restored_with_doc()
+        em._ASM_CKPT_STATS.update(hydratedAtoms=0, hydratedBytes=0, hydratedBy={})
         self.assertEqual(em.declared_plan(tree), em.declared_plan(whole))
+        self.assertEqual(em.declared_plan(tree), [], "this scenario declares no plan")
+        self.assertEqual((em.asm_checkpoint_stats()["hydratedAtoms"], em.asm_checkpoint_stats()["hydratedBy"]), (0, {}),
+                         "review find (1): a session with no plan hydrates nothing for the planner's fold (it asked for the whole tree)")
+
+    def test_the_declared_plan_hydrates_only_the_task_call_and_its_result(self):
+        t0 = NOW - 7200
+        recs = [G.uline(t0, "plan the retry work", "u1", None),
+                G.aline(t0 + 10, "", "a1", "u1", tools=("TaskCreate",), stop="tool_use"),
+                G.trline(t0 + 11, "tu_a1_0", "r1", "a1", content="Task #7 created"),
+                G.aline(t0 + 20, "the plan is filed", "a2", "r1", stop="end_turn"),
+                G.uline(t0 + 100, "now do it", "u2", "a2"),
+                G.aline(t0 + 130, "done with the first step", "a3", "u2", stop="end_turn")]
+        path = self.write("plan", compacting_variant(recs, "pln"))
+        self.fresh(); whole = self.parse(path); plan = em.declared_plan(whole)
+        self.assertEqual([t["key"] for t in plan], ["7"], "the whole parse folds the declared step")
+        self.assertTrue(em.asm_checkpoint_write(path, SID), em.asm_checkpoint_stats())
+        self.fresh(); modes = []
+        tree = self.parse(path, modes); self.assertEqual(modes, ["restore"])
+        em._ASM_CKPT_STATS.update(hydratedAtoms=0, hydratedBytes=0, hydratedBy={})
+        self.assertEqual(em.declared_plan(tree), plan)
+        st = em.asm_checkpoint_stats()
+        self.assertEqual(st["hydratedAtoms"], 2, "the TaskCreate call and its result, nothing else: %s" % st["hydratedBy"])
+        self.assertEqual(sorted(st["hydratedBy"]), ["declared_plan"])
+        self.assertEqual(sorted(a["uuid"] for a in em.plan_atoms(tree)), ["a1", "r1"])
 
 
 class ConcurrentHydration(Harness):
