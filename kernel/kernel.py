@@ -1052,9 +1052,9 @@ def _kernel_sha():
                                    capture_output=True, text=True, timeout=2)
                 if d.returncode == 0 and d.stdout.strip():
                     sha += "-dirty"
-            _SHA = sha
-        except Exception:
-            _SHA = ""
+            _SHA = sha or None      # an EMPTY answer is not remembered (T352 review): a 2 s git timeout at a busy boot
+        except Exception:           # used to pin '' for the process's life, and the drift check's restart leg then
+            _SHA = None             # had no running sha to compare until a restart; the next call asks again
     return _SHA or None
 
 
@@ -7766,16 +7766,20 @@ def _main_drift_check():
     checkout = _checkout_sha()      # ONE read each: the verdict's inputs and the parked-deploy
     running = _kernel_sha()         # match below read the same shas the verdict examined
     origin = _origin_main_sha()
+    kind, target = _main_drift_verdict(origin, checkout, running)
     if not origin or not checkout or not running:
-        # no verdict this pass, said each time (T352): an unreadable input used to pass in silence, indistinguishable
-        # in the journal from a check thread that had died. `main` unreadable is git ls-remote failing or timing out
-        # (15 s) at the release remote: offline, an auth prompt, or a box too busy to answer in time.
+        # an unreadable input is a NOTE each pass, never a gate (T352, and its review): the verdict keeps its per-leg
+        # shape, so main unreadable (git ls-remote failing or timing out at the release remote: offline, an auth prompt,
+        # a box too busy to answer in 15 s) still lets a checkout ahead of the running kernel converge the restart leg,
+        # while a pull needs main and the checkout both. Silence here used to read, in the journal, like a check thread
+        # that had died.
         gone = [n for n, v in (("main at %s (git ls-remote failed or timed out)" % _release_remote(), origin),
                                ("the checkout's HEAD", checkout), ("the running kernel's sha", running)) if not v]
-        _converge_say("no verdict this pass: %s could not be read; main %s, checkout %s, running %s; again in %d s"
-                      % (" and ".join(gone), origin or "?", checkout or "?", running or "?", _MAIN_CHECK_EVERY_S))
-        return
-    kind, target = _main_drift_verdict(origin, checkout, running)
+        _converge_say("%s could not be read this pass (main %s, checkout %s, running %s): %s; again in %d s"
+                      % (" and ".join(gone), origin or "?", checkout or "?", running or "?",
+                         "no verdict" if not kind else "the %s leg still decides from what was read" % kind, _MAIN_CHECK_EVERY_S))
+        if not kind:
+            return
     if kind == "restart" and target == _REBUILT_FOR[0]:
         return                                        # already converged in place (UI-only rebuild)
     if kind == "restart" and not _kernel_code_changed(running, target):

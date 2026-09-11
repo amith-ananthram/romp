@@ -8,6 +8,7 @@ import inspect
 import os
 import tempfile
 import unittest
+from unittest import mock
 from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -595,16 +596,42 @@ class ConvergeWaitsSpareOnlyCuts(unittest.TestCase):
         self.assertEqual(self.ran, [], "unknown keeps both waits, as before")
         self.assertIn("; what a restart would cut is unknown (no backend yet)", self._lines()[0])
 
-    def test_an_unreadable_main_says_so_every_pass(self):
+    def test_an_unreadable_main_says_so_every_pass_and_the_restart_leg_still_converges(self):
         km._origin_main_sha = lambda: ""                  # git ls-remote failed or timed out
         km._deploy_would_cut = lambda: []
         self._pass(); self._pass()
-        self.assertEqual(self.ran, [])
+        self.assertEqual(self.ran, [], "the checkout and the kernel agree: nothing to do, said each pass")
         lines = self._lines()
         self.assertEqual(len(lines), 2, lines)
         for l in lines:
-            self.assertIn("no verdict this pass: main at ", l)
-            self.assertIn("(git ls-remote failed or timed out) could not be read; main ?, checkout aaa, running aaa; again in 300 s", l)
+            self.assertIn("main at ", l)
+            self.assertIn("(git ls-remote failed or timed out) could not be read this pass (main ?, checkout aaa, running aaa): no verdict; again in 300 s", l)
+        # the per-leg shape (the review's M1): the checkout ahead of the running kernel converges the restart leg with
+        # main unreadable, as it always did; only a pull needs main and the checkout both
+        km._checkout_sha = lambda: "bbb"
+        self._pass()
+        self.assertEqual(self.ran, ["restart"], "offline, the restart leg still converges")
+        self.assertIn("the restart leg still decides from what was read; again in 300 s", self._lines()[-1])
+
+    def test_an_empty_kernel_sha_is_asked_again_never_remembered(self):
+        import subprocess as _sp
+        saved = km._SHA
+        real = self.saved[3]                              # the REAL reader: setUp stubbed km._kernel_sha for the gate tests
+        calls = []
+        def run(argv, **kw):
+            calls.append(argv[-1])
+            if len(calls) == 1:
+                raise _sp.TimeoutExpired(argv, 2)     # a busy boot: git did not answer in time
+            return mock.Mock(returncode=0, stdout="" if argv[-1] == "--porcelain" else "abc1234\n")   # a clean tree
+        try:
+            km._SHA = None
+            with mock.patch.object(km.subprocess, "run", side_effect=run):
+                self.assertIsNone(real(), "the blip answers nothing…")
+                self.assertEqual(real(), "abc1234", "…and is not remembered: the next call asks git again")
+                self.assertEqual(real(), "abc1234", "a real answer is memoized")
+            self.assertEqual(calls, ["HEAD", "HEAD", "--porcelain"])
+        finally:
+            km._SHA = saved
 
     def test_a_parked_quiet_deploy_stands_down_every_pass_unless_nothing_would_be_cut(self):
         km._checkout_sha = lambda: "bbb"                  # the checkout is ahead of the kernel: a restart is owed…
@@ -625,7 +652,9 @@ class ConvergeWaitsSpareOnlyCuts(unittest.TestCase):
     def test_the_backend_answers_would_cut_with_the_drains_own_predicate(self):
         import sys, tempfile, types
         sbm = sys.modules.get("romp_sdk_backend") or load_source("romp_sdk_backend", os.path.join(os.path.dirname(HERE), "kernel", "sdk_backend.py"))
-        be = sbm.SdkBackend(tempfile.mkdtemp(), "/bin/true", lambda *a, **k: None)
+        d = tempfile.mkdtemp()
+        open(os.path.join(d, "session-hosts"), "w").write("off")   # a bare state root pins hosts off (the suite's rule, T348)
+        be = sbm.SdkBackend(d, "/bin/true", lambda *a, **k: None)
         mk = lambda sid, name, inflight, host=None, intent=False: types.SimpleNamespace(sid=sid, name=name, inflight=inflight, _host=host, _host_intent=intent)
         be.sessions = {"a": mk("a" * 36, "plain-busy", True), "b": mk("b" * 36, "plain-idle", False),
                        "c": mk("c" * 36, "hosted-busy", True, host=object()), "d": mk("d" * 36, "attaching-busy", True, intent=True)}
@@ -654,7 +683,9 @@ class UiOnlyConverge(unittest.TestCase):
         self._saved = {n: getattr(km, n) for n in
                        ("_main_drift_verdict", "_kernel_code_changed", "_rebuild_dist",
                         "_sync_notice", "_update_mode", "_send_to_app", "_kernel_sha",
-                        "_main_tracking", "_converge_classes")}
+                        "_main_tracking", "_converge_classes", "_origin_main_sha", "_checkout_sha")}
+        km._origin_main_sha = lambda: "tgt"     # stubbed: the real one runs `git ls-remote`, a NETWORK call per test
+        km._checkout_sha = lambda: "tgt"        # (the classifier test's precedent; the stubbed verdict decides below)
         km._MAIN_DRIFT[0] = km._MAIN_DRIFT[1] = ""
         km._REBUILT_FOR[0] = ""
         km._INPLACE_TRIED[0] = ""
@@ -799,12 +830,14 @@ class PersistentDismissal(unittest.TestCase):
     def test_a_dismissed_drift_sha_never_banners_but_a_new_one_does(self):
         saved = {n: getattr(km, n) for n in
                  ("_main_tracking", "_main_drift_verdict", "_send_to_app", "_update_mode",
-                  "_kernel_sha", "_kernel_code_changed")}
+                  "_kernel_sha", "_kernel_code_changed", "_origin_main_sha", "_checkout_sha")}
         banners = []
         try:
             km._update_mode = lambda: "ask"
             km._main_tracking = lambda: True
             km._kernel_sha = lambda: "cur"
+            km._origin_main_sha = lambda: "tgt"     # stubbed: the real one is a network call (the classifier test's precedent)
+            km._checkout_sha = lambda: "tgt"
             km._kernel_code_changed = lambda a, b: True
             km._send_to_app = lambda app, payload: banners.append(payload)
             km._MAIN_DRIFT[0] = km._MAIN_DRIFT[1] = ""
