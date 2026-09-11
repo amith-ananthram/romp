@@ -31190,7 +31190,18 @@ def _merge_live_atoms(session, sid, shown_texts=()):
         turns = [{"id": "live", "trigger": None, "t": fresh[0]["t"], "end": fresh[-1]["t"],
                   "ended": not live_work, "atoms": []}]
     turns[-1] = dict(turns[-1])
-    turns[-1]["atoms"] = sorted(list(turns[-1]["atoms"]) + fresh, key=lambda a: (a.get("t", 0), a.get("_seq", 0)))
+    # An in-flight input ECHO — the kernel's copy of a send the model has not read yet — sorts AFTER every atom the
+    # turn holds, whatever its send time (T252d for every other window, 2026-09-11). The model reads a mid-turn
+    # send only at its next tool boundary, so the steps that streamed after the send ran BEFORE it was read; sorted
+    # by time the echo drew the message above them in every window but the sender's own, whose tail bubble hides
+    # the echo (render.ts hiddenByPending) — one session in two split columns read as one column behind the other
+    # (the user 2026-09-10). The landing (the queued_command attachment, event_model._absorbed) takes the
+    # boundary's own time, the same tail region, so nothing moves when it lands. A never-delivered echo (dropped)
+    # is a record of a loss and keeps its time, as does a landed-but-unpruned one and the CLI's command feedback.
+    def _order(a):
+        tail = 1 if (a.get("_echo_text") and not a.get("command") and not a.get("dropped") and not a.get("_landed")) else 0
+        return (tail, a.get("t", 0), a.get("_seq", 0))
+    turns[-1]["atoms"] = sorted(list(turns[-1]["atoms"]) + fresh, key=_order)
     # Extend the turn's window over the appended tail (the user 2026-07-02): segments() spans [turn.t,
     # turn.end], so a live atom past the disk turn's end (a /model invocation minutes after the last work)
     # otherwise falls OUTSIDE every segment — its timeline dot then appeared only retroactively, once the

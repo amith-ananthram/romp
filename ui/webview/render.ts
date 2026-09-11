@@ -48,7 +48,7 @@ import { titleWithKey, chordOf, effectiveChord, loadOverrides } from "./keybindi
 import { DEFAULT_CHORDS } from "./commands";
 import { NavHistory } from "./nav-history";
 import { StagedStack, quoteReplyBody, stagedPosts } from "./staged-messages";
-import { type PendingSend, type TailEvent, OPT_PREFIX, isOptimisticUuid, newPending, mintQid, reconcilePending, queuedCopyToHide, dropPending, bareGroupLabel, sentAtLabel, pendingBody } from "./send-pending";
+import { type PendingSend, type TailEvent, OPT_PREFIX, isOptimisticUuid, isKernelEchoUuid, newPending, mintQid, reconcilePending, queuedCopyToHide, dropPending, bareGroupLabel, sentAtLabel, pendingBody } from "./send-pending";
 import { reconcileHeld, heldAsQueued, type HeldCopy, type HeldQueued, type HeldMemory } from "./queued-held";
 import { reloadHoldReason } from "./reload-hold";
 import { liveNotices, keepReloadNotices, takeReloadNotices } from "./reload-notices";
@@ -3314,6 +3314,20 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
         turn.appendChild(notice({ src: "system", glyph: "system", gist, body: more ? bubble : null, nested: true,
                                   key: ev.uuid ? "hn:" + ev.uuid : undefined }));
       } else turn.appendChild(bubble);
+      // The kernel's ECHO of a send the model has not read yet, seen from a window that did not send it (the other
+      // column of a split, another browser): dressed as the sender's own tail bubble is — dashed, captioned
+      // "sending…" — so two views of one session agree on what is pending (the user 2026-09-10: one session in two
+      // columns, solid history in one and a pending bubble in the other). The kernel orders the echo at the turn's
+      // tail for the same reason (_merge_live_atoms); the sender's own window hides this event behind its bubble
+      // (hiddenByPending, above); a never-delivered echo takes the dress below instead.
+      if (!ev.undelivered && !injected && isKernelEchoUuid(ev.uuid)) {   // the backend's "echo:" prefix rides into the payload
+        turn.classList.add("echo");
+        bubble.classList.add("echo-bubble");
+        const note = el("div", "echo-note");
+        note.textContent = "sending…";
+        setTip(note, "On its way to the session. The window that sent it can still cancel it until the session takes it.");
+        turn.appendChild(note);
+      }
       // NEVER-DELIVERED send (kernel ev.undelivered, from the backend's dropped-echo marking): the
       // session's process died holding this message, so it was never seen — say so instead of letting
       // it pose as history (the user 2026-07-29: a two-day-old lost send kept resurfacing mid-chat as
