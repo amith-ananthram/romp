@@ -92,11 +92,16 @@ body.scheme-solarized-dark {
                        defined (a phantom token) until 2026-08-26; mirrored in feed.css (own :root). */
   /* the postal card's three KIND colours (T320, the user 2026-09-10): one SEQUENTIAL ramp in the accent's hue, not
      three unrelated hues, ranked by how much the kind asks of the reader: coordination lowest (an FYI), delegation
-     next (work handed over), question highest (an answer owed). More asking = more intense against the page: on the
-     dark page the ramp climbs toward the accent's brightness (OKLCH hue 244, L .66 / .76 / .86; 5.4:1, 7.8:1 and
-     10.8:1 on the page, 5.0:1, 7.3:1 and 9.9:1 on a boxed card, whose --box-bg wash the word also sits on); the light
-     theme re-inks the same three ranks toward the deep end of its clay accent (below). */
-  --postal-coordinate: #7996af;  --postal-delegate: #7fb8e7;  --postal-question: #91d9ff;
+     next (work handed over), question highest (an answer owed). More asking = more intense against the page. The
+     three are sampled EVENLY, at positions 0, 1/2 and 1 of one straight line in OKLCH (T337, the user 2026-09-10, who
+     found the first three too alike: they spanned a fifth of the line, L .66 to .86 at one saturation). On the dark
+     page the line runs from the deepest blue that still reads on a boxed card (L .64, C .085: 4.6:1 on --box-bg, the
+     review's floor being 4.5) to the brightest tint the hue holds (L .90, C .05, the sRGB gamut's edge), hue pinned
+     at the accent's 244 throughout; 5.0:1, 8.1:1 and 12.5:1 on the page, 4.6:1, 7.5:1 and 11.5:1 on a boxed card,
+     whose --box-bg wash the word also sits on. The light theme runs its own line the other way, deepening toward the
+     dark end of its clay accent (below). postal-kind-ramp.test.ts holds the positions, theme-parity.test.ts the
+     contrast. */
+  --postal-coordinate: #5d92bc;  --postal-delegate: #90badd;  --postal-question: #c3e3fd;
   /* THE romp accent — light blue (the user 2026-06-24). Use var(--accent) for accent/highlight chrome
      (selected toggles, in-progress loading dots, the Fleet pill, focus) — NOT for STATUS colors, which keep
      their own meaning (--st-working-bg yellow = working, --st-blocked-bg red, etc.). --accent-fg reads on it. */
@@ -234,14 +239,17 @@ body.theme-light {
   --hl-cmt: #67614f; --hl-title: #8C4A00; --hl-meta: #6E6455; --hl-attr: #7A5A20;   /* --hl-cmt from #6E675C (4.39:1 on a code block) to 4.86:1 */
   --box-bg: rgba(0, 0, 0, 0.03);
   --box-border: rgba(0, 0, 0, 0.12);
-  --postal-coordinate: #974a32;  --postal-delegate: #962b00;  --postal-question: #751000;   /* the kind ramp (T320): the
+  --postal-coordinate: #974a32;  --postal-delegate: #6c2a14;  --postal-question: #430a00;   /* the kind ramp (T320, T337): the
                                                                                             accent's clay hue (OKLCH 38)
-                                                                                            deepening with rank, L .50 /
-                                                                                            .45 / .36; 5.3:1, 6.7:1 and
-                                                                                            9.6:1 on the cream page and
-                                                                                            5.0:1, 6.2:1 and 9.0:1 on a
-                                                                                            boxed card (the review's
-                                                                                            floor is the box, 4.5:1) */
+                                                                                            deepening with rank, sampled
+                                                                                            evenly along the line from
+                                                                                            L .50, C .11 (the same first
+                                                                                            step) to L .25, C .09, a deep
+                                                                                            rust, never black; 5.3:1, 8.9:1
+                                                                                            and 13.7:1 on the cream page,
+                                                                                            4.9:1, 8.3:1 and 12.9:1 on a
+                                                                                            boxed card (the review's floor
+                                                                                            is the box, 4.5:1) */
   --err: #B02A1C;
   --accent: #C2410C; --accent-fg: #FFF8F2;
   --accent-wash: rgba(194, 65, 12, 0.10);
@@ -2509,9 +2517,9 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
    T320 (the user, later that day): the word wears the prose weight, not bold, and its three colours are one
    sequential ramp ranked by how much the kind asks of the reader (the tokens' comment has the ranking). */
 .postal-kind { font-weight: 400; }
-.postal-kind-delegate { color: var(--postal-delegate, #7fb8e7); }
-.postal-kind-coordinate { color: var(--postal-coordinate, #7996af); }
-.postal-kind-question { color: var(--postal-question, #91d9ff); }
+.postal-kind-delegate { color: var(--postal-delegate, #90badd); }
+.postal-kind-coordinate { color: var(--postal-coordinate, #5d92bc); }
+.postal-kind-question { color: var(--postal-question, #c3e3fd); }
 /* BOTH ENDS of a postal card in the head, each in its session's identity colour (the peer's chip as before, and this
    session's own chip after it); a narrow head collapses this session's chip to its coloured dot, so both colours
    still show where the words would not fit */

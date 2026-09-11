@@ -27,16 +27,17 @@ test("the kind is coloured text in the meta slot, never a chip, at prose weight,
   // reader, each with a light-theme re-ink (the parity test holds every one at 4.5:1 on its page)
   assert.match(CSS, /\.postal-kind \{ font-weight: 400; \}/, "prose weight, not bold");
   assert.doesNotMatch(CSS, /\.postal-kind \{ font-weight: (600|700|bold)/);
-  assert.match(CSS, /\.postal-kind-delegate \{ color: var\(--postal-delegate, #7fb8e7\); \}/);
-  assert.match(CSS, /\.postal-kind-coordinate \{ color: var\(--postal-coordinate, #7996af\); \}/);
-  assert.match(CSS, /\.postal-kind-question \{ color: var\(--postal-question, #91d9ff\); \}/);
-  assert.match(CSS, /\n  --postal-coordinate: #7996af;\s+--postal-delegate: #7fb8e7;\s+--postal-question: #91d9ff;/, "the dark ramp, low to high");
+  // (T337: the three are re-sampled evenly along the line; postal-kind-ramp.test.ts holds the positions, these the values)
+  assert.match(CSS, /\.postal-kind-delegate \{ color: var\(--postal-delegate, #90badd\); \}/);
+  assert.match(CSS, /\.postal-kind-coordinate \{ color: var\(--postal-coordinate, #5d92bc\); \}/);
+  assert.match(CSS, /\.postal-kind-question \{ color: var\(--postal-question, #c3e3fd\); \}/);
+  assert.match(CSS, /\n  --postal-coordinate: #5d92bc;\s+--postal-delegate: #90badd;\s+--postal-question: #c3e3fd;/, "the dark ramp, low to high");
   const light = CSS.slice(CSS.indexOf("body.theme-light {"), CSS.indexOf("\n}\n", CSS.indexOf("body.theme-light {")));
-  assert.match(light, /--postal-coordinate: #974a32;\s+--postal-delegate: #962b00;\s+--postal-question: #751000;/, "the light ramp, low to high, deepening");
+  assert.match(light, /--postal-coordinate: #974a32;\s+--postal-delegate: #6c2a14;\s+--postal-question: #430a00;/, "the light ramp, low to high, deepening");
   // the ramp IS a ramp: in each theme the three steps are monotone in luminance in rank order (brighter with rank on
   // the dark page, darker with rank on the light one), so the eye reads one scale, not three tags
   const lumOf = (hex: string) => { const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((v) => v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)); return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; };
-  const dark = ["#7996af", "#7fb8e7", "#91d9ff"].map(lumOf), lightRamp = ["#974a32", "#962b00", "#751000"].map(lumOf);
+  const dark = ["#5d92bc", "#90badd", "#c3e3fd"].map(lumOf), lightRamp = ["#974a32", "#6c2a14", "#430a00"].map(lumOf);
   assert.ok(dark[0] < dark[1] && dark[1] < dark[2], "dark: coordination < delegation < question in luminance");
   assert.ok(lightRamp[0] > lightRamp[1] && lightRamp[1] > lightRamp[2], "light: coordination > delegation > question in luminance");
   assert.match(CSS, /coordination lowest \(an FYI\), delegation\s+next \(work handed over\), question highest \(an answer owed\)/, "the ranking sits beside the tokens");
