@@ -37,7 +37,7 @@ import { CHIP_LABEL, chipWords, statusChip, type ChipState } from "./status-chip
 import { isClearCmd, openTopTitles, clearConfirmDetail, endConfirmDetail } from "./clear-confirm";
 import { prebuildPlan, type ViewState } from "./prebuild";
 import { historyMarks, historyBands, windowSpans, HIST_H, HIST_GAP } from "./glow-history";
-import { newSkeletonState, applyTabOrderSkeleton, onStatus, onFull, onDismiss, onSocketUp, nextPrefetch, renderKind } from "./skeleton-tabs";
+import { newSkeletonState, applyTabOrderSkeleton, onStatus, holdStatus, onFull, onDismiss, onSocketUp, nextPrefetch, renderKind } from "./skeleton-tabs";
 import { reconcileTabOrder, adoptArrival } from "./tab-order";
 import { writeViewOrder } from "./view-order";
 import { planStrip, readTabGroups, writeTabGroups, setSectionCollapsed, sectionRef, isPinned, setPinned, prunePinned, reachableFrom, headWords,
@@ -16384,7 +16384,15 @@ function statusOnly(msg: any) {
   // skeleton for every tab within a cycle.
   if (onStatus(skeletonTabs, msg.id, msg.status) === "skeleton") { scheduleRenderTabs(); return; }
   const s = sessions.get(msg.id);
-  if (!s) { requestFullSession(msg.id, "nobase"); return; }   // a delta with no base is PROOF of desync (see chatTail)
+  if (!s) {
+    // A status for a session this page holds NOTHING of, which the set does not list: a skeleton tab's whose strip has
+    // not landed. The kernel sends a status frame for a sid it holds as a skeleton and for no other, and the shim's
+    // FIFO carries a newer strip to the END of the burst, behind the statuses between two strips (a later chat column's
+    // open sends two: the pusher cycle its handshake woke and the ready arm's connect push). Held for the strip
+    // (skeleton-tabs.ts holdStatus), never chatTail's no-base ask, which asked for every withheld tab's full and loaded
+    // the whole board into a column opened as a view of one session, one ask per withheld tab (2026-09-11).
+    holdStatus(skeletonTabs, msg.id, msg.status); return;
+  }
   const before = awaitKey(s.status);
   s.status = msg.status || s.status;
   renderTabs();                          // status-only push → repaint the chip; order is untouched

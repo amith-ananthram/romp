@@ -76,6 +76,18 @@ export function onStatus(st: SkeletonState, id: string, status: unknown): "skele
   return "skeleton";
 }
 
+/** A {type:"status"} frame for an id the set does not list (yet) and the page holds NO session for. The kernel sends a
+ *  status frame for a sid it holds as a skeleton and for no other (_send_chat_or_status), so such a frame is a skeleton
+ *  tab's whose strip this page has not applied: the pane shim's dispatch FIFO carries a newer whole-state frame (a
+ *  second tabOrder) to the END of the burst, so the statuses that arrived between two strips are delivered ahead of
+ *  the strip that names their set (a later chat column's open sends two: the pusher cycle its handshake woke and the
+ *  ready arm's connect push). Held for that strip: applyTabOrderSkeleton keeps the entry when the array lists the id
+ *  and drops it when it does not, and the chip reads it only for a skeleton id. Never the no-base ask, which asked for
+ *  every withheld tab's full and loaded the whole board into a column opened as a view of one session (2026-09-11). */
+export function holdStatus(st: SkeletonState, id: string, status: unknown): void {
+  st.status.set(id, status);
+}
+
 /** A full `session` frame landed (upsert): the id is loaded, its skeleton entry and stored status go.
  *  Returns whether it WAS held — a just-loaded skeleton that is the active tab must re-show its view, not
  *  append to the hidden one. Also records the id as loaded on this socket (see applyTabOrderSkeleton). */

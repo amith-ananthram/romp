@@ -27,7 +27,7 @@ const fn = (name: string): string => {
 };
 
 test("render.ts holds ONE skeleton set, declared beside tabMeta, and reads the active session through liveSession", () => {
-  assert.match(RENDER, /import \{ newSkeletonState, applyTabOrderSkeleton, onStatus, onFull, onDismiss, onSocketUp, nextPrefetch, renderKind \} from "\.\/skeleton-tabs";/);
+  assert.match(RENDER, /import \{ newSkeletonState, applyTabOrderSkeleton, onStatus, holdStatus, onFull, onDismiss, onSocketUp, nextPrefetch, renderKind \} from "\.\/skeleton-tabs";/);
   // beside tabMeta / closingTabs / pendingTabMeta (below them: tab-close-optimistic.test.ts wants closingTabs within
   // 900 characters of tabMeta) — renderTabs reads it and can run before the module finishes evaluating
   assert.match(RENDER, /const pendingTabMeta = new Map<string, PendingTabMeta>\(\);\n(?:\/\/[^\n]*\n)*const skeletonTabs = newSkeletonState\(\);/);
@@ -106,12 +106,16 @@ test("makeSkeletonTab: the loaded-tab chrome minus what it does not know — no 
   for (const f of ["applyTabStatus", "wireTabDrag", "makeSkeletonTab", "appendTabCtxGauge"]) assert.ok(RENDER.indexOf(`function ${f}(`) < ph, f + " above the placeholder builder");
 });
 
-test("statusOnly begins with the skeleton branch: store + scheduleRenderTabs (one frame for a burst), never renderTabs or the no-base ask", () => {
+test("statusOnly begins with the skeleton branch: store + scheduleRenderTabs (one frame for a burst), never renderTabs; a status for a session the page holds nothing of is HELD for its strip, never the no-base ask", () => {
   const body = RENDER.split("function statusOnly(msg: any) {")[1].split("\n}")[0];
   const first = body.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("//"))[0];
   assert.equal(first, 'if (onStatus(skeletonTabs, msg.id, msg.status) === "skeleton") { scheduleRenderTabs(); return; }');
-  assert.ok(body.indexOf("onStatus(skeletonTabs") < body.indexOf('if (!s) { requestFullSession(msg.id, "nobase"); return; }'),
-    "the no-base repair still follows, unchanged, for every non-skeleton sid");
+  // The shim's FIFO carries a newer strip to the END of a burst, so a skeleton's statuses can land ahead of the strip that
+  // names the set (a later chat column's open sends two strips, 2026-09-11): the status waits for the strip. The ask that
+  // stood here loaded the whole board into a column opened as a view of one session, one ask per withheld tab.
+  assert.match(body, /const s = sessions\.get\(msg\.id\);\s*\n\s*if \(!s\) \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*holdStatus\(skeletonTabs, msg\.id, msg\.status\); return;\s*\n\s*\}/,
+    "no session and not a skeleton: the status is held for the strip");
+  assert.doesNotMatch(body, /"nobase"/, "statusOnly never asks for a full: a status frame is only ever a skeleton tab's");
   const skel = body.slice(0, body.indexOf("const s = sessions.get(msg.id);"));
   assert.doesNotMatch(skel, /\brenderTabs\(\)/, "sixteen status frames land in one burst — one animation frame, not sixteen synchronous repaints");
 });
@@ -196,10 +200,10 @@ test("requestFullSession(id, why): every ask names its why, from the fixed vocab
   assert.match(RENDER, /type NeedFullWhy = "gap" \| "nobase" \| "skeleton-click" \| "prefetch" \| "skeleton-delta";/);
   assert.match(RENDER, /function requestFullSession\(id: string, why: NeedFullWhy\): void \{\s*\n\s*if \(!id \|\| awaitingFull\.has\(id\)\) return;\s*\n\s*awaitingFull\.add\(id\);\s*\n\s*vscodeApi\?\.postMessage\(\{ type: "needFull", id, why \}\);/);
   const calls = [...RENDER.matchAll(/requestFullSession\(([^()]*?)\)/g)].map((m) => m[1]).filter((a) => !a.startsWith("id: string"));
-  assert.ok(calls.length >= 6, "the gap, no-base ×3, skeleton-delta ×2, skeleton-click and prefetch sites");
+  assert.ok(calls.length >= 6, "the gap, no-base ×2 (chatTail and update; statusOnly holds a status for its strip instead, 2026-09-11), skeleton-delta ×2, skeleton-click and prefetch sites");
   for (const c of calls) assert.match(c, /, "(gap|nobase|skeleton-click|prefetch|skeleton-delta)"$/, `call site without a why: requestFullSession(${c})`);
   const why = (w: string) => RENDER.split(`, "${w}")`).length - 1;
-  assert.equal(why("gap"), 1); assert.equal(why("nobase"), 3); assert.equal(why("skeleton-delta"), 2);
+  assert.equal(why("gap"), 1); assert.equal(why("nobase"), 2); assert.equal(why("skeleton-delta"), 2);
   assert.equal(why("skeleton-click"), 1); assert.equal(why("prefetch"), 1);
 });
 

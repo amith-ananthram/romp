@@ -88,13 +88,15 @@ test("a delta with NO base at all is a desync too — every delta path asks for 
     "chatTail: no base → ask, don't wait forever");
   const updateFn = RENDER.slice(RENDER.indexOf("function update(msg"), RENDER.indexOf("function chatTail(msg"));
   assert.match(updateFn, /if \(!s\) \{ requestFullSession\(msg\.id, "nobase"\); return; \}/, "update: same");
-  // The window is 1100 characters since 2026-09-07 (it was 400): statusOnly now OPENS with the skeleton-tab
-  // branch — a status frame for a tab the kernel is withholding after a redial is stored for the chip, not a
-  // desync — and its comment pushed the no-base line past the old window. That failure was the intended
-  // tripwire; the widening is deliberate, and the no-base contract below is byte-for-byte what it was (plus
-  // the why). skeleton-tabs-wiring.test.ts pins that the skeleton branch comes FIRST and never asks.
-  const statusFn = RENDER.slice(RENDER.indexOf("function statusOnly(msg"), RENDER.indexOf("function statusOnly(msg") + 1100);
-  assert.match(statusFn, /if \(!s\) \{ requestFullSession\(msg\.id, "nobase"\); return; \}/, "statusOnly: same");
+  // statusOnly is the exception (2026-09-11; it has OPENED with the skeleton-tab branch since 2026-09-07): the kernel
+  // sends a status frame for a sid it holds as a skeleton and for no other, so a status for a session the page holds
+  // nothing of is a skeleton's whose strip the shim's FIFO delivers BEHIND it (a newer strip takes the end of the
+  // burst), not a lost first frame. It is held for the strip (skeleton-tabs.ts holdStatus); the ask that stood here
+  // loaded the whole board into a chat column opened as a view of one session, one ask per withheld tab.
+  // skeleton-tabs-wiring.test.ts pins the branch's shape.
+  const statusFn = RENDER.split("function statusOnly(msg: any) {")[1].split("\n}")[0];
+  assert.doesNotMatch(statusFn, /requestFullSession\(msg\.id, "nobase"\)/, "statusOnly: a status is never a desync");
+  assert.match(statusFn, /if \(!s\) \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*holdStatus\(skeletonTabs, msg\.id, msg\.status\); return;/, "statusOnly: held for its strip");
 });
 
 test("a reconnect clears parked asks — a dead socket's pending needFull can never gag the new one", () => {

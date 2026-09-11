@@ -12,8 +12,9 @@ driver run walks the whole story in order, each step landing in its own assertio
   1. __rompMoveTab(B, "new") opens a second column that holds B — B's tab leaves column 1's strip, column 2's
      strip lists B alone — both columns near half the old width (the honest half, __rompSplitGrow), the v2 store
      persisted, the frame at /chat?col=2&skeleton=1; the column is served as a VIEW of B (the kernel's send
-     counters: one full frame, a status per other tab, never the board) and showed the pane loader, never the
-     no-sessions copy or an "Opening session" line, between the call and B's paint;
+     counters: exactly one full frame, a status per other tab, never the board; and the column's socket asked for
+     nothing) and showed the pane loader, never the no-sessions copy or an "Opening session" line, between the
+     call and B's paint;
   2. routing by the owner: with C moved into column 2 as well and active there, the feed's click echo for C
      (a romp:focus-echo storage write) and a jumpSession for B posted into COLUMN 1 both land in column 2 —
      column 1 keeps A throughout — and __rompChatTarget names the owner for every session;
@@ -72,8 +73,8 @@ SID_B = "11111111-2222-4333-8444-000000000302"   # "api": the session the move o
 SID_C = "11111111-2222-4333-8444-000000000303"   # "tests": moved into column 2 beside B for the routing step
 SID_X = "11111111-2222-4333-8444-000000000999"   # a session no column lists (not on the board)
 # six more tabs, so the board is EIGHT sessions: a column served whole takes eight full frames per push, a column served
-# as a view of B takes one (plus a status frame per other tab), and the /perf deltas in step 1 tell the two apart with
-# room for the page's idle prefetch to have loaded a tab or two by the paint
+# as a view of B takes exactly one (plus a status frame per other tab), and the /perf deltas in step 1 tell the two apart;
+# the column's idle walk visits only its members (tabInView), and its one member is on screen, so no prefetch loads a tab
 FILLERS = [("11111111-2222-4333-8444-00000000030%d" % k, name, k)
            for k, name in ((3, "tests"), (4, "docs"), (5, "lint"), (6, "deploy"), (7, "search"), (8, "auth"))]
 BOARD = 2 + len(FILLERS)
@@ -126,6 +127,14 @@ try { browser = await chromium.launch(); }
 catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 const out = { t0: Date.now() };
+// Column 2's asks, read at the socket layer (the browser reports every frame's sockets): a needFull from a column opened
+// as a view of one session is the fingerprint of the board loading behind the view. 2026-09-11: seven `nobase` asks per
+// open, one per withheld tab, when the shim's FIFO delivered the status frames ahead of the strip that named their set.
+const col2Asks = [];
+page.on("websocket", (ws) => {
+  if (!/[?&]col=2(?:&|$)/.test(ws.url())) return;
+  ws.on("framesent", (f) => { try { const m = JSON.parse(f.payload); if (m && m.type === "needFull") col2Asks.push([m.id, m.why || ""]); } catch (e) { /* a non-JSON frame */ } });
+});
 const die = async (why) => {
   out.ms = Date.now() - out.t0;
   fs.writeSync(1, "RESULT:" + JSON.stringify({ ...out, died: why }) + "\n");
@@ -232,6 +241,7 @@ out.s1.col2Active = await activeIn("f-chat-2"); out.s1.col1After = await activeI
 out.s1.col2Tabs = await tabsIn("f-chat-2"); out.s1.col1Tabs = await tabsIn("f-chat");
 out.s1.obs = await page.evaluate(() => { const { perfAtPaint, ...rest } = window.__obs; return rest; });
 out.s1.fullChatDelta = sends(perfAtPaint, "chat") - sends(perf0, "chat"); out.s1.statusDelta = sends(perfAtPaint, "status") - sends(perf0, "status");
+out.s1.col2Asks = col2Asks.slice();
 out.s1.targetB = await targetOf(cfg.sidB); out.s1.targetA = await targetOf(cfg.sidA); out.s1.targetX = await targetOf(cfg.sidX);
 
 // ---- 2. routing by the owner: C joins column 2 and is active there; an echo for C and a jump for B posted into column 1 both land in column 2 ----
@@ -557,18 +567,22 @@ class ServedChatSplit(unittest.TestCase):
         a create). The kernel's send counters across the open tell a column served WHOLE (a full frame per tab: eight
         here, and no status frame — a client that declared nothing gets none) from one served as a VIEW of B (the
         strip with a skeleton list, B's one full, a status per other tab): the status delta is at least the other
-        tabs, and the full delta is the mechanism's fingerprint: ONE full by the open (the pusher cycle the handshake
-        wakes withholds the session frames from a pre-ready skeleton client, so the ready arm's connect push is the one
-        full; review find 2026-09-11, when it crossed the wire twice), plus at most one more from the page's idle
-        prefetch, which may have loaded a skeleton tab by the time B's transcript is painted (needFull repairs at once).
-        Never the board."""
+        tabs, and the full delta is the mechanism's fingerprint: exactly ONE full by the open (the pusher cycle the
+        handshake wakes withholds the session frames from a pre-ready skeleton client, so the ready arm's connect push is
+        the one full; review find 2026-09-11, when it crossed the wire twice), and no more: the column's idle walk visits
+        only its members and its one member is on screen, so nothing is prefetched, and the column ASKS for nothing. The
+        board loaded behind the view all the same before 2026-09-11: the pusher's strip and the ready arm's strip land in
+        one burst, the shim's FIFO carries the newer strip to the END of that burst, so the status frames between them
+        reached the page ahead of the strip that named their set, and each took the no-base ask meant for a lost first
+        frame: seven asks, seven fulls, the board. A status ahead of its strip is now held for it (skeleton-tabs.ts
+        holdStatus). Never the board."""
         s = self._r()["s1"]
         o = s["obs"]
         self.assertTrue(o["done"], "the observer saw B's transcript painted in column 2: %r" % o)
         self.assertGreaterEqual(s["statusDelta"], BOARD - 1,
                                 "a status frame per other tab: the column was served as a skeleton client, not whole: %r" % s)
-        self.assertGreaterEqual(s["fullChatDelta"], 1, "B's one full frame: %r" % s)
-        self.assertLessEqual(s["fullChatDelta"], 2, "one full per open, plus at most one idle prefetch by the paint — never the board (eight per push before 2026-09-11), never the open's full twice: %r" % s)
+        self.assertEqual(s["fullChatDelta"], 1, "exactly one full per open, B's: never the board (eight per push before 2026-09-11), never the open's full twice, no prefetch (the column's one member is on screen): %r" % s)
+        self.assertEqual(s["col2Asks"], [], "the column asked for nothing: a status delivered ahead of its strip is held for the strip, never the no-base ask that loaded the board behind the view, one ask per withheld tab (2026-09-11): %r" % s)
         # the copy between the call and the paint: the pane loader, never the create flow's words or the no-sessions copy
         self.assertEqual(o["emptyState"], 0, "no 'No session open' / no-sessions copy in a column opened on a session: %r" % o)
         self.assertEqual(o["openingText"], 0, "no 'Opening session' or 'opening …' line — a view of a running session is not a create: %r" % o)
