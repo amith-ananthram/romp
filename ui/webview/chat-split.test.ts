@@ -57,7 +57,7 @@ test("a pick of a session another column holds is shown where it lives: the setA
   assert.ok(guard < fn.indexOf("assertPeekFor(id);"), "before the peek: a forwarded pick never opens a peek here");
   assert.ok(guard < fn.indexOf("// Stash the leaving tab's draft"), "before the drafts swap: this page's box never changes hands for a session it does not show");
   // the boot memberships: a later column never adopts a non-member's frame, and a reload never re-activates a tab dragged away
-  assert.match(RENDER, /const adopted = !activeId && heldHere\(msg\.id\);/);
+  assert.match(RENDER, /const adopted = !activeId && !vanishedId && !wantActive && heldHere\(msg\.id\);/);   // …with T357\'s away and awaited gates beside the membership one
   assert.match(RENDER, /if \(wantActive && msg\.id === wantActive && heldHere\(msg\.id\)\) \{ wantActive = null; setActive\(msg\.id\); \}/);
   // …with the sets read fresh right there, not the last render's
   const up = RENDER.slice(RENDER.indexOf("function upsert(msg: any) {"), RENDER.indexOf("function update(msg: any) {"));

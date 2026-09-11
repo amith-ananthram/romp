@@ -287,5 +287,23 @@ class DropAfterQuiescentFold(unittest.TestCase):
         self.assertIn("Environment=MALLOC_ARENA_MAX=2", unit, "the service unit hands the allocator setting to the manager and its kernels")
 
 
+class RecordCacheDefaultBudget(unittest.TestCase):
+    """The budget shipped at 1 GiB (2026-09-11) and sat below a 50-session working set: every build re-read whole transcripts
+    (14.9 GB in 3.5 min, 132 s pusher cycles). The default is a quarter of the machine's memory, never under 4 GiB."""
+
+    def test_a_quarter_of_the_machine(self):
+        text = "MemTotal:       123634396 kB\nMemFree:        1 kB\n"
+        self.assertEqual(em._record_cache_default_budget_bytes(text), int(123634396 * 1024 * 0.25))
+
+    def test_never_under_four_gib(self):
+        self.assertEqual(em._record_cache_default_budget_bytes("MemTotal:  8000000 kB\n"), 4 * 1024 ** 3, "a quarter of 8 GB is under the floor")
+        self.assertEqual(em._record_cache_default_budget_bytes("garbage"), 4 * 1024 ** 3, "no MemTotal: the floor")
+
+    def test_the_environment_sets_it_outright(self):
+        src = open(em.__file__).read()
+        self.assertIn('int(float(os.environ["ROMP_RECORD_CACHE_BUDGET_MB"]) * 1024 * 1024)', src)
+        self.assertIn("else _record_cache_default_budget_bytes()", src, "the default is derived, not a literal")
+
+
 if __name__ == "__main__":
     unittest.main()

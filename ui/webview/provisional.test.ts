@@ -13,6 +13,7 @@ import { mintProvisionalId, isProvisionalId, provisionalName, adoptsProvisional,
   PROVISIONAL_PREFIX } from "./provisional";
 
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
+const PLACEHOLDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "pane-placeholder.ts"), "utf8");   // the empty pane's placeholder, by kind (T355)
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
 
 test("a provisional id carries NO colon — federation would read it as a host", () => {
@@ -140,8 +141,11 @@ test("a failed create says so in a dialog, in the kernel's own words — ON the 
   assert.ok(!fail.includes("= dropProvisional()"), "the tab is NOT torn down — it holds the text");
   assert.ok(fail.includes("failedProvisionals.add(id);"));
   // the failed tab's transcript says what happened (the starting loader would be a lie)…
-  assert.match(RENDER, /This session couldn't start\. What you typed is kept in the box below/);
-  assert.match(RENDER, /const staleStart = !!only && only\.classList\?\.contains\("tx-starting"\) && failedProvisionals\.has\(id\);/);
+  assert.match(PLACEHOLDER, /This session couldn't start\. What you typed is kept in the box below/);   // the placeholder by kind (pane-placeholder.ts, T355)
+  // …the starting loader gives way to it because the placeholder's KIND changed (starting → start-failed), the rule that
+  // replaced the stale-start special case: the failed create feeds the kind, and a kind change rebuilds
+  assert.match(RENDER, /provisional: isProvisionalId\(id\), provisionalFailed: failedProvisionals\.has\(id\) \}\);/);
+  assert.match(PLACEHOLDER, /if \(st\.provisional && st\.provisionalFailed\) return "start-failed";\s*\n\s*if \(st\.provisional\) return "starting";/);
   // …and its composer stays LIVE despite the closed-tab treatment, so the text is editable/copyable
   assert.match(RENDER, /const closed = s\.status\.state === "closed" && !failedProvisionals\.has\(activeId!\);/);
 });
@@ -166,9 +170,10 @@ test("the folder question retires the tab and holds what was typed for the retry
 });
 
 test("a starting tab shows the romp loader, not the 'No messages yet' placeholder", () => {
-  assert.match(RENDER, /\} else if \(isProvisionalId\(id\)\) \{\s*\n\s*ph\.classList\.add\("tx-starting"\);/);
+  assert.match(PLACEHOLDER, /case "starting": \{[\s\S]{0,400}?ph\.classList\.add\("tx-starting"\);/);   // the placeholder by kind (pane-placeholder.ts, T355)
   assert.match(RENDER, /romp-swirl-glyph\.svg/);
-  assert.match(RENDER, /"Starting " \+ s\.name \+ "… you can type now; romp sends it when it's up\."/);
+  assert.match(PLACEHOLDER, /"Starting " \+ ctx\.text\.sessionName \+ "… you can type now; romp sends it when it's up\."/);
+  assert.match(RENDER, /sessionName: s\.name \},/);
   assert.match(CSS, /\.tx-starting-swirl \{[\s\S]*?animation: tx-starting-spin/);
   assert.match(CSS, /prefers-reduced-motion: reduce\) \{ \.tx-starting-swirl \{ animation: none/);
   assert.doesNotMatch(CSS, /opening-dots/, "the bouncing-dots modal CSS went with it");

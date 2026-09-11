@@ -913,7 +913,7 @@ class Wiring(unittest.TestCase):
         # code converges in place with the kernel left up (_kernel_code_changed + _in_place_converge).
         # The copy names both routes. The route line is pinned too, so a change to the route flags
         # the copy for re-reading.
-        self.assertIn("if not _kernel_code_changed(_kernel_sha(), pulled) and _in_place_converge(pulled):",
+        self.assertIn("if not _kernel_code_changed(_kernel_sha(reask=True), pulled) and _in_place_converge(pulled):",
                       self.src)
         self.assertNotIn("quiet moment", self.gear,
                          "the gear still promises a quiet-window restart; since T269 every deploy restart "

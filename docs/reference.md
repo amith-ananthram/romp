@@ -1001,10 +1001,22 @@ sets as hashes, each file's witness and where its tail starts, and a hash over
 the pre-cut turn ids, segment ids and atom uuids. A fresh kernel verifies the
 document, rebuilds the pre-cut turns as atoms without bodies, reads the leaf
 from the cut's byte offset only and parses that tail, proves the prefix by the
-hash, and hands the judges and the display one tree. A body before the cut is
-read on demand from its record when a consumer asks for it, through a
-byte-capped memo; a consumer that reads one without asking fails loudly rather
-than seeing an empty message. A compaction after the document demotes to a
+hash, and hands the judges and the display one tree. Since the lazy index
+(2026-09-11, document version 4) the document also carries a `turns` section:
+each pre-cut turn as its identity, its atoms' row indexes, its segments' spans
+and the scalars the kernel's walkers read (the atoms' uuids, the last and
+latest times, the last model, the tool calls), so a restore builds the turns
+without building an atom. The pre-cut rows stay as bytes; a turn's atoms are
+a list whose slots are built one at a time when a consumer reaches for them,
+through a process-wide LRU of 20000 built atoms across every session (eviction
+drops the memo; a consumer's own reference stays whole), counted per consumer
+under `/perf` `asmIndex`. A body before the cut is read on demand from its
+record when a consumer asks for it, through a byte-capped memo; a consumer
+that reads one without asking fails loudly rather than seeing an empty
+message, and a serializer reaching a pre-cut turn's atoms is refused (a dump
+goes through `plain_tree`). A document written without the parsed tree (the
+exit path past its budget) carries no `turns` section and restores the atoms
+as before, until the next settle rewrites it with one. A compaction after the document demotes to a
 whole parse as before, and the next settle writes a new document; a rewrite
 under the cut's guard, a shrunk or moved file, another session, other inputs,
 a wrong version, a corrupt or unprovable document, or a document past 16 MB
@@ -1390,6 +1402,11 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `reconstruction`, `oversize`, `unencodable`, `offsets`, `stat`, `write`),
   `hydratedAtoms` and `hydratedBytes` (bodies read on demand for atoms before
   a cut) and `hydratedBy` (those bytes per calling function).
+- `asmIndex`: the lazy index (T323 stage 4c) a restored session's pre-cut turns
+  come from: `materialized` atoms built from the document's rows since boot,
+  `materializedBy` (per consumer), `resident` (the process-wide LRU, `cap`
+  20000 atoms across every session; eviction drops the memo, never a field in
+  place), `evictions`, and `restoredTurns`.
 - `skillLoadIndex`: the judge's skill-load boot pass (the tops older stores minted from
   the harness's own skill load): `filesRead` and `bytesRead` (transcripts read raw this
   boot, appended tails only once the persisted index holds a file), `filesIndexed`, and
@@ -1662,6 +1679,104 @@ lazy atoms (a page hydrates its own turns), memoized in a bounded cache
 `key` unique within its list (the uuid, or `uuid#n` for a second event built
 from one record); the notes romp adds (a retry recovered, an effort change, an
 orphan reply) carry synthetic uuids keyed by their second and ordinal.
+
+## The file preview popover
+
+Hovering a local file link in the chat (or focusing it from the keyboard) pops up
+a card with the rendered head of the file, or the section a `path#slug` link
+names, after a short dwell; it closes when the pointer leaves (with a grace to
+cross into the card), on Escape, on a scroll, on a click elsewhere and at every
+tab-strip rebuild. The card is the comment popover's card (its surface and its
+fractions of the pane) and is never draggable or resizable; the romp loader shows
+first and the text replaces it the moment it lands. "open" opens the full file
+viewer, scrolled to the section.
+
+**What a hover may fetch.** A hover is a gesture the user did not choose, so the
+popover is stricter than the viewer (whose own rule, that any path the agent
+named opens, is untouched). The kernel decides per link when it builds the
+message and ships the verdict as `pathPreview` beside `pathLinks`, a map from
+the message's token to the kind it may show: `markdown`, `image`, `code` or
+`pdf`. Every judgement is of the **real** path (a symlink is what it points at,
+and a link whose own name claims another kind than its target is refused; a hard
+link is another name for the same bytes and no path check can see its other
+names, so a `notes.md` hard-linked onto a `.env` passes the name rules and is
+caught only by the content belt below). A
+link absent from the map gets the text-only card (the path as words plus "open")
+and **no request**: a path outside the session's folder and the user's home, one
+the kernel could not verify, a secrets-shaped name (the `.env` family, `.netrc`,
+`.npmrc`, `.pypirc`, any name carrying `credential`, `token`, `secret` or
+`password`, `id_*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, key stores, and any file
+under `.ssh`, `.gnupg`, `.aws`, `.docker`, `.kube`, `.azure`, `.gcloud`,
+`.config/gh` or `.config/gcloud` in the home, matched without regard to case), a
+kind the card cannot show, or a file over the caps (2 MB of text, 50 MB of
+media). Under the name rules sits a content belt: a text shaped like a
+credential (a private-key block, a key or token assignment, a provider token, a
+JWT) is refused with "looks like a secret". The belt reads the file's first
+64 KB at load (so at warm time): a hit there means the file is never cached and
+the link ships without a preview kind. It reads the served slice again on the
+route: a secret past the first 64 KB passes the load-time read, so that file's
+whole text does sit in the slice cache until eviction, and what the belt
+refuses then is every slice that carries the secret (the section itself, or a
+head long enough to reach it); a slice that does not carry it is served.
+
+**The slice route.** `GET /file?path=…&sid=…&slice=1[&anchor=slug]` answers JSON
+for a text kind: `kind`, `title` (the file's name), `text` (the file's head, or
+the section from the heading whose slug matches through the line before the next
+heading of the same or a higher level; capped at 64 KB, `truncated` when cut),
+`found` (false when the anchor names no heading: the head is served and the card
+says so in one line), `heading` (the section's own: level, text, slug, line),
+`size`, `mtimeNs`, `hit` (the slice came from the cache); the heading index
+stays on the kernel's side. The card stamps `data-render-ms` (the dwell's end to
+its rendered content) and `data-slice-hit` on itself, so the served test reads
+the latency off the card and pins the cached markdown case under 250 ms. For an image or
+a PDF the same route answers the metadata only; the bytes ride the plain route.
+A path the popover may not render answers 403 with `why` (the content belt
+included); a text kind whose bytes are not text answers 415. Heading
+slugs follow GitHub's rule, the same one the file viewer gives its headings
+(`md-links.ts`), duplicates numbered `-1`, `-2`; the two ports are pinned over
+`tests/fixtures/heading_slugs.json`.
+
+**Near-instant.** The kernel keeps the text of recently linked markdown and code
+files with their heading index, keyed on the path and its `mtime_ns` (a rewrite
+is a new entry and the old one goes), bounded to 64 entries and 8 MB, least
+recently read out first. The cache is warmed on the pusher's path: when the
+message builder verifies a markdown link in a message about to ship, the file is
+read and indexed then, so the hover's fetch is a hit. Never on a timer, never a
+watcher: the events are the message build and the hover. `GET /perf` reports the
+route under `fileSlice`: `hit`, `miss`, `bytes` served and `warm` (entries the
+builder filled ahead of a hover).
+
+**The content contract** (`ui/webview/file-preview.ts PreviewContent`). The card
+renders one shape whoever fills it, so another provider can land its answer in
+the same card:
+
+```
+{ kind: "markdown" | "section" | "image" | "code" | "pdf" | "text" | "term",
+  title: string, subtitle?: string,
+  body: { markdown?: string, html?: string, text?: string, url?: string, lang?: string },
+  note?: string,
+  open?: { label: string, path: string, frag?: string } }
+```
+
+Stage 1 fills it from the slice route (`markdown`, `section`, `code`) and the
+bytes route (`image` at its natural size capped to the card, `pdf` as its first
+page), or with the text-only card. A previewed document renders on the
+sanitizer's inert DOM and is stripped of every remote load there, before its
+nodes join the page: an image's `src` or `srcset`, a picture's sources, a video's
+poster or source, an audio, an SVG image, in any spelling the URL parser
+resolves to another origin (a protocol-relative `//host`, backslashes, a tab or
+newline anywhere in the value, which the browser deletes before it reads the
+URL). An image becomes its alt text and the rest go, so a hover never sends a
+request elsewhere; a previewed document's images load only from this kernel
+(the file route, a relative path, a data: URI). The card closes when the link it
+is anchored to leaves the document (a re-render, a tab pick), not on the tab
+strip's rebuilds. The markdown grammar renders `[[wikilinks]]`
+as their plain text and callout blockquotes (`> [!NOTE] …`) as blockquotes with
+the kind as a small label, in the chat and in the viewer alike. Pending the lab
+team's glossary format: a per-project glossary file whose headings (and their
+aliases) are linkified in assistant text, mail bodies and cards at render time,
+and a `GET /glossary/<term>` route answering `{title, markdown, source_path,
+anchor}` that fills the `term` kind of the same card.
 
 ## Browser-side performance telemetry
 
@@ -2504,6 +2619,40 @@ carry and restart metrics count. The crossing is the event: nothing repeats
 while the rate stays high. Once the rate falls under half the ceiling a
 `spend.ceiling.cleared` row and a toast say so, and the guard is armed again.
 
+## The spend ledger across a host re-attach
+
+A session under a host keeps its CLI process across a kernel restart, and the
+CLI's `total_cost_usd` is cumulative per process. The kernel folds only each
+result's delta over a watermark, so every result persists that watermark on the
+session's registry row (`costState`: the cumulative total, the token
+watermarks, and the CLI's identity as pid and start time). A kernel that
+attaches to a surviving host reads it at the first result and, when it names
+that same CLI, seeds the watermarks from it, so the first result records only
+its own turn; a fresh process still starts at zero and records its whole first
+total. A surviving process with no matching watermark on record (a kernel
+before this rule wrote none) records nothing for that first result, since its
+total is the lifetime's and the turn's share is unknowable; the kernel log says
+so, and the watermark is written from there. The replay of a dead host's
+journal tail seeds the same way for the dead CLI before it drains. A result the
+attach's replay hands over again folds nothing, whatever its total, decided
+from the record's own journal position: the transport tags each result record
+with its offset as it reads it, the kernel pops one tag for every result record
+it receives, first thing and whatever the result holds (the SDK's buffered
+reader runs a record ahead, so the transport's current offset is never the
+handled record's), and a record before the offset the host's hello named as its
+next is a replay; a dead host's journal replays through the same road, the
+replay reader being the session's transport for the drain; its turn row says `redelivered` and carries
+`journalOffset`. A live total below the watermark is a counter reset the kernel
+did not see and folds whole, as before. An orphan journal's replay keeps the
+dead CLI's watermark as its line: at or below it was folded, above it was not. The attach flag lives
+one connect, so a rollback to hosts off records a fresh child's first turn in
+full, and a `/clear` as the first turn after an attach retires the pending seed
+so the zeroed counter stands. Each `turns.jsonl` row carries
+`cumulativeUsd`, the CLI's own total at that result, and a first result's
+`spendBaseline` (`fresh`, `seeded` or `attach-unknown`). Before this rule every
+restart re-billed each hosted session's lifetime as one turn (2026-09-11: a
+staircase of rows from $436 to $953 on one session across 21 restarts).
+
 ## Restart metrics
 
 `romp restart-metrics` reads what kernel restarts do to the sessions, from the
@@ -2565,6 +2714,50 @@ output directory outside your state root, because real session names are
 private and must not reach a repository, an issue or a pull request; `--named`
 shows them, and inside your own state root they show by default. Without
 cleanplots the script says so and draws nothing.
+
+## Repairing the spend ledger
+
+`romp spend-repair [--day D] [--since INSTANT] [--apply]` recomputes a day's
+`spend.json` hour and day buckets, their per-session rows and `turns.jsonl`
+dollars after the re-attach re-bill (the section above on the ledger across a
+host re-attach: before the fix, every kernel restart recorded each hosted
+session's whole CLI lifetime as one turn, a staircase of rows on each session).
+It reads the turn rows and the restart instants (each boot row of
+`restart-cuts.jsonl` gives its `firstServe`, the epoch the new kernel began
+serving; the row's own `t` is the settle, which can lag the first serve by
+minutes; nothing else is an instant: a restart request in the audit ledger is
+most often a parked one that no restart followed, and the dying kernel records
+results for seconds after both a request and its own cut row) and judges each
+session's first result strictly after a restart, a result at the first-serve
+second being the old kernel's:
+it is that process's cumulative when it stands at or above the previous
+cumulative plus the rows recorded between (a process's total grows by at least
+what its own rows recorded; a figure below that is a fresh process's first turn
+and stands), and its true cost is the cumulative less the previous cumulative
+less those rows. The day's first cumulative row counts as a typical turn (the
+median of the session's rows that follow no restart) and only when a staircase
+follows it. A row bearing the signature with no restart instant on record (a
+crash leaves no audit row) is taken as a step only on a chain the session has
+already shown. `--since` is the instant the per-session hosts came on: before
+it every restart killed the CLI, so nothing there is a step. Rows the fixed
+kernel writes (`cumulativeUsd`, `spendBaseline`) are never touched.
+
+It prints before and after per hour and per session and changes nothing unless
+`--apply` is given. A corrected row keeps the kernel's figure as `usdRecorded`,
+and every run judges a repaired row again on that figure, so a tightened rule
+or a later `--since` restores what an earlier run took, and a run over a
+repaired day changes nothing. Per-session figures fold under the session a row
+bills (a comment thread's owner, the registry's `threadOf`), and the buckets'
+`key` split moves only for sessions the registry marks as API-key billed; the
+report says how many rows' split was left as recorded. The kernel may be
+running: `--apply` copies both files beside themselves first
+(`spend.json.bak-<stamp>`, `turns.jsonl.bak-<stamp>`), rewrites `turns.jsonl`
+first carrying every row appended since its read, journals the rows' deltas
+(`spend-repair.jsonl`), then reads `spend.json` again and folds the deltas on
+what is there; a run that fails between the two writes leaves its deltas
+journaled and the next run folds them first. A standing correction of a day's
+first cumulative row is kept as it was made, so the day's later rows never
+rewrite it.
 
 ## Switches
 

@@ -46,15 +46,18 @@ rows = [{"sid": sid, "name": "worker", "path": os.path.join(proj, sid + ".jsonl"
 km._sessions = lambda now, **kw: list(rows)
 km._tmux_sessions = lambda: {}
 r0 = rss(); modes = []
+trees = {}                                                          # the boot's trees, for the documents' turns sections (stage 4c)
+import inspect
+_tree_arg = hasattr(em, "asm_checkpoint_write") and "tree" in inspect.signature(em.asm_checkpoint_write).parameters   # main before 4c: no tree=
 for sid in sids:                                                    # the boot: the judges' parse and the folds (as bench_asm_checkpoint)
     leaf = os.path.join(proj, sid + ".jsonl"); m = []
-    jd.parsed_session(sid, [leaf], now, asm_mode_out=m); modes += m
+    trees[sid] = jd.parsed_session(sid, [leaf], now, asm_mode_out=m); modes += m
     km._bg_scan_cached(leaf); km._bg_scan_all_cached(leaf); km._session_meta(leaf); km._agent_launch_state(leaf)
 r_boot = rss(); read_boot = read_total()
 if phase == "first" and hasattr(em, "asm_checkpoint_write"):
     if hasattr(em, "checkpoint_write_dirty"): em.checkpoint_write_dirty()
     for sid in sids:
-        em.asm_checkpoint_write(os.path.join(proj, sid + ".jsonl"), sid, bool(jd._sdk_owned(sid)))
+        em.asm_checkpoint_write(os.path.join(proj, sid + ".jsonl"), sid, bool(jd._sdk_owned(sid)), **({"tree": trees.get(sid)} if _tree_arg else {}))
 if hasattr(km, "_live_scope") and hasattr(km, "_RENDER_FLOOR"):
     km._live_scope.chat_floor0 = False                              # the pusher's decision: no proto-1 client connected
 ms, events, floors = [], 0, []

@@ -40,6 +40,9 @@ class _FakeCodex:
     def owns(self, sid):
         return sid == SID
 
+    def has_record(self, sid):
+        return sid == SID
+
     def echo(self, text, t):
         # the Codex backend's live_atoms shape, field for field
         self.echoes.append({"type": "user", "uuid": "echo-%d" % len(self.echoes), "session_id": SID, "fsid": "thread-1",

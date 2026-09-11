@@ -17,6 +17,7 @@
 import { Marked, type MarkedExtension } from "marked";
 import { mathBlock, mathInline, renderMathPlaceholders } from "./math";
 import { registerMdPostPass } from "./md-sanitize";
+import { mdWikiExtensions } from "./md-wiki";   // [[wikilinks]] as text, callouts as labelled blockquotes (T351)
 
 // Strikethrough requires DOUBLE tildes (the user 2026-06-26). marked's built-in GFM `del` tokenizer also
 // fires on a SINGLE tilde, so prose like "near the ~21 Wh/day budget … gives ~1.5–2 days" renders as one big
@@ -41,7 +42,7 @@ export const delDoubleTilde = {
 // and userMd(); the viewer's mdBlock when it runs inside the chat page, whose marked singleton render.ts
 // arms with these extensions), and a bundle that never imports this module (feed.js) has neither the
 // grammar nor KaTeX.
-export const chatMdExtensions: MarkedExtension[] = [delDoubleTilde, { extensions: [mathBlock, mathInline] }];
+export const chatMdExtensions: MarkedExtension[] = [delDoubleTilde, { extensions: [mathBlock, mathInline] }, ...mdWikiExtensions];
 registerMdPostPass(renderMathPlaceholders);
 
 // The user-text instance: the chat grammar with hard line breaks. Its own `Marked` so the singleton's

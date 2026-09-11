@@ -11,6 +11,7 @@ When the SDK is not importable the class still exists, duck-typed, so the pure p
 """
 from __future__ import annotations
 import asyncio
+import collections
 import json
 import os
 import re
@@ -195,6 +196,11 @@ class HostTransport(_Base):
         self.sock_path = str(sock_path) if sock_path else None
         self.kernel = dict(kernel or {})
         self.ack_offset = int(ack)
+        self.replay_end = None          # the journal's next offset at the attach (the hello's journal.next): records before
+        #                                 it are the replay, records from it on are live (T354's spend fold)
+        self.result_tags = collections.deque()   # one tag per RESULT record handed over, in order: {"offset", "replay"};
+        #                                 the consumer reads the transport through a buffered stream a record ahead, so the
+        #                                 transport's current offset is never the handled record's; the tag is
         self.end_grace = float(end_grace)
         self.on_ack, self.on_hello, self.on_stderr, self.on_exit, self.on_fault = on_ack, on_hello, on_stderr, on_exit, on_fault
         self.journal_dir = str(journal_dir) if journal_dir else None
@@ -243,6 +249,10 @@ class HostTransport(_Base):
                 else:
                     self._early.append(f)
         self.hello = hello
+        try:
+            self.replay_end = int(((hello or {}).get("journal") or {}).get("next"))
+        except (TypeError, ValueError):
+            self.replay_end = None
         self._fr = fr
         self._ready = True
         if self.on_hello:
@@ -371,7 +381,23 @@ class HostTransport(_Base):
 
     def _take(self, out: dict):
         self._advance(out)
+        self._tag(out.get("offset"), out["data"])
         return out["data"]
+
+    def _tag(self, offset, data, replay=None) -> None:
+        """A RESULT record's own offset, queued for the spend fold (T354): the consumer pops one per result it handles,
+        in order, so it reads the record's position, never the transport's current offset (a buffered reader runs a
+        record ahead). `replay` is decided against the hello's journal.next unless the caller knows (an orphan journal
+        replays only)."""
+        if not isinstance(data, dict) or data.get("type") != "result":
+            return
+        try:
+            off = int(offset)
+        except (TypeError, ValueError):
+            off = -1
+        if replay is None:
+            replay = self.replay_end is not None and off < self.replay_end
+        self.result_tags.append({"offset": off, "replay": bool(replay)})
 
     def _answers_mine(self, data) -> bool:
         if not isinstance(data, dict) or data.get("type") != "control_response":
@@ -462,6 +488,7 @@ class HostTransport(_Base):
             self.ack_offset = off
             if self.on_ack:
                 self.on_ack(off)
+            self._tag(off, rec, replay=True)             # an orphan journal's records are all replays
             yield rec
             # answers the Query asked for meanwhile ride between records
             while not self._synth.empty():

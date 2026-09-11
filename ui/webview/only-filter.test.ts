@@ -82,7 +82,9 @@ test("a filtered view re-points the CHAT BODY, not just the tab bar", () => {
   // the deferred bounce re-validates at FIRE time since the ephemeral peek (2026-08-24): an
   // activation between schedule and fire (a feed click opening a peek) makes the active tab
   // visible again — bouncing then would kick the user off the tab they just opened
-  assert.match(RENDER, /setTimeout\(\(\) => \{ if \(activeId !== next && activeId && !tabInView\(activeId\)\) setActive\(next\); \}, 0\);/);
+  // (T357: the fallback no longer re-points the pane at another session; it goes UNFOCUSED naming the tab the view
+  // hides, which still takes the hidden transcript off screen, and comes back to it when the view shows it again)
+  assert.match(RENDER, /setTimeout\(\(\) => \{ if \(activeId !== next && activeId && !tabInView\(activeId\)\) unfocusHiddenByView\(activeId\); \}, 0\);/);
 });
 
 test("feed cards filter by the #only tag; clear bookkeeping still uses the FULL payload", () => {

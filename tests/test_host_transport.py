@@ -477,7 +477,8 @@ class BackendHostRules(unittest.TestCase):
         Path(d, "session-hosts").write_text("off")
         sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "alive": True, "lastSid": SID})
         sb.write_lease(d, {"sid": SID, "fsid": SID, "pid": 999999997, "start": "1", "holder": {"pid": 999999996, "start": "2", "kind": "host"}, "version": "", "t": time.time()})
-        s = types.SimpleNamespace(sid=SID, name="web", _host_intent=True, _host=None, _host_is_attach=False)
+        s = types.SimpleNamespace(sid=SID, name="web", _host_intent=True, _host=None, _host_is_attach=False,
+                                _seed_for_dead_cli=lambda cli: None)   # the replay's watermark seed (T354): a no-op on this stand-in
         with mock.patch.object(sb, "proc_start", lambda p, run=None: None):
             out = asyncio.run(be._host_transport_for(s, types.SimpleNamespace(), (None, None, None)))
         self.assertIsNone(out, "the kill switch holds after the orphan road: a plain SDK subprocess, no new host")
@@ -519,7 +520,8 @@ class BackendHostRules(unittest.TestCase):
         sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "alive": True, "lastSid": SID,
                                      "hostAck": {"host": "5:h", "cli": "6:c", "offset": 0}, "hostLogPos": 3})
         hd = self._leftover(d, "5:h", records=3)
-        s = types.SimpleNamespace(sid=SID, name="web", _host_intent=True, _host=None, _host_is_attach=False)
+        s = types.SimpleNamespace(sid=SID, name="web", _host_intent=True, _host=None, _host_is_attach=False,
+                                _seed_for_dead_cli=lambda cli: None)   # the replay's watermark seed (T354): a no-op on this stand-in
         self.assertTrue(be._host_lease_applies(s), "a leftover directory is a host that held this session: the road runs whatever the setting")
         acks, drained = [], []
         async def drain(sess, client, msg_classes): drained.append(client.transport)
@@ -543,7 +545,8 @@ class BackendHostRules(unittest.TestCase):
         sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "alive": True, "lastSid": SID,
                                      "hostAck": {"host": "5:h", "cli": "6:c", "offset": 2}})
         hd = self._leftover(d, "5:h", records=3)          # offsets 0..2, all acknowledged
-        s = types.SimpleNamespace(sid=SID, name="web", _host_intent=True, _host=None, _host_is_attach=False)
+        s = types.SimpleNamespace(sid=SID, name="web", _host_intent=True, _host=None, _host_is_attach=False,
+                                _seed_for_dead_cli=lambda cli: None)   # the replay's watermark seed (T354): a no-op on this stand-in
         with mock.patch.dict(sys.modules, {"claude_agent_sdk": self._sdk_stub()}), \
              mock.patch.object(be, "_replay_drain", mock.AsyncMock()):
             asyncio.run(be._host_orphan_recover(s, types.SimpleNamespace(), None, (None, None, None), died=False))
@@ -562,7 +565,9 @@ class BackendHostRules(unittest.TestCase):
         sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "alive": True, "lastSid": SID,
                                      "hostAck": {"host": "1:a", "cli": "2:c", "offset": 1}})
         self._leftover(d, "9:b", records=3)
-        s = types.SimpleNamespace(sid=SID, name="web", _host_intent=True, _host=None, _host_is_attach=False)
+        seeds = []
+        s = types.SimpleNamespace(sid=SID, name="web", _host_intent=True, _host=None, _host_is_attach=False,
+                                _seed_for_dead_cli=seeds.append)   # the replay's watermark seed (T354): recorded here
         acks = []
         capture = classmethod(lambda cls, hdir, ack=-1, **kw: acks.append(ack) or types.SimpleNamespace(hdir=hdir))
         with mock.patch.dict(sys.modules, {"claude_agent_sdk": self._sdk_stub()}), \
@@ -576,6 +581,7 @@ class BackendHostRules(unittest.TestCase):
              mock.patch.object(ht.HostTransport, "from_journal", capture), mock.patch.object(be, "_replay_drain", mock.AsyncMock()):
             asyncio.run(be._host_orphan_recover(s, types.SimpleNamespace(), None, (None, None, None), died=False))
         self.assertEqual(acks, [-1, 1], "this host's ack: the replay starts past it")
+        self.assertEqual(seeds, ["", "2:c"], "the watermark seed runs before each replay (T354 M7), the CLI named by hostAck only when the ack is this host's")
 
     def test_a_host_this_kernel_ended_gets_a_bounded_wait_for_its_lease_and_no_host_died_row(self):
         # item 6: the behaviour, not the bookkeeping: an `end` this kernel asked for races the reconnect; the stale
@@ -585,7 +591,8 @@ class BackendHostRules(unittest.TestCase):
         sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "alive": True, "lastSid": SID})
         sb.write_lease(d, {"sid": SID, "fsid": SID, "pid": 999999997, "start": "1", "holder": {"pid": 999999996, "start": "2", "kind": "host"}, "version": "", "t": time.time()})
         be._host_recently_ended[SID] = "999999996:2"
-        s = types.SimpleNamespace(sid=SID, name="web", _host_intent=True, _host=None, _host_is_attach=False)
+        s = types.SimpleNamespace(sid=SID, name="web", _host_intent=True, _host=None, _host_is_attach=False,
+                                _seed_for_dead_cli=lambda cli: None)   # the replay's watermark seed (T354): a no-op on this stand-in
         import threading
         remover = threading.Timer(0.4, lambda: sb.remove_lease(d, SID)); remover.start()
         try:

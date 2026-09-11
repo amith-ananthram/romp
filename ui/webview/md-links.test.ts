@@ -205,3 +205,14 @@ test("uniqueSlugs is amortised linear: 20,000 identical headings dedupe in well 
   assert.deepEqual(mixed, ["setup", "setup-2", "setup-1", "setup-3", "setup-4", "setup-5", "setup-6"]);
   assert.equal(new Set(mixed).size, mixed.length);
 });
+
+// T351: the slug rule is shared with the kernel (kernel.py _heading_slug / _unique_slugs), which slices a `path#slug`
+// link's section for the chat's file preview; the fixture pins both sides so the section the kernel slices is the
+// heading the viewer lands on (tests/test_file_slice.py runs the same fixture through the Python port).
+import * as fs from "node:fs";
+import * as path from "node:path";
+test("headingSlug and uniqueSlugs agree with the kernel's port over the shared fixture", () => {
+  const fx = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), "..", "tests", "fixtures", "heading_slugs.json"), "utf8"));
+  for (const [text, slug] of fx.slugs as [string, string][]) assert.equal(headingSlug(text), slug, JSON.stringify(text));
+  for (const [inp, out] of fx.unique as [string[], string[]][]) assert.deepEqual(uniqueSlugs(inp), out, JSON.stringify(inp));
+});

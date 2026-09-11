@@ -410,6 +410,34 @@ a subproject that became its own repository, right-click its tab and choose
 name, mail and history stay with the session, and from the next turn on the
 agent works in the new folder and reads its `CLAUDE.md`.
 
+The chat pane never jumps to another session on its own. If the tab you are
+on disappears (a kernel restart that hides a remote host's sessions until the
+host reconnects, a relay down, a session that ended), the pane goes blank: no
+tab is selected, the body names the session that vanished (and says it is
+reconnecting when that is known), and the message box is disabled with no
+session name in it. When that same session's tab returns, the pane goes back
+to it. After a kernel restart the page reloads and remembers the tab you were
+on: until that session is listed again the pane stays blank and names it as not
+listed yet, and it never settles on another session meanwhile; if it never
+returns, the blank body stays until you pick a tab. A tab view that stops
+showing your session (a tag removed) blanks the pane the same way and comes back
+to it when the view shows it again. From the blank pane an arrow key or Next Tab
+lands on the first visible tab. Focus moves to a different session only when
+you pick a tab, or when you close the active tab yourself (then the pane returns
+to the tab you used before it).
+
+A comment thread's mail is off, both directions, until you break it out: peers
+cannot see or mail the thread, and its own mail is refused with a line saying
+so. The comment box itself says nothing about it (the tab hover's Mail row and
+the Sessions pane show the state), except a count when messages are actually
+held for the thread; they land within seconds of a break-out. The moment you
+break the thread out it is a session like any other, mail on unless you toggle
+its mailbox off (the user 2026-09-11, after a thread received a manager's mail
+and acted as the manager). Only peer mail is gated: what you type into the thread's
+box yourself, and plain text the kernel's own send route carries, is yours and
+still goes through; that is the human channel, by design, not a hole in the
+gate.
+
 A session started from another one joins its tags. Forking a session, breaking
 a comment thread out into its own session, and running `romp new` inside a
 session's shell all put the new session in the parent's groups, so a session's

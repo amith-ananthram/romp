@@ -32,7 +32,7 @@ test("a relative path click carries the active session id so whoever resolves it
   // picks the host (VS Code editor vs the feed pane's viewer) — see the openPath test below. render.ts
   // reads the span's data and binds the click (bindPathLink).
   assert.match(RENDER, /const open = a\.dataset\.path \|\| "", relative = a\.dataset\.rel === "1";/);
-  assert.match(RENDER, /openPath\(open, relative \? activeId : null, e\);/);   // + the click itself: a modified click on a PDF takes a browser tab (pdf-new-tab.test.ts)
+  assert.match(RENDER, /openPath\(open, relative \? activeId : null, e, a\.dataset\.frag \|\| null\);/);   // + the click itself: a modified click on a PDF takes a browser tab (pdf-new-tab.test.ts)
 });
 
 test("the cheap pre-filter keys on a slash — or, inside inline code, a dot", () => {

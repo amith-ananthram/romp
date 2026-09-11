@@ -110,6 +110,11 @@ const { chromium } = require('playwright');
   await pg.waitForFunction(() => document.querySelector('#rsp-panel [data-act="range:days"]').classList.contains('on')
     && document.querySelector('#rsp-panel [data-act="measure:tok"]').classList.contains('on'), null, { timeout: 5000 });
   const days = await pg.evaluate(() => ({
+    // T353: the session list follows the chart's range, so the FULL list (every session with spend in 90 days) is
+    // read here, with its pane's scroll: the seven days shown at open list only the sessions with hourly spend
+    rows: Array.from(document.querySelectorAll('#rsp-panel .rsp-tbl tbody tr')).map((tr) => tr.textContent),
+    deadRows: document.querySelectorAll('#rsp-panel .rsp-tbl tbody tr.rsp-dead').length,
+    pane: (() => { const p = document.getElementById('rsp-table'); const panel = document.getElementById('rsp-panel'); return { scrolls: !!p && p.scrollHeight > p.clientHeight + 4, h: p ? p.clientHeight : null, panelScrolls: panel.scrollHeight > panel.clientHeight + 2 }; })(),
     segs: document.querySelectorAll('#rsp-chart .rsp-seg').length,
     ylabels: Array.from(document.querySelectorAll('#rsp-chart .ru-tip-gy')).map((e) => e.textContent),
     xlabels: Array.from(document.querySelectorAll('#rsp-chart .ru-tip-gx span')).map((e) => e.textContent),

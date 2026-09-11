@@ -91,7 +91,9 @@ test("render.ts wires the three rules, tracks the pending needFull reason, hides
   assert.ok(more.includes("const am = afterMore(!!msg.more, !!s.headKnown, s.events.length);"), "chatMore decides through the rule");
   assert.ok(more.includes("if (msg.id === activeId && s.detached) window.requestAnimationFrame(() => edgeCheckAfterWindow(msg.id));"), "…and a still-detached run re-checks its edge after the page painted");
   const active = RENDER.slice(RENDER.indexOf("function setActive(id: string"), RENDER.indexOf("\n}\n", RENDER.indexOf("function setActive(id: string")));
-  assert.ok(active.includes("activeId = id;\n  updateLivePaused();"), "a tab switch re-evaluates the strip for the entering tab");
+  // (T357: the unfocused state's clear sits between the two lines; the re-evaluation still follows the activation)
+  const actAt = active.indexOf("activeId = id;\n  vanishedId = null;"), pausedAt = active.indexOf("updateLivePaused();");
+  assert.ok(actAt >= 0 && pausedAt > actAt && pausedAt - actAt < 200, "a tab switch re-evaluates the strip for the entering tab");
   assert.ok(RENDER.includes('turn.dataset.orphanOf = String((ev as { orphanOf?: string }).orphanOf)'), "an orphan note's turn carries its record uuid");
   assert.equal((RENDER.match(/\.turn\[data-orphan-of="\$\{cssEscape\(uuid\)\}"\]/g) || []).length, 2, "…and both anchor lookups read it");
   assert.ok(RENDER.includes("(e as { orphanOf?: string }).orphanOf === uuid"), "…as does the events-list search behind them");

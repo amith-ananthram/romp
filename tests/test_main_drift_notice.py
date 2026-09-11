@@ -534,24 +534,27 @@ class ConvergeWaitsSpareOnlyCuts(unittest.TestCase):
         import io
         self.saved = (km._update_mode, km._origin_main_sha, km._checkout_sha, km._kernel_sha, km._run_main_update,
                       km._deploy_would_cut, km._parked_quiet_deploy, km._kernel_code_changed,
-                      km._LAST_AUTO_CONVERGE[0], km._MAIN_DRIFT[0], km._MAIN_DRIFT[1], km._QUIET_PARKED_LOGGED[0])
+                      km._LAST_AUTO_CONVERGE[0], km._MAIN_DRIFT[0], km._MAIN_DRIFT[1], km._QUIET_PARKED_LOGGED[0],
+                      km._CONVERGE_CRASH_T[0])
         self.ran = []
         km._update_mode = lambda: "auto"
         km._checkout_sha = lambda: "aaa"
         km._kernel_sha = lambda: "aaa"
         km._origin_main_sha = lambda: "bbb"
-        km._run_main_update = lambda kind, immediate=False, target="": self.ran.append(kind)
+        km._run_main_update = lambda kind, immediate=False, target="": (self.ran.append(kind), True)[1]   # ran and succeeded
         km._parked_quiet_deploy = lambda checkout, now=None: 0
         km._kernel_code_changed = lambda running, target: True
         km._MAIN_DRIFT[0] = km._MAIN_DRIFT[1] = ""
         km._QUIET_PARKED_LOGGED[0] = ""
         km._LAST_AUTO_CONVERGE[0] = 0.0
+        km._CONVERGE_CRASH_T[0] = 0.0
         self.err = io.StringIO()
 
     def tearDown(self):
         (km._update_mode, km._origin_main_sha, km._checkout_sha, km._kernel_sha, km._run_main_update,
          km._deploy_would_cut, km._parked_quiet_deploy, km._kernel_code_changed) = self.saved[:8]
-        km._LAST_AUTO_CONVERGE[0], km._MAIN_DRIFT[0], km._MAIN_DRIFT[1], km._QUIET_PARKED_LOGGED[0] = self.saved[8:]
+        (km._LAST_AUTO_CONVERGE[0], km._MAIN_DRIFT[0], km._MAIN_DRIFT[1], km._QUIET_PARKED_LOGGED[0],
+         km._CONVERGE_CRASH_T[0]) = self.saved[8:]     # the crash stamp restored too (the follow-up review)
         if km.RESTART_CUTS_FILE.exists():
             km.RESTART_CUTS_FILE.unlink()
 
@@ -674,8 +677,77 @@ class ConvergeWaitsSpareOnlyCuts(unittest.TestCase):
             self._pass()
         self.assertEqual(km._MAIN_DRIFT[0], "", "the latch is reset on the way out, so the next pass judges afresh")
         km._deploy_would_cut = lambda: []
+        km._CONVERGE_CRASH_T[0] = 0.0                    # the crash hold is its own test below
         self._pass()
         self.assertEqual(self.ran, ["pull"])
+
+    def test_a_crash_in_the_converge_leg_holds_one_cool_down_before_the_retry(self):
+        # the round-three review's low a: the spares branch waived the cool-down the crash had just stamped, so a
+        # crashing leg retried every pass on a hosted box
+        def boom():
+            raise RuntimeError("boom")
+        km._deploy_would_cut = boom
+        with self.assertRaises(RuntimeError):
+            self._pass()
+        self.assertGreater(km._CONVERGE_CRASH_T[0], 0.0, "the crash is stamped")
+        km._deploy_would_cut = lambda: []                # a restart would cut nothing: the spares branch would converge
+        self._pass(); self._pass()
+        self.assertEqual(self.ran, [], "held: one cool-down after a crash, whatever a restart would cut")
+        held = [l for l in self._lines() if "the converge leg crashed" in l]
+        self.assertEqual(len(held), 2, "said on every held pass: %r" % self._lines())
+        self.assertIn("holding ", held[0]); self.assertIn(" s more of one cool-down before the retry", held[0])
+        self.assertEqual(km._MAIN_DRIFT[0], "", "no target latched while held")
+        km._CONVERGE_CRASH_T[0] = time.time() - km._CONVERGE_COOLDOWN_S - 1
+        self._pass()
+        self.assertEqual(self.ran, ["pull"], "the cool-down over, the retry converges")
+        self.assertEqual(km._CONVERGE_CRASH_T[0], 0.0, "a converge that ran clears the crash hold (the follow-up review)")
+
+    def test_a_refused_converge_leaves_the_crash_stamp_standing(self):
+        # the second round of the follow-up review: the clear keyed on _run_main_update having RETURNED, and every
+        # refusal returns too. The stamp pre-loaded is an EXPIRED one (a live one holds the pass at the cool-down gate
+        # above, before the leg runs), so the road reaches the leg and the no-op is what is pinned
+        stamp = time.time() - km._CONVERGE_COOLDOWN_S - 1
+        km._CONVERGE_CRASH_T[0] = stamp
+        km._run_main_update = lambda kind, immediate=False, target="": (self.ran.append(kind), False)[1]   # a refusal
+        self._pass()
+        self.assertEqual(self.ran, ["pull"], "the leg ran")
+        self.assertEqual(km._CONVERGE_CRASH_T[0], stamp, "a refusal is no converge that succeeded: the stamp stands")
+        self.ran.clear(); km._MAIN_DRIFT[0] = ""; km._LAST_AUTO_CONVERGE[0] = 0.0   # the cool-down the first pass stamped
+        km._run_main_update = lambda kind, immediate=False, target="": (self.ran.append(kind), True)[1]
+        self._pass()
+        self.assertEqual((self.ran, km._CONVERGE_CRASH_T[0]), (["pull"], 0.0), "a converge that succeeded clears it")
+
+    def test_an_in_place_converge_clears_the_crash_hold_too(self):
+        # the follow-up review: a success that bypassed the gate (an in-place converge from the restart leg or /update)
+        # left the stamp, and a later converge waited out a cool-down it had no reason to
+        import inspect
+        src = inspect.getsource(self.saved[4])           # the REAL _run_main_update (setUp stubs km's)
+        i = src.index("_in_place_converge(pulled):")
+        self.assertIn("_CONVERGE_CRASH_T[0] = 0.0", src[i:i + 400], "cleared on the in-place road before its return")
+        self.assertLess(src.index("_CONVERGE_CRASH_T[0] = 0.0", i), src.index("return", i + 30))
+
+    def test_the_converge_leg_asks_git_again_for_the_running_sha_within_the_miss_bound(self):
+        # the round-three review's low b: the 30 s miss memo made the leg's own read (in _run_main_update) return None
+        # for a blip at the top of the same pass, so a main commit touching no kernel code took a full restart
+        import subprocess as _sp
+        real = self.saved[3]
+        saved, saved_miss = km._SHA, km._SHA_MISS_T[0]
+        calls = []
+        def run(argv, **kw):
+            calls.append(argv[-1])
+            return mock.Mock(returncode=0, stdout="" if argv[-1] == "--porcelain" else "abc1234\n")
+        try:
+            km._SHA = None
+            km._SHA_MISS_T[0] = time.time()              # git blipped a moment ago
+            with mock.patch.object(km.subprocess, "run", side_effect=run):
+                self.assertIsNone(real(), "within the bound the miss stands…")
+                self.assertEqual(calls, [])
+                self.assertEqual(real(reask=True), "abc1234", "…but the converge leg's read asks once more")
+            self.assertEqual(calls, ["HEAD", "--porcelain"])
+            self.assertIn("_kernel_code_changed(_kernel_sha(reask=True), pulled)", inspect.getsource(self.saved[4]),
+                          "the REAL _run_main_update (setUp stubs km's) asks once more")
+        finally:
+            km._SHA, km._SHA_MISS_T[0] = saved, saved_miss
 
     def test_a_parked_quiet_deploy_stands_down_every_pass_unless_nothing_would_be_cut(self):
         km._checkout_sha = lambda: "bbb"                  # the checkout is ahead of the kernel: a restart is owed…
@@ -741,6 +813,7 @@ class UiOnlyConverge(unittest.TestCase):
         km._update_mode = lambda: "ask"
         km._kernel_sha = lambda: "cur-sha"
         km._main_tracking = lambda: True   # these tests exercise POST-gate behavior; the gate has its own
+        self._stamp = km._CONVERGE_CRASH_T[0]
 
     def tearDown(self):
         for n, f in self._saved.items():
@@ -748,6 +821,21 @@ class UiOnlyConverge(unittest.TestCase):
         km._MAIN_DRIFT[0] = km._MAIN_DRIFT[1] = ""
         km._REBUILT_FOR[0] = ""
         km._INPLACE_TRIED[0] = ""
+        km._CONVERGE_CRASH_T[0] = self._stamp
+
+    def test_the_restart_legs_in_place_converge_clears_the_crash_hold_and_a_failed_build_does_not(self):
+        # the follow-up review's second round: this road returned on success with the stamp standing
+        km._main_drift_verdict = lambda o, c, k: ("restart", "tgt-ui")
+        km._kernel_code_changed = lambda a, b: False
+        km._rebuild_dist = lambda: (False, "esbuild boom")
+        km._CONVERGE_CRASH_T[0] = expired = time.time() - km._CONVERGE_COOLDOWN_S - 1
+        km._main_drift_check()
+        self.assertEqual(km._CONVERGE_CRASH_T[0], expired, "a failed build converged nothing: the stamp stands")
+        km._REBUILT_FOR[0] = ""; km._INPLACE_TRIED[0] = ""; km._MAIN_DRIFT[0] = km._MAIN_DRIFT[1] = ""
+        km._rebuild_dist = lambda: (self.rebuilds.append(1), (True, ""))[1]
+        km._main_drift_check()
+        self.assertEqual((len(self.rebuilds), km._REBUILT_FOR[0]), (1, "tgt-ui"))
+        self.assertEqual(km._CONVERGE_CRASH_T[0], 0.0, "the in-place converge from the restart leg clears the crash hold")
 
     def test_ui_only_restart_drift_rebuilds_in_place_and_latches(self):
         km._main_drift_verdict = lambda o, c, k: ("restart", "tgt-ui")
@@ -805,7 +893,7 @@ class UiOnlyConverge(unittest.TestCase):
     def test_the_pull_path_carries_the_same_in_place_converge(self):
         src = inspect.getsource(km._run_main_update)
         self.assertIn("pulled = _checkout_sha()", src)
-        self.assertIn("not _kernel_code_changed(_kernel_sha(), pulled) and _in_place_converge(pulled)",
+        self.assertIn("not _kernel_code_changed(_kernel_sha(reask=True), pulled) and _in_place_converge(pulled)",
                       src, "verdict input and converge target are the SAME read — never raced")
         conv = inspect.getsource(km._in_place_converge)
         self.assertIn("_rebuild_dist()", conv)
@@ -988,11 +1076,19 @@ class ConvergePullStep(unittest.TestCase):
              mock.patch.object(urllib.request, "urlopen",
                                side_effect=AssertionError("the restart POST must not ride urllib")), \
              mock.patch.dict(km.os.environ, env):
-            km._run_main_update("pull", immediate=True, manager_port="1", target=target)
+            self.result = km._run_main_update("pull", immediate=True, manager_port="1", target=target)
         return [s for s, _ in self.calls if s != "other"]
 
     def _refusals(self):
         return [m for m, ok in self.notices if not ok]
+
+    def test_the_return_says_whether_a_converge_ran_and_succeeded(self):
+        # the follow-up review's second round: the drift check's crash-hold clear keys on this
+        self._drive()
+        self.assertIs(self.result, True, "the checkout moved and the restart was requested")
+        self._drive(target="")
+        self.assertIs(self.result, False, "a refusal (no commit named) is not a converge")
+        self.assertTrue(self._refusals(), "and it was said")
 
     def test_the_happy_path_moves_onto_the_advertised_commit_and_restarts(self):
         steps = self._drive()

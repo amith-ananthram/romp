@@ -130,6 +130,23 @@ completed); the feed just paints columns. (Reflected in `docs/judges.md`.)
   (open, nothing for you to do — including delegated work and waiting on a
   non-user trigger), **blocked** (needs *you*), **completed**. They map 1:1 onto
   the three feed columns.
+- **A block addressed to a peer is a peer wait, in working** (2026-09-11): the
+  judges read a block's addressee from the session's own open question to a live
+  peer, else from the peer that delegated the work it sits under (the planted
+  origin, or the delegate mail the session received before the goal was minted;
+  never a goal you typed), and file the
+  awaiting-a-peer stamp instead of the block, so the card shows the "Awaiting
+  <peer>" chip in working and never a needs-you; when the worker never mailed
+  that peer, the kernel relays the block's why to it as the worker's own question,
+  once per block (each marker has an identity its queue entry and its record
+  name), so the reply can end the wait; a relay handed to a far host stays
+  pending by its id up to the far host's delivered row or the peer's answer; a
+  refusal the bus cannot retry reverts the block to yours; your own follow-up on a
+  delegated card, newer than the delegation, keeps its block yours. A block in a delegated goal that
+  names you still goes to the delegating manager; a worker's card reaches you only
+  when the debt ladder escalates, and for a manager debtor only at an idle turn end
+  with no unread mail waiting for it. Your own sessions' blocks are untouched,
+  whatever questions they have out.
 - **`blocked` has a deterministic floor the judge cannot override.** A live
   permission / decision prompt is a fact, not a judgment. `blocked = hard OR soft`,
   hard wins: the planner's output can never clear a hard block. This is a merge

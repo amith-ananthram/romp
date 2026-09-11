@@ -5,6 +5,9 @@ periodically for a session whose leaf moves with no settle evidence; the exit's 
 the exit's assembly-document writes are bounded. Hermetic: a temp state root, no kernel, no sessions."""
 import json
 import os
+import pathlib
+import sys
+import types
 import tempfile
 import threading
 import time
@@ -111,15 +114,35 @@ class PeriodicCheckpoints(unittest.TestCase):
 
     def test_a_moving_leaf_with_no_settle_evidence_writes_once_per_period(self):
         period = km.CKPT_PERIOD_S
-        # cycle 1: first sight (writes); 2: leaf moved but too soon (no write); 3: moved, period passed (writes);
-        # 4: nothing moved (no write, even past the period)
+        # cycle 1: first sight (records, NO write: a boot must not prime every session at once); 2: leaf moved but too
+        # soon (no write); 3: moved, period passed (writes); 4: nothing moved (no write, even past the period)
         writes = self._run(leaf_stats=[("l", 1), ("l", 2), ("l", 3), ("l", 3)], settle_keys=[0, 0, 0, 0],
                            monos=[0.0, period / 2, period + 1, 3 * period])
-        self.assertEqual(len(writes), 2, "the first sight and the first move past the period; not the early move, not the idle cycle")
+        self.assertEqual(len(writes), 1, "only the first move past the period; not the first sight, not the early move, not the idle cycle")
+
+    def test_the_first_sight_at_boot_writes_nothing_for_any_session(self):
+        # the restart-path deploy (2026-09-11): the first pusher cycle after a boot primed 52 leaves (21 cold refolds) and
+        # held the boot census to 5.7 s behind the interpreter lock; both triggers now record at first sight and write nothing
+        writes = []
+        sess = [{"sid": "55555555-aaaa-0000-0000-%012d" % i, "path": "/synthetic/leaf%d.jsonl" % i} for i in range(50)]
+        km._CKPT_SETTLE_SEEN.clear(); km._CKPT_PERIODIC_SEEN.clear()
+        with mock.patch.object(km, "_sessions", lambda now: sess), \
+             mock.patch.object(km, "_turn_end_key", lambda s, reg=None: 1234), \
+             mock.patch.object(km, "_stat_key", lambda p: ("k", 1)), \
+             mock.patch.object(km, "_prime_leaf_folds", lambda leaf: writes.append(("prime", leaf)) or True), \
+             mock.patch.object(km.em, "checkpoint_dirty", lambda: []), \
+             mock.patch.object(km.em, "asm_checkpoint_write", lambda *a, **k: writes.append(("asm", a[0])) or True), \
+             mock.patch.object(km, "_display_sdk_human", lambda s: False):
+            km._persist_checkpoints(0)
+        self.assertEqual(writes, [], "a boot's first sight primes and writes nothing, for any number of sessions")
+        self.assertEqual((len(km._CKPT_SETTLE_SEEN), len(km._CKPT_PERIODIC_SEEN)), (50, 50), "every session recorded")
 
     def test_a_settle_still_writes_at_once(self):
         writes = self._run(leaf_stats=[("l", 1), ("l", 1)], settle_keys=[0, 7], monos=[0.0, 1.0])
-        self.assertEqual(len(writes), 2, "a turn end writes immediately, whatever the period says")
+        self.assertEqual(len(writes), 1, "the first sight records; the turn end that follows writes at once, whatever the period says")
+
+
+sb_mod = load_source("romp_sdk_backend_restart_phases", os.path.join(os.path.dirname(BIN), "kernel", "sdk_backend.py"))
 
 
 class ExitPhases(unittest.TestCase):
@@ -136,9 +159,52 @@ class ExitPhases(unittest.TestCase):
         i = src.index("draining SDK sessions")
         tail = src[i:i + 6000]
         self.assertIn("if time.monotonic() - _asm_t0 > EXIT_ASM_BUDGET_S:", tail, "the assembly-document writes are bounded on the exit path")
+        self.assertIn("em.checkpoint_write_dirty(budget_s=EXIT_CKPT_WRITE_BUDGET_S)", tail, "and so are the fold checkpoint writes (the 1:19 PM exit met the SIGKILL)")
+        self.assertIn("if time.monotonic() - _prime_t0 > EXIT_PRIME_BUDGET_S:", tail)
+        self.assertLess(km.EXIT_PRIME_BUDGET_S + km.EXIT_CKPT_WRITE_BUDGET_S + km.EXIT_ASM_BUDGET_S + 2.0, 5.0,
+                        "the exit's budgets and the 2 s SDK drain fit under the manager's 5 s grace")
         self.assertIn('_phases["ckptS"]', tail); self.assertIn('_phases["drainS"]', tail)
         self.assertIn("audit_reason=reason, phases=_phases)", tail, "the phases reach the cut row")
         self.assertIn("boot_phase=_mark_boot,", src, "the backend's milestones land in the kernel's boot marks")
+
+
+class BoundedDirtyWrite(unittest.TestCase):
+    def test_a_zero_budget_writes_the_first_dirty_file_and_leaves_the_rest(self):
+        calls = []
+        with mock.patch.object(km.em, "checkpoint_dirty", lambda: ["/synthetic/a.jsonl", "/synthetic/b.jsonl", "/synthetic/c.jsonl"]), \
+             mock.patch.object(km.em, "checkpoint_write", lambda p: calls.append(p) or True):
+            n = km.em.checkpoint_write_dirty(budget_s=0.0)
+        self.assertEqual((n, calls), (1, ["/synthetic/a.jsonl"]), "the first always writes; the budget then stops the pass")
+        calls.clear()
+        with mock.patch.object(km.em, "checkpoint_dirty", lambda: ["/synthetic/a.jsonl", "/synthetic/b.jsonl"]), \
+             mock.patch.object(km.em, "checkpoint_write", lambda p: calls.append(p) or True):
+            self.assertEqual(km.em.checkpoint_write_dirty(), 2, "no budget: everything, as the settle writer relies on")
+
+
+class AttachTimedOutNamesTheAttaches(unittest.TestCase):
+    def test_the_backstop_row_carries_the_unsettled_sids_and_the_pending_count(self):
+        rows = []
+        saved = km._sdk_backend
+        km._sdk_backend = types.SimpleNamespace(_boot_attach_unsettled={"22222222-0000-0000-0000-000000000002"}, _boot_attach_pending=1)
+        try:
+            with mock.patch.dict(km._BOOT_MARKS, {"firstServe": 100.0, "reconcileDone": 100.2, "censusDone": 100.1}, clear=True), \
+                 mock.patch.object(km, "_append_restart_cut", lambda row: rows.append(row)), \
+                 mock.patch.object(km, "_kernel_process_sample", lambda: {}), \
+                 mock.patch.object(km, "RESTART_CUTS_FILE", pathlib.Path(tempfile.mkdtemp()) / "restart-cuts.jsonl"):
+                km._append_boot_settled(100.0, 100.2)
+        finally:
+            km._sdk_backend = saved
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0]["attachTimedOut"], rows[0]["attachUnsettled"], rows[0]["attachPending"]), (True, ["22222222"], 1),
+                         "a timed-out boot row says which attaches never settled (1:19 PM Pacific 2026-09-11: 23 hellos, no mark)")
+
+    def test_the_backend_tracks_the_unsettled_attaches(self):
+        be = types.SimpleNamespace(_boot_attach_unsettled=set(), _boot_attach_pending=2, _boot_attach_lock=threading.Lock())
+        be._boot_attach_count_down = lambda: None
+        settled = sb_mod.SdkBackend._boot_attach_settled(be, None, "22222222-0000-0000-0000-000000000002")
+        self.assertEqual(be._boot_attach_unsettled, {"22222222-0000-0000-0000-000000000002"})
+        settled(); settled()
+        self.assertEqual(be._boot_attach_unsettled, set(), "fires once; the sid leaves the set at the hello")
 
 
 if __name__ == "__main__":

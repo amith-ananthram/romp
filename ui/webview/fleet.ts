@@ -34,7 +34,8 @@ interface LedgerNode {
   promptAnchorUuid?: string | null; anchorUuid?: string | null;
 }
 interface Ledger { summary?: string; tree: LedgerNode[]; current?: { t?: number } | null; archivedTops?: LedgerNode[]; }
-interface FleetSession { sid: string; name: string; color: Color; status?: { state?: string } | null; ledger?: Ledger | null; }
+interface FleetSession { sid: string; name: string; color: Color; status?: { state?: string } | null; ledger?: Ledger | null;
+                         postalServiceOff?: boolean; mailOffWhy?: string; }   // the session's mail is off, and why (isolation, a comment thread's default, an unreadable record; T356)
 
 const vscodeApi =
   typeof (window as any).acquireVsCodeApi === "function" ? (window as any).acquireVsCodeApi() : undefined;
@@ -602,6 +603,15 @@ function render() {
       nameInto(nm, s.name, s.sid, curSearch);   // highlight a name match (remote "host:" stays quiet metadata)
       if (s.color?.bg) nm.style.color = s.color.bg;
       head.appendChild(nm);
+      if (s.postalServiceOff) {
+        // T356: a session whose mail is off says so on its row, quietly
+        const mo = el("span", "fl-mail-off");
+        mo.textContent = s.mailOffWhy === "unreadable" ? "mail held" : "mail off";
+        mo.title = s.mailOffWhy === "unreadable" ? "this session's record cannot be read: mail waits until it is repaired"
+          : s.mailOffWhy === "thread" ? "a comment thread's mail is off until it is broken out"
+          : "this session neither sends nor receives peer mail";
+        head.appendChild(mo);
+      }
       head.title = "Open this session";
       head.dataset.act = "open"; head.dataset.sid = s.sid;   // click-safe: action lives on the #fleet-list delegate
       sec.appendChild(head);

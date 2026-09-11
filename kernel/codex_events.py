@@ -217,6 +217,19 @@ class ThreadNormalizer:
         final message. stop stays null — the turn genuinely didn't settle."""
         return self._flush()
 
+    def abandoned(self, turn_id, message):
+        """The backend's settle for a turn whose stream ENDED WITHOUT turn/completed — the app-server
+        connection died mid-turn, or a transcript write failed — so no notification will ever close
+        it. Same shape as a terminal `error`: the held final reply lands mid-turn-shaped, then an
+        end_turn record flagged as the error card ENDS the turn. Without it the file's turn stays open
+        for good: the kernel reads working from the FILE, so the session shows working while nothing
+        runs, and the NEXT prompt is absorbed into the dead turn as mid-turn input instead of opening
+        its own (the interrupt settle above exists for the same reason). The turn's usage never lands
+        on a later settle, as for a failed turn."""
+        self.turn_open = False
+        self._usage = None
+        return self._error({"turnId": turn_id, "error": {"message": message}})
+
     # ── the dispatcher ─────────────────────────────────────────────────────────────────────────
     def handle(self, method, params):
         """Map one notification to the records to APPEND (possibly []). The caller owns the file."""
