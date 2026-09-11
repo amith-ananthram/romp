@@ -71,6 +71,15 @@ SID_C = "cccccccc-1111-2222-3333-444444444444"   # tests: buzzed too (the vanish
 SID_D = "dddddddd-1111-2222-3333-444444444444"   # docs: likewise
 
 
+# The served harness's deadline for an EVENT the kernel or the page produces after a gesture (a landing, a settle, a
+# diag row, a log line): one generous ceiling, waited on by polling the event's own record, never a fixed sleep. Main's
+# run of 2026-09-10 (3:10 PM PT) failed this file on a loaded runner with a 5 s ceiling around the click's landing; the
+# tap had landed, the kernel's row and trail were seconds behind the page. Under no load every wait returns in well
+# under a second, so the ceiling costs nothing green.
+SETTLE_S = 30.0
+DEADLINE_MS = int(SETTLE_S * 1000)   # the same ceiling inside the browser drivers (waitForFunction / the ledger waits)
+
+
 def _free_port():
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
@@ -90,6 +99,7 @@ const cfg = JSON.parse(fs.readFileSync(process.env.CFG, "utf8"));
 let browser;
 try { browser = await chromium.launch(); }
 catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
+const DEADLINE = __DEADLINE_MS__;   // the harness deadline for an outcome (SETTLE_S), set by the test
 const out = { reveals: [], ledger: [], acks: [] };
 const context = await browser.newContext({ viewport: { width: 1100, height: 720 } });
 await context.grantPermissions(["notifications"], { origin: cfg.origin });
@@ -99,16 +109,16 @@ context.on("request", (r) => { const u = r.url();
   if (r.method() === "POST" && /\/push\/ack$/.test(u)) out.acks.push(JSON.parse(r.postData() || "{}")); });   // the worker's own fetches ride the context
 const page = await context.newPage();
 await page.goto(cfg.landing);
-const chat = await (async () => { for (let i = 0; i < 200; i++) { const f = page.frames().find((f) => /\/chat/.test(f.url())); if (f) return f; await page.waitForTimeout(50); } return null; })();
+const chat = await (async () => { for (let i = 0; i < DEADLINE / 50; i++) { const f = page.frames().find((f) => /\/chat/.test(f.url())); if (f) return f; await page.waitForTimeout(50); } return null; })();
 if (!chat) { console.error("no chat iframe in the shell"); process.exit(1); }
-await chat.waitForSelector('#tabs .tab[data-id="' + cfg.sidB + '"]', { timeout: 20000 });
+await chat.waitForSelector('#tabs .tab[data-id="' + cfg.sidB + '"]', { timeout: DEADLINE });
 // the session in front is `web`, so the tap has something to CHANGE
 await chat.evaluate((sid) => { const t = document.querySelector('#tabs .tab[data-id="' + sid + '"]'); if (t) t.click(); }, cfg.sidA);
-await chat.waitForFunction((sid) => (document.querySelector("#tabs .tab.active") || {}).dataset?.id === sid, cfg.sidA, { timeout: 10000 });
+await chat.waitForFunction((sid) => (document.querySelector("#tabs .tab.active") || {}).dataset?.id === sid, cfg.sidA, { timeout: DEADLINE });
 const active = () => chat.evaluate(() => (document.querySelector("#tabs .tab.active") || { dataset: {} }).dataset.id || null);
 out.before = await active();
 // the worker: registered the way the bell's opt-in does, then in control of this page (clients.claim on activate)
-const swWait = context.waitForEvent("serviceworker", { timeout: 20000 }).catch(() => null);
+const swWait = context.waitForEvent("serviceworker", { timeout: DEADLINE }).catch(() => null);
 await page.evaluate(() => navigator.serviceWorker.register("/sw.js"));
 const sw = context.serviceWorkers()[0] || await swWait;
 if (!sw) { console.error("no service worker registered"); process.exit(1); }
@@ -132,9 +142,9 @@ out.worker = await sw.evaluate(async (payload) => {
   await Promise.all(waited);
   return { pushWaited: pushOutcomes.length, pushOutcomes, clickWaited: waited.length, opened: self.__opened || null };
 }, cfg.payload);
-out.landed = await chat.waitForFunction((sid) => (document.querySelector("#tabs .tab.active") || {}).dataset?.id === sid, cfg.sidB, { timeout: 8000 }).then(() => true).catch(() => false);
+out.landed = await chat.waitForFunction((sid) => (document.querySelector("#tabs .tab.active") || {}).dataset?.id === sid, cfg.sidB, { timeout: DEADLINE }).then(() => true).catch(() => false);
 out.after = await active();
-for (let i = 0; i < 40 && !out.ledger.length; i++) await page.waitForTimeout(50);   // the settle rides after the /reveal; bounded
+for (let i = 0; i < DEADLINE / 50 && !out.ledger.length; i++) await page.waitForTimeout(50);   // the settle rides after the /reveal; bounded by the deadline
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
 process.exit(0);
@@ -151,6 +161,7 @@ const cfg = JSON.parse(fs.readFileSync(process.env.CFG, "utf8"));
 let browser;
 try { browser = await chromium.launch(); }
 catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
+const DEADLINE = __DEADLINE_MS__;   // the harness deadline for an outcome (SETTLE_S), set by the test
 const out = { reveals: [], ledger: [] };
 const context = await browser.newContext({ viewport: { width: 1100, height: 720 } });
 // T312 trace: in every frame, wrap the federation layer's inbound the moment it is published (federation.ts assigns
@@ -175,25 +186,25 @@ page.on("request", (r) => { const u = r.url();
   if (r.method() === "POST" && /\/push\/landed$/.test(u)) out.ledger.push(JSON.parse(r.postData() || "{}")); });
 // THE BOOT ON THE LINK: the navigate URL the declarative message carries, as iOS opens it
 await page.goto(cfg.link);
-const chat = await (async () => { for (let i = 0; i < 200; i++) { const f = page.frames().find((f) => /\/chat/.test(f.url())); if (f) return f; await page.waitForTimeout(50); } return null; })();
+const chat = await (async () => { for (let i = 0; i < DEADLINE / 50; i++) { const f = page.frames().find((f) => /\/chat/.test(f.url())); if (f) return f; await page.waitForTimeout(50); } return null; })();
 if (!chat) { console.error("no chat iframe in the shell"); process.exit(1); }
 const active = () => chat.evaluate(() => (document.querySelector("#tabs .tab.active") || { dataset: {} }).dataset.id || null);
-out.landed = await chat.waitForFunction((sid) => (document.querySelector("#tabs .tab.active") || {}).dataset?.id === sid, cfg.sidB, { timeout: 20000 }).then(() => true).catch(() => false);
+out.landed = await chat.waitForFunction((sid) => (document.querySelector("#tabs .tab.active") || {}).dataset?.id === sid, cfg.sidB, { timeout: DEADLINE }).then(() => true).catch(() => false);
 out.after = await active();
 out.frames = await chat.evaluate(() => (window.__frames || []).slice(0, 60));   // T312 trace
 out.urlAfterBoot = page.url();
 out.cookies = (await context.cookies(cfg.origin)).map((c) => ({ name: c.name, value: c.value }));   // the token's home once the address drops it
-for (let i = 0; i < 40 && !out.ledger.length; i++) await page.waitForTimeout(50);
+for (let i = 0; i < DEADLINE / 50 && !out.ledger.length; i++) await page.waitForTimeout(50);
 out.boot = { reveals: out.reveals.slice(), ledger: out.ledger.slice() };
 // back to `web`, so the second arrival has something to change
 await chat.evaluate((sid) => { const t = document.querySelector('#tabs .tab[data-id="' + sid + '"]'); if (t) t.click(); }, cfg.sidA);
-await chat.waitForFunction((sid) => (document.querySelector("#tabs .tab.active") || {}).dataset?.id === sid, cfg.sidA, { timeout: 10000 });
+await chat.waitForFunction((sid) => (document.querySelector("#tabs .tab.active") || {}).dataset?.id === sid, cfg.sidA, { timeout: DEADLINE });
 out.reveals.length = 0; out.ledger.length = 0;
 // THE OPEN PAGE GAINS THE LINK WITHOUT A LOAD: the window iOS navigates in place — the URL changes and the page shows again
 await page.evaluate((u) => { history.pushState(null, "", u); window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })); }, cfg.link2);
-out.landed2 = await chat.waitForFunction((sid) => (document.querySelector("#tabs .tab.active") || {}).dataset?.id === sid, cfg.sidB, { timeout: 8000 }).then(() => true).catch(() => false);
+out.landed2 = await chat.waitForFunction((sid) => (document.querySelector("#tabs .tab.active") || {}).dataset?.id === sid, cfg.sidB, { timeout: DEADLINE }).then(() => true).catch(() => false);
 out.after2 = await active();
-for (let i = 0; i < 40 && !out.ledger.length; i++) await page.waitForTimeout(50);
+for (let i = 0; i < DEADLINE / 50 && !out.ledger.length; i++) await page.waitForTimeout(50);
 out.urlAfterShow = page.url();
 out.later = { reveals: out.reveals.slice(), ledger: out.ledger.slice() };
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
@@ -212,6 +223,7 @@ const cfg = JSON.parse(fs.readFileSync(process.env.CFG, "utf8"));
 let browser;
 try { browser = await chromium.launch(); }
 catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
+const DEADLINE = __DEADLINE_MS__;   // the harness deadline for an outcome (SETTLE_S), set by the test
 const out = { reveals: [], ledger: [], pending: 0, passes: [] };
 const context = await browser.newContext({ viewport: { width: 1100, height: 720 } });
 await context.grantPermissions(["notifications"], { origin: cfg.origin });
@@ -231,14 +243,14 @@ page.on("request", (r) => { const u = r.url();
   if (r.method() === "POST" && /\/push\/(landed|superseded|dropped)$/.test(u)) out.ledger.push([u.replace(/^.*\/push\//, ""), JSON.parse(r.postData() || "{}")]);
   if (/\/push\/pending\?/.test(u)) out.pending++; });
 await page.goto(cfg.landing);
-const chat = await (async () => { for (let i = 0; i < 200; i++) { const f = page.frames().find((f) => /\/chat/.test(f.url())); if (f) return f; await page.waitForTimeout(50); } return null; })();
+const chat = await (async () => { for (let i = 0; i < DEADLINE / 50; i++) { const f = page.frames().find((f) => /\/chat/.test(f.url())); if (f) return f; await page.waitForTimeout(50); } return null; })();
 if (!chat) { console.error("no chat iframe in the shell"); process.exit(1); }
-await chat.waitForSelector('#tabs .tab[data-id="' + cfg.sidB + '"]', { timeout: 20000 });
+await chat.waitForSelector('#tabs .tab[data-id="' + cfg.sidB + '"]', { timeout: DEADLINE });
 await chat.evaluate((sid) => { const t = document.querySelector('#tabs .tab[data-id="' + sid + '"]'); if (t) t.click(); }, cfg.sidA);
-await chat.waitForFunction((sid) => (document.querySelector("#tabs .tab.active") || {}).dataset?.id === sid, cfg.sidA, { timeout: 10000 });
+await chat.waitForFunction((sid) => (document.querySelector("#tabs .tab.active") || {}).dataset?.id === sid, cfg.sidA, { timeout: DEADLINE });
 const active = () => chat.evaluate(() => (document.querySelector("#tabs .tab.active") || { dataset: {} }).dataset.id || null);
 out.before = await active();
-const swWait = context.waitForEvent("serviceworker", { timeout: 20000 }).catch(() => null);
+const swWait = context.waitForEvent("serviceworker", { timeout: DEADLINE }).catch(() => null);
 await page.evaluate(() => navigator.serviceWorker.register("/sw.js"));
 const sw = context.serviceWorkers()[0] || await swWait;
 if (!sw) { console.error("no service worker registered"); process.exit(1); }
@@ -255,9 +267,9 @@ async function pass(name, displayed, landsOn, settles) {
   await page.evaluate((d) => { window.__displayed = d; }, displayed);
   // the app comes forward: the events a resumed page produces, and nothing else
   await page.evaluate(() => { window.dispatchEvent(new Event("focus")); window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })); });
-  const decided = await page.waitForFunction((n) => window.__tp.length >= n + 2, tp0, { timeout: 8000 }).then(() => true).catch(() => false);
-  const landed = landsOn ? await chat.waitForFunction((sid) => (document.querySelector("#tabs .tab.active") || {}).dataset?.id === sid, landsOn, { timeout: 8000 }).then(() => true).catch(() => false) : null;
-  for (let i = 0; i < 40 && out.ledger.length < ledger0 + settles; i++) await page.waitForTimeout(50);   // the settles ride after the decision; bounded
+  const decided = await page.waitForFunction((n) => window.__tp.length >= n + 2, tp0, { timeout: DEADLINE }).then(() => true).catch(() => false);
+  const landed = landsOn ? await chat.waitForFunction((sid) => (document.querySelector("#tabs .tab.active") || {}).dataset?.id === sid, landsOn, { timeout: DEADLINE }).then(() => true).catch(() => false) : null;
+  for (let i = 0; i < DEADLINE / 50 && out.ledger.length < ledger0 + settles; i++) await page.waitForTimeout(50);   // the settles ride after the decision; bounded by the deadline
   out.passes.push({ name, decided, landed, after: await active(), reveals: out.reveals.slice(reveals0), ledger: out.ledger.slice(ledger0),
                     rows: await page.evaluate((n) => window.__tp.slice(n), tp0) });
 }
@@ -345,8 +357,8 @@ class ServedTapLanding(unittest.TestCase):
             json.dump(dict({"origin": base, "landing": base + "/?token=" + self.token, "token": self.token, "sidA": SID_A, "sidB": SID_B}, **extra), f)
         driver = os.path.join(self.lab, "driver.mjs")
         with open(driver, "w") as f:
-            f.write(driver_src)
-        p = subprocess.run(["node", driver], capture_output=True, text=True, timeout=120,
+            f.write(driver_src.replace("__DEADLINE_MS__", str(DEADLINE_MS)))
+        p = subprocess.run(["node", driver], capture_output=True, text=True, timeout=max(300, int(SETTLE_S * 8)),
                            env=dict(os.environ, EXT_PKG=os.path.join(EXT, "package.json"), CFG=cfg))
         if p.returncode == 3:
             raise unittest.SkipTest("no playwright browser on this box — the served tap needs one (CI installs none)")
@@ -378,7 +390,33 @@ class ServedTapLanding(unittest.TestCase):
         """the kernel's own [reveal] trail: delivered or parked, and to which wid"""
         return " | ".join(ln.strip() for ln in self._klog().splitlines() if "[reveal]" in ln) or "(no [reveal] line)"
 
-    def _diag_rows(self, what, deadline_s=5.0):
+    def _trail(self):
+        """the kernel's push and reveal trail, for a failure message: every [push] and [reveal] line, in order"""
+        return " | ".join(ln.strip() for ln in self._klog().splitlines() if "[push]" in ln or "[reveal]" in ln) or "(no [push]/[reveal] line)"
+
+    def _wait_row(self, pid, field="landedAt", deadline_s=SETTLE_S):
+        """the kernel's ledger row for `pid` once it carries `field` (the settle is an EVENT the page posts after the
+        landing; the driver returns when the PAGE landed, so the row can be seconds behind it on a loaded runner), or
+        whatever the row holds at the deadline. The caller asserts on the row and prints it with the trail."""
+        end = time.time() + deadline_s
+        row = self._row(pid)
+        while not (row or {}).get(field) and time.time() < end:   # loop-ok: bounded by the harness deadline
+            time.sleep(0.1)
+            row = self._row(pid)
+        return row
+
+    def _klog_settled(self, *patterns, count=1, deadline_s=SETTLE_S):
+        """the kernel log once every pattern appears in it at least `count` times (the trail lines are written as the
+        kernel HANDLES each request, on its own thread, so the last of them can land after the page's word), or as it
+        stands at the deadline: the caller's assertRegex then fails and prints the trail"""
+        end = time.time() + deadline_s
+        klog = self._klog()
+        while any(len(re.findall(pat, klog)) < count for pat in patterns) and time.time() < end:   # loop-ok: bounded
+            time.sleep(0.1)
+            klog = self._klog()
+        return klog
+
+    def _diag_rows(self, what, deadline_s=SETTLE_S):
         """the shell's client-diag rows of one kind, waited for (bounded): they ride the shell socket after the fetch"""
         fp = os.path.join(self.state, "client-diag.jsonl")
         end = time.time() + deadline_s
@@ -455,14 +493,11 @@ class ServedTapLanding(unittest.TestCase):
         self.assertEqual(out["ledger"], [{"pid": pid}], "the row is settled once landed")
         self.assertEqual([a["stage"] for a in out["acks"]], ["shown", "clicked"], "the worker's two acks, by pid: %r" % out["acks"])
         self.assertTrue(all(a["pid"] == pid for a in out["acks"]))
-        for _ in range(50):
-            if (self._row(pid) or {}).get("landedAt"):
-                break
-            time.sleep(0.1)
-        row = self._row(pid)
-        self.assertTrue(row["shownAt"] and row["tappedAt"] and row["landedAt"], "shown, tapped, landed on the kernel's row: %r" % row)
-        # the kernel's own trail, end to end, in order
-        klog = self._klog()
+        row = self._wait_row(pid, "landedAt")
+        self.assertTrue(row and row.get("shownAt") and row.get("tappedAt") and row.get("landedAt"),
+                        "shown, tapped, landed on the kernel's row: %r\n  kernel: %s" % (row, self._trail()))
+        # the kernel's own trail, end to end, in order (waited for: the landing's line is the last the kernel writes)
+        klog = self._klog_settled(r"\[push\] landed sid=%s endpoint=push\.example\.net" % re.escape(SID_B[:8]))
         ep_host = "push.example.net"
         for line in (r"\[push\] ack stage=shown sid=%s endpoint=%s" % (re.escape(SID_B[:8]), ep_host),
                      r"\[push\] ack stage=clicked sid=%s endpoint=%s" % (re.escape(SID_B[:8]), ep_host),
@@ -471,7 +506,7 @@ class ServedTapLanding(unittest.TestCase):
                      # finishes: both roads land it, and the trail says which
                      r"\[reveal\] sw sid=%s wid=\S+: (?:delivered|parked[\s\S]*?\[reveal\] sid=%s wid=\S+: consumed \S+ the pane's ready)" % (re.escape(SID_B[:8]), re.escape(SID_B[:8])),
                      r"\[push\] landed sid=%s endpoint=%s" % (re.escape(SID_B[:8]), ep_host)):
-            self.assertRegex(klog, line, "the kernel logged it: %s" % klog[-2000:])
+            self.assertRegex(klog, line, "the kernel logged it: %s\n  trail: %s" % (klog[-2000:], self._trail()))
         # (the worker STARTS the shown ack before the click and the clicked ack before it tells the page, but every one
         # of those requests — the two acks, the page's /reveal, the /push/landed — travels on its own connection, which
         # the kernel serves on its own thread: all four are on the trail, and their relative order is not a fact of
@@ -522,17 +557,16 @@ class ServedTapLanding(unittest.TestCase):
         self.assertEqual((l["reveals"][0]["sid"], l["reveals"][0]["via"], l["reveals"][0].get("boot")), (SID_B, "link", None), "a live page: no boot flag — %r" % l["reveals"])
         self.assertEqual(l["ledger"], [{"pid": pid2}])
         self.assertNotIn("push-", out["urlAfterShow"], "stripped again: %r" % out["urlAfterShow"])
-        for _ in range(50):
-            if (self._row(pid2) or {}).get("landedAt"):
-                break
-            time.sleep(0.1)
-        self.assertTrue((self._row(pid) or {}).get("landedAt") and (self._row(pid2) or {}).get("landedAt"), "both rows landed on the kernel: %r %r" % (self._row(pid), self._row(pid2)))
+        row1, row2 = self._wait_row(pid, "landedAt"), self._wait_row(pid2, "landedAt")
+        self.assertTrue((row1 or {}).get("landedAt") and (row2 or {}).get("landedAt"),
+                        "both rows landed on the kernel: %r %r\n  kernel: %s" % (row1, row2, self._trail()))
         # the kernel's trail: the boot reveal parked (the pane not yet up) or delivered with a copy parked (the pane's
-        # ready beat the fetch, T312) — either road lands; the later one delivered live; both settled
-        klog = self._klog()
-        self.assertRegex(klog, r"\[reveal\] link sid=%s wid=\S+ boot: (parked|delivered, copy parked \(booting page\))" % re.escape(SID_B[:8]), "the boot reveal: %s" % self._reveal_lines())
-        self.assertRegex(klog, r"\[reveal\] link sid=%s wid=\S+: delivered" % re.escape(SID_B[:8]), "the in-place arrival delivered live: %s" % self._reveal_lines())
-        self.assertEqual(len(re.findall(r"\[push\] landed sid=%s endpoint=web.push.apple.com" % re.escape(SID_B[:8]), klog)), 2)
+        # ready beat the fetch, T312) — either road lands; the later one delivered live; both settled (waited for: two
+        # landings, the last lines the kernel writes)
+        klog = self._klog_settled(r"\[push\] landed sid=%s endpoint=web\.push\.apple\.com" % re.escape(SID_B[:8]), count=2)
+        self.assertRegex(klog, r"\[reveal\] link sid=%s wid=\S+ boot: (parked|delivered, copy parked \(booting page\))" % re.escape(SID_B[:8]), "the boot reveal: %s" % self._trail())
+        self.assertRegex(klog, r"\[reveal\] link sid=%s wid=\S+: delivered" % re.escape(SID_B[:8]), "the in-place arrival delivered live: %s" % self._trail())
+        self.assertEqual(len(re.findall(r"\[push\] landed sid=%s endpoint=web.push.apple.com" % re.escape(SID_B[:8]), klog)), 2, "two landings: %s" % self._trail())
         # the shell's trail: the deeplink rows, boot then pageshow, structure only
         rows = [r["data"] for r in self._diag_rows("deeplink") if r["data"].get("hasSid")]
         self.assertEqual([(r["via"], r["hasPid"], r["dup"]) for r in rows], [("boot", True, False), ("pageshow", True, False)], "%r" % rows)
@@ -545,14 +579,14 @@ class ServedTapLanding(unittest.TestCase):
         self.assertEqual(code, 200, pend)
         return pend.get("rows") if isinstance(pend, dict) and isinstance(pend.get("rows"), list) else []
 
-    def _pending_empty(self, ep, tries=50):
-        """GET /push/pending for `ep` until it lists nothing (the settles land after the reveal; bounded); the last answer"""
-        after = None
-        for _ in range(tries):
-            after = self._pending_rows(ep)
-            if after == []:
-                break
+    def _pending_empty(self, ep, deadline_s=SETTLE_S):
+        """GET /push/pending for `ep` until it lists nothing (the settles land after the reveal; bounded by the harness
+        deadline); the last answer"""
+        end = time.time() + deadline_s
+        after = self._pending_rows(ep)
+        while after != [] and time.time() < end:   # loop-ok: bounded by the harness deadline
             time.sleep(0.1)
+            after = self._pending_rows(ep)
         return after
 
     def test_a_vanished_notification_lands_when_the_app_comes_forward_and_nothing_else_ever_shows(self):
@@ -601,16 +635,19 @@ class ServedTapLanding(unittest.TestCase):
         self.assertEqual(sorted(json.dumps(x) for x in p3["ledger"]), sorted(json.dumps(x) for x in [["dropped", {"pid": pids[1]}], ["dropped", {"pid": pids[2]}]]), "%r" % p3["ledger"])
         self.assertEqual(sorted(r["vanished"] for r in p3["rows"]), [0, 2], "%r" % p3["rows"])
         self.assertEqual(self._pending_empty(ep), [], "every row settled: nothing left to inflate a later check")
-        # the kernel's own trail: three shown acks, the vanish reveal, the landing, the two drops
+        # the kernel's own trail: three shown acks, the vanish reveal, the landing, the two drops (waited for: the landing
+        # and the two drops are the last lines the kernel writes)
         ep_host = "push.example.net"
-        klog = self._klog()
+        klog = self._klog_settled(r"\[push\] landed sid=%s endpoint=%s" % (re.escape(SID_B[:8]), ep_host),
+                                  r"\[push\] dropped sid=%s endpoint=%s" % (re.escape(SID_C[:8]), ep_host),
+                                  r"\[push\] dropped sid=%s endpoint=%s" % (re.escape(SID_D[:8]), ep_host))
         for line in ([r"\[push\] ack stage=shown sid=%s endpoint=%s" % (re.escape(sid[:8]), ep_host) for sid in (SID_B, SID_C, SID_D)] +
                      [r"\[reveal\] vanish sid=%s wid=\S+: delivered" % re.escape(SID_B[:8]),
                       r"\[push\] landed sid=%s endpoint=%s" % (re.escape(SID_B[:8]), ep_host),
                       r"\[push\] dropped sid=%s endpoint=%s" % (re.escape(SID_C[:8]), ep_host),
                       r"\[push\] dropped sid=%s endpoint=%s" % (re.escape(SID_D[:8]), ep_host)]):
-            self.assertRegex(klog, line, "the kernel logged it: %s" % klog[-2500:])
-        self.assertEqual(klog.count("[reveal] vanish"), 1, "landed once across the two checks: %s" % klog[-2500:])
+            self.assertRegex(klog, line, "the kernel logged it: %s\n  trail: %s" % (klog[-2500:], self._trail()))
+        self.assertEqual(klog.count("[reveal] vanish"), 1, "landed once across the two checks: %s" % self._trail())
         # the shell's trail: the landing's own row names the session clipped
         lands = self._diag_rows("tap-vanish-land")
         self.assertTrue(lands, "one tap-vanish-land row is on file")

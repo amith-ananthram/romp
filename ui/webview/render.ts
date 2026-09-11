@@ -5375,6 +5375,9 @@ function makeGroupHead(sec: TabSection, collapsed: boolean, holdsActive: boolean
   // (headWords) and its own way back are derived from
   const shown = snapView === name;
   if (shown) head.classList.add("snap-shown");
+  // the tag's colour as the row's --chip-bg (the tab sets the same variable from its identity colour): the shown
+  // row's box wears the selected tab's inset ring in it (styles.css .tab-group-head.snap-shown, T322)
+  if (sec.color) head.style.setProperty("--chip-bg", sec.color);
   // THE WAY BACK: the header whose section the pane shows, OPEN, holding the tab being read, is the click that
   // put the section in the pane; a second click puts the transcript back (show-transcript, leaveSnapshot)
   // instead of folding the section under its reader. Derived from the rendered state, as the fold is, and
@@ -5966,7 +5969,7 @@ function renderTabs() {
     // ...and the whole tab dims when that host is unreachable, so a disconnected session reads as one at
     // a glance rather than only on inspection (the user 2026-07-29). The marked "host:" carries the why.
     if (hostIsDown(id)) { tab.classList.add("host-off"); tab.title = hostDownNote(id); }
-    if (s.status.faded && id !== activeId && s.color) {
+    if (s.status.faded && (id !== activeId || snapView) && s.color) {   // in the overview mode the active tab fades like any other (no residual selection cue, T322)
       const full = s.color.bg;
       label.style.color = fadedColor(full);
       // The "host:" prefix declares its OWN color (quiet gray), so the parent's faded color can't inherit
@@ -6144,7 +6147,7 @@ function dismissTabMenu() {
 function showSelectionMenu(e: MouseEvent) {
   const content = document.getElementById("content");
   const sel = window.getSelection();
-  const text = sel ? sel.toString() : "";
+  const text = sel ? (mentionCopyText(sel)?.text ?? sel.toString()) : "";   // a chip copies as the @name typed, as Ctrl+C does
   if (!content || !sel || !sel.anchorNode || !content.contains(sel.anchorNode) || !text.trim()) return;
   e.preventDefault();
   dismissTabMenu();
@@ -11238,9 +11241,17 @@ function snapshotHost(): HTMLElement | null {
   host.addEventListener("pointerdown", () => { tabPointerHeld = true; });
   return host;
 }
+/** The overview MODE's one switch (T322): the body carries the class (the footer hides by it, the Classic strip's active
+ *  tab is neutralised by it) and so does the strip itself, because the Yatharth theme's neutraliser is a tint rule and
+ *  every tint rule starts with the theme's body class (tab-theme.test.ts), so that rule reads the mode off #tabs. */
+function setSnapMode(on: boolean): void {
+  document.body.classList.toggle("snap-mode", on);
+  document.getElementById("tabs")?.classList.toggle("snap-mode", on);
+}
 function hideSnapshot(): void {
   const host = document.getElementById("tab-snapshot");
   if (host) host.style.display = "none";
+  setSnapMode(false);
   snapModel = null;
   // the transcript comes back where the reader left it, not where the view's scrolls put the spot (snapKeep)
   if (snapKeep) { snapKeep.v.scrollTop = snapKeep.scrollTop; snapKeep.v.stick = snapKeep.stick; snapKeep = null; }
@@ -11324,16 +11335,18 @@ function renderSnapshot(): boolean {
   let list = host.querySelector<HTMLElement>(":scope > .snap-list");
   if (!list) {
     const h = document.createElement("h2"); h.className = "snap-head";
-    // the heading's own bar (snap-swatch) and the name: the strip's header wears the tag chip; this heading
-    // keeps a bar + name pair, whose parts the patch below rewrites in place (the rows' rule: nothing is remade)
-    const sw = el("span", "snap-swatch"); sw.setAttribute("aria-hidden", "true");
-    h.append(sw, el("span", "snap-name"), el("span", "snap-count"));
+    // the heading reads "Overview of <the tag's ordinary chip> <count>" (T322, the user 2026-09-10: a name beside a
+    // little colour bar was not it): the words, a slot the tag chip is placed in (tagChip, the same builder the
+    // strip's row and the tag menu use — never a chip rule of its own), and the count; the patch below rewrites
+    // the slot's chip and the count in place (the rows' rule: nothing else is remade)
+    const of = el("span", "snap-of"); of.textContent = "Overview of";
+    h.append(of, el("span", "snap-chip-slot"), el("span", "snap-count"));
     list = el("div", "snap-list"); list.setAttribute("role", "list");
     host.replaceChildren(h, list);
   }
   const part = (cls: string) => host.querySelector<HTMLElement>(".snap-head > ." + cls)!;
-  part("snap-swatch").style.background = next.color || "";
-  part("snap-name").textContent = next.name;
+  const chip = tagChip(next.name, next.color, { inheritSize: true }); chip.classList.add("snap-chip");
+  part("snap-chip-slot").replaceChildren(chip);
   part("snap-count").textContent = words.count;
   // a MOVED row: insertBefore detaches and re-attaches its node, which blurs it (the browser's focus fixup); the
   // same event puts focus back on it (the strip's refocus rule, by node instead of by id). A row GONE from under
@@ -11412,7 +11425,9 @@ function showActive(keep?: { uuid: string; y: number } | null) {
   // kernel's active hint, the MRU and the drafts still point at the session being read, and its header wears
   // the mark. renderSnapshot answers false when the section is gone from the strip (a tag deleted, its last
   // member hidden): then the transcript.
+  const wasSnap = document.body.classList.contains("snap-mode");   // read before renderSnapshot's gone-section path can clear it
   if (snapView && renderSnapshot()) {
+    setSnapMode(true);   // the overview is a mode: the message box goes, no tab is selected (styles.css, T322)
     for (const v of views.values()) v.el.style.display = "none";
     // the reader's place (snapKeep; once per visit): the hide above only queues the clamp's scroll event, so the
     // view's fields still hold what the reader's last scroll recorded
@@ -11434,6 +11449,11 @@ function showActive(keep?: { uuid: string; y: number } | null) {
     if (sendBtn) sendBtn.disabled = true;
     updateStatusline();
     return;
+  }
+  setSnapMode(false);   // a session's transcript: the message box and the selected tab are back
+  if (wasSnap) {   // the box was measured while the footer was display:none (a pick's draft swap): measure it now it has a layout box
+    const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
+    if (ta) growComposer(ta);
   }
   hideSnapshot();
   const s = activeId ? liveSession(activeId) : null;
@@ -12185,7 +12205,7 @@ if (typeof ResizeObserver === "function") {
       const h = entries[0]?.contentRect?.height ?? 0;
       const content = document.getElementById("content");
       const v = activeId ? views.get(activeId) : null;
-      if (content && lastH >= 0 && content.clientHeight > 0 && v && v.shown && followBoxBelow(v.stick, h - lastH)) {
+      if (content && !snapView && lastH >= 0 && content.clientHeight > 0 && v && v.shown && followBoxBelow(v.stick, h - lastH)) {   // a transcript rule: it stands down while the overview owns #content (the footer's hide is not a box below the reader, T322)
         writeScroll(content, content.scrollHeight, "box-below", true);
         v.scrollTop = content.scrollTop;                      // keep the per-view saved position in sync
       }
@@ -16853,6 +16873,63 @@ function markMentions(root: HTMLElement): void {
     t.replaceWith(frag);
   }
 }
+
+// A copy over a chip: the chip's text is the bare name, so the browser's own copy (and the selection menu's
+// Copy) would paste "ask api" for a message sent as "ask @api", and the pasted word no longer names the
+// session (the picker put the @ there so that it would). Every chip the selection covers WHOLE gets its "@"
+// back for the moment the clipboard is read, and the DOM is then as it was: insertData and deleteData on the
+// chip's first text node move a live range's offsets and move them back, so the visible selection does not
+// change (the transcript's observers watch child lists, not character data). Whole means the range reaches
+// the chip's first character and its last (Range.comparePoint on the chip's text nodes): a double-clicked
+// chip word counts, a run of letters inside a chip does not and copies as rendered. Every range is read (a
+// multi-select holds several and sel.toString() concatenates them). A selection with no whole chip is left
+// to the browser in both flavours, including a copy inside the composer (the document's selection holds no
+// chip then). The rich flavour is the ranges' own markup with each chip's hover title (live status text) and
+// data attributes dropped, so a paste keeps the chip's class and text and nothing about the session behind it.
+// The Comment/Quote seed (transcriptSelection) keeps reading the rendered text: a thread's quoted passage
+// anchors on what the transcript shows.
+function mentionCopyText(sel: Selection): { text: string; html: string } | null {
+  const firsts = new Set<Text>();
+  for (let i = 0; i < sel.rangeCount; i++) {
+    const r = sel.getRangeAt(i);
+    if (r.collapsed) continue;
+    const c = r.commonAncestorContainer;
+    const scope = c instanceof Element ? c : c.parentElement;
+    if (!scope) continue;
+    const own = scope.closest(".mention-chip");
+    const chips = own ? [own] : Array.from(scope.querySelectorAll(".mention-chip"));
+    for (const chip of chips) {
+      const texts: Text[] = [];
+      const walker = document.createTreeWalker(chip, NodeFilter.SHOW_TEXT);
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) texts.push(n as Text);
+      if (!texts.length) continue;
+      const first = texts[0], last = texts[texts.length - 1];
+      if (r.comparePoint(first, 0) === 0 && r.comparePoint(last, last.length) === 0) firsts.add(first);
+    }
+  }
+  if (!firsts.size) return null;
+  for (const t of firsts) t.insertData(0, "@");
+  try {
+    const scratch = document.createElement("div");
+    for (let i = 0; i < sel.rangeCount; i++) scratch.appendChild(sel.getRangeAt(i).cloneContents());
+    for (const c of Array.from(scratch.querySelectorAll<HTMLElement>(".mention-chip"))) {   // class and text travel; the hover title and the ids do not
+      c.removeAttribute("title");
+      for (const k of Object.keys(c.dataset)) delete c.dataset[k];
+    }
+    return { text: sel.toString(), html: scratch.innerHTML };
+  } finally {
+    for (const t of firsts) t.deleteData(0, 1);
+  }
+}
+document.addEventListener("copy", (e) => {
+  const sel = window.getSelection();
+  if (!e.clipboardData || !sel) return;
+  const out = mentionCopyText(sel);
+  if (!out) return;                        // no whole chip in the selection: the browser's own copy
+  e.preventDefault();
+  e.clipboardData.setData("text/plain", out.text);
+  e.clipboardData.setData("text/html", out.html);
+});
 
 // Composer: Enter sends the message to the active session as its next prompt,
 // Shift+Enter inserts a newline; the box auto-grows a few lines.

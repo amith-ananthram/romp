@@ -148,7 +148,13 @@ class SettingsSectionsTest(unittest.TestCase):
             row = row[:row.index("</div>")]
             self.assertIn("<label class=rs-fastin id=rs-%s-wrap><input type=checkbox id=rs-%s>Fast mode<span class=rs-mixed hidden></span>" % (tier, tier), row)
             self.assertIn("<span class=rs-sub id=rs-%s-sub>" % tier, row)
-        self.assertIn("#rsettings .rs-fastin.rs-off {", _gear_css_src())
+        css = _gear_css_src()
+        self.assertIn("#rsettings .rs-fastin.rs-off {", css)
+        # the greyed look fades the BOX alone: opacity on the whole label faded the hint span inside it too, and made
+        # the label a stacking context the rows beneath paint over, so the reason the box was greyed read dim and overdrawn
+        self.assertIn("#rsettings .rs-fastin.rs-off input { opacity: .4;", css)
+        self.assertNotRegex(css, r"\.rs-fastin\.rs-off \{[^}]*opacity", "no opacity on the label: the hint inside it would fade with it")
+        self.assertRegex(css, r"\.rs-fastin\.rs-off \{[^}]*color: var\(--text-faint", "the word greys by token, not by fading")
 
     def test_collapse_gaps_is_wired_to_the_shared_collapseGaps_setting(self):
         # the gear JS persists/loads romp:settings.collapseGaps; the timeline reads it (see romp-timeline-view.js)
