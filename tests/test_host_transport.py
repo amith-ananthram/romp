@@ -205,7 +205,7 @@ class TransportOverSocket(unittest.TestCase):
             self.assertEqual(got[0]["type"], "control_response", "the initialize's answer comes first, ahead of the replay")
             self.assertEqual([m.get("n") for m in got[1:]], [1, 2], "then the replay, from after the acknowledged offset 0")
             self.assertEqual(stderr, ["a stderr line"])
-            self.assertEqual(acks[-1], 3)
+            self.assertEqual(acks[-1], 2, "the held records' offsets were acknowledged as consumed; the answer's (3) waits for the stream to move on")
             t.detach_mode = True
             await t.end_input()                       # detach mode: no `end` goes out
             await t.close()
@@ -222,7 +222,8 @@ class TransportOverSocket(unittest.TestCase):
         recs = [{"type": "assistant", "n": i} for i in range(300)]
         async def go():
             fh = FakeHost(self._path(), recs); await fh.start()
-            t = ht.HostTransport(fh.path, kernel={"pid": 1})
+            acks = []
+            t = ht.HostTransport(fh.path, kernel={"pid": 1}, on_ack=acks.append)
             await t.connect()
             got = []
             async def read():
@@ -236,7 +237,11 @@ class TransportOverSocket(unittest.TestCase):
             await asyncio.wait_for(reader, 10)
             self.assertEqual(got[0]["type"], "control_response")
             self.assertEqual([m["n"] for m in got[1:]], list(range(300)), "every replayed record, in order, after the answer")
-            self.assertEqual(t.ack_offset, 300)
+            # the answer's own offset (300) is acknowledged only when the stream moves on past the held records;
+            # a reader that stopped here has acknowledged exactly what it consumed, nothing beyond
+            self.assertEqual(t.ack_offset, 299)
+            self.assertEqual((acks[0], acks[-1]), (0, 299), "the ack advanced with each held record, never jumping to the answer's offset first")
+            self.assertEqual(acks, sorted(acks))
             fh.close()
         run(go())
 
@@ -312,6 +317,79 @@ class TransportOverJournal(unittest.TestCase):
             self.assertEqual(t.exit_info["cause"], "replay-end")
             await t.close()
         run(go())
+
+
+class BackendHostRules(unittest.TestCase):
+    """The backend's host rules driven, not pinned by source: the drain's intent latch, the hello's open-turn
+    adoption and slot release, a thread attached at boot, a hosted thread's notices, an ended host's lease race,
+    the ack that a dead host must not get, and the kill switch after an orphan."""
+
+    def _be(self):
+        d = tempfile.mkdtemp(); return d, sb.SdkBackend(d, "/bin/true", lambda *a, **k: None)
+
+    def test_the_drain_latches_a_session_mid_attach_by_intent(self):
+        d, be = self._be()
+        s = types.SimpleNamespace(sid=SID, name="web", inflight=1, ended=False, thread=None, _host=None, _host_intent=True,
+                                  detached=False, shutdown=lambda: None)
+        be.sessions[SID] = s
+        res = be.drain(timeout=1)
+        self.assertEqual(res["cutTurns"], [], "a session mid-attach is detached, never cut")
+        self.assertTrue(s.detached)
+
+    def test_hello_adopts_the_hosts_open_turns_and_releases_the_slot_only_for_an_attach(self):
+        d, be = self._be()
+        fired = []
+        t = types.SimpleNamespace(hello={"host": {"pid": 1, "start": "a"}, "cli": {"pid": 2, "start": "b"}}, ack_offset=5)
+        s = types.SimpleNamespace(sid=SID, name="web", inflight=0, _host=t, _host_is_attach=True, _fire_boot_settled=lambda: fired.append(1))
+        be._on_host_hello(s, {"host": {"pid": 1, "start": "a"}, "cli": {"pid": 2, "start": "b"}, "journal": {"next": 6}, "parked": [], "inflight": 1})
+        self.assertEqual((s.inflight, fired), (1, [1]), "mid-turn adopted; the boot slot released for an attach")
+        s2 = types.SimpleNamespace(sid=SID, name="web", inflight=1, _host=t, _host_is_attach=False, _fire_boot_settled=lambda: fired.append(2))
+        be._on_host_hello(s2, {"host": {"pid": 1, "start": "a"}, "cli": {}, "journal": {"next": 0}, "parked": [], "inflight": 0})
+        self.assertEqual((s2.inflight, fired), (1, [1]), "a lower count never lowers ours; a spawn's hello leaves the slot to the init record")
+
+    def test_a_hosted_comment_thread_attaches_at_boot_and_gets_no_dead_life_notices(self):
+        d, be = self._be()
+        tsid = "33333333-2222-3333-4444-0000000000b3"
+        reg = {"sid": tsid, "name": "t1", "cwd": d, "mode": "default", "effort": "high", "lastSid": tsid, "alive": True,
+               "threadOf": SID, "bgTasks": [{"id": "x", "desc": "a task"}], "pendingAsk": True, "spawnedAt": 1}
+        sb.write_reg(Path(d), tsid, reg)
+        sb.write_lease(d, {"sid": tsid, "fsid": tsid, "pid": 999999999, "start": "1", "holder": {"pid": 999999998, "start": "2", "kind": "host"}, "version": "", "t": time.time()})
+        starts = {999999999: "1", 999999998: "2"}
+        started = []
+        with mock.patch.object(sb, "proc_start", lambda p, run=None: starts.get(p)), \
+             mock.patch.object(sb.SdkSession, "start", lambda self: started.append(self.sid)):
+            be._boot_reconcile([dict(reg)])
+            self.assertIn(tsid, be._boot_attach_sids, "a thread with a live host attaches at boot (the attach check runs before the thread skip)")
+            be._ensure(tsid)
+        queue = (sb.read_reg(Path(d), tsid) or {}).get("queue") or []
+        self.assertEqual(queue, [], "no killed-question or dead-task notice for a thread whose host kept it alive")
+
+    def test_a_host_this_kernel_ended_is_ended_not_died_and_its_stale_ack_is_never_written(self):
+        d, be = self._be()
+        t = types.SimpleNamespace(hello={"host": {"pid": 7, "start": "h"}, "cli": {"pid": 8, "start": "c"}}, ack_offset=3, exit_info=None)
+        s = types.SimpleNamespace(sid=SID, name="web", _host=t, _host_ack_t=0.0)
+        sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "alive": True})
+        be._host_ended(s, {"t": "exit", "code": 0, "cause": "end"})
+        self.assertEqual(be._host_recently_ended[SID], "7:h")
+        lease = {"sid": SID, "holder": {"pid": 7, "start": "h", "kind": "host"}}
+        self.assertEqual(be._holder_ident(lease), "7:h", "the ended host is recognized by identity, so its lease race is a wait, not a host.died")
+        t.exit_info = {"t": "exit", "code": 0}
+        be._write_host_ack(s, force=True)
+        self.assertNotIn("hostAck", sb.read_reg(Path(d), SID) or {}, "no ack written for a host that reported its exit")
+
+    def test_with_the_setting_off_an_orphan_lease_is_recovered_and_no_host_is_spawned(self):
+        d, be = self._be()
+        Path(d, "session-hosts").write_text("off")
+        sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "alive": True, "lastSid": SID})
+        sb.write_lease(d, {"sid": SID, "fsid": SID, "pid": 999999997, "start": "1", "holder": {"pid": 999999996, "start": "2", "kind": "host"}, "version": "", "t": time.time()})
+        s = types.SimpleNamespace(sid=SID, name="web", _host_intent=True, _host=None, _host_is_attach=False)
+        with mock.patch.object(sb, "proc_start", lambda p, run=None: None):
+            out = asyncio.run(be._host_transport_for(s, types.SimpleNamespace(), (None, None, None)))
+        self.assertIsNone(out, "the kill switch holds after the orphan road: a plain SDK subprocess, no new host")
+        self.assertFalse(s._host_intent)
+        self.assertIsNone(sb.read_lease(d, SID), "the dead host's lease is cleared")
+        kinds = [json.loads(l)["kind"] for l in (Path(d) / sb.SESSION_EVENTS_FILE).read_text().splitlines()]
+        self.assertIn("host.died", kinds)
 
 
 class Pins(unittest.TestCase):

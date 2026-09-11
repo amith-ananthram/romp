@@ -110,6 +110,8 @@ class JournalRules(unittest.TestCase):
         self.assertEqual(j.next_offset, 5); self.assertEqual(len(j._index), 5)
         self.assertEqual([(o, r["n"]) for o, r in j.read_from(2)], [(2, 2), (4, 4)])
         self.assertEqual([(o, r["n"]) for o, r in j.read_from(3, 5)], [(4, 4)], "a replay spanning the hole reads past it")
+        self.assertEqual([(o, r["n"]) for o, r in sh.read_journal_dir(d, 0)], [(0, 0), (2, 2), (4, 4)],
+                         "the orphan reader, with no index, numbers past the unrecorded gap from gaps.json")
 
     def test_a_replay_read_is_bounded_by_its_end(self):
         # finding 2: the replay covers the records that existed when the attach began; later ones follow from the
@@ -568,10 +570,12 @@ class HostProcess(unittest.TestCase):
         k2, hello = self._attach(sock, ack=-1, pid=4343)
         deadline = time.time() + 20
         while time.time() < deadline and sum(1 for f in k2.outs() if f["data"].get("type") == "result") < 3:   # loop-ok
-            k2.send({"t": "ping"}); k2.recv_until(lambda f: f.get("t") == "pong")
+            seen = {id(f) for f in k2.frames if f.get("t") == "pong"}
+            k2.send({"t": "ping"}); k2.recv_until(lambda f: f.get("t") == "pong" and id(f) not in seen)   # a NEW pong, so the read goes on
             time.sleep(0.1)
         offs = [f["offset"] for f in k2.outs()]
-        self.assertEqual(offs, list(range(len(offs))), "every record once, in order, whether from disk, memory or the backlog")
+        self.assertEqual(offs, list(range(7)), "every record once, in order: the init and three (assistant, result) pairs, whether from disk, memory or the backlog; host log: %r"
+                         % [(r["kind"], r.get("at"), r.get("error")) for r in self._hostlog()][-12:])
         self.assertGreaterEqual(hello["journal"]["next"], 4, "the hello counted records the writer had not landed yet")
         k2.close()
 
@@ -580,6 +584,7 @@ class HostProcess(unittest.TestCase):
         host, sock, spec = self._start()
         k, _ = self._attach(sock)
         k.send({"t": "in", "data": self._user("last words sleep=0.1")})
+        time.sleep(0.05)                                 # two socket reads on the host's side, not one
         k.send({"t": "end", "grace": 20})
         ex = k.recv_until(lambda f: f.get("t") == "exit", timeout=15)
         self.assertEqual(ex["cause"], "end")

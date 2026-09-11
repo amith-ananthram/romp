@@ -328,13 +328,15 @@ class HostTransport(_Base):
             self.on_fault(f)
         return None
 
-    def _take(self, out: dict):
-        """Bookkeeping for one record handed to the Query: acknowledged means RECEIVED by this process (not
-        persisted); the offset moves as the record is handed over, and derived state is rebuilt from the
-        transcript and the journal."""
+    def _advance(self, out: dict) -> None:
+        """Acknowledge one record: acknowledged means RECEIVED by this process (not persisted); the offset moves
+        as the record is handed over, and derived state is rebuilt from the transcript and the journal."""
         self.ack_offset = max(self.ack_offset, int(out.get("offset", self.ack_offset)))
         if self.on_ack:
             self.on_ack(self.ack_offset)
+
+    def _take(self, out: dict):
+        self._advance(out)
         return out["data"]
 
     def _answers_mine(self, data) -> bool:
@@ -358,11 +360,15 @@ class HostTransport(_Base):
                     # over; then the held records follow, in order, and live delivery resumes.
                     if self._init_pending:
                         if self._answers_mine(out.get("data")):
+                            # the answer is handed over first but acknowledged LAST: its offset sits past the
+                            # whole held replay, and an ack that jumped there before the held records were
+                            # handed over would lose them to every later kernel (the commit 6-7 review's third)
                             self._init_pending = False
-                            yield self._take(out)
+                            yield out["data"]
                             held, self._hold = self._hold, []
                             for h in held:
                                 yield self._take(h)
+                            self._advance(out)
                         else:
                             self._hold.append(out)
                     else:

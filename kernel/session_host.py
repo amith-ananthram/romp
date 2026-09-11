@@ -186,7 +186,12 @@ class Journal:
                 os.ftruncate(self._fh.fileno(), self._pos)
                 self._fh.seek(self._pos)
             except Exception:
-                pass
+                # the segment cannot be put back (a partial write that will not truncate): its byte positions are
+                # unreliable from here, so it is left behind and a fresh segment starts at this offset (finding 11)
+                try:
+                    self._open_segment(off)
+                except Exception:
+                    pass
             raise
         self._index.append((self._seg, self._pos))
         self._seg_last[self._seg] = off
@@ -206,6 +211,10 @@ class Journal:
         self._seg_last[self._seg] = off
         self.gaps.add(off)
         self.next_offset = off + 1
+        try:                                            # the ORPHAN reader has no index: the gaps ride beside the segments
+            (self.dir / "gaps.json").write_text(json.dumps(sorted(self.gaps)))
+        except OSError:
+            pass
 
     def _turn_boundary(self) -> None:
         # rotate when the current segment is past its size; drop segments the kernel has fully acknowledged
@@ -279,8 +288,14 @@ def read_journal_dir(directory, offset: int = 0):
     early segments cost nothing but the records they held. Pure on the files."""
     d = Path(directory)
     segs = sorted((f, p) for p in d.glob("journal-*.jsonl") for f in [_segment_first(p.name)] if f is not None)
+    try:
+        gaps = set(json.loads((d / "gaps.json").read_text()))
+    except Exception:
+        gaps = set()
     for first, p in segs:
         n = first
+        while n in gaps:            # an unrecorded gap at the segment's head
+            n += 1
         with open(p, "rb") as fh:
             for line in fh:
                 if n >= offset:
@@ -291,6 +306,8 @@ def read_journal_dir(directory, offset: int = 0):
                     if rec is not None and rec.get("type") != GAP_TYPE:
                         yield n, rec
                 n += 1
+                while n in gaps:    # an unrecorded gap between two records on disk: the numbering skips it
+                    n += 1
 
 
 # ── open control requests ───────────────────────────────────────────────────────────────────────
@@ -839,17 +856,19 @@ class SessionHost:
                             "journal": {"next": read_at_attach}, "parked": self.parked.ids(),
                             "inflight": self.inflight,      # the open turns, so an attaching kernel knows it is mid-turn
                             "exited": self.exit_info is not None})
+        # each offset is resolved at ITS moment: from memory while unwritten, from the journal once landed, so
+        # a record the writer lands during a drain yield is never between two snapshots (finding 4 of the
+        # commit 6-7 review); a gap (a failed write) yields nothing and the parked table covers a request there
         n = 0
-        journaled = min(self.journal.next_offset, read_at_attach)
-        for off, rec in self.journal.read_from(ack + 1, journaled):
-            self._send(writer, {"t": "out", "offset": off, "data": rec})
+        for off in range(max(ack + 1, 0), read_at_attach):
+            rec = self._unwritten.get(off)
+            if rec is None:
+                rec = next((r for _, r in self.journal.read_from(off, off + 1)), None)
+            if rec is not None:
+                self._send(writer, {"t": "out", "offset": off, "data": rec})
             n += 1
             if n % 200 == 0:
                 await writer.drain()
-        for off in range(max(ack + 1, journaled), read_at_attach):
-            rec = self._unwritten.get(off)
-            if rec is not None:
-                self._send(writer, {"t": "out", "offset": off, "data": rec})
         # every request still open is sent again FROM THE TABLE, whatever the acknowledged offset says and
         # whether or not its journal write landed: a kernel that received it and died never answered, and the
         # new kernel's Query must see it to answer it (findings 4 and e)
@@ -908,6 +927,10 @@ class SessionHost:
         self._journal_q = asyncio.Queue()
         self._stdin_q = asyncio.Queue()
         self.log("host-started", hostPid=os.getpid())
+        try:                                            # the identity hostAck is keyed by, for a reader with no hello
+            (self.dir / "identity.json").write_text(json.dumps({"pid": os.getpid(), "start": self.lease_api["proc_start"](os.getpid()) or ""}))
+        except OSError:
+            pass
         # the CLI first, the socket second: a kernel that finds the socket finds a CLI behind it (an attach
         # before the spawn would report no CLI pid and fail its first write)
         try:

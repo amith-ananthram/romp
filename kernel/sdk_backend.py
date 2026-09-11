@@ -4804,6 +4804,8 @@ class SdkSession:
         # `_host_end_grace` is the bound the next `end` carries (kill sets the short one)
         self._host = None
         self._host_intent = False          # set before the host attach or spawn begins, so a drain mid-attach detaches
+        self._host_is_attach = False       # the current host connect is an ATTACH (a replay-bearing hello)
+        self._host_attach_retries = 0
         self.detached = False
         self._host_end_grace = None
         self._host_ack_t = 0.0
@@ -6152,6 +6154,8 @@ class SdkSession:
                     # host alive must never start a second CLI beside the host's
                     self._host_intent = True
                     transport = await self.backend._host_transport_for(self, opts, (AssistantMessage, ResultMessage, SystemMessage))
+                    if transport is None:
+                        self._host_intent = False        # the setting is off: a kernel child after all
                 async with ClaudeSDKClient(options=opts, transport=transport) as client:
                     connected = True
                     self.client = client
@@ -6245,6 +6249,18 @@ class SdkSession:
                 if self._rewind_armed and not connected:
                     self._rewind_failed(e)
                     continue
+                host = self._host
+                if (not connected and host is not None and getattr(host, "hello", None) is not None
+                        and getattr(host, "_init_pending", False) and getattr(host, "exit_info", None) is None):
+                    # the attach reached the host (hello) but the connect did not complete (the initialize timed
+                    # out): the host and its CLI live on; detach (the transport's close already did) and try
+                    # again, bounded — never the crash heal, whose resume would put a second CLI beside the host's
+                    self._host_attach_retries += 1
+                    self.backend._log("host (%s): attach did not complete (%s); retry %d" % (self.name, type(e).__name__, self._host_attach_retries))
+                    if self._host_attach_retries <= 3:
+                        self.inflight = 0
+                        self._reconnect = True
+                        continue
                 if not connected:
                     # The CLI never came up. RECORD why, where the user can see it: this thread is about
                     # to die, and everything downstream of it (_on_session_gone settling 'waiting') is
@@ -6258,7 +6274,8 @@ class SdkSession:
                 if self._host is None and not self._host_intent:
                     self.backend._lease_close(self)
                 else:
-                    self.backend._write_host_ack(self, force=True)
+                    if self._host is not None and getattr(self._host, "exit_info", None) is None:
+                        self.backend._write_host_ack(self, force=True)   # still attached to a live CLI: the last ack
                     self._host = None
                     self._host_intent = False
             if self.ended or not self._reconnect:
@@ -8577,6 +8594,7 @@ class SdkBackend:
         self._leases: dict = {}            # sid -> (session, lease dict): the leases this kernel holds (T305)
         self._boot_attach_sids: set = set()   # sids the boot reconcile attached to a live host (T315)
         self._host_spawning: set = set()   # sids with a host spawn in flight (one host per session, ever)
+        self._host_recently_ended: dict = {}   # sid -> host identity this kernel asked to end (its lease removal races a reconnect)
         self._lease_thread = None          # the heartbeat, started at the first lease, ends when none are held
         self.thread_wake_model = None      # kernel-installed: model_id -> replacement or None, consulted
         #                                    ONLY when a comment THREAD is explicitly woken (T223 rider) —
@@ -8942,17 +8960,30 @@ class SdkBackend:
         lease = read_lease(self.state_dir, sess.sid)
         state = ht.host_lease_state(lease, now)
         hdir = ht.host_dir(self.state_dir, sess.sid)
+        if state == "orphan" and self._host_recently_ended.get(sess.sid) == self._holder_ident(lease):
+            # the host this kernel just asked to end (an effort change's reconnect, a kill): its lease removal
+            # races our reconnect; it ended, it did not die. Wait for the lease to go (bounded), then proceed.
+            deadline = time.time() + 5.0
+            while read_lease(self.state_dir, sess.sid) is not None and time.time() < deadline:   # loop-ok: bounded, on the lease's removal
+                await asyncio.sleep(0.1)
+            self._host_recently_ended.pop(sess.sid, None)
+            lease, state = None, "none"
         if state == "orphan":
-            await self._host_orphan_recover(sess, opts, lease, msg_classes)
+            await self._host_orphan_recover(sess, opts, lease, msg_classes, died=True)
             lease, state = None, "none"
         elif state == "none" and lease is None and hdir.exists():
-            # a leftover directory with no lease: the host ended cleanly (its exit frame was not seen by a
-            # kernel) or was cleared already; nothing to replay, never a host.died row (the orphan road needs
-            # a holder that died)
-            self._log("host (%s): clearing the ended host's leftover directory" % sess.name)
-            shutil.rmtree(str(hdir), ignore_errors=True)
-            self._update_reg_dropping(sess.sid, drop=("hostAck", "hostLogPos"))
+            # a leftover directory with no lease: the host ended on its own (its idle grace, unattended) after
+            # records no kernel consumed. Replay that tail through the same road (no wait: no holder to wait
+            # for; no host.died row: nothing died), then clear the directory.
+            await self._host_orphan_recover(sess, opts, None, msg_classes, died=False)
+        if state == "none" and not self.session_hosts_on():
+            # the kill switch: with the setting off nothing SPAWNS a host, whatever happened to the last one;
+            # the session runs the plain SDK subprocess and the connect loop's finally closes a kernel lease
+            sess._host_intent = False
+            self._log("host (%s): session-hosts is off; running the CLI as a kernel child" % sess.name)
+            return None
         if state == "attach":
+            sess._host_is_attach = True
             reg = read_reg(self.state_dir, sess.sid) or {}
             ack = reg.get("hostAck") if isinstance(reg.get("hostAck"), dict) else {}
             holder = lease.get("holder") or {}
@@ -8993,6 +9024,7 @@ class SdkBackend:
         finally:
             with self._lock:
                 self._host_spawning.discard(sess.sid)
+        sess._host_is_attach = False
         t = self._new_host_transport(sess, sock, -1)
         sess._host = t
         self._log("host (%s): started a session host (pid %d)" % (sess.name, proc.pid))
@@ -9021,15 +9053,27 @@ class SdkBackend:
         return subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=errlog,
                                 start_new_session=True, close_fds=True)
 
-    async def _host_orphan_recover(self, sess, opts, lease, msg_classes):
-        """A host died (its lease does not hold, or a journal has no lease): say so, wait for its CLI to be
-        gone (the lease's pid and start time; the process finishing its turn on stdin end-of-file), replay
-        the orphan journal through the ONE consumer path (a client over the replay transport, drained by the
-        session's own receive loop), then clear the host's directory and lease."""
+    @staticmethod
+    def _holder_ident(lease) -> str:
+        h = (lease or {}).get("holder") if isinstance(lease, dict) else None
+        h = h if isinstance(h, dict) else {}
+        return "%s:%s" % (h.get("pid"), h.get("start"))
+
+    async def _host_orphan_recover(self, sess, opts, lease, msg_classes, died: bool = True):
+        """A host is gone: `died` (its lease does not hold; a host.died row, and a wait for its CLI to be gone,
+        the lease's pid and start time, the process finishing its turn on stdin end-of-file) or ended unattended
+        (a lease-less leftover directory: a host.tail-replayed row, no wait). Either way the journal's tail past
+        hostAck is replayed through the ONE consumer path (a client over the replay transport, drained by the
+        session's own receive loop), then the host's directory and lease are cleared. hostAck is trusted only
+        when it names THIS host (the identity the host wrote at its start)."""
         ht = _ht()
         hdir = ht.host_dir(self.state_dir, sess.sid)
-        problem_row(self.state_dir, "the session host for %s died; its CLI finishes its turn, then the session resumes from "
-                    "the transcript after the journal is replayed" % sess.name, "host.died", sid=sess.sid, name=sess.name, log=self._log)
+        if died:
+            problem_row(self.state_dir, "the session host for %s died; its CLI finishes its turn, then the session resumes from "
+                        "the transcript after the journal is replayed" % sess.name, "host.died", sid=sess.sid, name=sess.name, log=self._log)
+        else:
+            append_session_event(self.state_dir, "host.tail-replayed", sid=sess.sid, name=sess.name)
+            self._log("host (%s): the host ended unattended; replaying the journal's tail before resuming" % sess.name)
         if isinstance(lease, dict):
             try:
                 pid, start = int(lease.get("pid")), str(lease.get("start") or "")
@@ -9043,7 +9087,12 @@ class SdkBackend:
                     self._log("host (%s): still waiting for the dead host's CLI (pid %d) to finish its turn" % (sess.name, pid))
         reg = read_reg(self.state_dir, sess.sid) or {}
         ack = reg.get("hostAck") if isinstance(reg.get("hostAck"), dict) else {}
-        offset = int(ack.get("offset", -1)) if ack else -1
+        try:
+            ident = json.loads((hdir / "identity.json").read_text())
+            ident = "%s:%s" % (ident.get("pid"), ident.get("start"))
+        except Exception:
+            ident = None
+        offset = int(ack.get("offset", -1)) if (ack and ident and str(ack.get("host") or "") == ident) else -1
         if any(hdir.glob("journal-*.jsonl")):
             from claude_agent_sdk import ClaudeSDKClient
             replay = ht.HostTransport.from_journal(hdir, ack=offset)
@@ -9066,8 +9115,8 @@ class SdkBackend:
         once a second, and always on detach. Acknowledged means received by this process, not persisted:
         derived state is rebuilt from the transcript and the journal anyway."""
         t = sess._host
-        if t is None or getattr(t, "hello", None) is None:
-            return
+        if t is None or getattr(t, "hello", None) is None or getattr(t, "exit_info", None) is not None:
+            return                # no host, no hello yet, or a host that reported its exit (its ack is history)
         now = time.time()
         if not force and now - sess._host_ack_t < 1.0:
             return
@@ -9086,6 +9135,10 @@ class SdkBackend:
         instead of walking the orphan road over a clean end's leftovers."""
         self._log("host (%s): the CLI exited (%s, code %s)" % (sess.name, ex.get("cause"), ex.get("code")))
         self._file_host_log_rows(sess)
+        t = sess._host
+        if t is not None and getattr(t, "hello", None):
+            h = t.hello.get("host") or {}
+            self._host_recently_ended[sess.sid] = "%s:%s" % (h.get("pid"), h.get("start"))
         if ex.get("cause") in ("end", "end-forced", "eof-grace"):
             shutil.rmtree(str(_ht().host_dir(self.state_dir, sess.sid)), ignore_errors=True)
             self._update_reg_dropping(sess.sid, drop=("hostAck", "hostLogPos"))
@@ -9105,10 +9158,13 @@ class SdkBackend:
             open_turns = 0
         if open_turns > sess.inflight:
             sess.inflight = open_turns
-        try:
-            sess._fire_boot_settled()
-        except Exception:
-            pass
+        if getattr(sess, "_host_is_attach", False):
+            # an attach's hello has nothing to wait for (no init record follows a replay); a SPAWN's hello is
+            # the host's, not the CLI's, and the init record releases the boot-stagger slot as for any spawn
+            try:
+                sess._fire_boot_settled()
+            except Exception:
+                pass
         append_session_event(self.state_dir, "host.attached", sid=sess.sid, name=sess.name, boot=boot,
                              hostPid=h.get("pid"), cliPid=c.get("pid"), fsid=c.get("fsid"),
                              replayFrom=int(sess._host.ack_offset) + 1 if sess._host else None, journalNext=j.get("next"),
@@ -11159,7 +11215,8 @@ class SdkBackend:
                     reg["model"] = nm
                     reg["liveModel"] = _alias_label(nm)
                     self._update_reg(sid, model=nm, liveModel=_alias_label(nm))   # _reg_lock, not self._lock
-            if reg.get("threadOf"):
+            hosted = _ht().host_lease_state(read_lease(self.state_dir, sid), time.time()) == "attach"
+            if reg.get("threadOf") and not hosted:   # a thread whose host kept it alive lost nothing (T315)
                 # A dormant thread's DEAD LIFE, reported at its explicit wake. The boot sweep never
                 # resumes a thread for it (T223), so what the sweep tells a resumed top-level session
                 # — a question the kernel's death killed (pendingAsk, T214), background tasks that
