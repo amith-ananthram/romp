@@ -1995,14 +1995,19 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
 .turn-queued { display: flex; flex-direction: column; align-items: flex-end; padding: 6px 0 10px; gap: 5px; }
 .queued-head { display: inline-flex; align-items: center; gap: 5px; font-size: 0.82em; color: var(--dim); letter-spacing: 0.02em; }
 .queued-head .queued-icon { color: var(--accent); display: flex; }   /* wireframe hourglass in the accent blue */
-.queued-bubble, .notice.notice-slim.queued-bubble {   /* …and a SENT postal card whose message has not landed yet wears the
-                                                         same dress by the same class (T302): one provisional vocabulary */
+.queued-bubble, .notice.queued-bubble, .notice.notice-slim.queued-bubble {   /* …and a SENT postal card whose message has
+   not landed yet wears the same dress by the same class (T302): one provisional vocabulary. Named at BOTH densities:
+   slim, and boxed by a fold (a first line past the head's clip, or a second line). On the boxed card `.notice` alone,
+   later in the file at `.queued-bubble`'s specificity, took the border, background and radius back and left a solid
+   box at the bubble's 72% width until the receipt landed; `.notice.queued-bubble` outranks it. The slim selector stays:
+   `.notice.notice-slim`, later in the file too, would otherwise beat `.notice.queued-bubble` on the slim card. */
   max-width: 72%; overflow-wrap: anywhere; display: flow-root;
   background: color-mix(in srgb, var(--you) 10%, transparent); border: 1px dashed color-mix(in srgb, var(--you) 65%, transparent);
   border-radius: 14px; padding: 7px 12px; color: var(--fg); opacity: 0.85;
 }
-.notice.notice-slim.queued-bubble { max-width: none; display: block; }   /* the notice keeps its row width and flex head; only the
-                                                                            dress is the bubble's (same specificity as the shared rule, later) */
+.notice.queued-bubble, .notice.notice-slim.queued-bubble { max-width: none; display: block; }   /* the notice keeps its row
+   width and flex head at either density; only the dress is the bubble's (the shared rule's specificities, later in the
+   file). The boxed card too: it fills the column while provisional, so nothing snaps when the receipt lands. */
 /* A CANCELABLE queued bubble carries an explicit ✕ (the user 2026-07-08 — the old whole-bubble click was
    undiscoverable and re-render-fragile). The bubble itself is no longer clickable; only the ✕ acts. It sits
    in the top-right corner (the bubble reserves padding for it) — dim until the bubble is hovered, red on
