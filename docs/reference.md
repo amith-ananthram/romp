@@ -1623,7 +1623,10 @@ announces `chatProto2` in its `caps`:
   re-attaches it (the page's "Return to live" strip and its jump chip ask for
   one, and the full frame answering that ask merges into the held run it
   overlaps, so the pages the reader walked stay, the kernel's base keeping the
-  run's older first edge with it; every other full frame replaces the run, its
+  run's older first edge with it (the page sends its newest resident keys with
+  the ask, `reattachKeys`, and the kernel keeps the older edge when the highest
+  of them still in the list lies inside the frame); every other full frame
+  replaces the run, its
   in-list events being the fresh copies); a reconnect's `ready` starts a fresh
   base. A window that overlaps the run the client holds
   through the live tail, by turn span, keeps it attached (`connected`; a

@@ -20,7 +20,7 @@ import { ctxFallbackColor, pickTone, readableRgb } from "./ctx-color";
 import { applyTheme } from "./theme";
 import { applyDenseChrome } from "./dense-chrome";
 import { SessionViews, viewVisible, viewsKey, revealIn, viewTagUnion, viewTags, type TagUnion, type SessionTag } from "./session-views";
-import { prependHead, appendMore, mergeWindow, historyLabel, indexOfUuid, keyOf, windowDetached, fullFrameMerges, afterMore } from "./chat-window";   // the uuid-anchored wire (T323 stage 4b)
+import { prependHead, appendMore, mergeWindow, historyLabel, indexOfUuid, keyOf, windowDetached, fullFrameMerges, afterMore, reattachKeys } from "./chat-window";   // the uuid-anchored wire (T323 stage 4b)
 import { mintWriteId, ackOutcome, adoptViews, seqOf, capsAdopts, announcedSeq, announcedAfter, createInFlight, rederivePending, lensBlob, applyLensFields, type InflightWrite, type LensFields, type TagEditOp, type ViewsAck } from "./views-writes";
 import { lensVisible, surfaceLens } from "./tag-lens";
 import { openTagMenu, tagMenuButton, syncTagFilter, tagChip } from "./tag-menu";
@@ -16428,6 +16428,7 @@ function updateLivePaused(): void {
 function reattachLive(sid: string): void {
   const s = sessions.get(sid);
   if (!s || s.proto !== 2 || !s.detached) return;
+  vscodeApi?.postMessage({ type: "reattachKeys", id: sid, keys: reattachKeys(s.events as { uuid?: string; key?: string }[]) });   // the run as held, for the kernel's shared clause
   requestFullSession(sid, "reattach");   // the kernel's full tail frame re-bases this client; upsert merges it into the held run
 }
 

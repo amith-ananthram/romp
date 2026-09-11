@@ -27384,7 +27384,8 @@ def _ledger_memo_report():
 # only draws a window) and streams OLDER history in on scroll-back, WIRE_CHUNK events per `loadOlder` request.
 # The build itself is unchanged (every session still builds its full events + ledger — so the Fleet ledger
 # that rides the chat builds is intact); only what crosses the wire is trimmed.
-WIRE_TAIL = 250                                  # events shipped on a full chat send; older streams in on scroll-back
+WIRE_TAIL = 250
+REATTACH_KEYS = 512                              # the newest resident keys a proto-2 client sends with its re-attach ask                                  # events shipped on a full chat send; older streams in on scroll-back
 WIRE_CHUNK = 250                                 # events per loadOlder (chatHead) response
 
 
@@ -40098,9 +40099,10 @@ def _reattach_edge(client, sid, msg):
         return None
     with _client_lock(client):
         old = (client.get("echat") or {}).get(sid)
+        keys = (client.get("reattachKeys") or {}).pop(sid, None)   # the client's newest resident keys (reattachKeys, M1)
     if not isinstance(old, dict) or not old.get("first"):
         return None
-    return {"first": old["first"], "last": old.get("last"), "detached": False, "reattach": True}
+    return {"first": old["first"], "last": old.get("last"), "detached": False, "reattach": True, "keys": keys}
 
 
 def _client_reset_chat_base(client):
@@ -41020,8 +41022,9 @@ def _warm_history_pages(feed, now, live_map=None):
             if keys and len(keys | set(window)) > WARM_PAGES_MAX:
                 pending += 1                      # its pages would take the set past the bound: it waits (a shared page is free)
                 continue
+            new_keys = [k for k in window if k not in keys]     # a page two windows share is probed, rendered and counted once
             keys.update(window)
-            for key in window:
+            for key in new_keys:
                 with _page_lock:
                     hit = _PAGE_CACHE.get(key)
                 if hit is None:
@@ -41037,8 +41040,8 @@ def _warm_history_pages(feed, now, live_map=None):
         _PAGE_STATS["warmPending"] = pending
         _PAGE_STATS["warmMs"] += (time.monotonic() - t0) * 1000.0
         _PAGE_STATS["warmCycles"] += 1
-        resident_all = bool(keys) and unresolved == 0 and all(k in _PAGE_CACHE for k in keys)   # an empty or unresolved set is
-    if resident_all:                                                                              #  never "settled" (round 3, A)
+        resident_all = unresolved == 0 and all(k in _PAGE_CACHE for k in keys)   # an unresolved set is never "settled" (round 3, A); a
+    if resident_all:                                                                #  resolved board with every anchor in the tail settles EMPTY
         _WARM_MEMO.update(anchors=tuple(anchors), keys=frozenset(keys), sigs={sid_: e[4] for sid_, e in per_sid.items() if e is not None})
     else:
         _WARM_MEMO.update(anchors=(), keys=frozenset(), sigs={})
@@ -41383,14 +41386,18 @@ def _send_chat_proto2(c, m, ms, change_from, led_changed, st, pc):
         # newest event left the list (a fork, a /clear) is replaced on the client, and the frame's first is the base's
         pos = _uuid_positions(evs, sid)
         pf, pl = pos.get(pc["first"]), pos.get(pc.get("last"))
-        # the run shares a key with the frame (the client's merge overlaps on ANY resident key) when its newest event is
-        # inside the frame, or, its newest gone (a fork rewrote the tail), when the fork point lies inside the frame: the
-        # run held everything up to its newest, so the keys just below the fork point survive in the list and are in the
-        # frame exactly when the fork left fewer than WIRE_TAIL new events behind it (round 4: a fork of 250 or more
-        # leaves no run key in the frame, the client replaces, and the base takes the frame's first with it). The fork
-        # point is this push's change index (the shared diff against the last list sent).
-        fork_in_frame = pl is None and 0 < change_from < total and change_from > head_from
-        shared = (pl is not None and pl >= head_from) or fork_in_frame
+        # the run shares a key with the frame (the client's merge overlaps on ANY resident key) when the highest RESIDENT
+        # key of the run, as the client holds it, lies inside the frame: the client sends its newest REATTACH_KEYS keys with
+        # the ask (reattachKeys), and a fork that cut them all leaves no shared key (the client replaces, and the base takes
+        # the frame's first with it). The broadcast diff's change index is no fork point here: the repair frame is a
+        # connect push over an unchanged build (M1). An older bundle sends no keys: its newest edge decides. A resident key
+        # is required either way (M2): a run the fork cut entirely is replaced, never given a first that is in no list.
+        keys = pc.get("keys")
+        if keys is not None:
+            res = [pos[k] for k in keys if k in pos]
+            shared = bool(res) and max(res) >= head_from
+        else:
+            shared = pl is not None and pl >= head_from
         if shared and (pf is None or pf < head_from):
             first = pc["first"]
     st[sid] = {"first": first, "last": _last_anchor(evs), "detached": False}
@@ -54632,6 +54639,13 @@ class Handler(BaseHTTPRequestHandler):
             # client, and two threads over its held state would rebase a full the dedup then swallowed.
             client.setdefault("resync", set()).add(str(msg["slot"]))
             _pusher_wake.set()
+            return
+        if msg and msg.get("type") == "reattachKeys" and msg.get("id"):
+            # a proto-2 client's newest resident keys, sent right before its needFull("reattach") (T323 follow-up, M1): the
+            # repair frame's shared clause reads THESE, the run as the client holds it, not the broadcast diff's change index
+            keys = [str(k) for k in (msg.get("keys") or []) if k][-REATTACH_KEYS:]
+            with _client_lock(client):
+                client.setdefault("reattachKeys", {})[str(msg["id"])] = keys
             return
         if msg and msg.get("type") == "needFull" and msg.get("id"):
             # The client REJECTED a delta because it started past what it holds (render.ts chatTail's gap
