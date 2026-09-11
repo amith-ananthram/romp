@@ -192,13 +192,13 @@ test("run: render.ts's paneHidden() over window stand-ins says hidden when the p
 });
 
 test("requestFullSession(id, why): every ask names its why, from the fixed vocabulary", () => {
-  assert.match(RENDER, /type NeedFullWhy = "gap" \| "nobase" \| "skeleton-click" \| "prefetch" \| "skeleton-delta";/);
+  assert.match(RENDER, /type NeedFullWhy = "gap" \| "nobase" \| "skeleton-click" \| "prefetch" \| "skeleton-delta" \| "reattach";/);   // reattach: a proto-2 window back at the tail (T323 stage 4b)
   assert.match(RENDER, /function requestFullSession\(id: string, why: NeedFullWhy\): void \{\s*\n\s*if \(!id \|\| awaitingFull\.has\(id\)\) return;\s*\n\s*awaitingFull\.add\(id\);\s*\n\s*vscodeApi\?\.postMessage\(\{ type: "needFull", id, why \}\);/);
   const calls = [...RENDER.matchAll(/requestFullSession\(([^()]*?)\)/g)].map((m) => m[1]).filter((a) => !a.startsWith("id: string"));
-  assert.ok(calls.length >= 6, "the gap, no-base ×3, skeleton-delta ×2, skeleton-click and prefetch sites");
-  for (const c of calls) assert.match(c, /, "(gap|nobase|skeleton-click|prefetch|skeleton-delta)"$/, `call site without a why: requestFullSession(${c})`);
+  assert.ok(calls.length >= 9, "the gap ×4, no-base ×3, skeleton-delta ×2, skeleton-click, prefetch and reattach sites");
+  for (const c of calls) assert.match(c, /, "(gap|nobase|skeleton-click|prefetch|skeleton-delta|reattach)"$/, `call site without a why: requestFullSession(${c})`);
   const why = (w: string) => RENDER.split(`, "${w}")`).length - 1;
-  assert.equal(why("gap"), 1); assert.equal(why("nobase"), 3); assert.equal(why("skeleton-delta"), 2);
+  assert.equal(why("gap"), 4); assert.equal(why("nobase"), 3); assert.equal(why("skeleton-delta"), 2); assert.equal(why("reattach"), 1);   // gap ×4: the index tail's, the uuid tail's, a missing chatHead's and a missing chatMore's (an anchor gone from the transcript)
   assert.equal(why("skeleton-click"), 1); assert.equal(why("prefetch"), 1);
 });
 

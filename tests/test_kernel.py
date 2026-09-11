@@ -4729,9 +4729,9 @@ class ViewBuilder(unittest.TestCase):
 
     def test_feed_live_picker_floors_focus_card_to_blocked(self):
         """An SDK AskUserQuestion reports live state "picker" (it IS a picker, not a permission Allow/Deny;
-        tmux's Notification hook calls the same prompt "permission"). The hard blocked floor must honor
-        "picker" too, else an SDK session stopped on a question never registers as blocked the way a tmux
-        one does (the user 2026-06-27). The card text says "awaiting your input" (vs "approval")."""
+        the removed tmux backend's Notification hook called the same prompt "permission"). The hard blocked
+        floor must honor "picker" too, else an SDK session stopped on a question never registers as blocked
+        the way a terminal one did (the user 2026-06-27). The card text says "awaiting your input" (vs "approval")."""
         g = "%s:g8" % SID
         (jd.GOALDIR / (SID + ".json")).write_text(json.dumps({
             "rompUuid": SID, "seq": 8, "lastNode": g,
@@ -7502,9 +7502,13 @@ class ServeSecurity(unittest.TestCase):
         # Height rides --app-h (the shell's live VISIBLE height): the layout viewport ignores the phone
         # keyboard, so an inset:0 lift sat half behind it, and the --app-h sizing is what delivers the
         # keyboard to the iframe as its own resize — the event the picker's fold keys on (2026-08-10).
-        self.assertIn("body.picker-open #f-chat{display:block;position:fixed;left:0;right:0;top:0;"
+        self.assertIn("body.picker-open iframe.lifted{display:block;position:fixed;left:0;right:0;top:0;"
                       "height:var(--app-h,100dvh);z-index:200;background:transparent}", html)
-        self.assertIn("body.picker-open #chat-pane{display:block!important}", html)         # un-hide it even if chat is toggled off
+        self.assertIn("body.picker-open .pane.lifted{display:block!important}", html)      # un-hide it even if chat is toggled off
+        # by CLASS since the split (2026-09-08): the shell marks the ASKING column .lifted, so a picker opened
+        # in a later column lifts that column and never the first
+        self.assertIn("var lf=(window.__rompFrameOfWin&&window.__rompFrameOfWin(e.source))||document.getElementById('f-chat');", html)
+        self.assertIn("if(m.on&&lf){lf.classList.add('lifted');if(lf.parentElement)lf.parentElement.classList.add('lifted');}", html)
         self.assertIn("m.romp==='picker'", html)                                            # the shell listens for the picker post
         self.assertIn("document.body.classList.toggle('picker-open',!!m.on)", html)
         # the settings bridge is untouched (both share the one message handler)

@@ -39,7 +39,7 @@
 //
 //      Serving design: the REAL kernel HTTP Handler runs in a python3 subprocess under an isolated
 //      environment, the pattern of tests/test_color_route.py with the floors tests/conftest.py applies:
-//      private XDG_STATE_HOME and TMUX_TMPDIR; the manager variables removed (the manager port set to a
+//      a private XDG_STATE_HOME; the manager variables removed (the manager port set to a
 //      dead one, as conftest does) and every key-source name conftest pops removed too (the API keys,
 //      the key reference and command, the token credentials, the auth declaration and 1Password's
 //      names; STRIPPED_KEY_ENV below); the manager's key FILE and the boot model-catalog fetch pointed away (the
@@ -623,7 +623,7 @@ export const STRIPPED_KEY_ENV_PREFIXES = ["ANTHROPIC_", "OP_SESSION_"];
 
 /** The parent every run of this tool on this machine keeps its state under: <tmp>/romp-ui-bench-<uid>,
  *  private to the user and refused when something else holds the name. Each run gets a subdirectory
- *  holding owner.pid, the Handler's XDG_STATE_HOME and TMUX_TMPDIR and, through TMPDIR at launch, the
+ *  holding owner.pid, the Handler's XDG_STATE_HOME and, through TMPDIR at launch, the
  *  browser's profile and artifacts. This small parent is the only directory the tool ever lists. */
 export function benchRoot(base = os.tmpdir()) {
   const uid = typeof os.userInfo === "function" ? os.userInfo().uid : -1;
@@ -679,9 +679,7 @@ export async function startPageServer({ dist, python = "python3", log = () => {}
   // to the default, live, one, so a dead value is the state that is safe against every consumer.
   env.ROMP_MANAGER_PORT = "1";
   env.XDG_STATE_HOME = path.join(tmp, "state");
-  env.TMUX_TMPDIR = path.join(tmp, "tmux");
   fs.mkdirSync(env.XDG_STATE_HOME, { recursive: true });
-  fs.mkdirSync(env.TMUX_TMPDIR, { recursive: true });
   env.ROMP_KERNEL_NO_OPEN = "1";
   env.ROMP_POSTAL_PEERS = "0";   // the feed page polls /tunnels, which otherwise asks the LIVE postal bus for its peers
   // The floors tests/conftest.py applies, for the same reasons. The kernel's boot check reads the manager's

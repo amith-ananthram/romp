@@ -558,14 +558,14 @@ class TurnFinishedPush(unittest.TestCase):
                 f.unlink()
         self.path = _transcript(SID_WEB, "Done: the login flow now redirects to the notes list.\n\nDetails below.")
         self.alive = [{"sid": SID_WEB, "name": "web", "path": self.path}]
-        self.tmux = {SID_WEB: {"state": "waiting"}}
+        self.live = {SID_WEB: {"state": "waiting"}}
 
     def _tick(self):
         pushed, fwd = [], []
         with mock.patch.object(km, "_alive_sessions", return_value=self.alive), \
              mock.patch.object(km, "_push_notify", side_effect=lambda *a, **k: pushed.append((a, k))), \
              mock.patch.object(km, "_push_forward", side_effect=lambda evs: fwd.append(evs)):
-            fired = km._turn_notify_tick(time.time(), self.tmux)
+            fired = km._turn_notify_tick(time.time(), self.live)
         return fired, pushed, fwd
 
     def test_first_sight_is_a_silent_baseline_then_a_new_end_fires(self):

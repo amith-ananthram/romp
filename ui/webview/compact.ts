@@ -11,6 +11,18 @@
 // Which events are foldable is the caller's call (render.ts isFoldableNotice, passed per event): peers,
 // API errors, compaction/clear boundaries, asks, to-dos, dividers and every bubble stay standalone.
 
+/** The events compact mode may sweep into a noticegroup: the low-stakes, self-similar rows (a recovery, an effort
+ *  change, a model swap, a reload, an interrupt marker and its settle, an injected notice: a system reminder or a
+ *  romp notice on a user row). Peers, API errors, boundaries, asks, to-dos and every real bubble stay standalone.
+ *  Pure over the event's shape so render.ts (the fold) and reveal-progress.ts (what counts as a message) share ONE
+ *  reading (T336 review: the progress count took injected notices for messages). */
+export function isFoldableNoticeShape(ev: { kind: string; interruptMarker?: unknown; interruptSettle?: unknown; rompSystem?: unknown; md?: unknown; source?: unknown; human?: unknown; undelivered?: unknown }): boolean {
+  if (ev.kind === "retried" || ev.kind === "effortApplied" || ev.kind === "modelFallback" || ev.kind === "reconnecting") return true;
+  if (ev.kind === "user") return !!(ev.interruptMarker || (ev.rompSystem && ev.md) || (ev.source && !ev.human && !ev.undelivered));
+  if (ev.kind === "assistant") return !!ev.interruptSettle;
+  return false;
+}
+
 export type DisplayItem =
   | { kind: "event"; index: number }            // a pass-through event, by its index in the source array
   | { kind: "toolgroup"; indices: number[] }    // a collapsed run of ≥2 consecutive tool uses (a lone tool is an "event")
@@ -58,6 +70,25 @@ export function compactDisplay(kinds: readonly string[], names?: readonly (strin
   flush();
   flushNotices();
   return out;
+}
+
+/** The member a display unit is PLACED and TIMED by (T339, the user 2026-09-11). A collapsed NOTICE run anchors on the
+ *  member with the LATEST epoch (ties: the later one), never the first: a run can hold a notice stamped earlier than the
+ *  rows around it (one that kept the moment it was queued and landed in the transcript at delivery), so timed by its first
+ *  member the run wore yesterday's clock among today's rows and the day walk read the step back as a day boundary. The
+ *  latest member is the one in sequence with its neighbours; the head's rail time, the day walk and the walk's exit all
+ *  read it (a run with no timed member falls to its first). Every other unit keeps its FIRST member, as before: a lone
+ *  event is its own anchor, and a tool run's members are in transcript order with its head timed by its first.
+ *  `epochAt(i)` is event i's epoch or null. */
+export function itemAnchor(it: DisplayItem, epochAt: (i: number) => number | null): number {
+  if (it.kind === "event") return it.index;
+  if (it.kind === "toolgroup") return it.indices[0];
+  let best = it.indices[0], bestEp: number | null = null;
+  for (const i of it.indices) {
+    const ep = epochAt(i);
+    if (ep != null && (bestEp == null || ep >= bestEp)) { best = i; bestEp = ep; }
+  }
+  return best;
 }
 
 // One pluralized count of a tool kind, e.g. { label: "Edits", count: 3 }. The label keeps the tool's

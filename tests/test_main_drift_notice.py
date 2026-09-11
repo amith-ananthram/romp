@@ -378,7 +378,7 @@ class DriftWiring(unittest.TestCase):
             ran.clear()
             km._QUIET_PARKED_LOGGED[0] = ""
             audit.write_text(json.dumps({"t": int(now - 60), "ppid": 4242, "parent": "bash", "sid": "", "name": "",
-                                         "tty": "/dev/pts/0", "tmux": "", "when": "quiet", "sha": "f3dc387a"}) + "\n")
+                                         "tty": "/dev/pts/0", "when": "quiet", "sha": "f3dc387a"}) + "\n")
             check()
             self.assertEqual(ran, [], "a quiet CLI refresh for this sha is a parked deploy too")
             # a busy box (review find): fifty session self-closes write fifty end-on-idle rows after

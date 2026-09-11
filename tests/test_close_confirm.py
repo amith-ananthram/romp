@@ -64,8 +64,8 @@ class CloseConfirmRidesTheKill(unittest.TestCase):
         km._record_death = lambda sid, ts, why: self.events.append(("death", sid, why))
         # the tab builder reads the backend's CURRENT liveness — so after the kill it lists only the survivor
         km._live_map = lambda: {s: {} for s in self.be.alive}
-        km._chat_tab_sessions = lambda now, tmux: [{"sid": s, "name": "web" if s == KEPT else "api", "path": "/nonexistent"}
-                                                   for s in (KEPT, ENDED) if s in tmux]
+        km._chat_tab_sessions = lambda now, live: [{"sid": s, "name": "web" if s == KEPT else "api", "path": "/nonexistent"}
+                                                   for s in (KEPT, ENDED) if s in live]
         del km._clients[:]
 
     def tearDown(self):
@@ -114,7 +114,7 @@ class CloseConfirmRidesTheKill(unittest.TestCase):
     def test_a_failing_builder_never_breaks_the_handler(self):
         chat, frames = _chat_client()
         km._clients.append(chat)
-        km._chat_tab_sessions = lambda now, tmux: (_ for _ in ()).throw(RuntimeError("boom"))
+        km._chat_tab_sessions = lambda now, live: (_ for _ in ()).throw(RuntimeError("boom"))
         self.assertFalse(km._confirm_close_now(ENDED))
         self.assertEqual(frames, [])
 
