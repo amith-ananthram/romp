@@ -222,10 +222,11 @@ ride as the plain lead-in alone; under the question rides the conversation it
 ends, quoted whole inside a fence: whole turns, the question's own always,
 earlier ones newest first while they fit the bound, shown oldest first with a
 line saying how many were left out, the user's prompts and the worker's
-replies with tool calls collapsed to a count and code blocks never cut; the
-bound is 24 KiB of text by default, a knob at ~/.config/romp/relay-context-bytes
-or $ROMP_RELAY_CONTEXT_BYTES, read at call time, so you raise it without a
-release), once per block off a marker the judge
+replies with tool calls collapsed to a count and code blocks never cut, a turn
+with no paragraph break keeping its last lines; the bound is 24 KiB of text by
+default, a knob at ~/.config/romp/relay-context-bytes or
+$ROMP_RELAY_CONTEXT_BYTES, read at call time and capped at 768 KiB, so you
+raise it without a release), once per block off a marker the judge
 leaves on the node (each marker has an identity, the block's evidence time
 and the peer, that its queue entry and the record settling it name, and the
 node remembers the markers it settled, so a block filed again after a lift is

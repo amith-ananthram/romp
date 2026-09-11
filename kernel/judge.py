@@ -12955,8 +12955,9 @@ def file_block(store, nd, src, why, ev_t, t=None, seg=None):
 
 
 RELAY_CONTEXT_BYTES_DEFAULT = 24 * 1024     # the conversation excerpt a relayed question carries: 24 KiB of text
+RELAY_CONTEXT_BYTES_MAX = 768 * 1024        # the bus reads a megabyte per request: the excerpt leaves headroom for the rest
 RELAY_CONTEXT_KNOB = Path(os.path.expanduser("~/.config/romp/relay-context-bytes"))
-_RELAY_MARKER_RE = re.compile(r"<!--\s*romp-[^>]*-->")
+_RELAY_MARKER_RE = re.compile(r"<!--\s*romp-.*?-->", re.S)   # to the marker's own close: a payload may hold a '>'
 
 
 def relay_context_bytes():
@@ -12970,6 +12971,11 @@ def relay_context_bytes():
             continue
         try:
             n = int(str(raw).strip().replace("_", ""))
+            if n > RELAY_CONTEXT_BYTES_MAX:               # past the bus's own limit the send would be refused (a 413 read as
+                if raw not in _RELAY_KNOB_SAID:            #   definitive, every wait reverted): the cap stands in its place
+                    _RELAY_KNOB_SAID.add(raw)
+                    sys.stderr.write("relay context: %s holds %r, over the %d-byte cap; the cap stands\n" % (src, raw, RELAY_CONTEXT_BYTES_MAX))
+                return RELAY_CONTEXT_BYTES_MAX
             if n > 0:
                 return n
         except ValueError:
@@ -12985,11 +12991,11 @@ _RELAY_KNOB_SAID = set()
 
 def _relay_knob_line():
     try:
-        for line in RELAY_CONTEXT_KNOB.read_text().splitlines():
+        for line in RELAY_CONTEXT_KNOB.read_text(errors="replace").splitlines():
             line = line.strip()
             if line and not line.startswith("#"):
                 return line
-    except OSError:
+    except Exception:                                      # unreadable, undecodable, not a file: the default stands
         return None
     return None
 
@@ -13045,24 +13051,50 @@ def _relay_units(text):
 
 def _relay_shorten(text, budget):
     """The question's own turn when it alone exceeds the bound: its LAST complete units that fit (paragraphs, and code
-    blocks kept whole or left out whole with a line saying so), under a line saying what was left out."""
+    blocks kept whole or left out whole with a line saying so), under a line saying what was left out. A text unit that
+    alone exceeds what is left (a turn with no paragraph break: a long list, a pasted log, a table) is shortened by its
+    LAST lines, and a single line past the budget by its last bytes at a character boundary, so the question's own
+    words always ride (the manager's review: a 27 KB unbroken turn used to vanish into a one-line note)."""
+    note_room = 80
     units = _relay_units(text)
-    kept, size, dropped_code = [], 0, 0
+    kept, size = [], 0
     for kind, u in reversed(units):
         n = len(u.encode("utf-8")) + 2
-        if size + n > budget:
+        room = budget - note_room - size
+        if n > room:
             if kind == "code":
-                dropped_code += 1
                 note = "(a code block of %d lines left out)" % u.count("\n")
-                if size + len(note) + 2 <= budget:
+                if len(note) + 2 <= room:
                     kept.append(note); size += len(note) + 2
                 continue
+            tail = _relay_tail_lines(u, room - 2)
+            if tail:
+                kept.append(tail); size += len(tail.encode("utf-8")) + 2
             break
         kept.append(u); size += n
     kept.reverse()
     out = "\n\n".join(kept)
     left = max(0, len(text) - len(out))
     return "(shortened: this turn's earlier %d characters left out)\n\n%s" % (left, out) if left else out
+
+
+def _relay_tail_lines(text, room):
+    """The last whole lines of `text` that fit `room` bytes; when even the last line does not, its last bytes cut at a
+    character boundary. Empty when there is no room at all."""
+    if room <= 0:
+        return ""
+    lines = text.split("\n")
+    kept, size = [], 0
+    for line in reversed(lines):
+        n = len(line.encode("utf-8")) + 1
+        if size + n > room:
+            break
+        kept.append(line); size += n
+    if kept:
+        kept.reverse()
+        return "\n".join(kept)
+    last = lines[-1].encode("utf-8")[-room:]
+    return last.decode("utf-8", errors="ignore")
 
 
 def _relay_excerpt(turns, upto_t, budget, who=""):
@@ -13072,7 +13104,7 @@ def _relay_excerpt(turns, upto_t, budget, who=""):
     out. Turns are the parse's (event_model): the user's prompt text and the assistant's reply text, tool calls
     collapsed to a count. Empty when there is nothing to show."""
     upto = int(upto_t or 0)
-    sel = [t for t in turns or [] if int(t.get("t") or 0) <= upto] or list(turns or [])[-1:]
+    sel = [t for t in turns or [] if int(t.get("t") or 0) <= upto]   # nothing at or before the block's evidence: no excerpt
     rendered = [(i, _relay_turn_text(t, who)) for i, t in enumerate(sel)]
     rendered = [(i, txt) for i, txt in rendered if txt]
     if not rendered:
