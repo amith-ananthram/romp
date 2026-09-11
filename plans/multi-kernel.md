@@ -2,6 +2,11 @@
 
 Status: PROPOSED — not shipped. A design sketch; no part of this has landed.
 
+Superseded in part (2026-09-11): the tmux legs below (the `tmuxSocket?` profile field,
+`ROMP_TMUX_SOCKET` in phases 2 and 3, the per-profile tmux server) are void since the terminal (tmux)
+backend was removed from romp on that date; a multi-kernel design now scopes Claude Code and Codex
+sessions only.
+
 The user's ask (2026-07-24, via romp_docs + directly): run SEVERAL kernels on one machine, each on
 its own port with its own state, so different remote people can each be handed their own kernel —
 and additionally run kernels on DIFFERENT Claude accounts in parallel, surface which account each
