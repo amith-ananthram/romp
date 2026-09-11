@@ -173,6 +173,30 @@ class Plan(unittest.TestCase):
         p2 = rp.plan(fixed_kernel, self.restarts + [at(12, 0)], DAY)
         self.assertNotIn(at(12, 10), {c["t"] for c in p2["rows"]}, "a row that names its cumulative is not a staircase step")
 
+    def test_rows_before_the_hosts_start_are_never_steps_and_an_earlier_correction_there_is_restored(self):
+        # web: a long first turn at 9:40 after the 9:30 restart (300, a plain child before the hosts came on at 10:00),
+        # a fresh process's modest first turn after the 10:30 restart (6), and that process's lifetime after the 11:00
+        # restart (26 = 6 + this turn's 20). Without the bound 300 would read as the day's first cumulative
+        turns = [row(A, "web", at(9, 0), 2.0), row(A, "web", at(9, 40), 300.0), row(A, "web", at(10, 40), 6.0),
+                 row(A, "web", at(11, 10), 26.0)]
+        restarts = [at(9, 30), at(10, 30), at(11, 0)]
+        p = rp.plan(turns, restarts, DAY, since=at(10, 0))
+        got = {c["t"]: (c["recorded"], c["corrected"]) for c in p["rows"]}
+        self.assertEqual(sorted(got), [at(11, 10)], "before the hosts' start a first result is the turn it says; 6 is a fresh process; 26 is its lifetime")
+        self.assertEqual(got[at(11, 10)], (26.0, 20.0))
+        self.assertEqual({c["t"] for c in rp.plan(turns, restarts, DAY)["rows"]}, {at(9, 40), at(11, 10)}, "without the bound, 300 reads as the first cumulative")
+        # an earlier run without the bound zeroed the 9:40 row (a 300 lifetime, it thought): the bound restores it
+        repaired = [turns[0], turns[1] | {"usd": 2.0, "usdRecorded": 300.0, "repairedT": 1}, turns[2], turns[3] | {"usd": 20.0, "usdRecorded": 26.0, "repairedT": 1}]
+        p2 = rp.plan(repaired, restarts, DAY, since=at(10, 0))
+        self.assertEqual([(c["t"], c["current"], c["corrected"], c.get("restore")) for c in p2["rows"]], [(at(9, 40), 2.0, 300.0, True)])
+        self.assertIn("restored: 300.0000 precedes the hosts' start (2026-09-11 10:00:00), a fresh process's turn", p2["rows"][0]["reason"])
+        self.assertIn("rows before 2026-09-11 10:00:00 (the hosts' start, --since) are fresh processes' turns, never steps", rp.report(p2))
+        self.assertEqual(rp.parse_since("2026-09-11T10:00:00"), at(10, 0))
+        self.assertEqual(rp.parse_since(str(at(10, 0))), float(at(10, 0)))
+        self.assertEqual(rp.parse_since(""), None)
+        with self.assertRaises(ValueError):
+            rp.parse_since("yesterday-ish")
+
     def test_the_restart_instants_come_from_both_ledgers(self):
         cuts = [{"t": 100, "cutTurns": [], "reason": "main-converge"}, {"t": 150, "firstServe": 1}]      # a bootSettled row is not a restart
         audit = [{"t": 200, "action": "manager-sigterm"}, {"t": 250, "action": "quiet-window"}, {"t": 100, "action": "p2p-update"}]

@@ -24,7 +24,7 @@ import os
 import statistics
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 RESTART_ACTIONS = ("manager-sigterm", "remote-restart", "main-converge", "p2p-update", "self-update")
@@ -81,12 +81,33 @@ def _typical(usds: list) -> float:
     return float(statistics.median(usds)) if usds else 0.0
 
 
-def plan(turns: list, restarts: list, day: str) -> dict:
+def parse_since(text: str):
+    """--since: an ISO instant (2026-09-11T14:09:56Z, or a local date-time without a zone) or epoch seconds; None when empty."""
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    t = text.strip()
+    if t.endswith("Z"):
+        return datetime.strptime(t[:-1], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(t, fmt).timestamp()
+        except ValueError:
+            continue
+    raise ValueError(text)
+
+
+def plan(turns: list, restarts: list, day: str, since=None) -> dict:
     """The corrections for `day`: {"rows": [{sid, name, t, hour, recorded, corrected, reason}], "hours": {hour: {before,
     after}}, "days": {day: {before, after}}, "bySid": {sid: {name, before, after}}}, computed from the turn rows alone
     (the buckets' before/after are the sums over the day's rows, so a bucket the rows do not explain is left alone).
     A row is a staircase candidate when a restart instant lies after the session's previous row and at or before it
-    (or, for the session's first row of the day, at or before it that day)."""
+    (or, for the session's first row of the day, at or before it that day). `since` (epoch seconds) is the instant the
+    per-session hosts came on: before it every restart killed the CLI, so a first result after a restart is a fresh
+    process's own turn and never a step (a row corrected by an earlier run without the bound is restored)."""
     rows = [r for r in turns if isinstance(r.get("t"), (int, float)) and isinstance(r.get("usd"), (int, float))
             and local_day(r["t"]) == day]
     rows.sort(key=lambda r: (str(r.get("sid") or ""), float(r["t"])))
@@ -123,6 +144,14 @@ def plan(turns: list, restarts: list, day: str) -> dict:
                 continue
             repaired = isinstance(r.get("usdRecorded"), (int, float))
             rec = float(r["usdRecorded"]) if repaired else usd
+            if since is not None and t < since:
+                # before the hosts came on: a fresh process each restart, the turn stands (restored, when an earlier
+                # run without the bound took it). No baseline carries over: the first restart after the hosts' start
+                # kills the plain child, so the first row after it is a fresh process, judged as the day's first
+                if repaired and abs(rec - usd) > 1e-9:
+                    restores.append((r, rec, usd, "since", []))
+                prev_t = t
+                continue
             if restarted:
                 if prev_cum is not None:
                     # the surviving process's lifetime again: at or above the previous cumulative PLUS every turn recorded
@@ -176,7 +205,10 @@ def plan(turns: list, restarts: list, day: str) -> dict:
                 continue                       # already right: a run over repaired rows
             corrections.append(entry(r, sid, rec, cur, corrected, reason))
         for r, rec, cur, prev_cum, between in restores:
-            if prev_cum is None:
+            if prev_cum == "since":
+                reason = "restored: %.4f precedes the hosts' start (%s), a fresh process's turn" % (
+                    rec, datetime.fromtimestamp(since).strftime("%Y-%m-%d %H:%M:%S"))
+            elif prev_cum is None:
                 reason = "restored: %.4f is a lone first result after a restart with no staircase following it, a turn" % rec
             else:
                 reason = "restored: %.4f is below the previous cumulative %.4f plus %d row(s) between (%.4f), a turn of a fresh process" % (
@@ -197,7 +229,7 @@ def plan(turns: list, restarts: list, day: str) -> dict:
         m["before"], m["after"] = round(m["before"], 6), round(m["after"], 6)
     before = round(sum(h["before"] for h in hours.values()), 6)
     after = round(sum(h["after"] for h in hours.values()), 6)
-    return {"day": day, "rows": sorted(corrections, key=lambda c: c["t"]), "hours": dict(sorted(hours.items())),
+    return {"day": day, "since": since, "rows": sorted(corrections, key=lambda c: c["t"]), "hours": dict(sorted(hours.items())),
             "days": {day: {"before": before, "after": after}}, "bySid": sids, "restarts": len([x for x in restarts if local_day(x) == day])}
 
 
@@ -283,6 +315,9 @@ def report(p: dict) -> str:
     n_restore = sum(1 for c in p["rows"] if c.get("restore"))
     lines = ["spend repair for %s: %d restart(s) that day, %d cumulative row(s) found%s" % (
         p["day"], p["restarts"], len(p["rows"]) - n_restore, ", %d earlier correction(s) to restore" % n_restore if n_restore else "")]
+    if p.get("since") is not None:
+        lines.append("rows before %s (the hosts' start, --since) are fresh processes' turns, never steps"
+                     % datetime.fromtimestamp(p["since"]).strftime("%Y-%m-%d %H:%M:%S"))
     lines.append("")
     lines.append("per session (dollars before -> after):")
     for sid, m in sorted(p["bySid"].items(), key=lambda kv: -kv[1]["before"]):
@@ -313,6 +348,8 @@ def main(argv=None) -> int:
     ap.add_argument("--day", help="the local date to repair (default: today)")
     ap.add_argument("--apply", action="store_true", help="write the corrected spend.json and turns.jsonl (default: print only)")
     ap.add_argument("--state", help="a state directory other than this machine's")
+    ap.add_argument("--since", help="the instant the per-session hosts came on (ISO, Z or local; or epoch seconds): a first result "
+                    "after a restart before it is a fresh process's turn, never a step; default: the whole day")
     ap.add_argument("--json", action="store_true", help="the plan as JSON")
     a = ap.parse_args(argv)
     state = Path(a.state) if a.state else state_dir()
@@ -322,13 +359,18 @@ def main(argv=None) -> int:
     except ValueError:
         sys.stderr.write("romp spend-repair: bad date %r (YYYY-MM-DD)\n" % day)
         return 2
+    try:
+        since = parse_since(a.since or "")
+    except ValueError:
+        sys.stderr.write("romp spend-repair: bad --since %r (ISO instant or epoch seconds)\n" % a.since)
+        return 2
     turns = read_jsonl(state / "turns.jsonl")
     restarts = restart_instants(read_jsonl(state / "restart-cuts.jsonl"), read_jsonl(state / "restart-audit.jsonl"))
     try:
         spend = json.loads((state / "spend.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         spend = {}
-    p = plan(turns, restarts, day)
+    p = plan(turns, restarts, day, since)
     new_spend = apply_to_spend(spend, p)      # computed either way, for the notes; written only with --apply
     if a.json:
         sys.stdout.write(json.dumps(p, indent=1, sort_keys=True) + "\n")
