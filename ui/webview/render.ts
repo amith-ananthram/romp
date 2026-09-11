@@ -15656,7 +15656,11 @@ function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: s
   if (anchor) flashedAnchor = null;        // a fresh navigation re-arms the one-per-navigation flash
   pendingAnchorIntent = anchor ? (anchorKind ?? null) : null;
   if (anchor) armSeek(id, anchor, anchorKind ?? null, anchorEventT ?? null);   // durable until land / ✕ / backstop (see armSeek)
-  else if (anchorT != null) clearSeek();   // a time-only navigation supersedes a seek (and the reveal progress line with it)
+  else if (anchorT != null) {              // a time-only navigation supersedes a seek (and the reveal progress line with it)…
+    releaseSeekFetch(id);                  // …and drops the loop's claim on any in-flight older fetch, so the chunk that lands next is a
+    if (seek && seek.sid !== id) releaseSeekFetch(seek.sid);   // pure prepend and never re-pursues the abandoned anchor (review find)
+    clearSeek();
+  }
   activeId = id;
   try { vscodeApi?.setState?.({ ...(vscodeApi.getState?.() || {}), activeId: id }); } catch { /* ignore */ }
   renderTabs();

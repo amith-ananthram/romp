@@ -122,6 +122,7 @@ function liftBetween(startAnchor: string, endAnchor: string): string {
 type Hooks = { posts: any[]; pillShown: number; pillHidden: number; shows: number; cancels: number };
 type Api = {
   chatHead: (msg: any) => void;
+  timeOnly: () => void;                          // a time-only navigation into the session mid-loop
   tick: (scrolled: boolean, attAnchor: string | null) => void;
   pass: (scrolled: boolean, attAnchor?: string | null) => void;   // landActive's order after the attempt: the tick, then the seek block
   kick: (uuid: string) => void;                                    // scrollToAnchor's older-tail branch, as the pinned source has it
@@ -132,6 +133,7 @@ type Api = {
 
 function liftWorld(): (hooks: Hooks, mod: typeof MOD, doc: ReturnType<typeof fakeDocument>) => Api {
   const note = liftBetween("function showSeekNote(): void {", "// ── reveal progress (T336)");
+  const release = liftBetween("function releaseSeekFetch(sid: string): void {", "function cancelSeek(): void {");
   const region = liftBetween("// ── reveal progress (T336)", "// ── end reveal progress");
   const head = liftBetween("function chatHead(msg: any) {", "// Fetch the next older history chunk re-anchored on `uuid`");
   const fetch = liftBetween("function fetchOlderForAnchor(sid: string, uuid: string): boolean {", "// Ask the kernel for the chunk of history just before the resident tail.");
@@ -152,6 +154,7 @@ function liftWorld(): (hooks: Hooks, mod: typeof MOD, doc: ReturnType<typeof fak
     const metaDots = () => { const d = el("span", "meta-dots"); d.appendChild(el("i")); return d; };
     const eventEpoch = (ev) => (typeof ev.t === "number" ? ev.t : null);
     const liveSession = (id) => (id ? sessions.get(id) : undefined);   // no skeleton tabs in this world
+    const captureScrollAnchor = () => null;                             // nothing visible at the viewport top in this world
     const { REVEAL_LABEL, revealFraction, revealShownFraction, residentSpan, revealCountWords, revealPercentWords, messageCount } = MOD;
   `;
   const epilogue = `
@@ -167,6 +170,8 @@ function liftWorld(): (hooks: Hooks, mod: typeof MOD, doc: ReturnType<typeof fak
           pendingAnchor = uuid; anchorPendingOlder = true;
         }
       },
+      // setActive's time-only branch, as the pinned source has it, then landActive's clearing of the pending fields
+      timeOnly: () => { releaseSeekFetch(activeId); if (seek && seek.sid !== activeId) releaseSeekFetch(seek.sid); seek = null; document.getElementById("seek-note")?.remove(); revealProgressEnd(); pendingAnchor = null; },
       state: () => revealProgress,
       set: (p) => {
         if ("sessions" in p) sessions = p.sessions; if ("activeId" in p) activeId = p.activeId; if ("seek" in p) seek = p.seek;
@@ -176,7 +181,7 @@ function liftWorld(): (hooks: Hooks, mod: typeof MOD, doc: ReturnType<typeof fak
       get: (k) => ({ pendingAnchor, anchorPendingOlder, loadingOlder, pendingOlderAnchor, seek })[k],
     };
   `;
-  return new Function("HOOKS", "MOD", "document", prelude + note + region + head + fetch + epilogue) as any;
+  return new Function("HOOKS", "MOD", "document", prelude + release + note + region + head + fetch + epilogue) as any;
 }
 
 const BASE = 1_760_000_000;                                   // an epoch in seconds; one event a minute
@@ -345,6 +350,22 @@ test("another anchor landing in the same session mid-loop leaves the line alone;
   assert.equal(line(doc), null, "its own anchor landed");
 });
 
+test("a time-only navigation mid-loop supersedes the seek AND the loop's claim: the in-flight chunk re-pursues nothing and no line returns", () => {
+  const { H, doc, api, s } = world({ seekT: anchorT });
+  api.kick("e10"); api.pass(false);
+  assert.ok(line(doc)); assert.equal(api.get("pendingOlderAnchor").get("A"), "e10", "the fetch on the wire is claimed for the anchor");
+  api.timeOnly();                                             // a lane click by time, no anchor: the seek and the line go
+  assert.equal(line(doc), null); assert.equal(api.get("seek"), null);
+  assert.equal(api.get("pendingOlderAnchor").has("A"), false, "the claim is released: the arrival is a pure prepend");
+  assert.equal(api.get("anchorPendingOlder"), false);
+  api.chatHead({ type: "chatHead", id: "A", before: 500, from: 250, events: range(250, 500) });
+  assert.equal(s.headFrom, 250, "the chunk still lands");
+  assert.equal(api.get("pendingAnchor"), null, "nothing re-pursues the abandoned anchor");
+  api.tick(true, null);                                       // the time-only moment lands on the next pass
+  assert.equal(line(doc), null); assert.equal(api.state(), null);
+  assert.equal(H.posts.length, 1, "no new fetch was kicked");
+});
+
 test("the line ends when the loop stops asking with no seek, and when the tab changes", () => {
   {
     const { doc, api } = world({ seekT: "none" });
@@ -403,7 +424,7 @@ test("the seams: the tick sits on the landing pass BEFORE the seek block, the se
   assert.match(RENDER, /let seek: \{ sid: string; uuid: string; kind: string \| null; t: number \| null; from0: number \| null \} \| null = null;/);
   assert.match(RENDER, /function armSeek\(sid: string, uuid: string, kind: string \| null, t: number \| null = null\): void \{/);
   assert.match(RENDER, /seek = \{ sid, uuid, kind, t, from0: sessions\.get\(sid\)\?\.headFrom \?\? null \};/);
-  assert.match(RENDER, /if \(anchor\) armSeek\(id, anchor, anchorKind \?\? null, anchorEventT \?\? null\);[^\n]*\n\s*else if \(anchorT != null\) clearSeek\(\);/, "a time-only navigation supersedes the seek");
+  assert.match(RENDER, /if \(anchor\) armSeek\(id, anchor, anchorKind \?\? null, anchorEventT \?\? null\);[^\n]*\n\s*else if \(anchorT != null\) \{[^\n]*\n\s*releaseSeekFetch\(id\);[^\n]*\n\s*if \(seek && seek\.sid !== id\) releaseSeekFetch\(seek\.sid\);[^\n]*\n\s*clearSeek\(\);\n\s*\}/, "a time-only navigation supersedes the seek and releases the loop's fetch claim");
   assert.match(RENDER, /typeof m\.anchorEventT === "number" \? m\.anchorEventT : undefined\);/, "the frame handler hands the kernel's anchorEventT to setActive");
   // the bar paints the floored fraction; the dots stand in for count mode
   assert.match(RENDER, /const shown = revealShownFraction\(fraction\);[^\n]*\n\s*n\.dataset\.fraction = shown\.toFixed\(3\);\n\s*bar\.hidden = false; bar\.title = revealPercentWords\(fraction\);\n\s*fill\.style\.width = \(shown \* 100\)\.toFixed\(1\) \+ "%";\n\s*detail\.textContent = "";\n\s*dots\.hidden = true;/);

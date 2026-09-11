@@ -45,11 +45,14 @@ PARSED = {"turns": [{"id": "t1", "atoms": [{"uuid": U_TURN, "t": T_TURN + 5}, {"
 
 class Base(unittest.TestCase):
     def setUp(self):
-        self.saved = {n: getattr(km, n) for n in ("build_session", "_built_chat", "_sessions", "_parse", "_tmux_sessions", "_reveal_chat_for", "_name_of")}
-        km.build_session = lambda *a, **kw: self.fail("build_session must never run for a focus frame's anchor moment")
+        self.saved = {n: getattr(km, n) for n in ("build_session", "_built_chat", "_sessions", "_parse", "_live_map", "_reveal_chat_for", "_name_of")}
+        # the guards RECORD: an exception raised inside _anchor_event_t would be swallowed by its own `except` (review find),
+        # so a build or a parse that must not happen is proven by an empty list, not by a raise
+        self.calls = []
+        km.build_session = lambda *a, **kw: (self.calls.append("build"), None)[1]
         km._built_chat = {}
-        km._sessions = lambda now: []
-        km._parse = lambda path, sid, now: self.fail("no parse expected here")
+        km._sessions = lambda now: (self.calls.append("sessions"), [])[1]
+        km._parse = lambda path, sid, now: (self.calls.append("parse"), {"turns": []})[1]
         self.sent = []
         km._reveal_chat_for = lambda client, msg: self.sent.append(msg)
         km._name_of = lambda sid: "web"
@@ -66,6 +69,7 @@ class FromTheBuiltPayload(Base):
 
     def test_a_turns_moment_is_its_ts_parsed_to_epoch_seconds(self):
         self.assertEqual(km._anchor_event_t(SID, U_TURN), T_TURN)
+        self.assertEqual(self.calls, [], "the built payload answered: no build, no session listing, no parse")
 
     def test_a_postal_cards_moment_by_its_uuid_or_its_message_ids(self):
         self.assertEqual(km._anchor_event_t(SID, U_POSTAL), 1_757_500_000, "a postal event's t")
@@ -93,6 +97,7 @@ class FromTheCachedParse(Base):
         km._parse = lambda path, sid, now: (calls.append((path, sid)), PARSED)[1]
         self.assertEqual(km._anchor_event_t(SID, U_TURN, now=1_757_600_000), T_TURN + 5)
         self.assertEqual(calls, [("/synthetic/leaf.jsonl", SID)], "the cached parse, keyed the way every other reader keys it")
+        self.assertEqual(self.calls, [], "and never a build")
         self.assertIsNone(km._anchor_event_t(SID, "11111111-2222-3333-4444-0000000000aa", now=1_757_600_000), "an atom with no time")
         self.assertIsNone(km._anchor_event_t(SID, MID, now=1_757_600_000), "a postal id is not in the parse: the chat counts")
 
@@ -107,23 +112,24 @@ class OnTheLiveBranchOnly(Base):
         km._built_chat = {SID: (("sig",), {"events": list(EVENTS)}, "", None)}
 
     def test_a_live_sessions_anchored_focus_carries_the_moment(self):
-        km._tmux_sessions = lambda: {SID: {}}
+        km._live_map = lambda: {SID: {}}
         km._reveal_or_confirm(SID, {"type": "focus", "id": SID, "anchor": U_TURN, "anchorT": 1_757_600_000, "anchorKind": None}, client={"wid": "w1"})
         self.assertEqual(len(self.sent), 1)
         f = self.sent[0]
         self.assertEqual(f["type"], "focus")
         self.assertEqual(f["anchorT"], 1_757_600_000, "the card's time stays: the kind gate and the time-only landing read it")
         self.assertEqual(f["anchorEventT"], T_TURN, "the turn's own moment rides beside it")
+        self.assertEqual(self.calls, [], "from the built payload alone")
 
     def test_a_dead_sessions_card_pays_nothing_and_gets_the_confirm_without_it(self):
-        km._tmux_sessions = lambda: {}
+        km._live_map = lambda: {}
         km._built_chat = {}
-        km._sessions = lambda now: self.fail("no session listing for a dead session's confirm")
         km._reveal_or_confirm(SID, {"type": "focus", "id": SID, "anchor": U_TURN, "anchorT": 1_757_600_000}, client={"wid": "w1"})
         self.assertEqual(self.sent, [{"type": "confirmRevive", "id": SID, "name": "web"}])
+        self.assertEqual(self.calls, [], "nothing was built, listed or parsed for the dead session's card")
 
     def test_a_focus_with_no_anchor_and_a_frame_that_already_carries_one_are_left_alone(self):
-        km._tmux_sessions = lambda: {SID: {}}
+        km._live_map = lambda: {SID: {}}
         km._reveal_or_confirm(SID, {"type": "focus", "id": SID}, client={"wid": "w1"})
         self.assertEqual(self.sent[-1], {"type": "focus", "id": SID}, "no anchor, no moment, no key")
         km._reveal_or_confirm(SID, {"type": "focus", "id": SID, "anchor": U_TURN, "anchorEventT": 7}, client={"wid": "w1"})
