@@ -60,16 +60,22 @@ def write_jsonl(path, records, mtime=None):
 
 
 class FakeBackend:
-    def __init__(self):
-        self.interrupts, self.sends, self.logs = [], [], []
+    def __init__(self, stops=True, accepts=True):
+        self.interrupts, self.sends, self.logs, self.stops, self.accepts = [], [], [], stops, accepts
+
+    def owns(self, sid):
+        return True
 
     def interrupt(self, sid):
         self.interrupts.append(sid)
-        return True
+        return self.stops
 
-    def send(self, sid, text):
+    def send(self, sid, text, qid=None, user=False):
         self.sends.append((sid, text))
-        return True
+        return self.accepts
+
+    def busy(self, sid):
+        return False
 
     def _log(self, m, problem=None, key=None, ring_text=None):
         self.logs.append((str(m), problem, ring_text))
@@ -98,8 +104,11 @@ class SpendRate(unittest.TestCase):
         sub = Path(self.leaf).with_suffix("") / "subagents"
         write_jsonl(sub / "agent-1.jsonl", [assistant(NOW - 300, "msg_s1", out_tokens=20000)], mtime=NOW - 300)
         write_jsonl(sub / "agent-old.jsonl", [assistant(NOW - 5000, "msg_s2", out_tokens=900000)], mtime=NOW - 5000)
+        # a WORKFLOW agent, one level down (Claude Code 2.1.261): the review's probe, invisible to a flat listing
+        write_jsonl(sub / "workflows" / "wf_abc" / "agent-w1.jsonl", [assistant(NOW - 120, "msg_w1", out_tokens=400000, in_tokens=0)], mtime=NOW - 120)
+        os.symlink(self.leaf, sub / "agent-link.jsonl")   # a symlinked file is a user's, never the CLI's: skipped
         usd = km._spend_window_usd(self.leaf, NOW, 600, PRICES)
-        want = (1000 * 5e-6 + 12000 * 25e-6) + (2000 * 1e-6 + 4000 * 5e-6) + (1000 * 5e-6 + 20000 * 25e-6)
+        want = (1000 * 5e-6 + 12000 * 25e-6) + (2000 * 1e-6 + 4000 * 5e-6) + (1000 * 5e-6 + 20000 * 25e-6) + 400000 * 25e-6
         self.assertAlmostEqual(usd, want, places=9)
         self.assertAlmostEqual(km._spend_rate_usd_per_hour(self.leaf, NOW, 600, PRICES), want * 6, places=6)
         # nothing recorded in the window: zero, and a missing leaf is zero too
@@ -129,6 +138,29 @@ class SpendRate(unittest.TestCase):
         self.assertAlmostEqual(km._spend_window_usd(self.leaf, NOW, 600, PRICES), 1000 * 25e-6, places=9)
 
 
+class Memo(unittest.TestCase):
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.leaf = os.path.join(self.td.name, "proj", SID + ".jsonl")
+        km._SPEND_ROWS_CACHE.clear()
+
+    def tearDown(self):
+        km._SPEND_ROWS_CACHE.clear()
+        self.td.cleanup()
+
+    def test_an_unchanged_file_serves_its_rows_from_the_memo_and_a_changed_one_is_scanned_again(self):
+        write_jsonl(self.leaf, [assistant(NOW - 100, "msg_a", out_tokens=1000, in_tokens=0)], mtime=NOW - 100)
+        self.assertAlmostEqual(km._spend_window_usd(self.leaf, NOW, 600, PRICES), 1000 * 25e-6, places=9)
+        stamp, floor, rows = km._SPEND_ROWS_CACHE[self.leaf]
+        self.assertEqual(floor, NOW - 600 - km.SPEND_GUARD_MEMO_SLACK_S)
+        with mock.patch.object(km, "_msg_epoch", side_effect=AssertionError("a re-scan of an unchanged file")):
+            self.assertAlmostEqual(km._spend_window_usd(self.leaf, NOW + 30, 600, PRICES), 1000 * 25e-6, places=9, msg="a later window, the same stamp: no scan")
+            self.assertEqual(km._spend_window_usd(self.leaf, NOW + 800, 600, PRICES), 0.0, "the memo's rows age out of the window without a scan")
+        write_jsonl(self.leaf, [assistant(NOW - 100, "msg_a", out_tokens=1000, in_tokens=0), assistant(NOW - 10, "msg_b", out_tokens=1000, in_tokens=0)], mtime=NOW - 10)
+        self.assertAlmostEqual(km._spend_window_usd(self.leaf, NOW, 600, PRICES), 2 * 1000 * 25e-6, places=9, msg="a changed stamp: scanned again")
+        self.assertNotEqual(km._SPEND_ROWS_CACHE[self.leaf][0], stamp)
+
+
 class Ceiling(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
@@ -143,7 +175,8 @@ class Ceiling(unittest.TestCase):
 
     def test_the_setting_file_is_read_at_each_check(self):
         self.assertEqual(km._spend_ceiling(), 1000.0, "no file: the default")
-        for raw, want in (("250", 250.0), ("0", 0.0), ("1500.5\n", 1500.5), ("junk", 1000.0), ("", 1000.0)):
+        for raw, want in (("250", 250.0), ("0", 0.0), ("1500.5\n", 1500.5), ("junk", 1000.0), ("", 1000.0),
+                          ("nan", 1000.0), ("inf", 1000.0), ("-inf", 1000.0), ("-5", 1000.0)):   # LOW 1: not a silent disable
             Path(self.td.name, km.SPEND_CEILING_SETTING).write_text(raw)
             jd._state_cache.clear()
             self.assertEqual(km._spend_ceiling(), want, "the file says %r" % raw)
@@ -158,13 +191,27 @@ class Guard(unittest.TestCase):
         jd.STATE = Path(self.td.name)
         jd._state_cache.clear()
         km._SPEND_GUARD.clear()
+        km._SPEND_GUARD_SEEDED[0] = False
+        km._SPEND_ROWS_CACHE.clear()
+        km._interrupt_clicked.pop(SID, None)
         self.leaf = os.path.join(self.td.name, "proj", SID + ".jsonl")
         self.be, self.toasts = FakeBackend(), []
         self.clients = [client(self.toasts), client(self.toasts)]
         self.sessions = [{"sid": SID, "name": "web", "path": self.leaf, "anchor": SID, "mtime": NOW}]
+        # the message rides the machine sends' door (LOW 3): recorded here, handed over (False), refused (None) when the
+        # backend refuses, as the real door answers
+        self.parked = []
+        def send_or_park(be, sid, text, echo=None, qid=None, user=False):
+            self.parked.append((sid, text))
+            return False if be.send(sid, text) else None
+        p = mock.patch.object(km, "_send_or_park", side_effect=send_or_park)
+        p.start(); self.addCleanup(p.stop)
 
     def tearDown(self):
         km._SPEND_GUARD.clear()
+        km._SPEND_GUARD_SEEDED[0] = False
+        km._SPEND_ROWS_CACHE.clear()
+        km._interrupt_clicked.pop(SID, None)
         jd.STATE = self.saved
         jd._state_cache.clear()
         self.td.cleanup()
@@ -191,8 +238,12 @@ class Guard(unittest.TestCase):
         self._spend(NOW, 200.0)                          # $200 in ten minutes: $1,200 an hour, over the default 1000
         self._tick(NOW)
         self.assertEqual(self.be.interrupts, [SID], "interrupted first: the fan-out ends now")
+        # the Stop button's whole road (MEDIUM 2): the chip's stamp, the retry suppression, the views marked dirty
+        self.assertEqual(km._interrupt_clicked.get(SID), NOW, "the interrupt-clicked stamp the chip reads")
+        self.assertIn(SID, km._retry_suppress_data(), "retry suppression: the auto-retry and the idle-queue drive stand down")
         self.assertEqual(len(self.be.sends), 1)
         sid, body = self.be.sends[0]
+        self.assertEqual(self.parked, [(SID, body)], "the message rode _send_or_park, the machine sends' door")
         self.assertEqual(sid, SID)
         self.assertIn("about $1,200 an hour", body)
         self.assertIn("I set the line at $1,000 an hour", body)
@@ -201,7 +252,8 @@ class Guard(unittest.TestCase):
         for w in ("romp", "card", "board", "goal", "nudge", "ceiling", "kernel", "session"):
             self.assertNotIn(w, body.split("<!--")[0].lower(), "the prose speaks as the user, no machinery named: %r" % w)
         self.assertEqual(len(self.toasts), 2, "every connected client, once")
-        self.assertEqual(self.toasts[0]["type"], "warn")
+        self.assertEqual(self.toasts[0]["type"], "spendCeiling", "its own type, never warn (a warn is an in-flight create's verdict to the chat)")
+        self.assertEqual((self.toasts[0]["sid"], self.toasts[0]["name"], self.toasts[0]["phase"], self.toasts[0]["t"]), (SID, "web", "over", int(NOW)))
         self.assertIn("web was spending about $1,200 an hour at ", self.toasts[0]["text"])
         self.assertIn("over the $1,000 an hour ceiling; it has been stopped and told.", self.toasts[0]["text"])
         rows = self._rows()
@@ -209,11 +261,18 @@ class Guard(unittest.TestCase):
         self.assertEqual((rows[0]["sid"], rows[0]["name"], rows[0]["ceilingUsdPerHour"], rows[0]["windowS"]), (SID, "web", 1000.0, 600))
         self.assertAlmostEqual(rows[0]["usdPerHour"], 1200.0, places=1)
         self.assertEqual(rows[0]["t"], int(NOW))
+        self.assertEqual((rows[0]["stopped"], rows[0]["stopping"], rows[0]["told"]), (True, False, True), "the row carries the truth of the road")
         self.assertTrue(self.be.logs and self.be.logs[0][1] is True and "web was spending" in (self.be.logs[0][2] or ""),
                         "the row also rides the backend's log with the ring flag: the error center shows it")
         self.assertEqual(km._SPEND_GUARD[SID]["over"], True)
-        # the latch: the same rate the next cycle, and a still-high rate the cycle after, say nothing more
+        # the latch: the same rate the next cycle, and a still-high rate the cycle after, say nothing more; it survives
+        # a kernel restart (the dict cleared, re-seeded from the ledger's rows: MEDIUM 1) and a departure from the live map
+        km._SPEND_GUARD.clear(); km._SPEND_GUARD_SEEDED[0] = False
+        km._interrupt_clicked.pop(SID, None)
         self._tick(NOW + 5)
+        self.assertEqual(km._SPEND_GUARD[SID]["over"], True, "seeded from the ledger: still over")
+        km._spend_guard_tick(NOW + 6, {}, sessions=[], be=self.be, clients=self.clients, prices=PRICES)   # left the live map
+        self.assertIn(SID, km._SPEND_GUARD, "a departed session keeps its latch")
         self._spend(NOW + 60, 150.0)                     # $900 an hour: under the ceiling, above the re-arm level
         self._tick(NOW + 60)
         self.assertEqual((len(self.be.interrupts), len(self.be.sends), len(self.toasts), len(self._rows())), (1, 1, 2, 1))
@@ -224,10 +283,12 @@ class Guard(unittest.TestCase):
         self.assertEqual(km._SPEND_GUARD[SID]["over"], False)
         self.assertEqual([r["kind"] for r in self._rows()], ["spend.ceiling", "spend.ceiling.cleared"])
         self.assertEqual(len(self.toasts), 4)
+        self.assertEqual((self.toasts[2]["type"], self.toasts[2]["phase"]), ("spendCeiling", "under"))
         self.assertIn("web is back under the spend ceiling (about $240 an hour now).", self.toasts[2]["text"])
         self.assertEqual((len(self.be.interrupts), len(self.be.sends)), (1, 1), "a clearing sends the session nothing")
         # a second crossing is new information: it fires again
         self._spend(NOW + 180, 300.0)
+        km._interrupt_clicked.pop(SID, None)              # the earlier stop settled long ago
         self._tick(NOW + 180)
         self.assertEqual((len(self.be.interrupts), len(self.be.sends)), (2, 2))
         self.assertEqual([r["kind"] for r in self._rows()], ["spend.ceiling", "spend.ceiling.cleared", "spend.ceiling"])
@@ -249,12 +310,60 @@ class Guard(unittest.TestCase):
         self.assertIn("I set the line at $500 an hour", self.be.sends[0][1])
         self.assertIn("over the $500 an hour ceiling", self.toasts[0]["text"])
 
-    def test_a_session_that_left_the_live_set_takes_its_latch_with_it(self):
+    def test_a_kernel_restart_does_not_fire_the_same_crossing_again(self):
+        """The ledger holds a spend.ceiling row with no clearing after it: a fresh process reads it back and stays latched;
+        a clearing row after it re-arms; the ledger's verdict never outranks one this life made."""
         self._spend(NOW, 200.0)
         self._tick(NOW)
-        self.assertIn(SID, km._SPEND_GUARD)
-        km._spend_guard_tick(NOW + 5, {}, sessions=[], be=self.be, clients=self.clients, prices=PRICES)
-        self.assertEqual(km._SPEND_GUARD, {})
+        self.assertEqual(len(self.be.interrupts), 1)
+        km._SPEND_GUARD.clear(); km._SPEND_GUARD_SEEDED[0] = False; km._interrupt_clicked.pop(SID, None)
+        self._tick(NOW + 5)
+        self.assertEqual((len(self.be.interrupts), len(self.be.sends), len(self._rows())), (1, 1, 1), "one fire across the restart")
+        self.assertTrue(km._SPEND_GUARD[SID]["seeded"])
+        self._spend(NOW + 120, 40.0); self._tick(NOW + 120)              # cleared: the row lands
+        km._SPEND_GUARD.clear(); km._SPEND_GUARD_SEEDED[0] = False
+        self._spend(NOW + 180, 300.0); km._interrupt_clicked.pop(SID, None); self._tick(NOW + 180)
+        self.assertEqual(len(self.be.interrupts), 2, "a fresh process after a clearing row fires the new crossing")
+
+    def test_an_unsettled_interrupt_is_not_pressed_again_and_the_sentence_says_so(self):
+        self._spend(NOW, 200.0)
+        km._interrupt_clicked[SID] = NOW - 5                # a stop is in flight (the ladder would climb on a second press)
+        self._tick(NOW)
+        self.assertEqual(self.be.interrupts, [], "not pressed again")
+        self.assertEqual(len(self.be.sends), 1, "…but told")
+        self.assertIn("; a stop was already in flight, and it has been told.", self.toasts[0]["text"])
+        self.assertEqual((self._rows()[0]["stopped"], self._rows()[0]["stopping"], self._rows()[0]["told"]), (False, True, True))
+
+    def test_the_sentence_states_what_the_backend_actually_did(self):
+        self._spend(NOW, 200.0)
+        self.be = FakeBackend(stops=False, accepts=False)   # detached, or no backend owns it: both refused
+        self._tick(NOW)
+        self.assertIn("; it could not be stopped or told (no backend owns it).", self.toasts[0]["text"])
+        self.assertEqual((self._rows()[0]["stopped"], self._rows()[0]["told"]), (False, False))
+        self.assertNotIn(SID, km._interrupt_clicked, "a refused interrupt stamps nothing")
+        # the tick with no backend given resolves the session's OWN backend (MEDIUM 4), never the SDK one for everyone
+        with mock.patch.object(km.Sessions, "backend_for", return_value=FakeBackend(stops=False, accepts=True)) as bf:
+            km._SPEND_GUARD.clear(); km._SPEND_GUARD_SEEDED[0] = True
+            self.toasts.clear()
+            km._spend_guard_tick(NOW + 1, {SID: {"state": "working"}}, sessions=self.sessions, be=None, clients=self.clients, prices=PRICES)
+            bf.assert_called_with(SID)
+        self.assertIn("; it could not be stopped (the interrupt was refused: detached, or no backend owns it) but has been told.", self.toasts[0]["text"])
+
+    def test_the_fire_road_is_pinned_to_the_shared_doors(self):
+        import inspect
+        fire = inspect.getsource(km._spend_guard_fire)
+        self.assertIn("_send_or_park(be, sid, _spend_ceiling_body(rate, ceiling))", fire, "the machine sends' door, not a bare send")
+        self.assertIn("be = Sessions.backend_for(sid)", fire, "the session's own backend")
+        stop = inspect.getsource(km._spend_guard_stop)
+        for piece in ("_interrupt_clicked[str(sid)] = now", "_suppress_session_retry(sid)", "_mark_views_dirty()"):
+            self.assertIn(piece, stop, "the Stop button's road, whole: " + piece)
+        self.assertIn('payload = json.dumps(dict(fields, type="spendCeiling", text=text))', inspect.getsource(km._spend_guard_toast))
+        ui = open(os.path.join(ROOT, "ui", "webview", "render.ts")).read()
+        i = ui.index('m.type === "spendCeiling"')
+        handler = ui[i:ui.index("\n  }", i)]
+        self.assertIn("warnToast(m.text);", handler)
+        self.assertNotIn("failProvisional", handler, "never read as an in-flight create's verdict")
+        self.assertIn("_subagent_transcripts(leaf)", inspect.getsource(km._spend_window_files), "the canonical recursive walk")
 
     def test_the_guard_never_starts_the_price_feed_fetch(self):
         """The cost view refreshes the remote price feed when its cache is stale; the guard runs on the pusher's path in

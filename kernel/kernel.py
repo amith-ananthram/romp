@@ -36208,84 +36208,137 @@ SPEND_CEILING_SETTING = "spend-ceiling-usd-per-hour"
 SPEND_CEILING_DEFAULT = 1000.0
 SPEND_GUARD_WINDOW_S = 600          # the sliding window the rate is read over
 SPEND_GUARD_REARM = 0.5             # the latch re-arms once the rate is under this share of the ceiling
+SPEND_GUARD_MEMO_SLACK_S = 60       # a file's window rows are scanned this much further back than the window, so the
+#                                     memo serves the next cycles' (later) windows without a re-scan
+SPEND_GUARD_LATCH_MAX = 1000        # latch entries kept for sessions no longer live (the oldest go first)
 _SPEND_GUARD = {}                   # sid -> {"over": bool, "t": the crossing (or clearing) epoch, "rate": $/h then}
+_SPEND_GUARD_SEEDED = [False]       # the latch was read back from the ledger once this kernel life
+_SPEND_ROWS_CACHE = {}              # file -> ((mtime, size), floor, [(t, usd), ...]): the window rows, memoized on the stamp
 
 
 def _spend_ceiling():
-    """The ceiling in dollars an hour: the setting file's number; SPEND_CEILING_DEFAULT with no file, an empty one or a
-    value that is not a number; 0 (or any negative number) disables the guard."""
+    """The ceiling in dollars an hour: the setting file's number; SPEND_CEILING_DEFAULT with no file, an empty one, a
+    value that is not a number, or one that is not a finite non-negative number (nan, inf, a negative); exactly 0
+    disables the guard."""
     raw = jd._state_str(SPEND_CEILING_SETTING, "")
     if not raw:
         return SPEND_CEILING_DEFAULT
     try:
-        return float(raw)
+        v = float(raw)
     except ValueError:
         return SPEND_CEILING_DEFAULT
+    if not math.isfinite(v) or v < 0:
+        return SPEND_CEILING_DEFAULT
+    return v
 
 
 def _spend_window_files(leaf, since):
-    """The leaf transcript and the agent transcripts beside it that changed at or after `since` (stat only)."""
+    """The leaf transcript and every agent transcript beside it that changed at or after `since`: the kernel's one
+    recursive walk of the session's subagents tree (_subagent_transcripts: Task agents at the top, Workflow agents one
+    level down under workflows/wf_<id>/, sibling agents after a /clear fork, no symlink followed), each file kept on a
+    stat of its own. A flat listing missed every workflow agent, the very fan-out the guard exists for (the review)."""
     files = [str(leaf)]
-    try:
-        sd = Path(str(leaf)).with_suffix("") / "subagents"
-        if sd.is_dir():
-            for p in sd.glob("*.jsonl"):
-                try:
-                    if p.stat().st_mtime >= since:
-                        files.append(str(p))
-                except OSError:
-                    pass
-    except OSError:
-        pass
+    for p in _subagent_transcripts(leaf):
+        try:
+            if os.stat(p).st_mtime >= since:
+                files.append(p)
+        except OSError:
+            pass
     return files
 
 
+def _spend_file_rows(f, since, prices, dearest):
+    """One file's (t, usd) rows at or after `since`, from the record cache, memoized on the file's (mtime, size) stamp:
+    a file that did not change since its last scan serves its rows without a walk (LOW 2 of the review). The scan runs
+    from the tail back to SPEND_GUARD_MEMO_SLACK_S before `since`, so the memo also serves the next cycles, whose windows
+    start later; a response logged more than once (one record per content block, one message id) is one row at its
+    largest usage; a record whose model the table cannot place is priced at the table's dearest row (a guard errs high).
+    The reader's entry is taken with a TAIL accepted (T323 stage 4a): after a restart the assembly checkpoint restores
+    a file as the records past its cut, and the whole-file road would upgrade that entry to a full re-read of every live
+    transcript on the guard's first cycle; the window wants the newest records, which a tail holds."""
+    ent = em._read_jsonl_entry(f, tail_ok=True)
+    if ent is None:
+        _SPEND_ROWS_CACHE.pop(f, None)
+        return []
+    stamp = (ent[0], ent[1])
+    hit = _SPEND_ROWS_CACHE.get(f)
+    if hit is not None and hit[0] == stamp and hit[1] <= since:
+        return [r for r in hit[2] if r[0] >= since]
+    floor = since - SPEND_GUARD_MEMO_SLACK_S
+    best, rows = {}, []
+    for o in reversed(ent[4]):
+        if not isinstance(o, dict):
+            continue
+        t = _msg_epoch(o)
+        if t is None:
+            continue
+        if t < floor:
+            break                                        # chronological: everything before is older
+        if o.get("type") != "assistant":
+            continue
+        m = o.get("message") if isinstance(o.get("message"), dict) else {}
+        u = m.get("usage") if isinstance(m.get("usage"), dict) else None
+        if not u:
+            continue
+        row = _price_for(str(m.get("model") or ""), prices) or dearest
+        if not row:
+            continue
+        c = (int(u.get("input_tokens") or 0) * float(row.get("in") or 0)
+             + int(u.get("output_tokens") or 0) * float(row.get("out") or 0)
+             + int(u.get("cache_creation_input_tokens") or 0) * float(row.get("cache_w") or 0)
+             + int(u.get("cache_read_input_tokens") or 0) * float(row.get("cache_r") or 0))
+        mid = m.get("id")
+        if mid:
+            i = best.get(mid)
+            if i is None:
+                best[mid] = len(rows)
+                rows.append((t, c))
+            elif c > rows[i][1]:
+                rows[i] = (rows[i][0], c)
+        else:
+            rows.append((t, c))
+    _SPEND_ROWS_CACHE[f] = (stamp, floor, rows)
+    return [r for r in rows if r[0] >= since]
+
+
 def _spend_window_usd(leaf, now, window_s=SPEND_GUARD_WINDOW_S, prices=None):
-    """Dollars the session spent in the last `window_s` seconds, from the record cache: the leaf's and its agent files'
-    assistant records stamped inside the window, priced by `prices` (the merged table by default). A response logged
-    more than once (one record per content block, one message id) counts once, at its largest usage row; a record
-    whose model the table cannot place counts at the table's dearest row rather than not at all (a guard errs high)."""
+    """Dollars the session spent in the last `window_s` seconds: the leaf's and its agent files' rows in the window
+    (_spend_file_rows), priced by `prices` (the merged table by default, without the feed refresh)."""
     if prices is None:
         prices = _model_prices(int(now), refresh=False)   # never a network fetch from the pusher's path
     dearest = max(prices.values(), key=lambda p: float(p.get("out") or 0)) if prices else None
     since = now - window_s
-    usd = 0.0
-    for f in _spend_window_files(leaf, since):
-        best, anon = {}, 0.0
-        # the reader's entry with a TAIL accepted (T323 stage 4a): after a restart the assembly checkpoint restores a
-        # file as the records past its cut, and the whole-file road (_read_jsonl_incremental) would upgrade that entry
-        # to a full re-read of every live transcript on the guard's first cycle; the window wants the newest records,
-        # which a tail holds. A tail cut inside the window undercounts the minutes before the cut on that first cycle.
-        ent = em._read_jsonl_entry(f, tail_ok=True)
-        for o in reversed(ent[4] if ent is not None else []):
-            if not isinstance(o, dict):
-                continue
-            t = _msg_epoch(o)
-            if t is None:
-                continue
-            if t < since:
-                break                                    # chronological: everything before is older
-            if o.get("type") != "assistant":
-                continue
-            m = o.get("message") if isinstance(o.get("message"), dict) else {}
-            u = m.get("usage") if isinstance(m.get("usage"), dict) else None
-            if not u:
-                continue
-            row = _price_for(str(m.get("model") or ""), prices) or dearest
-            if not row:
-                continue
-            c = (int(u.get("input_tokens") or 0) * float(row.get("in") or 0)
-                 + int(u.get("output_tokens") or 0) * float(row.get("out") or 0)
-                 + int(u.get("cache_creation_input_tokens") or 0) * float(row.get("cache_w") or 0)
-                 + int(u.get("cache_read_input_tokens") or 0) * float(row.get("cache_r") or 0))
-            mid = m.get("id")
-            if mid:
-                if c > best.get(mid, 0.0):
-                    best[mid] = c
-            else:
-                anon += c
-        usd += sum(best.values()) + anon
-    return usd
+    return sum(c for f in _spend_window_files(leaf, since) for _t, c in _spend_file_rows(f, since, prices, dearest))
+
+
+def _spend_guard_seed():
+    """Read the latch back from the ledger once per kernel life (MEDIUM 1 of the review): the last spend.ceiling or
+    spend.ceiling.cleared row per session says whether that session stands over the ceiling, so a restarted kernel
+    does not fire the same crossing again on the same window (a second interrupt, a second message, a second row with
+    no clearing between). The rows are the durable record; nothing else is mirrored."""
+    if _SPEND_GUARD_SEEDED[0]:
+        return
+    _SPEND_GUARD_SEEDED[0] = True
+    try:
+        lines = (jd.STATE / "session-events.jsonl").read_text(encoding="utf-8").splitlines()[-SESSION_EVENTS_TAIL:]
+    except OSError:
+        return
+    for ln in lines:
+        try:
+            r = json.loads(ln)
+        except Exception:
+            continue
+        if not isinstance(r, dict) or r.get("kind") not in ("spend.ceiling", "spend.ceiling.cleared") or not r.get("sid"):
+            continue
+        cur = _SPEND_GUARD.get(str(r["sid"]))
+        if cur is not None and not cur.get("seeded"):
+            continue                                     # a verdict this life already made outranks the ledger's
+        try:
+            rate = float(r.get("usdPerHour") or 0)
+        except (TypeError, ValueError):
+            rate = 0.0
+        _SPEND_GUARD[str(r["sid"])] = {"over": r["kind"] == "spend.ceiling", "t": float(r.get("t") or 0), "rate": rate,
+                                       "seeded": True}
 
 
 def _spend_rate_usd_per_hour(leaf, now, window_s=SPEND_GUARD_WINDOW_S, prices=None):
@@ -36307,12 +36360,15 @@ def _spend_ceiling_body(rate, ceiling):
             % (_usd_words(rate), _usd_words(ceiling)))
 
 
-def _spend_guard_toast(text, clients=None):
-    """One warn toast to every connected dashboard client (the shell renders `warn` as its toast)."""
+def _spend_guard_toast(text, clients=None, **fields):
+    """One `spendCeiling` message to every connected dashboard client: the chat bundle toasts it (render.ts). Its OWN
+    type, never `warn` (MEDIUM 3 of the review): a warn arriving while a create is in flight is read by the chat as that
+    create's verdict, and warn is the panes' soft-refusal channel. The durable record is the problem ring the shell's
+    bell mirrors on every pane (the row rides the backend's log); this message is the moment's toast."""
     if clients is None:
         with _clients_lock:
             clients = list(_clients)
-    payload = json.dumps({"type": "warn", "text": text})
+    payload = json.dumps(dict(fields, type="spendCeiling", text=text))
     for c in list(clients):
         try:
             c["send"](payload)
@@ -36330,31 +36386,67 @@ def _spend_guard_row(kind, text, sid, name, be, **fields):
         sys.stderr.write("spend-guard row: %s\n" % traceback.format_exc())
 
 
+def _spend_guard_stop(sid, be, now):
+    """The Stop button's WHOLE road for a session over the ceiling (MEDIUM 2 of the review): the interrupt, the
+    interrupt-clicked stamp the chip reads, the retry suppression that keeps the auto-retry and the idle-queue drive
+    from re-driving the session while the latch holds, and the views marked dirty. Not pressed while an interrupt is
+    already unsettled for the sid (the escalation ladder would climb to SIGINT and SIGKILL on a second press). Returns
+    "stopped", "stopping" (a stop already in flight), or "refused" (the backend would not, or owns no such session)."""
+    t0 = _interrupt_clicked.get(str(sid))
+    if t0 is not None and now - t0 <= 120:
+        return "stopping"
+    try:
+        stopped = bool(be.interrupt(sid))
+    except Exception:
+        sys.stderr.write("spend-guard interrupt: %s\n" % traceback.format_exc())
+        stopped = False
+    if not stopped:
+        return "refused"
+    _interrupt_clicked[str(sid)] = now
+    err = _suppress_session_retry(sid)
+    if err:
+        sys.stderr.write("spend-guard: %s\n" % err)
+    _mark_views_dirty()
+    return "stopped"
+
+
 def _spend_guard_fire(s, rate, ceiling, now, be, clients):
-    """A crossing: stop the session, tell it once in the user's voice, warn every dashboard, file the row."""
+    """A crossing: stop the session (the Stop button's road), tell it once in the user's voice, tell every dashboard,
+    file the row. `be` None resolves the session's OWN backend (Sessions.backend_for: the SDK's, Codex's, or the unowned
+    stand-in that refuses by name), and the sentence says what actually happened (MEDIUM 4 of the review)."""
     sid, name = s["sid"], s.get("name") or s["sid"][:8]
     when = time.strftime("%H:%M", time.localtime(now))
-    if be is not None:
-        try:
-            be.interrupt(sid)                            # the Stop button's road: the fan-out ends now
-        except Exception:
-            sys.stderr.write("spend-guard interrupt: %s\n" % traceback.format_exc())
-        try:
-            _send_with_id(be, sid, _spend_ceiling_body(rate, ceiling))
-        except Exception:
-            sys.stderr.write("spend-guard send: %s\n" % traceback.format_exc())
-    text = ("%s was spending about $%s an hour at %s, over the $%s an hour ceiling; it has been stopped and told."
-            % (name, _usd_words(rate), when, _usd_words(ceiling)))
-    _spend_guard_toast(text, clients)
+    if be is None:
+        be = Sessions.backend_for(sid)
+    stop = _spend_guard_stop(sid, be, now)
+    try:
+        # the user's message rides the same door as every machine send (LOW 3): parked while the session compacts,
+        # behind the user's own queued messages, and under a usage-limit hold; None is a refusal (no backend owns it)
+        told = _send_or_park(be, sid, _spend_ceiling_body(rate, ceiling)) is not None
+    except Exception:
+        sys.stderr.write("spend-guard send: %s\n" % traceback.format_exc())
+        told = False
+    outcome = {("stopped", True): "it has been stopped and told",
+               ("stopping", True): "a stop was already in flight, and it has been told",
+               ("refused", True): "it could not be stopped (the interrupt was refused: detached, or no backend owns it) but has been told",
+               ("stopped", False): "it has been stopped, but the message was refused",
+               ("stopping", False): "a stop was already in flight, and the message was refused",
+               ("refused", False): "it could not be stopped or told (no backend owns it)"}[(stop, told)]
+    text = ("%s was spending about $%s an hour at %s, over the $%s an hour ceiling; %s."
+            % (name, _usd_words(rate), when, _usd_words(ceiling), outcome))
+    _spend_guard_toast(text, clients, sid=sid, name=name, phase="over", usdPerHour=round(float(rate), 2), t=int(now))
     _spend_guard_row("spend.ceiling", text, sid, name, be, t=int(now), usdPerHour=round(float(rate), 2),
-                     ceilingUsdPerHour=float(ceiling), windowS=SPEND_GUARD_WINDOW_S)   # t: the crossing's moment
+                     ceilingUsdPerHour=float(ceiling), windowS=SPEND_GUARD_WINDOW_S,
+                     stopped=(stop == "stopped"), stopping=(stop == "stopping"), told=told)   # t: the crossing's moment
 
 
 def _spend_guard_clear(s, rate, ceiling, now, be, clients):
     """The rate fell under the re-arm level: say so where the crossing was said, and file the clearing."""
     sid, name = s["sid"], s.get("name") or s["sid"][:8]
+    if be is None:
+        be = Sessions.backend_for(sid)
     text = "%s is back under the spend ceiling (about $%s an hour now)." % (name, _usd_words(rate))
-    _spend_guard_toast(text, clients)
+    _spend_guard_toast(text, clients, sid=sid, name=name, phase="under", usdPerHour=round(float(rate), 2), t=int(now))
     _spend_guard_row("spend.ceiling.cleared", text, sid, name, be, t=int(now), usdPerHour=round(float(rate), 2),
                      ceilingUsdPerHour=float(ceiling), windowS=SPEND_GUARD_WINDOW_S)
 
@@ -36366,9 +36458,8 @@ def _spend_guard_tick(now, live_map, sessions=None, be=None, clients=None, price
     if ceiling <= 0:
         _SPEND_GUARD.clear()                             # disabled: nothing latched survives the disable
         return
+    _spend_guard_seed()                                  # once per kernel life: the ledger's verdicts
     rows = _alive_sessions(now, live_map) if sessions is None else sessions
-    if be is None:
-        be = _sdk_backend or None
     if prices is None:
         prices = _model_prices(int(now), refresh=False)   # never a network fetch from the pusher's path
     live = set()
@@ -36389,8 +36480,11 @@ def _spend_guard_tick(now, live_map, sessions=None, be=None, clients=None, price
         elif st and st.get("over") and rate < ceiling * SPEND_GUARD_REARM:
             _SPEND_GUARD[sid] = {"over": False, "t": now, "rate": rate}
             _spend_guard_clear(s, rate, ceiling, now, be, clients)
-    for sid in [k for k in _SPEND_GUARD if k not in live]:
-        _SPEND_GUARD.pop(sid, None)                      # a session that left the live map takes its latch with it
+    # a session that left the live map KEEPS its latch (MEDIUM 1 of the review): dropping it re-fired the whole
+    # crossing when the session rejoined on the same window; the dict is bounded instead, the oldest departed first
+    if len(_SPEND_GUARD) > SPEND_GUARD_LATCH_MAX:
+        for sid in sorted((k for k in _SPEND_GUARD if k not in live), key=lambda k: _SPEND_GUARD[k].get("t") or 0)[:len(_SPEND_GUARD) - SPEND_GUARD_LATCH_MAX]:
+            _SPEND_GUARD.pop(sid, None)
 
 
 def _spend_series(keyed_only=False, now=None):
