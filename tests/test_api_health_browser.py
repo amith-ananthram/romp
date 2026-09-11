@@ -236,11 +236,11 @@ const R = await page.evaluate((SID) => {
   R.lightDotOpacity = getComputedStyle(el.querySelector(".ah-dot")).opacity;
   });
   step('lightState', () => {
-  // 11. light theme, degraded and paused: the detail's headline dot wears the rail dot's color (a bare light rule
+  // 11. light theme, degraded and paused: the detail's machine-line dot wears the rail dot's color (a bare light rule
   //     would outrank the state rules and paint it the label gray)
   window.__rompApiHealth(frame({ seq: 8 }));
   el.click();                                              // pin the detail (the row step closed it)
-  const head = () => tip().querySelector(".ah-head .ah-dot");
+  const head = () => tip().querySelector('.ah-mline[data-host=""] .ah-dot');   // this machine's line dot (T316: the head row is gone)
   R.lightDegraded = { rail: bg(el.querySelector(".ah-dot")), head: bg(head()), headOpacity: getComputedStyle(head()).opacity };
   window.__rompApiHealth(frame({ state: "paused", reason: "limit", text: "paused · usage limit · 1 waiting", since: 1700000010, seq: 8 }));
   R.lightPaused = { rail: bg(el.querySelector(".ah-dot")), head: bg(head()) };
@@ -299,7 +299,7 @@ await step2('rightButton', async () => {
   //     mouse event: it goes first, and each press records that it landed on the card.
   await page.evaluate(() => { const b = document.getElementById("romp-boot"); if (b) b.remove();
     window.__rompApiHealth(window.__frame({ seq: 9 })); document.getElementById("rail-api").click(); });
-  const head = () => page.evaluate(() => { const r = document.querySelector("#ah-tip .ah-head").getBoundingClientRect(); return { x: r.left + 8, y: r.top + r.height / 2 }; });
+  const head = () => page.evaluate(() => { const r = document.querySelector("#ah-tip .ah-mline").getBoundingClientRect(); return { x: r.left + 8, y: r.top + r.height / 2 }; });
   const inside = (b) => page.evaluate(([x, y]) => document.getElementById("ah-tip").contains(document.elementFromPoint(x, y)), [b.x, b.y]);
   const box = await head();
   R.rightInside = await inside(box);
@@ -331,9 +331,13 @@ await step2('pressFocus', async () => {
     window.__rompApiHealth(window.__frame({ state: "paused", reason: "limit", text: "paused · usage limit · 1 waiting", since: 1700000010, seq: 12 }));
     document.getElementById("rail-api").focus(); });
   await page.keyboard.press("Enter");
+  // the open's read lands (this lab has no /api-health: the failure line) and re-renders the card; the focus reads
+  // below wait for that render rather than racing it (a CI flake on another PR read focus mid-render)
+  await page.waitForFunction(() => !!document.querySelector("#ah-tip .ah-err") || !!document.querySelector("#ah-tip .ah-bars"), null, { timeout: 8000 });
   await page.keyboard.press("Tab");
   R.pressFocusBefore = await active();
   await page.keyboard.press("Space");
+  await page.waitForFunction(() => { const b = document.querySelector("#ah-tip button[data-act=pause]"); return !!(b && b.disabled); }, null, { timeout: 8000 });
   R.pressSent = await page.evaluate(() => window.__sent3.map((o) => o.type + ":" + String(o.value)));
   R.pressFocusAfter = await active();
   R.pressButton = await page.evaluate(() => { const b = document.querySelector("#ah-tip button[data-act=pause]"); return { disabled: b.disabled, label: b.textContent }; });
@@ -572,8 +576,9 @@ class ServedCell(unittest.TestCase):
     def test_tab_cycles_within_the_open_dialog(self):
         self.assertTrue(self.R["tabOpened"], "errors: %r" % self.R.get("err2"))
         self.assertEqual(self.R["tabAria"], "true")
-        self.assertEqual(self.R["tabSeq"], ["BUTTON.pause", "DIV.reveal", "SPAN.usage", "SPAN.log", "BUTTON.pause", "DIV.reveal"])
-        self.assertEqual(self.R["tabBack"], ["BUTTON.pause", "SPAN.log", "SPAN.usage"])
+        # T316: the detail's three range chips sit between the waiting rows and the footer links
+        self.assertEqual(self.R["tabSeq"], ["BUTTON.pause", "DIV.reveal", "BUTTON.range:hour", "BUTTON.range:day", "BUTTON.range:week", "SPAN.usage"])
+        self.assertEqual(self.R["tabBack"], ["BUTTON.range:week", "BUTTON.range:day", "BUTTON.range:hour"])
 
     def test_enter_on_a_row_opens_its_session_and_space_on_a_footer_link_runs_it(self):
         self.assertEqual(self.R["rowFocused"], "DIV.reveal", "errors: %r" % self.R.get("err2"))

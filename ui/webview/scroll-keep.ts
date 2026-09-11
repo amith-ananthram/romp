@@ -44,6 +44,19 @@ export function landSpot(v: KeepView): number | "bottom" {
   return (!v.shown || v.stick) ? "bottom" : v.scrollTop;
 }
 
+/** Follow mode at a RE-SHOW of the view already on screen (T262, the user 2026-09-08/09: the chat snapped up
+ *  the moment they scrolled to the bottom, in every column, 300 to 1900 px at a time). The journal named the
+ *  writer every time: `land-saved`, with the reader at the true bottom (scrollTop + clientHeight = scrollHeight)
+ *  and the RECORDED follow flag off. The recorded flag can lag the reader: a scroll that lands while a deferred
+ *  build is pending is deliberately not recorded (the reveal's clamp, see followReader), so a wheel gesture that
+ *  ended on the bottom in that window left `stick` false and `scrollTop` a screen or more above — and the next
+ *  full show landed on that stale spot. The DOM is the truth at the re-show: a reader at the true bottom follows
+ *  it, whatever the flag last said. Only ever turns following ON; off the bottom the recorded flag stands, so a
+ *  reader who scrolled up keeps their place through the rebuild as before. */
+export function reshowStick(recorded: boolean, atBottomNow: boolean): boolean {
+  return recorded || atBottomNow;
+}
+
 /** Must this show keep the reader's place across the rebuild? Only when the view is the one on screen
  *  already (displayed, in a visible pane), has been shown before, and nothing is navigating (no pending
  *  anchor or moment: a deep link lands where it says). A tab switch fails `displayed`; a first show fails
