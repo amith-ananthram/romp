@@ -128,6 +128,13 @@ installMenuEcho();
     run: () => { try { chatPane()!.contentWindow!.postMessage({ romp: "forkSession" }, "*"); } catch (e) { /* chat not loaded */ } },
   });
   registerCommand({
+    id: "session.notify", title: "Toggle notifications for this session",
+    // the per-session bell the tab menu's row flips, from the keyboard (the user 2026-09-11): the chat pane owns the
+    // flag (it knows the active session and the bell's state) and answers with a toast, since the flip itself is
+    // otherwise visible only in that menu. Lands in the column last worked in, like every chat-directed command.
+    run: () => { try { chatPane()!.contentWindow!.postMessage({ romp: "notifyToggle" }, "*"); } catch (e) { /* chat not loaded */ } },
+  });
+  registerCommand({
     id: "settings.open", title: "Open settings",
     // the gear lives on its own served page, the shell's hidden #f-settings iframe (the user 2026-09-10;
     // it rode the feed pane before, which made that pane required), loaded on the first open: the shell's one

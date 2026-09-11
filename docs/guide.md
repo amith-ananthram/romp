@@ -246,7 +246,8 @@ A tab can have a **hot key**: right-click it, pick **Hot key…**, press a combi
 combination shows on the tab after its name; pressing it switches to that session in the column
 already showing it, else in the column you last worked in. **Focus the next chat column** and
 **Focus the previous chat column** in **Keyboard shortcuts** take a hot key too, and cycle the
-focus between the columns. **Pin tab**, in the same menu, keeps a tab at its slot whatever else moves: it cannot be
+focus between the columns; **Toggle notifications for this session** flips the bell of the
+session you are looking at (the tab menu's **Notify me**), and says which way it went. **Pin tab**, in the same menu, keeps a tab at its slot whatever else moves: it cannot be
 dragged, other tabs drag around it, a reshuffle of the rest never shifts it, and its top-right
 corner folds over to say so. Pins are remembered per browser, like the tab order.
 
