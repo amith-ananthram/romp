@@ -1391,9 +1391,12 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   cards' anchors (the distilled summary's own targets first, a completed card's
   too, then the active cards' heads and open rows; the feed's first 32 anchors,
   so a late session's summaries can fall past the cap; the warm SET is bounded
-  to 16 pages, half the cache: anchors past it wait for the next board change,
-  and a set that fits settles, an unchanged board costing one probe of its
-  remembered keys), `warmPending` (anchors waiting past the bound), `warmMs`,
+  to half the cache in pages and in bytes: anchors past it wait for the next
+  board change, and a set that fits settles, an unchanged board costing one
+  probe of its remembered keys; a set with an anchor whose session has no
+  render floor yet is never remembered as settled, so the floor's return
+  warms), `warmPending` (anchors waiting past the bound), `warmMs` (the
+  probes' time included),
   `warmCycles`, and `warmSkipped` (cycles the warm stood down because the
   pusher's last cycle ran over 1.5 s). A page's cache key reads what a
   pre-floor render reads and none of the live tail (the reg's fork value, not

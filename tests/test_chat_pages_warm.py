@@ -176,6 +176,72 @@ class WarmTheCards(P.Harness):
         reg.write_text(json.dumps({"forkedFrom": {"sid": "22222222-3333-4444-5555-666666666666", "uuid": whole[3]["uuid"]}}))
         self.assertNotEqual(km._page_sig(self.rows[0], SID, NOW), k1, "a fork lineage: another key (the branch marker moves)")
 
+    def test_a_cycle_with_no_floor_never_settles_and_the_floors_return_warms(self):
+        """Round 3, A: with an index client connected every tab's floor is 0, so no anchor resolves; the memo must not call the
+        empty set settled, or the floor's return would find the warm asleep and the click miss."""
+        whole, m = self._restored()
+        feed = self._feed(self._card([whole[5]["uuid"], whole[60]["uuid"]]))
+        km._RENDER_FLOOR[SID] = 0                                     # a proto-1 client holds every tab at turn 0
+        self.assertEqual(km._warm_history_pages(feed, NOW, {}), 0, "nothing to warm below a floor of 0")
+        self.assertEqual(km._WARM_MEMO["anchors"], (), "…and the empty set is not remembered as settled")
+        self.assertEqual(km._PAGE_STATS["warmPending"], 0)
+        km._RENDER_FLOOR[SID] = m["floor"]                            # it left: the floor is back
+        n = km._warm_history_pages(feed, NOW, {})
+        self.assertGreater(n, 0, "the next cycle warms the windows")
+        self.assertTrue(self._hit(whole[5]["uuid"]))
+        # a second session with no row beside a resolved one: the set is unresolved, not settled
+        feed2 = {"type": "feed", "asks": feed["asks"] + [{"itemId": "z", "sid": "99999999-0000-4000-8000-000000000099", "column": "working",
+                                                           "tree": [{"id": "r", "kind": "ask", "status": "open", "anchorUuid": "u-nowhere"}]}]}
+        km._warm_history_pages(feed2, NOW, {})
+        self.assertEqual(km._WARM_MEMO["anchors"], (), "an anchor with no session row leaves the set unresolved")
+
+    def test_the_set_is_bounded_in_bytes_too_and_a_readers_page_beside_it_survives(self):
+        """Round 3, B: the cache evicts on bytes as well as count; a set bounded by count alone re-rendered itself every cycle
+        once its pages passed the byte bound."""
+        whole, m = self._restored(turns=600, compact_every=150)
+        floor = m["floor"]
+        turns = km._parse(self.leaf, SID, NOW)["turns"]
+        anchors = [next(a["uuid"] for a in turns[p + km.PAGE_TURNS // 2]["atoms"] if a.get("uuid"))
+                   for p in range(0, floor - 2 * km.PAGE_TURNS, 2 * km.PAGE_TURNS)]
+        reader = km._chat_history_page(SID, floor - km.PAGE_TURNS, floor, NOW)        # a page the reader scrolled into, beside the set
+        self.assertTrue(reader)
+        with km._page_lock:
+            page_bytes = max(b for _, b in km._PAGE_CACHE.values())
+        saved = km._PAGE_CACHE_BYTES
+        km._PAGE_CACHE_BYTES = page_bytes * 9                        # nine pages of room: the set may take half (four to five)
+        try:
+            feed = self._feed(self._card(anchors))
+            n1 = km._warm_history_pages(feed, NOW, {})
+            self.assertGreater(n1, 0); self.assertLess(n1, km.WARM_PAGES_MAX, "the byte bound closed the set before the page bound")
+            self.assertGreater(km._PAGE_STATS["warmPending"], 0)
+            ev0 = km._PAGE_STATS["evictions"]
+            for _ in range(4):
+                self.assertEqual(km._warm_history_pages(feed, NOW, {}), 0, "the set settles under the byte bound")
+            self.assertEqual(km._PAGE_STATS["evictions"], ev0, "…and evicts nothing")
+            misses = km._PAGE_STATS["misses"]
+            km._chat_history_page(SID, floor - km.PAGE_TURNS, floor, NOW)
+            self.assertEqual(km._PAGE_STATS["misses"], misses, "the reader's page beside the set survived the warm")
+            self.assertTrue(self._hit(anchors[0]))
+        finally:
+            km._PAGE_CACHE_BYTES = saved
+
+    def test_an_over_budget_pusher_stands_down_before_the_probe(self):
+        """Round 3, C: the stand-down comes first, so a slow pusher pays not even the settled probe; the probe's time is the warm's."""
+        whole, m = self._restored()
+        feed = self._feed(self._card([whole[5]["uuid"]]))
+        self.assertGreater(km._warm_history_pages(feed, NOW, {}), 0)
+        cycles, ms = km._PAGE_STATS["warmCycles"], km._PAGE_STATS["warmMs"]
+        km._PERF_STATS.pusher["cycle_ms_last"] = 5000.0
+        self.assertEqual(km._warm_history_pages(feed, NOW, {}), 0)
+        self.assertEqual((km._PAGE_STATS["warmSkipped"], km._PAGE_STATS["warmCycles"], km._PAGE_STATS["warmMs"]), (1, cycles, ms),
+                         "stood down before the probe: no cycle, no time")
+        km._PERF_STATS.pusher["cycle_ms_last"] = 20.0
+        self.assertEqual(km._warm_history_pages(feed, NOW, {}), 0, "the remembered set: a probe")
+        self.assertEqual(km._PAGE_STATS["warmCycles"], cycles + 1); self.assertGreater(km._PAGE_STATS["warmMs"], ms, "…counted")
+        src = open(os.path.join(P.BIN, "romp-kernel")).read()
+        fn = src[src.index("def _warm_history_pages("):src.index("def _turn_of_uuid(")]
+        self.assertLess(fn.index("WARM_SKIP_MS:"), fn.index('_WARM_MEMO["anchors"]:'), "the stand-down precedes the probe")
+
     def test_the_window_is_two_aligned_pages_around_the_anchor(self):
         w = km._window_turns
         self.assertEqual(w(3, 400), (0, 32), "the head's page and the next")

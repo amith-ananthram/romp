@@ -40951,10 +40951,12 @@ def _card_anchors(feed):
 def _warm_history_pages(feed, now, live_map=None):
     """Render, into the pages cache, the pages the feed's cards' anchors would ask for (the window loadAround serves,
     _window_turns), so a click on one lands from the cache. The warm SET is bounded to WARM_PAGES_MAX pages (half the
-    cache): anchors are taken in the feed's order and the first whose window would take the set past the bound, and
-    every anchor after it, wait for the next board change (counted as chatPages.warmPending), so the warm never evicts
-    its own pages nor a reader's and a bounded set SETTLES (the warming review, 2026-09-11: an unbounded set over the
-    cache re-rendered itself every cycle for the kernel's life). Each admitted page is PROBED first: one resident under
+    cache, in pages AND in bytes, half of each bound): anchors are taken in the feed's order and the first whose window
+    would take the set past the bound, and every anchor after it, wait for the next board change (counted as
+    chatPages.warmPending), so the warm never evicts its own pages nor a reader's and a bounded set SETTLES (the warming
+    review, 2026-09-11: an unbounded set over the cache re-rendered itself every cycle for the kernel's life). A set is
+    remembered as settled only when it is non-empty and every anchor resolved (a session with no render floor yet, an
+    index client holding the tabs at 0, leaves the set unresolved, so the floor's return warms). Each admitted page is PROBED first: one resident under
     the session's current page signature costs nothing, one that is not is rendered, so a page a reader's scrolling
     evicted or a floor flip re-keyed is warmed again; an unchanged board whose set is fully resident costs one probe of
     the remembered keys (_WARM_MEMO), nothing else. Skipped whole when the pusher's last cycle ran over WARM_SKIP_MS
@@ -40964,33 +40966,35 @@ def _warm_history_pages(feed, now, live_map=None):
     anchors = _card_anchors(feed)[:WARM_ANCHORS_MAX]
     if not anchors:
         return 0
+    last_ms = _PERF_STATS.pusher.get("cycle_ms_last", 0.0) if hasattr(_PERF_STATS, "pusher") else 0.0
+    if last_ms > WARM_SKIP_MS:                    # the stand-down first: an over-budget pusher pays not even the probe (round 3, C)
+        with _page_lock:
+            _PAGE_STATS["warmSkipped"] += 1
+        return 0
+    t0 = time.monotonic()
     rows = {x["sid"]: x for x in _sessions(now)}
     if tuple(anchors) == _WARM_MEMO["anchors"]:
         # a settled board: its set still resident under the sessions' CURRENT page signatures costs this probe alone (a
-        # floor flip or a judge publish moves a signature: the remembered keys are then another key's pages)
+        # floor flip or a judge publish moves a signature: the remembered keys are then another key's pages); the probe's
+        # time is the warm's (warmMs)
         try:
             same = all(_page_sig(rows[sid_], sid_, now) == sg for sid_, sg in _WARM_MEMO["sigs"].items() if sid_ in rows)
         except Exception:
             same = False
         with _page_lock:
             settled = same and all(k in _PAGE_CACHE for k in _WARM_MEMO["keys"])
-        if settled:
-            with _page_lock:
+            if settled:
                 _PAGE_STATS["warmCycles"] += 1
+                _PAGE_STATS["warmMs"] += (time.monotonic() - t0) * 1000.0
+        if settled:
             return 0
-    last_ms = _PERF_STATS.pusher.get("cycle_ms_last", 0.0) if hasattr(_PERF_STATS, "pusher") else 0.0
-    if last_ms > WARM_SKIP_MS:
-        with _page_lock:
-            _PAGE_STATS["warmSkipped"] += 1
-        return 0
     if live_map is None:
         live_map = _live_map()
-    t0 = time.monotonic()
-    st, pending, keys = {"rendered": 0}, 0, set()
+    st, pending, keys, unresolved, set_bytes = {"rendered": 0}, 0, set(), 0, 0
     per_sid = {}                                  # sid → (floor, sess, turns, uuid → turn index below the floor, page signature)
     for sid, uuid in anchors:
-        if len(keys) >= WARM_PAGES_MAX:
-            pending += 1                          # past the set's bound: this anchor waits for the next board change
+        if len(keys) >= WARM_PAGES_MAX or (keys and set_bytes >= _PAGE_CACHE_BYTES // 2):
+            pending += 1                          # past the set's bound (pages, or bytes: round 3, B): waits for the next board change
             continue
         try:
             if sid not in per_sid:
@@ -41003,7 +41007,8 @@ def _warm_history_pages(feed, now, live_map=None):
                     per_sid[sid] = (floor, sess, turns, u2t, _page_sig(sess, sid, now, floor=floor, turns=turns))
             entry = per_sid[sid]
             if entry is None:
-                continue
+                unresolved += 1                   # no floor yet (an index client holds every tab at 0), or no row: this
+                continue                          #  anchor's pages are unknown, so the set cannot be called settled (round 3, A)
             floor, sess, turns, u2t, sig = entry
             j = u2t.get(str(uuid).split("#", 1)[0])
             if j is None:
@@ -41018,18 +41023,22 @@ def _warm_history_pages(feed, now, live_map=None):
             keys.update(window)
             for key in window:
                 with _page_lock:
-                    resident = key in _PAGE_CACHE
-                if not resident:
+                    hit = _PAGE_CACHE.get(key)
+                if hit is None:
                     _chat_history_page(sid, key[1], key[2], now, sess=sess, live_map=live_map, sig=sig, stats=st)
+                    with _page_lock:
+                        hit = _PAGE_CACHE.get(key)
+                set_bytes += hit[1] if hit is not None else 0   # the set's bytes: a page over the half-bound alone is admitted, and the set closes
         except Exception:
+            unresolved += 1
             sys.stderr.write("chat pages warm: %s\n" % traceback.format_exc().strip().splitlines()[-1])
     with _page_lock:
         _PAGE_STATS["warmed"] += st["rendered"]
         _PAGE_STATS["warmPending"] = pending
         _PAGE_STATS["warmMs"] += (time.monotonic() - t0) * 1000.0
         _PAGE_STATS["warmCycles"] += 1
-        resident_all = all(k in _PAGE_CACHE for k in keys)
-    if resident_all:
+        resident_all = bool(keys) and unresolved == 0 and all(k in _PAGE_CACHE for k in keys)   # an empty or unresolved set is
+    if resident_all:                                                                              #  never "settled" (round 3, A)
         _WARM_MEMO.update(anchors=tuple(anchors), keys=frozenset(keys), sigs={sid_: e[4] for sid_, e in per_sid.items() if e is not None})
     else:
         _WARM_MEMO.update(anchors=(), keys=frozenset(), sigs={})
