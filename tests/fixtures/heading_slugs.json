@@ -1,0 +1,99 @@
+{
+  "_": "The heading-slug rule both sides share (T351): ui/webview/md-links.ts headingSlug / uniqueSlugs and kernel.py _heading_slug / _unique_slugs. Pinned on both sides so a path#slug link the chat's preview slices by (the kernel) lands on the id the viewer gave the heading (the client). Synthetic headings.",
+  "slugs": [
+    [
+      "Fold Rules",
+      "fold-rules"
+    ],
+    [
+      "  Spaced   Out  ",
+      "spaced-out"
+    ],
+    [
+      "What's new?",
+      "whats-new"
+    ],
+    [
+      "C++ & Rust: notes",
+      "c-rust-notes"
+    ],
+    [
+      "already-a-slug",
+      "already-a-slug"
+    ],
+    [
+      "Über Straße",
+      "über-straße"
+    ],
+    [
+      "日本語 見出し",
+      "日本語-見出し"
+    ],
+    [
+      "123 numbers first",
+      "123-numbers-first"
+    ],
+    [
+      "!!!",
+      "section"
+    ],
+    [
+      "",
+      "section"
+    ],
+    [
+      "snake_case drops_underscores",
+      "snakecase-dropsunderscores"
+    ],
+    [
+      "Tabs\tand\nnewlines",
+      "tabs-and-newlines"
+    ]
+  ],
+  "unique": [
+    [
+      [
+        "a",
+        "b",
+        "a",
+        "a",
+        "b"
+      ],
+      [
+        "a",
+        "b",
+        "a-1",
+        "a-2",
+        "b-1"
+      ]
+    ],
+    [
+      [
+        "x",
+        "x-1",
+        "x"
+      ],
+      [
+        "x",
+        "x-1",
+        "x-2"
+      ]
+    ],
+    [
+      [
+        "install",
+        "install",
+        "install-1"
+      ],
+      [
+        "install",
+        "install-1",
+        "install-1-1"
+      ]
+    ],
+    [
+      [],
+      []
+    ]
+  ]
+}

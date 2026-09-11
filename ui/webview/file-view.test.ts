@@ -21,14 +21,14 @@ const FEED_CSS = web("feed.css");
 const CHAT_CSS = web("styles.css");
 
 test("openPath routes by HOST: the in-pane viewer modal on the web (or the Files pane, by the ladder), the editor in VS Code", () => {
-  assert.match(RENDER, /function openPath\(path: string, sid\?: string \| null, ev\?: MouseEvent \| null\): void/);   // ev: the click, for a PDF's modified-click tab
+  assert.match(RENDER, /function openPath\(path: string, sid\?: string \| null, ev\?: MouseEvent \| null, frag\?: string \| null\): void/);   // ev: the click, for a PDF's modified-click tab
   // web → the ladder decides at the click (file-route.ts fileLinkRoute, its table in file-route.test.ts): "here" opens
   // the viewer in THIS document through the gesture reader; "pane" hands a plain click to the shell for the Files pane
   assert.match(RENDER, /const route = fileLinkRoute\(settings\.fileLinkPane, window\.parent !== window, panesOn\.files === true, panesAvail\.files !== false\);/,
     "…and whether the Files control exists at all (its gear setting, T317): hidden, the pane road falls back to here");
   assert.match(RENDER, /openFileClick\(ev, path, to, route === "pane" \? \(\) => \{/);   // via the gesture reader: a plain click is openFileView or the relay (pdf-new-tab.test.ts)
   assert.match(RENDER, /import \{ openFileClick \} from "\.\/file-view";/);   // the gesture reader is the chat's only way in; openFileView is not imported
-  assert.match(RENDER, /window\.parent\.postMessage\(\{ romp: "viewFile", path, sid: to, pane: "pane",\n\s*identity: s && s\.name \? \{ name: s\.name, color: s\.color \?\? null \} : null \}, "\*"\);/);
+  assert.match(RENDER, /window\.parent\.postMessage\(\{ romp: "viewFile", path, sid: to, pane: "pane", frag: frag \|\| null,\n\s*identity: s && s\.name \? \{ name: s\.name, color: s\.color \?\? null \} : null \}, "\*"\);/);
   assert.equal((RENDER.match(/romp: "viewFile"/g) || []).length, 1, "one relay, aimed at the Files pane; the feed is never a file's target");
   assert.doesNotMatch(RENDER, /pane: "feed"/);
   // VS Code keeps the host editor
@@ -36,7 +36,7 @@ test("openPath routes by HOST: the in-pane viewer modal on the web (or the Files
 });
 
 test("every file-link surface in the chat goes through openPath — no direct openFile posts left", () => {
-  for (const call of [/openPath\(path, null, e\);/, /openPath\(open, relative \? activeId : null, e\);/,
+  for (const call of [/openPath\(path, null, e\);/, /openPath\(open, relative \? activeId : null, e, a\.dataset\.frag \|\| null\);/,
                       /openPath\(p, id \|\| null, e\);/]) assert.match(RENDER, call);   // each with its click (a PDF's modified-click tab)
   // the ONLY openFile postMessage left in render.ts is openPath's own fallback branch
   assert.equal((RENDER.match(/type: "openFile"/g) || []).length, 2,
@@ -805,7 +805,7 @@ test("the title bar carries a session chip resolved from the sid — never inven
   // dirty-edit veto is false, so the Files pane's recent list records only real opens), and the listener
   // takes an optional relay contract (files.ts takes the shell's relay whole)
   assert.match(VIEW, /export function openFileView\(path: string, sid\?: string \| null, opts\?: \{ line\?: number \| null; frag\?: string \| null \}\): boolean \{/);   // frag: a sibling link's fragment lands after the render
-  assert.match(VIEW, /export function initFileView\(poster: \(m: Record<string, unknown>\) => void,\n\s*onRelay\?: \(m: \{ path: string; sid\?: unknown; identity\?: unknown \}\) => void\): void \{/);
+  assert.match(VIEW, /export function initFileView\(poster: \(m: Record<string, unknown>\) => void,\n\s*onRelay\?: \(m: \{ path: string; sid\?: unknown; identity\?: unknown; frag\?: unknown \}\) => void\): void \{/);
 });
 
 test("both hosting documents register a resolver beside their initFileView boot", () => {

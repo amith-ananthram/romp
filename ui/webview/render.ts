@@ -15,7 +15,7 @@ import type { ParsedAsk } from "../ask-types";
 import { TABBAR_H_KEY, TABBAR_H_DEFAULT, clampTabbarH, parseTabbarH } from "./tabbar-resize";
 import type { CmtPopFrac } from "./comment-pop-size";
 import { CMT_POP_SIZE_KEY, CMT_POP_THREAD_DEFAULT, parseCmtPopSize, clampCmtPopPx, toCmtPopFrac, isCmtPopMax,
-         centerCmtPop, cmtPopCapPx } from "./comment-pop-size";
+         centerCmtPop, cmtPopCapPx, CMT_POP_MIN_W, CMT_POP_MIN_H, CMT_POP_CAP_W, CMT_POP_CAP_H, CMT_POP_EDGE } from "./comment-pop-size";
 import { ctxFallbackColor, pickTone, readableRgb } from "./ctx-color";
 import { applyTheme } from "./theme";
 import { installPostalWash } from "./postal-wash";   // the incoming postal card's tint lightness, measured from the page (T337c)
@@ -71,6 +71,7 @@ import { initFileView, setFileViewIdentity, hostStub } from "./file-view";
 import { openUrlView } from "./file-view";                 // the URL mode of the same viewer (md-url-view.test.ts)
 import { isMarkdownUrl } from "./md-links";
 import { openPathLink, linkifyPathTokens, selectionOpenIn } from "./path-links";   // the path matcher the chat's links are made from (a shared module)
+import { PREVIEW_DWELL_MS, PREVIEW_GRACE_MS, HoverIntent, parsePreviewLink, previewKindOf, sliceUrl, contentFor, textOnlyContent, stripRemoteLoads, type PreviewContent } from "./file-preview";   // the file preview popover's pure half (T351)
 import { initFileBrowse, openFileBrowse } from "./file-browse";   // the browser is pane-local here now (the user 2026-08-24)
 import { pastedFilePath } from "./paste-path";
 import { insertAtCaret } from "./composer-insert";
@@ -144,8 +145,8 @@ type ChatEvent = (
   // event renders as a labelled notice (renderInjected), never the user's bubble (the user 2026-09-07)
   // gist: a romp SYSTEM notice's USER-facing head, lifted by the kernel from the notice's <!-- romp-gist -->
   // marker (2026-09-08) — the body is written to the agent and never doubles as the head
-  | { kind: "user"; md: string; uuid?: string; ts?: string; reminders?: string[]; taskOutputs?: TaskOutputs; human?: boolean; romp?: boolean; rompAuto?: boolean; rompSystem?: boolean; gist?: string; followUp?: boolean; goal?: string; fuCtx?: string; canned?: string; tag?: string; mid?: string; mids?: string[]; images?: { src: string; path?: string }[]; undelivered?: boolean; echoT?: number; absorbed?: boolean; sentAt?: number; hiddenByPending?: boolean; source?: InjectedSource; preamble?: string; spacePaths?: string[]; pathLinks?: Record<string, string>; pathPins?: Record<string, string> }
-  | { kind: "assistant"; md: string; uuid?: string; ts?: string; spacePaths?: string[]; pathLinks?: Record<string, string>; pathPins?: Record<string, string> }   // spacePaths: backticked filenames WITH spaces the kernel verified exist (build_session _space_paths) → whole-span links. pathLinks: path-shaped tokens the kernel verified against the filesystem, token → real open target (build_session _path_links) — the linkifier's gate
+  | { kind: "user"; md: string; uuid?: string; ts?: string; reminders?: string[]; taskOutputs?: TaskOutputs; human?: boolean; romp?: boolean; rompAuto?: boolean; rompSystem?: boolean; gist?: string; followUp?: boolean; goal?: string; fuCtx?: string; canned?: string; tag?: string; mid?: string; mids?: string[]; images?: { src: string; path?: string }[]; undelivered?: boolean; echoT?: number; absorbed?: boolean; sentAt?: number; hiddenByPending?: boolean; source?: InjectedSource; preamble?: string; spacePaths?: string[]; pathLinks?: Record<string, string>; pathPins?: Record<string, string>; pathPreview?: Record<string, string> }
+  | { kind: "assistant"; md: string; uuid?: string; ts?: string; spacePaths?: string[]; pathLinks?: Record<string, string>; pathPins?: Record<string, string>; pathPreview?: Record<string, string> }   // pathPreview: the links a hover may preview, by kind (T351). spacePaths: backticked filenames WITH spaces the kernel verified exist (build_session _space_paths) → whole-span links. pathLinks: path-shaped tokens the kernel verified against the filesystem, token → real open target (build_session _path_links) — the linkifier's gate
   | { kind: "thinking"; text: string; encrypted: boolean; uuid?: string; ts?: string }
   | {
       kind: "tool";
@@ -1558,13 +1559,14 @@ document.addEventListener("click", (e) => {
 // hears one and reads as all-off, which the framed gate makes moot anyway.
 let panesOn: Record<string, boolean> = {};
 let panesAvail: Record<string, boolean> = {};   // …and which panes EXIST to bring forward (avail: the Files control's setting, T317); absent = available
-function openPath(path: string, sid?: string | null, ev?: MouseEvent | null): void {
+function openPath(path: string, sid?: string | null, ev?: MouseEvent | null, frag?: string | null): void {
   if (!vscodeApi) return;
   if (location.protocol === "http:" || location.protocol === "https:") {
     const to = sid || activeId || null;
     const route = fileLinkRoute(settings.fileLinkPane, window.parent !== window, panesOn.files === true, panesAvail.files !== false);
     // with its gesture, read first: a Cmd/Ctrl- or middle-click on a PDF takes the browser's own tab wherever
-    // the plain click would have landed; a plain click routed to the Files pane is handed to the shell
+    // the plain click would have landed; a plain click routed to the Files pane is handed to the shell.
+    // `frag`: a section to land on (the preview popover's "open" of a path#slug link, T351), through either route
     openFileClick(ev, path, to, route === "pane" ? () => {
       // Fire-and-forget by nature: postMessage to a live parent never throws, so there is no catchable
       // failure here and no honest in-document fallback exists. The message names its target pane and
@@ -1573,9 +1575,9 @@ function openPath(path: string, sid?: string | null, ev?: MouseEvent | null): vo
       // from. Looked up, never invented: a sid neither list names sends null, and the pane's resolver
       // falls to the kernel's stub.
       const s = to ? (sessions.get(to) ?? tabMeta.get(to)) : undefined;
-      window.parent.postMessage({ romp: "viewFile", path, sid: to, pane: "pane",
+      window.parent.postMessage({ romp: "viewFile", path, sid: to, pane: "pane", frag: frag || null,
         identity: s && s.name ? { name: s.name, color: s.color ?? null } : null }, "*");
-    } : undefined);
+    } : undefined, frag || null);
     return;
   }
   vscodeApi.postMessage(sid ? { type: "openFile", path, id: sid } : { type: "openFile", path });
@@ -2148,10 +2150,173 @@ function bindPathLink(a: HTMLElement): HTMLElement {
   const open = a.dataset.path || "", relative = a.dataset.rel === "1";
   a.addEventListener("click", (e) => {
     e.stopPropagation();
-    openPath(open, relative ? activeId : null, e);
+    filePreviewIntent.cancel();
+    openPath(open, relative ? activeId : null, e, a.dataset.frag || null);   // data-frag: the section a path#slug link names (T351)
   });
-  onMiddleClick(a, (e) => openPath(open, relative ? activeId : null, e));
+  onMiddleClick(a, (e) => openPath(open, relative ? activeId : null, e, a.dataset.frag || null));
+  armFilePreview(a);   // a hover (or the keyboard's focus) previews the file (T351)
   return a;
+}
+// A `#slug` right after a path token names a SECTION (the lab team's glossary links, `path#fold`, T351): the token walk
+// marks the path alone, so the slug is the link's next text. It moves into the link (the token reads whole) as data-frag,
+// the file viewer's own convention for the section to land on (file-view-links.ts), and the preview shows that section.
+function absorbFragment(link: HTMLElement): void {
+  const nx = link.nextSibling;
+  if (!nx || nx.nodeType !== 3) return;
+  const m = /^#([a-z0-9][a-z0-9-]*)/.exec(nx.textContent || "");
+  if (!m) return;
+  link.dataset.frag = m[1];
+  link.appendChild(document.createTextNode(m[0]));
+  nx.textContent = (nx.textContent || "").slice(m[0].length);
+}
+
+// ── the file PREVIEW popover (T351, the user 2026-09-11) ──────────────────────────────────────────
+// Hovering a local file link pops up a card with the rendered head of the file, or the section a `path#slug` link
+// names, near-instantly: the kernel keeps the text of recently linked files with a heading index and warms it on the
+// pusher's path, so the hover is one small fetch of already-sliced text (GET /file?slice=1) rendered with the chat's
+// own marked in one call. The card wears the comment popover's vocabulary (comment-pop-size.ts's fractions, the
+// menu-card surface) but is transient: it opens after a dwell, closes on leave (with a grace to cross into it), on
+// Escape, on a scroll, on a click elsewhere and when the link it is anchored to leaves the document, and is never draggable. Progressive
+// disclosure: the link is the gist, the card the summary, "open" the mechanics (the full viewer, scrolled to the
+// section). A link the kernel did not allow to preview (pathPreview absent: outside the session's folder and the
+// user's home, unverified, a secrets-shaped name, not a kind it shows, over the caps) gets the text-only card and
+// NO request. The content shape is the one contract every provider fills (file-preview.ts PreviewContent; stage 2's
+// glossary lookup lands in the same card).
+let filePreviewEl: HTMLElement | null = null;
+let filePreviewSeq = 0;                        // the fetch that may fill the card: a later show retires an earlier answer
+let filePreviewAnchorWatch: MutationObserver | null = null;   // watches the anchored link's own removal (a re-render, a tab pick)
+function hideFilePreview(): void {
+  filePreviewSeq++;
+  if (filePreviewAnchorWatch) { filePreviewAnchorWatch.disconnect(); filePreviewAnchorWatch = null; }
+  if (filePreviewEl) { filePreviewEl.style.display = "none"; filePreviewEl.replaceChildren(); }
+}
+// The card is anchored to a link NODE; a re-render that drops the node (a streaming turn's replaceChildren, a tab pick,
+// a window rebuild) fires no pointerleave, so the card would stand stranded. The closer is the node's own removal
+// (the review): a MutationObserver on the thread sees the link leave the document and cancels the intent. Tab-strip
+// rebuilds are not the event (they run on every push and would close the card on unrelated state).
+function watchFilePreviewAnchor(a: HTMLElement): void {
+  if (filePreviewAnchorWatch) filePreviewAnchorWatch.disconnect();
+  const root = document.getElementById("content") || document.body;
+  filePreviewAnchorWatch = new MutationObserver(() => { if (!a.isConnected) filePreviewIntent.cancel(); });
+  filePreviewAnchorWatch.observe(root, { childList: true, subtree: true });
+}
+const filePreviewIntent = new HoverIntent<HTMLElement>(PREVIEW_DWELL_MS, PREVIEW_GRACE_MS, (a) => showFilePreview(a), () => hideFilePreview());
+function ensureFilePreview(): HTMLElement {
+  if (filePreviewEl && filePreviewEl.isConnected) return filePreviewEl;
+  const p = el("div", "file-preview-pop"); p.id = "file-preview-pop";
+  p.setAttribute("role", "dialog"); p.setAttribute("aria-label", "file preview");
+  p.style.display = "none";
+  p.addEventListener("pointerenter", () => filePreviewIntent.pin());   // inside the card: it stays
+  p.addEventListener("pointerleave", () => filePreviewIntent.unpin());
+  document.body.appendChild(p);
+  filePreviewEl = p;
+  document.getElementById("content")?.addEventListener("scroll", () => filePreviewIntent.cancel(), { passive: true });
+  return p;
+}
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") filePreviewIntent.cancel(); });
+document.addEventListener("pointerdown", (e) => {
+  if (filePreviewEl && filePreviewEl.style.display !== "none" && !filePreviewEl.contains(e.target as Node)) filePreviewIntent.cancel();
+}, true);
+function armFilePreview(a: HTMLElement): void {
+  a.addEventListener("pointerenter", () => filePreviewIntent.enter(a));
+  a.addEventListener("pointerleave", () => filePreviewIntent.leave());
+  a.addEventListener("focus", () => filePreviewIntent.enter(a));     // the keyboard's route to the same card
+  a.addEventListener("blur", () => filePreviewIntent.leave());
+}
+// the comment popover's size (70% × 60% of the pane, capped, never under the minimum), below the link when there is
+// room, else above it, and inside the viewport by the popover edge
+function placeFilePreview(p: HTMLElement, a: HTMLElement): void {
+  const pane = (document.getElementById("content") || document.body).getBoundingClientRect();
+  const w = Math.max(CMT_POP_MIN_W, Math.min(pane.width * CMT_POP_THREAD_DEFAULT.w, innerWidth * CMT_POP_CAP_W));
+  const h = Math.max(CMT_POP_MIN_H, Math.min(pane.height * CMT_POP_THREAD_DEFAULT.h, innerHeight * CMT_POP_CAP_H));
+  const r = a.getBoundingClientRect();
+  p.style.width = w + "px"; p.style.height = h + "px";
+  const below = r.bottom + 6 + h <= innerHeight - CMT_POP_EDGE;
+  p.style.top = (below ? r.bottom + 6 : Math.max(CMT_POP_EDGE, r.top - 6 - h)) + "px";
+  p.style.left = Math.max(CMT_POP_EDGE, Math.min(r.left, innerWidth - w - CMT_POP_EDGE)) + "px";
+}
+function renderFilePreview(p: HTMLElement, c: PreviewContent, sid: string | null): void {
+  p.replaceChildren();
+  const head = el("div", "fp-head");
+  const title = el("span", "fp-title"); title.textContent = c.title; title.title = c.title; head.appendChild(title);
+  if (c.subtitle) { const s = el("span", "fp-sub"); s.textContent = c.subtitle; head.appendChild(s); }
+  if (c.open) {
+    const b = el("button", "fp-open") as HTMLButtonElement; b.type = "button"; b.textContent = c.open.label; b.title = "the whole file, in the viewer";
+    const { path, frag } = c.open;
+    b.addEventListener("click", (e) => { e.stopPropagation(); filePreviewIntent.cancel(); openPath(path, sid, e, frag || null); });
+    head.appendChild(b);
+  }
+  p.appendChild(head);
+  if (c.note) { const n = el("div", "fp-note"); n.textContent = c.note; p.appendChild(n); }
+  const body = el("div", "fp-body fp-" + c.kind);
+  if (c.body.markdown != null) {
+    body.classList.add("md");
+    body.replaceChildren(...Array.from(previewMdClean(c.body.markdown).childNodes));   // its paths stay text here (the viewer, one click away, links them)
+  }
+  else if (c.body.html != null) { const clean = sanitizeMd(c.body.html); stripRemoteLoads(clean, location.origin, location.href); body.replaceChildren(clean); }   // a provider's own HTML, through the one sanitizer and the same strip
+  else if (c.body.url && c.kind === "image") { const img = el("img", "fp-img") as HTMLImageElement; img.src = c.body.url; img.alt = c.title; body.appendChild(img); }
+  else if (c.body.url && c.kind === "pdf") { const f = el("iframe", "fp-pdf") as HTMLIFrameElement; f.src = c.body.url + "#page=1&toolbar=0"; f.title = c.title; body.appendChild(f); }
+  else if (c.kind === "code") {
+    const pre = el("pre", "fp-code"); const code = el("code", ""); const lang = c.body.lang || "";
+    let html = "";
+    try { html = lang && hljs.getLanguage(lang) ? hljs.highlight(c.body.text || "", { language: lang }).value : ""; } catch { html = ""; }
+    if (html) { code.innerHTML = html; code.className = "hljs language-" + lang; } else code.textContent = c.body.text || "";
+    pre.appendChild(code); body.appendChild(pre);
+  }
+  else { const tx = el("div", "fp-text"); tx.textContent = c.body.text || ""; body.appendChild(tx); }
+  p.appendChild(body);
+}
+// A previewed document renders on the sanitizer's INERT DOM (DOMPurify's own document, no browsing context) and is
+// stripped of every remote load THERE, before its nodes are adopted into the page: an <img>'s src or srcset, a
+// <picture>'s <source>, a <video>'s poster or src, an <audio>, an SVG <image>, in any spelling the URL parser reads
+// as another origin (file-preview.ts stripRemoteLoads). A file the user did not choose to open must never send a
+// request elsewhere on a hover, and a strip AFTER innerHTML raced the browser's fetch and lost (the review): the beacon
+// had fired while the user saw alt text. Images load only from this kernel (the /file route, a relative path, a data:
+// URI). The viewer, opened on purpose, keeps its own rules. Not the chat's md(): its PR links and parked-image heal
+// are the chat's, and a previewed file's `#123` is prose, not the session's pull request.
+function previewMdClean(src: string): HTMLElement {
+  let clean: HTMLElement;
+  try { clean = sanitizeMd(marked.parse(src) as string); }
+  catch { clean = document.createElement("div"); clean.textContent = src; }
+  stripRemoteLoads(clean, location.origin, location.href);
+  return clean;
+}
+function showFilePreview(a: HTMLElement): void {
+  const open = a.dataset.path || "";
+  if (!open) return;
+  const sid = activeId;                          // the kernel resolves a relative path against it and confines by its folder
+  const parsed = parsePreviewLink(open);
+  const path = parsed.path, anchor = a.dataset.frag || parsed.anchor;   // the section: the absorbed #slug, else one inside a file:// URI
+  const kind = a.dataset.preview || null;
+  const p = ensureFilePreview();
+  placeFilePreview(p, a);
+  p.style.display = "";
+  watchFilePreviewAnchor(a);
+  const seq = ++filePreviewSeq;
+  // the acceptance is latency (the user 2026-09-11: how quickly rendered markdown shows): the card stamps the time from
+  // the dwell's end to its rendered content as data-render-ms, and whether the slice came from the kernel's cache as
+  // data-slice-hit, so the served lab reads the measurement off the card instead of timing the page from outside
+  const t0 = performance.now();
+  delete p.dataset.renderMs; delete p.dataset.sliceHit;
+  const stamp = (hit: boolean | null): void => {
+    p.dataset.renderMs = (performance.now() - t0).toFixed(1);
+    if (hit !== null) p.dataset.sliceHit = hit ? "1" : "0";
+  };
+  if (!kind) {                                   // the kernel allowed no preview: text and the way to the file, no request
+    renderFilePreview(p, textOnlyContent(path, anchor, "shown as text: outside the session's folder and your home, or not a kind the preview shows"), sid);
+    stamp(null);
+    return;
+  }
+  if (kind === "image" || kind === "pdf") { renderFilePreview(p, contentFor(path, anchor, kind, sid, null), sid); stamp(null); return; }
+  p.replaceChildren(rompLoaderInner("reading…", { wordmark: false }));   // the loader first (ui/CLAUDE.md), the text the moment it lands
+  fetch(sliceUrl(path, sid, anchor), { credentials: "same-origin" })
+    .then((r) => r.json().then((j) => ({ ok: r.ok, j })).catch(() => ({ ok: false, j: null })))
+    .then(({ ok, j }) => {
+      if (seq !== filePreviewSeq) return;        // the card moved on (another link, a close): this answer is stale
+      renderFilePreview(p, ok ? contentFor(path, anchor, kind, sid, j) : textOnlyContent(path, anchor, (j && j.why) || "could not read the file"), sid);
+      stamp(ok && j ? !!j.hit : null);
+    })
+    .catch(() => { if (seq === filePreviewSeq) { renderFilePreview(p, textOnlyContent(path, anchor, "could not read the file"), sid); stamp(null); } });
 }
 // Make bare file:// URLs AND bare file paths inside a rendered CHAT message clickable (assistant replies +
 // your own bubbles) — a relative `design/foo.md` opens too, resolved against the session's cwd (the user
@@ -2177,7 +2342,13 @@ function bindPathLink(a: HTMLElement): HTMLElement {
 // file:// URIs are explicit absolute paths — never gated on the map. (The gates and the map walk are
 // path-links.ts's; the map is threaded through to it.)
 function linkifyFileUris(root: HTMLElement, skipThumbs?: string[], spacePaths?: string[],
-    pathLinks?: Record<string, string>, pathPins?: Record<string, string>): void {
+    pathLinks?: Record<string, string>, pathPins?: Record<string, string>, pathPreview?: Record<string, string>): void {
+  // pathPreview (T351): the kernel's word on which of these links a hover may PREVIEW, by kind; the link carries it
+  // as data-preview, and a link without it gets the text-only card with no request
+  const armPreview = (link: HTMLElement, tok: string, open: string) => {
+    const k = previewKindOf(tok, pathPreview) || previewKindOf(open, pathPreview);
+    if (k) link.dataset.preview = k; else delete link.dataset.preview;
+  };
   // A whole-backtick http(s) URL becomes a TAPPABLE link that still looks like code (the user
   // 2026-08-16, on mobile, wanting to tap through to a dashboard link a session sent). Bare URLs
   // and [text](url) already link via marked's gfm autolink + the global anchor click delegate;
@@ -2205,6 +2376,7 @@ function linkifyFileUris(root: HTMLElement, skipThumbs?: string[], spacePaths?: 
       const tok = (code.textContent || "").trim();
       if (!verified.has(tok)) continue;
       const link = bindPathLink(openPathLink(tok, tok, true));
+      armPreview(link, tok, tok);
       code.replaceChildren(link);                              // the <code> chrome stays; its content is the link
       kernelVerified.add(tok);
       if (previewKind(tok) && !previewable.includes(tok) && !(skipThumbs && skipThumbs.includes(tok))) {
@@ -2218,6 +2390,8 @@ function linkifyFileUris(root: HTMLElement, skipThumbs?: string[], spacePaths?: 
   // order; this document binds each click and reads the hits for the figure pass below.
   for (const { el: link, open, verified } of linkifyPathTokens(root, pathLinks)) {
     bindPathLink(link);
+    armPreview(link, link.textContent || "", open);
+    absorbFragment(link);
     if (verified) kernelVerified.add(open);   // the kernel stat'd it this build
     if (previewKind(open) && !previewable.includes(open) && !(skipThumbs && skipThumbs.includes(open))) {
       previewable.push(open);
@@ -3418,7 +3592,7 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
         if (more) {
           const full = el("div", "nudge-full md");
           full.innerHTML = md(raw);
-          linkifyFileUris(full, imgPaths, ev.spacePaths, ev.pathLinks, ev.pathPins);
+          linkifyFileUris(full, imgPaths, ev.spacePaths, ev.pathLinks, ev.pathPins, ev.pathPreview);
           bubble.appendChild(full);
           bubble.classList.add("nudge-collapsible");
           // toggle rides the stable document.body delegate (data-act), NOT a per-render listener —
@@ -3433,7 +3607,7 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
         // the user's OWN words keep their line breaks (userMd); a harness-injected note — compact
         // summary, command stdout — shares this branch and stays on the assistant grammar
         bubble.innerHTML = kind === "user" ? userMd(ev.md) : md(ev.md);
-        linkifyFileUris(bubble, imgPaths, ev.spacePaths, ev.pathLinks, ev.pathPins);   // bare file:// URLs in a message → clickable (open in the host's default app)
+        linkifyFileUris(bubble, imgPaths, ev.spacePaths, ev.pathLinks, ev.pathPins, ev.pathPreview);   // bare file:// URLs in a message → clickable (open in the host's default app)
         if (kind === "user") markMentions(bubble);   // in the user's own bubble a typed "@name" that names a live session wears that session's color; a harness note is not the user naming a session
       }
       // images, IN the bubble (part of his message): thumbnail + open/copy caption;
@@ -3590,7 +3764,7 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
     const body = el("div", "assistant md");
     body.innerHTML = md(ev.md);
     highlight(body);
-    linkifyFileUris(body, undefined, ev.spacePaths, ev.pathLinks, ev.pathPins);   // bare file:// URLs + verified spaced filenames → clickable
+    linkifyFileUris(body, undefined, ev.spacePaths, ev.pathLinks, ev.pathPins, ev.pathPreview);   // bare file:// URLs + verified spaced filenames → clickable
     turn.appendChild(body);
     return turn;
   }

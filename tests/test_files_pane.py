@@ -317,7 +317,7 @@ class Relay(unittest.TestCase):
         # remembered so the viewer's close puts the person back
         _has(self, "if(window.__rompMobileOn&&window.__rompMobileOn()){var cur=document.body.getAttribute('data-tab')||'chat';", branch)
         _has(self, "if(cur!=='files'){window.__rompFilesTabFrom=cur;window.__rompMobileTab&&window.__rompMobileTab('files');}", branch)
-        _has(self, "postMessage({romp:'viewFile',path:m.path,sid:m.sid,identity:m.identity||null},'*')", branch)
+        _has(self, "postMessage({romp:'viewFile',path:m.path,sid:m.sid,identity:m.identity||null,frag:m.frag||null},'*')", branch)   # frag: the section a preview card's open names (T351)
         self.assertEqual(branch.count("postMessage("), 1, "one forward, carrying the whole click")
         for tok in ("__rompFeedWasOff", "'f-feed'", "browseClosed"):
             _lacks(self, tok, branch, tok + " belongs to the feed's browser route")
@@ -529,7 +529,7 @@ class BrowseRelay(unittest.TestCase):
 
     def test_the_view_file_pane_branch_beside_it_is_untouched(self):
         v = self.out["view"]
-        self.assertEqual(v["files"], [{"romp": "viewFile", "path": "/repo/notes-api/src/app.py", "sid": self.SID, "identity": self.IDENTITY}])
+        self.assertEqual(v["files"], [{"romp": "viewFile", "path": "/repo/notes-api/src/app.py", "sid": self.SID, "identity": self.IDENTITY, "frag": None}])
         self.assertEqual(v["toggles"], [["files", True]])
 
     def test_the_pane_branch_precedes_the_feed_branch_and_names_no_feed_token(self):

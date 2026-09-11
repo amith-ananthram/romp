@@ -333,8 +333,22 @@ class _PerfStats:
             # jd.parse_misses(). The acceptance number of the lazy-transcript work: a boot with no client parses zero.
             self.parses = {"kernel": 0, "hits": 0, "bytes": 0, "bySid": {}}   # kernel-asked cold parses; total/judge from jd
             self.http = {}
+            # the file preview popover's slice cache (T351): hits and misses of GET /file?slice=1, the bytes it served,
+            # and the entries the pusher's path warmed ahead of a hover
+            self.file_slice_stats = {"hit": 0, "miss": 0, "bytes": 0, "warm": 0}
 
     # ── writers (hot paths) ──
+    def file_slice(self, hit, nbytes=0, warm=False):
+        """One GET /file?slice=1 served (hit: from the text cache; miss: read and indexed now), or one entry the
+        pusher's path warmed (warm=True, no request)."""
+        with self.lock:
+            d = self.file_slice_stats
+            if warm:
+                d["warm"] += 1
+            else:
+                d["hit" if hit else "miss"] += 1
+                d["bytes"] += int(nbytes)
+
     def wake(self):
         with self.lock:
             self.pusher["wakes"] += 1
@@ -493,6 +507,7 @@ class _PerfStats:
                      for k, d in self.sends.items()}
             judge = dict(self.judge)
             http = {pth: {"count": e[0], "ms": e[1]} for pth, e in self.http.items()}
+            file_slice = dict(self.file_slice_stats)
             since = self.since
         pusher["ring_n"] = len(ring)
         pusher["cycle_ms_p50"] = self._pct(ring, 0.5)
@@ -541,6 +556,7 @@ class _PerfStats:
         return {"now": now, "since": since, "uptime_s": now - _STARTED, "log": _PERF,
                 "process": _process_stats(), "pusher": pusher, "stages_ms": stages,
                 "builds": builds, "sends": sends, "goals": goals, "memos": memos, "judge": judge, "skillLoadIndex": skill_idx, "http": http,
+                "fileSlice": file_slice,                   # T351: the preview popover's slice cache (hit / miss / bytes / warm)
                 # T323: cold parses through the ONE parse store (stage 2): total = every miss (whoever asked), kernel =
                 # the display's asks among them, judge = the rest, hits = the display's asks served from the store,
                 # sharedHits = every hit. A boot with no client reads kernel 0.
@@ -32738,6 +32754,9 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                             pl = _path_links(prompt, sid, a.get("uuid"), _pl_memo)
                             if pl is not None:
                                 ev["pathLinks"] = pl    # path-shaped tokens, filesystem-verified/fixed → the client's link gate
+                                pv = _path_previews(pl, sid)
+                                if pv:
+                                    ev["pathPreview"] = pv   # the links a hover may preview, by kind; the markdown ones warmed (T351)
                             pp = _path_pins(sid, a.get("uuid"))
                             if pp:
                                 ev["pathPins"] = pp     # mention-time snapshots: this message's embeds keep these bytes
@@ -32844,6 +32863,9 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                         pl = _path_links(txt, sid, a.get("uuid"), _pl_memo)
                         if pl is not None:
                             ev["pathLinks"] = pl    # path-shaped tokens, filesystem-verified/fixed → the client's link gate
+                            pv = _path_previews(pl, sid)
+                            if pv:
+                                ev["pathPreview"] = pv   # the links a hover may preview, by kind; the markdown ones warmed (T351)
                         pp = _path_pins(sid, a.get("uuid"))
                         if pp:
                             ev["pathPins"] = pp     # mention-time snapshots: this message's embeds keep these bytes
@@ -43122,6 +43144,312 @@ def _is_text_path(fp):
     return (ext in _TEXT_EXT) or (base in _TEXT_NAMES)
 
 
+# ---- the file PREVIEW popover's slice (T351, the user 2026-09-11): hovering a local file link in the chat shows the
+#      rendered head of the file, or the section a `path#slug` names, near-instantly. The kernel keeps the TEXT of
+#      recently linked markdown and code files with a heading index, keyed on (path, mtime_ns) so a rewrite is a new
+#      entry and the old one goes, bounded in entries and bytes, warmed on the PUSHER's path when _path_links verifies
+#      such a path in a message about to ship (never on a timer, never a watcher), and GET /file?slice=1 serves one
+#      slice of it; the client renders the slice with its own marked in one call, so the hover costs one small fetch.
+#      A hover is a gesture the user did not choose, so the popover is STRICTER than the viewer (whose rule, any path
+#      the agent named opens, is untouched): only a path under the session's folder or the user's home, never a
+#      secrets-shaped name, only the kinds it can show, under the caps; everything else is text plus "open".
+_SLICE_MAX_BYTES = 64 * 1024               # one popover's worth, a screenful and a bit; the viewer has the rest
+_SLICE_HEADINGS_MAX = 256
+_SLICE_CACHE_ENTRIES = 64
+_SLICE_CACHE_BYTES = 8 * 1024 * 1024
+_SLICE_CACHE = collections.OrderedDict()   # (path, mtime_ns) -> {"text", "headings", "size", "mtime_ns"}; LRU by read
+_SLICE_CACHE_LOCK = threading.Lock()
+_MARKDOWN_EXT = {"md", "markdown", "mdx"}
+# Names that hold credentials by convention: never fetched by a hover, shown as text. Judged on the REAL path's name
+# (a symlink's own name says nothing), anchor-free where a leading dot or a prefix would defeat an anchor (the review
+# on this change: ~/.claude/.credentials.json slipped a start-anchored `credentials`), plus the dotted stores a home
+# directory keeps: the `.env` family, `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, any `*credential*`, key files
+# and key stores, ssh identities, and any name carrying token, secret or password (conservative on purpose).
+_SECRET_NAME_RE = re.compile(r"(^\.env(\..*)?$|^\.netrc$|^\.npmrc$|^\.pypirc$|credential|^id_[a-z0-9]+(\.pub)?$"
+                             r"|\.(pem|key|p12|pfx|kdbx|jks|keystore)$|token|secret|password)", re.I)
+# …and the directories whose every file is a secret store: judged on the real path's components under the home
+_SECRET_DIR_RE = re.compile(r"(^|/)(\.ssh|\.gnupg|\.aws|\.docker|\.config/gh|\.config/gcloud|\.kube|\.azure|\.gcloud)(/|$)", re.I)
+# …and, as the belt under the name rules, the SHAPE of the text itself: a private key block, a credential assignment, a
+# bearer or provider token, a JWT. A slice whose first 64 KB matches is refused ("looks like a secret") and never cached.
+_SECRET_TEXT_RE = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    r"|(?i:(?:api[_-]?key|secret[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|oauth[_-]?token|auth[_-]?token|password|passwd)\s*[:=]\s*[\"']?[A-Za-z0-9_\-./+=]{8,})"
+    r"|\bsk-[A-Za-z0-9_\-]{20,}|\bgh[pousr]_[A-Za-z0-9]{20,}|\bAKIA[0-9A-Z]{16}\b|\bxox[baprs]-[A-Za-z0-9-]{10,}"
+    r"|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")
+
+
+def _secret_path(real):
+    """Does the REAL path name a secret store: by its own name, or by a directory on its way that holds nothing else."""
+    if _SECRET_NAME_RE.search(os.path.basename(real)):
+        return True
+    home = os.path.realpath(os.path.expanduser("~"))
+    rel = real[len(home) + 1:] if real.startswith(home + os.sep) else real
+    return bool(_SECRET_DIR_RE.search(rel.replace(os.sep, "/")))
+
+
+def _looks_secret(text):
+    """The content belt: a text (the file's first 64 KB at load; the served slice itself on the route, so a section
+    past that mark is read too) against the shapes credentials take."""
+    return bool(_SECRET_TEXT_RE.search(text[:_SLICE_MAX_BYTES]))
+
+
+def _slice_kind(fp):
+    """What the preview popover shows for `fp`, by name: markdown (rendered), image, pdf, code (a highlighted head),
+    or None for a kind it never shows."""
+    base = os.path.basename(fp).lower()
+    dotext = os.path.splitext(base)[1]
+    ext = dotext.lstrip(".")
+    if ext in _MARKDOWN_EXT:
+        return "markdown"
+    if dotext in _IMG_MIME:
+        return "image"
+    if ext == "pdf":
+        return "pdf"
+    if _is_text_path(fp):
+        return "code"
+    return None
+
+
+def _slice_confined(fp, sid):
+    """The popover renders only under the session's folder or the user's home (realpaths, so a symlink cannot walk
+    out); anything else is shown as text with an "open" affordance and no fetch."""
+    real = os.path.realpath(fp)
+    roots = [os.path.realpath(os.path.expanduser("~"))]
+    base = _cwd_of(sid) if sid else None
+    if base:
+        roots.append(os.path.realpath(base))
+    return any(real == r or real.startswith(r.rstrip(os.sep) + os.sep) for r in roots)
+
+
+def _slice_allowed(fp, sid):
+    """(kind, "") when the popover may fetch and render `fp` for session `sid`, else (None, why). Every judgement is of
+    the REAL path (the review on this change: a symlink named notes.md pointing at a .env passed as markdown, and the
+    build-time warm read the target): existence and a regular file, the secrets denylist on the real name and its
+    directories (first, so the reason names the secret whatever the kinds say; a .env is a text kind by extension), the
+    kind of the real name (and the link's name must agree, so a symlink cannot dress one kind as another), the
+    confinement, the size caps (text 2 MB, media 50 MB), in that order."""
+    if not os.path.isabs(fp):
+        return None, "not a file"
+    real = os.path.realpath(fp)
+    if not os.path.isfile(real):
+        return None, "not a file"
+    if _secret_path(real):
+        return None, "a secrets-shaped name"
+    kind = _slice_kind(real)
+    if not kind:
+        return None, "not a kind the preview shows"
+    if _slice_kind(fp) != kind:
+        return None, "a link dressed as another kind"
+    if not _slice_confined(real, sid):
+        return None, "outside the session's folder and your home"
+    try:
+        size = os.path.getsize(real)
+    except OSError:
+        return None, "unreadable"
+    if size > (_TEXT_MAX_BYTES if kind in ("markdown", "code") else _PREVIEW_MAX_BYTES):
+        return None, "too large to show"
+    return kind, ""
+
+
+def _heading_slug(text):
+    """GitHub's heading slug, the rule the file viewer's own anchors use (ui/webview/md-links.ts headingSlug; parity is
+    pinned over tests/fixtures/heading_slugs.json): lower-case; letters, digits, spaces and hyphens kept, everything
+    else dropped; whitespace runs become one hyphen; empty → "section"."""
+    s = "".join(c for c in str(text or "").lower() if c.isalnum() or c.isspace() or c == "-").strip()
+    s = re.sub(r"\s+", "-", s)
+    return s or "section"
+
+
+def _unique_slugs(slugs):
+    """Unique in document order, GitHub's way: the first `x` stays `x`, later ones `x-1`, `x-2`, skipping a suffix an
+    earlier heading already holds (md-links.ts uniqueSlugs)."""
+    used, nxt, out = set(), {}, []
+    for s in slugs:
+        o = s
+        if o in used:
+            n = nxt.get(s, 1)
+            o = "%s-%d" % (s, n)
+            while o in used:
+                n += 1
+                o = "%s-%d" % (s, n)
+            nxt[s] = n + 1
+        used.add(o)
+        out.append(o)
+    return out
+
+
+_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$")
+
+
+def _heading_text(raw):
+    """A heading's text as the viewer's rendered heading reads it: code spans and emphasis markers stripped to their
+    text, a link to its label."""
+    s = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", raw)
+    s = s.replace("`", "")
+    s = re.sub(r"(\*\*|__|\*|_|~~)", "", s)
+    return s.strip()[:200]
+
+
+def _slice_headings(text):
+    """The ATX headings of a markdown text, outside fenced code: [{level, text, slug, line}] with unique slugs, capped
+    at _SLICE_HEADINGS_MAX."""
+    out, fence = [], None
+    for i, line in enumerate(text.split("\n")):
+        st = line.lstrip()
+        if fence:
+            if st.startswith(fence):
+                fence = None
+            continue
+        if st.startswith("```") or st.startswith("~~~"):
+            fence = st[:3]
+            continue
+        m = _HEADING_RE.match(line)
+        if m:
+            out.append({"level": len(m.group(1)), "text": _heading_text(m.group(2)), "line": i})
+            if len(out) >= _SLICE_HEADINGS_MAX:
+                break
+    for h, slug in zip(out, _unique_slugs([_heading_slug(h["text"]) for h in out])):
+        h["slug"] = slug
+    return out
+
+
+def _slice_load(fp):
+    """The text and heading index of `fp` from the cache, keyed on (real path, mtime_ns), read on a miss. Returns
+    (entry, hit, why): why is "" on success, else the refusal ("not text", "too large to show", "looks like a secret":
+    the content belt under the name rules, so a credential file under an innocent name is never cached). Bounded: past
+    the entry or byte cap the least recently read entries go; an older mtime of the same path goes with a rewrite."""
+    fp = os.path.realpath(fp)
+    try:
+        st = os.stat(fp)
+    except OSError:
+        return None, False, "not a file"
+    key = (fp, st.st_mtime_ns)
+    with _SLICE_CACHE_LOCK:
+        e = _SLICE_CACHE.get(key)
+        if e is not None:
+            _SLICE_CACHE.move_to_end(key)
+            return e, True, ""
+    try:
+        with open(fp, "rb") as f:
+            raw = f.read(_TEXT_MAX_BYTES + 1)
+    except OSError:
+        return None, False, "unreadable"
+    if len(raw) > _TEXT_MAX_BYTES:
+        return None, False, "too large to show"
+    text = _decode_text(raw)
+    if text is None:
+        return None, False, "not text"
+    if _looks_secret(text):
+        return None, False, "looks like a secret"
+    e = {"text": text, "headings": _slice_headings(text) if _slice_kind(fp) == "markdown" else [],
+         "size": len(raw), "mtime_ns": st.st_mtime_ns}
+    with _SLICE_CACHE_LOCK:
+        for k in [k for k in _SLICE_CACHE if k[0] == fp]:     # a rewrite: the old mtime's entry goes
+            del _SLICE_CACHE[k]
+        _SLICE_CACHE[key] = e
+        total = sum(v["size"] for v in _SLICE_CACHE.values())
+        while _SLICE_CACHE and (len(_SLICE_CACHE) > _SLICE_CACHE_ENTRIES or total > _SLICE_CACHE_BYTES):
+            _, old = _SLICE_CACHE.popitem(last=False)
+            total -= old["size"]
+    return e, False, ""
+
+
+def _slice_of(entry, anchor):
+    """(text, found, heading): the section `anchor` names (its heading through the line before the next heading of
+    the same or a higher level), or the file's head when there is no anchor; a missing anchor falls back to the head
+    with found False (the popover says so in one line). The text is capped at _SLICE_MAX_BYTES; the heading index
+    is complete either way, so the client can offer the sections."""
+    lines = entry["text"].split("\n")
+    heading = None
+    if anchor:
+        for h in entry["headings"]:
+            if h["slug"] == anchor:
+                heading = h
+                break
+    if heading is None:
+        text = entry["text"]
+    else:
+        end = len(lines)
+        for h in entry["headings"]:
+            if h["line"] > heading["line"] and h["level"] <= heading["level"]:
+                end = h["line"]
+                break
+        text = "\n".join(lines[heading["line"]:end])
+    if len(text.encode("utf-8")) > _SLICE_MAX_BYTES:
+        text = text.encode("utf-8")[:_SLICE_MAX_BYTES].decode("utf-8", "ignore")
+        cut = text.rfind("\n")
+        text = (text[:cut] if cut > 0 else text)
+        return text, heading is not None or not anchor, heading, True
+    return text, heading is not None or not anchor, heading, False
+
+
+def _slice_warm(fp):
+    """Fill the cache for a markdown path the pusher is about to ship a link to, so the hover's fetch is a hit. No
+    request, no timer: the event is the message build itself. Runs only for a path _slice_allowed passed. Returns
+    whether the file may be previewed at all: the content belt can still refuse it here, and then the link is shipped
+    without a preview kind (text plus open)."""
+    real = os.path.realpath(fp)
+    try:
+        st = os.stat(real)
+        with _SLICE_CACHE_LOCK:
+            if (real, st.st_mtime_ns) in _SLICE_CACHE:
+                return True
+    except OSError:
+        return False
+    e, _hit, why = _slice_load(real)
+    if e is not None:
+        _PERF_STATS.file_slice(False, 0, warm=True)
+        return True
+    return why in ("", "too large to show", "unreadable")   # a transient refusal keeps the kind; a secret or a binary drops it
+
+
+def _slice_body(fp, sid, anchor):
+    """The slice route's answer, pure of the socket: (status, payload, content_type), the payload a dict to send as JSON
+    or the plain text of a 415. 403 with `why` when the popover may not render the path (the client never asks for one
+    it may not, so a 403 here is a hand-made request), 403 again when the text looks like a secret, 415 for a text kind
+    whose bytes are not text; 200 with the slice, `hit` saying whether it came from the cache. The tests read it whole."""
+    kind, why = _slice_allowed(fp, sid)
+    body = {"path": _tilde(fp), "title": os.path.basename(fp), "kind": kind, "anchor": anchor}
+    if not kind:
+        body.update(allowed=False, why=why)
+        return 403, body, "application/json"
+    body["allowed"] = True
+    if kind in ("image", "pdf"):
+        st = os.stat(fp)
+        body.update(size=st.st_size, mtimeNs=str(st.st_mtime_ns))
+        return 200, body, "application/json"
+    entry, hit, why = _slice_load(fp)
+    if entry is None:
+        if why == "not text":
+            return 415, "not text: %s" % _tilde(fp), "text/plain"
+        body.update(kind=None, allowed=False, why=why)           # the content belt, or a size or read refusal
+        return 403, body, "application/json"
+    text, found, heading, truncated = _slice_of(entry, anchor)
+    if _looks_secret(text):
+        # the belt over the SERVED slice: the load scanned the file's first 64 KB, and an anchored section can lie past
+        # that mark (the review)
+        body.update(kind=None, allowed=False, why="looks like a secret")
+        return 403, body, "application/json"
+    # the heading INDEX stays on the kernel's side: the client reads the slice and the one heading it named, and an
+    # index of hundreds of headings rode uncapped in the answer (the review)
+    body.update(text=text, found=found, heading=heading, size=entry["size"], mtimeNs=str(entry["mtime_ns"]), truncated=truncated,
+                hit=hit)                                           # from the cache (the warm, an earlier hover) or a cold read
+    _PERF_STATS.file_slice(hit, len(text.encode("utf-8")))
+    return 200, body, "application/json"
+
+
+def _path_previews(links, sid):
+    """{token: kind} for the verified links the preview popover may fetch for session `sid` (shipped as pathPreview
+    beside pathLinks; a token absent here is shown as text plus "open", with NO request), warming the markdown ones."""
+    out = {}
+    for tok, target in (links or {}).items():
+        fp = _resolve_open_path(target, sid)
+        kind, _why = _slice_allowed(fp, sid)
+        if kind and (kind != "markdown" or _slice_warm(fp)):
+            out[tok] = kind
+    return out
+
+
 def _human_bytes(n):
     """Byte count → a short human size, for the 413 that has to explain itself."""
     for unit, step in (("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)):
@@ -50079,7 +50407,7 @@ if(m.romp==='viewFile'&&m.pane==='pane'){var ff=document.getElementById('f-files
   try{window.__rompPaneToggle&&window.__rompPaneToggle('files',true);}catch(e){}
   try{if(window.__rompMobileOn&&window.__rompMobileOn()){var cur=document.body.getAttribute('data-tab')||'chat';
     if(cur!=='files'){window.__rompFilesTabFrom=cur;window.__rompMobileTab&&window.__rompMobileTab('files');}}}catch(e){}
-  var fwd=function(){try{ff&&ff.contentWindow&&ff.contentWindow.postMessage({romp:'viewFile',path:m.path,sid:m.sid,identity:m.identity||null},'*');}catch(e){}};
+  var fwd=function(){try{ff&&ff.contentWindow&&ff.contentWindow.postMessage({romp:'viewFile',path:m.path,sid:m.sid,identity:m.identity||null,frag:m.frag||null},'*');}catch(e){}};
   var rd='';try{rd=(ff&&ff.contentDocument)?ff.contentDocument.readyState:'';}catch(e){}
   if(ff&&rd!=='complete'){var once=function(){ff.removeEventListener('load',once);fwd();};ff.addEventListener('load',once);}else fwd();}
 // the Files pane's viewer closed (files.ts posts it on the close edge: nothing left up in the pane): on a
@@ -53357,6 +53685,18 @@ class Handler(BaseHTTPRequestHandler):
         return bool(TOKEN) and (_ct_eq((q.get("token") or [""])[0], TOKEN)
                                 or _ct_eq(self.headers.get("X-Romp-Token") or "", TOKEN))
 
+    def _file_slice(self, fp, q):
+        """GET /file?slice=1[&anchor=slug] — the file preview popover's one fetch (T351): JSON with the kind, the title
+        (the file's name), the text slice (a markdown or code file's head, or the section `anchor` names; a missing
+        anchor falls back to the head with found=false), the one heading it named, the size and mtime, and `hit` (the
+        slice came from the cache); for an image or a PDF only the metadata (the bytes ride the plain route). 403 with `why` when the popover may not render the path
+        (the client never asks for one it may not, so a 403 here is a hand-made request), and 403 again when the text
+        itself looks like a secret (the content belt); 415 for a text kind whose bytes are not text."""
+        sid = (q.get("sid") or [None])[0]
+        anchor = (q.get("anchor") or [""])[0][:200]
+        status, payload, ctype = _slice_body(fp, sid, anchor)
+        return self._send(status, payload if isinstance(payload, str) else json.dumps(payload), ctype, cache="no-cache")
+
     def _file_preview(self, q, head=False):
         """GET/HEAD /file — the preview bytes behind a chat path-thumbnail (the
         user 2026-07-08). Same path resolution as click-to-open (~ expanded, relative → the session's
@@ -53371,6 +53711,8 @@ class Handler(BaseHTTPRequestHandler):
         fp = _resolve_open_path((q.get("path") or [""])[0], (q.get("sid") or [None])[0])
         if (q.get("download") or [""])[0] == "1":
             return self._file_download(fp, head=head)
+        if (q.get("slice") or [""])[0] == "1" and not head:
+            return self._file_slice(fp, q)
         # A mention-time PIN (see _pin_mention): serve the snapshot this message's embed latched, so a
         # later overwrite of the same filename can never rewrite an old message's picture. The id is
         # strictly shape-validated and joined only onto the pin dir (no traversal); a pin whose blob

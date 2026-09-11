@@ -92,17 +92,17 @@ test("the shell's panes message fills the cache, and a click while the Files pan
   assert.deepEqual(api.panesOn(), { chat: true, timeline: true, fleet: false, feed: true, files: true });
   api.openPath("/repo/notes-api/src/app.py", SID, { mod: false });
   assert.deepEqual(H.views, [], "the viewer here is not opened");
-  assert.deepEqual(H.up, [[{ romp: "viewFile", path: "/repo/notes-api/src/app.py", sid: SID, pane: "pane", identity: { name: "web", color: COLOR } }, "*"]],
+  assert.deepEqual(H.up, [[{ romp: "viewFile", path: "/repo/notes-api/src/app.py", sid: SID, pane: "pane", frag: null, identity: { name: "web", color: COLOR } }, "*"]],
     "one message up, naming the target pane, with the name and colour the tab strip shows for the session");
   // the identity is LOOKED UP, never invented: a session only the tab set names sends its name with no colour;
   // a sid neither list names sends null, and the pane falls to the kernel's stub
   api.openPath("/repo/notes-api/README.md", SID_TAB, { mod: false });
-  assert.deepEqual(relayed(H)[1], { romp: "viewFile", path: "/repo/notes-api/README.md", sid: SID_TAB, pane: "pane", identity: { name: "api", color: null } });
+  assert.deepEqual(relayed(H)[1], { romp: "viewFile", path: "/repo/notes-api/README.md", sid: SID_TAB, pane: "pane", frag: null, identity: { name: "api", color: null } });
   api.openPath("/repo/notes-api/README.md", SID_NONE, { mod: false });
-  assert.deepEqual(relayed(H)[2], { romp: "viewFile", path: "/repo/notes-api/README.md", sid: SID_NONE, pane: "pane", identity: null });
+  assert.deepEqual(relayed(H)[2], { romp: "viewFile", path: "/repo/notes-api/README.md", sid: SID_NONE, pane: "pane", frag: null, identity: null });
   // no sid on the click: the active session's, as the in-place open resolves it
   api.openPath("/repo/notes-api/notes.md", null, { mod: false });
-  assert.deepEqual(relayed(H)[3], { romp: "viewFile", path: "/repo/notes-api/notes.md", sid: SID, pane: "pane", identity: { name: "web", color: COLOR } });
+  assert.deepEqual(relayed(H)[3], { romp: "viewFile", path: "/repo/notes-api/notes.md", sid: SID, pane: "pane", frag: null, identity: { name: "web", color: COLOR } });
   assert.deepEqual(H.views, [], "none of them opened here");
 });
 
@@ -131,7 +131,7 @@ test("the Files pane off: the setting decides; 'pane' hands the click up (the sh
   const { H, api } = world({ settings: { fileLinkPane: "pane" } });
   api.onShellMessage(PANES_ON({ chat: true, feed: true, files: false }));
   api.openPath("/repo/notes-api/src/app.py", SID, { mod: false });
-  assert.deepEqual(relayed(H), [{ romp: "viewFile", path: "/repo/notes-api/src/app.py", sid: SID, pane: "pane", identity: { name: "web", color: COLOR } }]);
+  assert.deepEqual(relayed(H), [{ romp: "viewFile", path: "/repo/notes-api/src/app.py", sid: SID, pane: "pane", frag: null, identity: { name: "web", color: COLOR } }]);
   assert.deepEqual(H.views, []);
   // the setting is read at CLICK time: flipped back, the next click opens here
   H.settings.fileLinkPane = "chat";
