@@ -20,7 +20,7 @@ import { ctxFallbackColor, pickTone, readableRgb } from "./ctx-color";
 import { applyTheme } from "./theme";
 import { applyDenseChrome } from "./dense-chrome";
 import { SessionViews, viewVisible, viewsKey, revealIn, viewTagUnion, viewTags, type TagUnion, type SessionTag } from "./session-views";
-import { prependHead, appendMore, mergeWindow, historyLabel, indexOfUuid, keyOf } from "./chat-window";   // the uuid-anchored wire (T323 stage 4b)
+import { prependHead, appendMore, mergeWindow, historyLabel, indexOfUuid, keyOf, windowDetached, fullFrameMerges, afterMore } from "./chat-window";   // the uuid-anchored wire (T323 stage 4b)
 import { mintWriteId, ackOutcome, adoptViews, seqOf, capsAdopts, announcedSeq, announcedAfter, createInFlight, rederivePending, lensBlob, applyLensFields, type InflightWrite, type LensFields, type TagEditOp, type ViewsAck } from "./views-writes";
 import { lensVisible, surfaceLens } from "./tag-lens";
 import { openTagMenu, tagMenuButton, syncTagFilter, tagChip } from "./tag-menu";
@@ -2188,6 +2188,7 @@ function renderEvent(ev: ChatEvent, prevEpoch?: number | null, worked?: number |
   // anchors on its own uuid.
   const anchorUuid = (ev.kind === "tool" && ev.name === "AskUserQuestion" && ev.resultUuid) ? ev.resultUuid : ev.uuid;
   if (anchorUuid) turn.dataset.uuid = anchorUuid; // deep-link anchor (shared with vs_chat)
+  if ((ev as { orphanOf?: string }).orphanOf) turn.dataset.orphanOf = String((ev as { orphanOf?: string }).orphanOf);   // a salvaged reply's note: landable by its record uuid (round 2, item 10)
   // A machine-cut turn's settle record is dropped server-side, but anchors minted AT that settle's
   // uuid (a verdict filed on the cut turn) must still land — the seam that replaced it answers to
   // them (kernel settleUuids → data-uuids, a token list like the postal data-mids).
@@ -10207,6 +10208,7 @@ function scrollToAnchor(uuid: string): boolean {
   // answer to it (the user 2026-07-23). `~=` matches one whitespace-separated token, and a message id
   // never contains whitespace.
   let target = (v?.el.querySelector(`.turn[data-uuid="${cssEscape(uuid)}"]`)
+                || v?.el.querySelector(`.turn[data-orphan-of="${cssEscape(uuid)}"]`)
                 || v?.el.querySelector(`.turn[data-mid="${cssEscape(uuid)}"]`)
                 || v?.el.querySelector(`.turn[data-mids~="${cssEscape(uuid)}"]`)
                 || v?.el.querySelector(`.turn[data-uuids~="${cssEscape(uuid)}"]`)) as HTMLElement | null;
@@ -10219,6 +10221,7 @@ function scrollToAnchor(uuid: string): boolean {
     // (renderEvent's data-uuid — the uuid the timeline emits for the decision), which no event
     // carries as its OWN uuid, so a uuid/mid-only lookup missed it and this recovery never ran.
     const idx = s ? s.events.findIndex((e) => e.uuid === uuid || (e as { mid?: string }).mid === uuid
+                                       || (e as { orphanOf?: string }).orphanOf === uuid
                                        || (e as { resultUuid?: string }).resultUuid === uuid
                                        || (((e as { settleUuids?: string[] }).settleUuids || []).includes(uuid))) : -1;
     if (s && idx >= 0) {
@@ -10241,6 +10244,7 @@ function scrollToAnchor(uuid: string): boolean {
       // unhydrated postal turn (whose message ids live only in data-mids) could be found in the events,
       // have its window rendered — and then still honest-fail "pointer-not-rendered" on the re-query.
       target = (v.el.querySelector(`.turn[data-uuid="${cssEscape(uuid)}"]`)
+                || v.el.querySelector(`.turn[data-orphan-of="${cssEscape(uuid)}"]`)
                 || v.el.querySelector(`.turn[data-mid="${cssEscape(uuid)}"]`)
                 || v.el.querySelector(`.turn[data-mids~="${cssEscape(uuid)}"]`)
                 || v.el.querySelector(`.turn[data-uuids~="${cssEscape(uuid)}"]`)) as HTMLElement | null;
@@ -15563,6 +15567,7 @@ function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: s
   try { vscodeApi?.setState?.({ ...(vscodeApi.getState?.() || {}), activeId: id }); } catch { /* ignore */ }
   renderTabs();
   showActive();
+  updateLivePaused();   // the entering tab's own detached state shows or hides the strip (round 2, item 7)
   schedulePrebuild(); // warm the OTHER tabs in idle (MRU-first) so the next switch is instant
 }
 
@@ -15619,10 +15624,13 @@ function upsert(msg: any) {
   }
   let events: ChatEvent[] = kept && prev ? prev.events : (msg.events || (prev ? prev.events : []));
   let mergedRun = false;
-  if (!kept && prev && prev.proto === 2 && msg.proto === 2 && Array.isArray(msg.events) && msg.events.length) {
-    // a full frame meeting a resident run it overlaps (a re-attach, a re-base after a floor move) MERGES into the run:
-    // the pages the reader walked stay resident and the reader's place holds (review find L); a frame with no
-    // overlap (a fork, a /clear) replaces as before
+  const fullWhy = pendingFullWhy.get(msg.id) ?? null;
+  pendingFullWhy.delete(msg.id);
+  if (!kept && prev && prev.proto === 2 && msg.proto === 2 && Array.isArray(msg.events) && msg.events.length && fullFrameMerges(fullWhy)) {
+    // a full frame answering this client's own RE-ATTACH ask MERGES into the resident run it overlaps: the pages the
+    // reader walked stay resident and the reader's place holds (review find L); a frame with no overlap (a fork, a
+    // /clear) replaces as before, and so does every full frame the kernel sent on its own (a change before the held
+    // run, a floor move): its in-list events are the fresh copies (round 2, item 3)
     stripOptimistic(prev);
     const r = mergeWindow(prev.events as { uuid?: string; key?: string }[], msg.events as { uuid?: string; key?: string }[]);
     if (r.mode === "merge") { events = r.events as ChatEvent[]; mergedRun = true; }
@@ -15647,7 +15655,7 @@ function upsert(msg: any) {
     githubRepo: ("githubRepo" in msg) ? (msg.githubRepo ?? null) : (prev ? prev.githubRepo : null),
     // A trimmed full send carries headFrom/headTotal; a whole-transcript send omits them (headFrom 0).
     headFrom: kept && prev ? prev.headFrom : (msg.headFrom ?? 0),
-    headTotal: kept && prev ? prev.headTotal : (msg.proto === 2 ? (msg.headTotal ?? null) : (msg.headTotal ?? events.length)),
+    headTotal: kept && prev ? prev.headTotal : (msg.proto === 2 ? (mergedRun && prev?.headKnown ? events.length : (msg.headTotal ?? null)) : (msg.headTotal ?? events.length)),   // a merged run with a known head: its own count (round 2, item 9)
     // the uuid-anchored wire (T323 stage 4b): the frame says its shape (proto 2); a frame without it is an index frame
     proto: kept && prev ? prev.proto : (msg.proto === 2 ? 2 : undefined),
     headKnown: kept && prev ? prev.headKnown : (msg.proto === 2 ? (!!msg.headKnown || (mergedRun && !!prev?.headKnown)) : undefined),
@@ -15660,6 +15668,7 @@ function upsert(msg: any) {
     notify: ("notify" in msg) ? !!msg.notify : (prev ? prev.notify : undefined),
   };
   sessions.set(msg.id, s);
+  if (msg.id === activeId) updateLivePaused();   // the re-attach frame landed: the paused strip hides (round 2, item 7)
   // a session frame can ride the kernel's chat build cache with a stale name/color embedded (its sig
   // watches transcript+states only) — the freshest tabOrder meta wins over it, pending guard included
   const tm = tabMeta.get(msg.id);
@@ -15794,6 +15803,7 @@ function notifyShell(kind: string, text: string, sid?: string): void {
 // every 0.5-3s and would otherwise re-ask on every rejected delta until the reply lands. Cleared in upsert(),
 // so the next gap can ask again.
 const awaitingFull = new Set<string>();
+const pendingFullWhy = new Map<string, NeedFullWhy>();   // sid → why this client asked: upsert merges a re-attach's answer only
 const emptyFrameDiagSent = new Set<string>();   // sids whose empty session frame was filed once (see upsert / frame-merge.ts)
 // `why` is a one-word diagnostic the kernel ignores (2026-09-07): gap = a delta past what we hold; nobase = a
 // delta for a session we hold nothing of; skeleton-click = the active tab is a skeleton; prefetch = the idle
@@ -15803,12 +15813,13 @@ type NeedFullWhy = "gap" | "nobase" | "skeleton-click" | "prefetch" | "skeleton-
 function requestFullSession(id: string, why: NeedFullWhy): void {
   if (!id || awaitingFull.has(id)) return;
   awaitingFull.add(id);
+  pendingFullWhy.set(id, why);
   vscodeApi?.postMessage({ type: "needFull", id, why });
 }
 // A reconnect mints a FRESH kernel-side client (its echat starts empty, so full frames are already
 // guaranteed) — but an ask parked against the dead socket would gag the new socket's repair path
 // forever (awaitingFull only clears when the reply lands, and the dead socket's never will).
-window.addEventListener("romp:wsup", () => awaitingFull.clear());
+window.addEventListener("romp:wsup", () => { awaitingFull.clear(); pendingFullWhy.clear(); });
 // …and the same socket-open resets what this page learned on the dead one: the fulls it received there (so the
 // new socket's skeleton list may re-list them — they are stale after the outage; skeleton-tabs.ts) and the
 // one-per-reconnect diagnostic row noteSkeletonTabOrder posts.
@@ -16052,15 +16063,15 @@ function chatWindow(msg: any) {
     return;
   }
   stripOptimistic(s);
-  const heldLast = s.lastUuid;
+  const heldLast = s.lastUuid, wasDetached = !!s.detached;
   const r = mergeWindow(s.events as { uuid?: string }[], msg.events as { uuid?: string }[]);
   s.events = r.events as ChatEvent[];
   s.firstUuid = keyOf(s.events[0] as { uuid?: string; key?: string } | undefined) ?? null;
   s.lastUuid = keyOf(s.events[s.events.length - 1] as { uuid?: string; key?: string } | undefined) ?? null;
   // detached only when the merged run's newest event is not the live tail the page held: a window that overlaps the
   // resident tail merges into one contiguous run through it and stays attached (review find G; the kernel says so
-  // too, `connected`)
-  s.detached = !!msg.moreAfter && !msg.connected && !(r.mode === "merge" && heldLast != null && s.lastUuid === heldLast);
+  // too, `connected`); a client detached BEFORE the window stays so on the merge clause (round 2, item 2)
+  s.detached = windowDetached(!!msg.moreAfter, !!msg.connected, wasDetached, r.mode, heldLast, s.lastUuid);
   if (msg.moreBefore === false) s.headKnown = true;
   s.headTotal = s.headKnown && !s.detached ? s.events.length : null;   // a count only when the whole is resident
   reconcileOptimistic(s);
@@ -16071,7 +16082,15 @@ function chatWindow(msg: any) {
   if (target) { pendingAnchor = target; pendingAnchorIntent = null; pendingAnchorT = null; pendingAnchorKind = null; flashedAnchor = null; pendingAnchorKeepY = null; anchorPendingOlder = false; }
   showActive();
   updateLivePaused();
-  window.requestAnimationFrame(() => virtualizeToViewport());   // a window that does not overflow never scrolls: the edge check runs once now (review find M)
+  window.requestAnimationFrame(() => {
+    // a window that does not overflow never scrolls: the edge check runs once (review find M). A DETACHED window whose
+    // content fits the viewport cannot reach the newer edge through that check (it returns on "everything rendered", or
+    // asks for older first), so its next page is asked for directly (round 2, item 7)
+    const c = document.getElementById("content");
+    const cur = sessions.get(msg.id);
+    if (cur && cur.detached && c && c.scrollHeight <= c.clientHeight + 1) { requestNewer(msg.id); return; }
+    virtualizeToViewport();
+  });
 }
 function chatMore(msg: any) {
   loadingOlder.delete(msg.id);
@@ -16084,12 +16103,13 @@ function chatMore(msg: any) {
   if (!next) { reconcileOptimistic(s); return; }   // stale: the newest moved on
   s.events = next as ChatEvent[];
   s.lastUuid = keyOf(s.events[s.events.length - 1] as { uuid?: string; key?: string } | undefined) ?? s.lastUuid;
-  s.detached = !!msg.more;
+  const am = afterMore(!!msg.more, !!s.headKnown, s.events.length);
+  s.detached = am.detached;
   if (!s.detached) {
     // back at the live tail: the kernel re-based this client on the reply and carries the frame's status and ledger
     // here, so no full frame is asked (a full frame is the last 250 events: the walked pages would be dropped and the
     // reader's place lost, review find L)
-    if (s.headKnown) s.headTotal = s.events.length;
+    s.headTotal = am.headTotal;
     if (msg.status) s.status = msg.status;
     if ("ledger" in msg) ledgers.set(msg.id, msg.ledger ?? null);
   }

@@ -67,3 +67,27 @@ export function historyLabel(headKnown: boolean, resident: number, total: number
   const older = Math.max(0, total - resident);
   return older ? older + " older" : "";
 }
+
+/** Whether a proto-2 client is DETACHED after a chatWindow landed (round 2, item 2): a window with more after it leaves the
+ *  client detached unless the kernel said the window reached the held run (`connected`), or the window merged into a run
+ *  that was ATTACHED before it and whose newest event is still the live tail the page held. The merge clause never
+ *  re-attaches a detached client: its heldLast is then an older window's last, not the live tail, while the kernel keeps
+ *  sending it nothing. */
+export function windowDetached(moreAfter: boolean, connected: boolean, wasDetached: boolean, mergeMode: "merge" | "replace",
+                               heldLast: string | null | undefined, newLast: string | null | undefined): boolean {
+  return !!moreAfter && !connected && !(mergeMode === "merge" && !wasDetached && heldLast != null && newLast === heldLast);
+}
+
+/** Whether a full session frame MERGES into the resident run instead of replacing it (round 2, item 3): only when it
+ *  answers this client's own re-attach ask, so the pages the reader walked stay resident. A change-driven full frame (a
+ *  tool output filling an earlier card, a floor move) replaces: a merge would keep the client's stale copies of the
+ *  in-list events the kernel just reported changed, and no later delta refreshes them. */
+export function fullFrameMerges(pendingWhy: string | null | undefined): boolean {
+  return pendingWhy === "reattach";
+}
+
+/** The client's state after a chatMore landed: detached while more is after it; back at the live tail, the count is the
+ *  resident run when the head is known (else none). */
+export function afterMore(more: boolean, headKnown: boolean, resident: number): { detached: boolean; headTotal: number | null } {
+  return { detached: !!more, headTotal: !more && headKnown ? resident : null };
+}

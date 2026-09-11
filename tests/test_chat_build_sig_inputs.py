@@ -186,6 +186,8 @@ DOTTED = {
     "em.injected_source": ("pure", "over a message record"),
     "em.strip_harness_preamble": ("pure", "over a text"),
     "em.hydrate": ("pure", "over the tree's atoms: fills a body before the assembly cut from the transcript the parse key already covers (T323 stage 4a)"),
+
+    "em.parse_z": ("pure", "a rendered orphan note's stamp, parsed for the fold's orphan gate window (round 2, item 11)"),
     "sb.echo_text_key": ("pure", "over a text"),
     "cm.context_rgb": ("pure", "over a percentage"),
     "cm.ramp": ("pure", "over a fraction and the colormap's stops"),

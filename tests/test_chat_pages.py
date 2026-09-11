@@ -176,7 +176,8 @@ class PagesEqualTheWhole(Harness):
                 {"t": int(t_of[48]) - 1, "cmdGesture": "/compact"},
                 {"t": int(t_of[64]) - 1, "orphanReply": {"uuid": "orph-1", "text": "a reply the transcript never kept"}},
                 {"t": int(t_of[7]) + 5, "orphanReply": {"uuid": "orph-2", "text": kept_text}},
-                {"t": int(t_of[80]) - 1, "effortApplied": "low"}]
+                {"t": int(t_of[80]) - 1, "effortApplied": "low"},
+                {"t": int(t_of[96]) - 1, "orphanReply": {"uuid": "orph-3", "text": kept_text}}]   # RENDERED, at a page boundary
         (jd.STATE / "states" / (SID + ".jsonl")).write_text("".join(json.dumps(r) + "\n" for r in rows))
         return recs
 
@@ -192,7 +193,8 @@ class PagesEqualTheWhole(Harness):
         # (event_model.synthesize_orphans), so orph-1's note is deduped against that atom, which sits at the note's time;
         # orph-2's text is turn 0's reply, far from the note's time, so under the near-window rule the note renders
         orphaned = [e for e in whole if e.get("orphaned")]
-        self.assertEqual([e.get("orphanOf") for e in orphaned], ["orph-2"], "near texts dedup; a copy far in time does not")
+        self.assertEqual([e.get("orphanOf") for e in orphaned], ["orph-2", "orph-3"], "near texts dedup; a copy far in time does not")
+        self.assertRegex(orphaned[1]["uuid"], r"^orphan:\d+:\d+$", "a rendered note's key: orphan:<t>:<n>, the record uuid on orphanOf")
         self.assertTrue(any(e.get("kind") == "assistant" and not e.get("orphaned") and (e.get("md") or "").startswith("a reply the transcript never kept") for e in whole))
         self.document()
         m = self.restored()
@@ -215,6 +217,19 @@ class PagesEqualTheWhole(Harness):
         note = next(e for e in whole if e.get("kind") == "retryGaveUp")
         w = km._chat_history_reply(SID, {"type": "loadAround", "id": SID, "uuid": note["uuid"]}, NOW)
         self.assertNotIn("missing", w); self.assertIn(note["uuid"], [e["uuid"] for e in w["events"]])
+        # the rendered orphan note at the boundary of the 96th turn: a page's FIRST event; a window lands on it by its key,
+        # the pages around it equal the whole, and a walk older from it crosses the boundary (round 2, item 6)
+        onote = orphaned[1]
+        ow = km._chat_history_reply(SID, {"type": "loadAround", "id": SID, "uuid": onote["uuid"]}, NOW)
+        self.assertNotIn("missing", ow); self.assertIn(onote["uuid"], [e["uuid"] for e in ow["events"]])
+        wu = [e["uuid"] for e in whole]
+        full_index = wu.index(onote["uuid"])
+        self.assertEqual(self.pages(m["floor"], 16)[full_index]["uuid"], onote["uuid"], "the note is the 96th turn's page's first event")
+        ob = km._chat_history_reply(SID, {"type": "loadOlder", "id": SID, "before": onote["uuid"]}, NOW)
+        self.assertNotIn("missing", ob); self.assertTrue(ob["events"], "older than the note: the pages before its boundary")
+        older = [e["uuid"] for e in ob["events"]]
+        self.assertEqual(older[len(self.head_cards):] + [onote["uuid"]], wu[:full_index + 1], "one contiguous run across the boundary, from the head")
+        self.assertFalse(ob["more"])
         held = list(w["events"])
         for _ in range(100):
             n = km._chat_history_reply(SID, {"type": "loadNewer", "id": SID, "after": held[-1].get("key") or held[-1]["uuid"]}, NOW)
@@ -254,6 +269,57 @@ class PagesEqualTheWhole(Harness):
                 tail = _strip(m["events"])
                 for size in (1, 2, 16):
                     self.assertEqual(self.pages(floor, size) + tail, whole, "%s at %d turns per page" % (name, size))
+
+
+def restart_seam_records():
+    """A machine-cut seam in the pre-cut history: a prompt, a reply cut by a kernel restart (the CLI's stop record, its null
+    settle, romp's resume notice), then the resumed reply; more turns; then a compaction and two turns after it, so the
+    seam lies in the pages. The notice is what stamps the marker's cause and drops the settle (_stamp_interrupt_causes),
+    and it lands turns after the marker: a page ending at the marker's turn reads it through its fill turns."""
+    t0 = NOW - 86400
+    recs, parent = [], None
+    for i in range(12):
+        t = t0 + i * 120
+        recs.append(G.uline(t, "step %d, please" % i, "u_seam_%d" % i, parent))
+        recs.append(G.aline(t + 30, "step %d done" % i, "a_seam_%d" % i, "u_seam_%d" % i, stop="end_turn"))
+        parent = "a_seam_%d" % i
+    t = t0 + 12 * 120
+    recs.append(G.uline(t, "now the long step", "u_cut", parent))
+    recs.append(G.aline(t + 20, "starting the long step", "a_cut", "u_cut", stop="end_turn"))
+    recs.append(G.uline(t + 40, "[Request interrupted by user]", "u_stop", "a_cut", ps=None))
+    recs.append(G.aline(t + 41, "No response requested.", "a_settle", "u_stop", stop="end_turn"))
+    recs.append(G.uline(t + 60, "[romp] The romp kernel " + km.INTR_RESTART_SIG + " this session's in-flight turn; pick it up where it "
+                        "stopped.<!-- romp-injected --><!-- romp-system -->", "u_notice", "a_settle", ps=None))
+    recs.append(G.aline(t + 90, "resuming the long step", "a_resume", "u_notice", stop="end_turn"))
+    parent = "a_resume"
+    for i in range(12, 20):
+        t = t0 + (i + 1) * 120
+        recs.append(G.uline(t, "step %d, please" % i, "u_seam_%d" % i, parent))
+        recs.append(G.aline(t + 30, "step %d done" % i, "a_seam_%d" % i, "u_seam_%d" % i, stop="end_turn"))
+        parent = "a_seam_%d" % i
+    return compacting_variant(recs, "seam")
+
+
+class RestartSeam(Harness):
+    def test_a_machine_cut_seam_in_the_pages_keeps_its_cause_and_no_page_repeats_an_event(self):
+        """Round 2, item 5: the settle a restart seam drops shifted every index after it, so a page kept its fill turn's first
+        event and the next page repeated it; and no golden carried an interrupt marker."""
+        self.write(restart_seam_records())
+        whole = self.whole()
+        marker = [e for e in whole if e.get("interruptMarker")]
+        self.assertEqual(len(marker), 1); self.assertEqual(marker[0].get("interruptCause"), "restart", "the notice names the cause")
+        self.assertEqual([e for e in whole if e.get("interruptSettle")], [], "a machine cut shows no settle line")
+        self.assertIn("a_settle", marker[0].get("settleUuids") or [], "the dropped settle's uuid still answers on the seam")
+        self.document()
+        m = self.restored()
+        floor = m["floor"]; self.assertGreater(floor, 0)
+        tail = _strip(m["events"])
+        for size in (1, 2, 16):
+            with self.subTest(page_turns=size):
+                paged = self.pages(floor, size)
+                self.assertEqual(paged + tail, whole, "the seam through pages of %d turns" % size)
+                keys = [e.get("key") or e["uuid"] for e in paged + tail]
+                self.assertEqual(len(keys), len(set(keys)), "no event twice on the wire")
 
 
 class UniqueUuids(Harness):
@@ -338,6 +404,59 @@ class RenderFloor(Harness):
         self.assertIsNotNone(fe)
         self.assertEqual(fe["rf"], cut, "the fold entry holds the prefix from the floor: the turn-0 prefix is released")
         self.assertLess(len(fe["events"]), len(m0["events"]))
+
+
+class FloorDecision(Harness):
+    def test_which_clients_move_the_floor(self):
+        """Round 2, item 4: a socket before its ready has no protocol and moves no floor; a redial carries the page's protocol
+        on its dial term; a client stamped ready with none (an older shim's redial) is an index client."""
+        f = km._chat_floor0_of
+        self.assertFalse(f([]))
+        self.assertFalse(f([{"proto": 2, "ready": True}]))
+        self.assertFalse(f([{"proto": None, "ready": False}, {"proto": 2}]), "a socket whose ready has not arrived is not counted")
+        self.assertTrue(f([{"proto": 1, "ready": True}]))
+        self.assertTrue(f([{"proto": None, "ready": True}]), "ready with no protocol: an index client")
+        self.assertTrue(f([{"proto": 2}, {"proto": 1}]))
+        src = open(os.path.join(BIN, "romp-kernel")).read()
+        self.assertIn('_live_scope.chat_floor0 = _chat_floor0_of(_all_chat)', src)
+        reg = src[src.index('            client["reconnect"] = True'):src.index('        _register_ws_client(client)')]
+        self.assertIn('_rp = (q.get("proto") or [""])[0]', reg, "the redial's registration reads the protocol from its dial term")
+        self.assertIn('client["proto"] = int(_rp)', reg)
+        self.assertIn('?"&reconnect=1&proto="+readyProto:""', src, "the shim's dial term carries the protocol the bundle's ready declared")
+        self.assertIn('if(m&&m.type==="ready"){bundleReady=true;readyProto=(m.proto===2?2:1);}', src)
+
+    def test_a_connect_push_counts_every_connected_client_and_a_pre_ready_socket_moves_nothing(self):
+        """Review find E, executed through _push: the decision reads km._clients, not the push's targets."""
+        recs = transcript(NOW - 86400, turns=90, compact_every=25)
+        self.write(recs)
+        self.document()
+        m = self.restored()
+        cut = m["floor"]; self.assertGreater(cut, 0)
+        saved_alive, saved_clients = km._alive_sessions, km._clients
+        km._alive_sessions = lambda now, tmux: list(self.rows)
+        try:
+            c2, s2 = _client(proto=2); c2.update(app="chat", alive=True, ready=True, active=SID)
+            c1, s1 = _client(proto=1); c1.update(app="chat", alive=True, ready=True)
+            c0, s0 = _client(proto=None); c0.update(app="chat", alive=True, ready=False)   # a socket before its ready
+            with km._clients_lock:
+                km._clients = [c2, c0]
+            km._push([c2], connect=True, tmux={})
+            self.assertEqual(km._RENDER_FLOOR[SID], cut, "a proto-2 page and a pre-ready socket: the floor stands")
+            f2 = next(x for x in s2 if x.get("type") == "session" and x.get("id") == SID)
+            self.assertEqual(f2.get("proto"), 2)
+            with km._clients_lock:
+                km._clients = [c2, c1]                                    # an index client connects elsewhere
+            km._push([c2], connect=False, tmux={})
+            self.assertEqual(km._RENDER_FLOOR[SID], 0, "every connected client decides: the index client drops the floor")
+            self.assertEqual(km._chat_fold_last_info().get("why"), "floor")
+            with km._clients_lock:
+                km._clients = [c2]
+            km._push([c2], connect=False, tmux={})
+            self.assertEqual(km._RENDER_FLOOR[SID], cut, "…and it climbs back when the index client leaves")
+        finally:
+            km._alive_sessions = saved_alive
+            with km._clients_lock:
+                km._clients = saved_clients
 
 
 def _client(proto=2):
@@ -474,13 +593,17 @@ class Proto2Wire(Harness):
         evs = m["events"]
         turns = km._parse(self.leaf, SID, NOW)["turns"]
         tix = km._turn_index_of_events(evs, turns)
+        pos = {e["uuid"]: i for i, e in enumerate(evs)}
+        for d in (0, 1, 2, 3):                                            # both parities: the fixture's turns are two events each,
+            anchor = evs[len(evs) // 2 + d]["uuid"]                       #  so one parity lands on a turn start by accident (round 2)
+            r = km._chat_history_reply(SID, {"type": "loadAround", "id": SID, "uuid": anchor}, NOW)
+            first, last = r["events"][0]["uuid"], r["events"][-1]["uuid"]
+            a, b = pos[first], pos[last]
+            self.assertTrue(a == 0 or tix[a - 1] != tix[a], "the window starts at a turn's first event (anchor +%d)" % d)
+            self.assertTrue(b == len(evs) - 1 or tix[b + 1] != tix[b], "and ends at a turn's last event (anchor +%d)" % d)
+            self.assertIn(anchor, [e["uuid"] for e in r["events"]])
         anchor = evs[len(evs) // 2]["uuid"]
         r = km._chat_history_reply(SID, {"type": "loadAround", "id": SID, "uuid": anchor}, NOW)
-        first, last = r["events"][0]["uuid"], r["events"][-1]["uuid"]
-        pos = {e["uuid"]: i for i, e in enumerate(evs)}
-        a, b = pos[first], pos[last]
-        self.assertTrue(a == 0 or tix[a - 1] != tix[a], "the window starts at a turn's first event")
-        self.assertTrue(b == len(evs) - 1 or tix[b + 1] != tix[b], "and ends at a turn's last event")
         held = list(r["events"])
         for _ in range(50):
             o = km._chat_history_reply(SID, {"type": "loadOlder", "id": SID, "before": held[0].get("key") or held[0]["uuid"]}, NOW)
@@ -493,6 +616,86 @@ class Proto2Wire(Harness):
             if not n["more"]:
                 break
         self.assertEqual(_strip(held), _strip(evs), "both walks from the window meet the whole list")
+
+    @staticmethod
+    def _apply_base(c, reply):
+        """What the handler does with a reply's _base (kernel.py, the history requests' arm): keepFirst / keepLast."""
+        base = reply.pop("_base", None)
+        old = c["echat"].get(SID)
+        if base is None:
+            return
+        if base.pop("keepFirst", False):
+            base["first"] = old.get("first") if isinstance(old, dict) else None
+        if base.pop("keepLast", False):
+            if not isinstance(old, dict):
+                return
+            base["last"], base["detached"] = old.get("last"), bool(old.get("detached"))
+        c["echat"][SID] = base
+
+    def test_load_older_advances_the_runs_first_edge_and_a_window_inside_the_walked_run_stays_attached(self):
+        """Round 2, item 1: the base's first never moved with loadOlder, so loadAround's `connected` tested a STALE first: a
+        window inside the walked run (holding neither the stale first nor the live tail) left the kernel detached while the
+        page, holding the live tail, believed itself live: no deltas, ever."""
+        recs = transcript(NOW - 86400, turns=600, compact_every=150)      # ~300 events after the cut: longer than the wire tail
+        self.write(recs)
+        whole = self.whole()
+        self.document()
+        m = self.restored()
+        evs = m["events"]
+        self.assertGreater(len(evs), km.WIRE_TAIL)
+        c, sent = _client()
+        km._send_chat_locked(c, m, None, 0, False)
+        base0 = dict(c["echat"][SID])
+        self.assertEqual(base0["first"], evs[len(evs) - km.WIRE_TAIL]["uuid"], "the first frame's base: the wire tail's first")
+        self.assertNotEqual(base0["first"], evs[0]["uuid"])
+        o1 = km._chat_history_reply(SID, {"type": "loadOlder", "id": SID, "before": base0["first"]}, NOW, base=c["echat"][SID])
+        self.assertIsNotNone(o1.get("_base")); self.assertTrue(o1["_base"].get("keepLast"))
+        self._apply_base(c, o1)
+        b1 = c["echat"][SID]
+        self.assertEqual(b1["first"], evs[0]["uuid"], "the run's first edge advanced to the list's head")
+        self.assertEqual((b1["last"], b1["detached"]), (base0["last"], False), "its last and its attachment unchanged")
+        o2 = km._chat_history_reply(SID, {"type": "loadOlder", "id": SID, "before": b1["first"]}, NOW, base=c["echat"][SID])
+        self._apply_base(c, o2)
+        b2 = c["echat"][SID]
+        pages = o2["events"]
+        self.assertEqual(b2["first"], pages[0].get("key") or pages[0]["uuid"], "…and into the pages")
+        run = pages + evs                                                 # what the page holds: one run through the live tail
+        anchor = run[len(pages) // 2]["uuid"]                             # inside the walked pages: neither edge is in its window
+        w = km._chat_history_reply(SID, {"type": "loadAround", "id": SID, "uuid": anchor}, NOW, base=c["echat"][SID])
+        keys = {e.get("key") or e["uuid"] for e in w["events"]}
+        self.assertNotIn(b2["first"], keys); self.assertNotIn(base0["first"], keys); self.assertNotIn(b2["last"], keys)
+        self.assertTrue(w["moreAfter"], "the window ends before the tail")
+        self.assertTrue(w["connected"], "…but lies inside the run the client holds through the live tail: attached")
+        self.assertEqual((w["_base"]["first"], w["_base"]["last"], w["_base"]["detached"]), (b2["first"], b2["last"], False))
+        self._apply_base(c, w)
+        n = len(sent)
+        km._send_chat_locked(c, m, None, len(evs) - 1, False)             # a change at the tail: a delta, not silence
+        self.assertEqual(len(sent), n + 1); self.assertEqual(sent[-1]["type"], "chatTail")
+        # a window that holds NO part of the run (a far anchor) still detaches the client, kernel and page agreeing
+        far = km._chat_history_reply(SID, {"type": "loadAround", "id": SID, "uuid": whole[2]["uuid"]}, NOW, base=c["echat"][SID])
+        self.assertFalse(far["connected"]); self.assertTrue(far["_base"]["detached"])
+        src = open(os.path.join(BIN, "romp-kernel")).read()
+        self.assertIn('if base.pop("keepLast", False):', src, "the handler applies a loadOlder's first-edge advance")
+
+    def test_a_detached_bases_note_keyed_edges_do_not_keep_it_alive_and_the_check_is_memoized(self):
+        """Round 2, item 8: a note key resolves by time, to turn 0 on any newer transcript, so a run edged on a note read as
+        alive after a /clear and the client never got its full frame."""
+        whole, m = self._restored_tail()
+        note_base = {"first": "orphan:%d:1" % (NOW - 90000), "last": "retried:%d:1" % (NOW - 89000), "detached": True}
+        self.assertFalse(km._base_alive(SID, note_base, NOW), "note-keyed edges alone: not alive")
+        atom_base = {"first": "orphan:%d:1" % (NOW - 90000), "last": whole[30]["uuid"], "detached": True}
+        self.assertTrue(km._base_alive(SID, atom_base, NOW), "an atom-keyed edge the transcript holds: alive")
+        turns = km._parse(self.leaf, SID, NOW)["turns"]
+        hit = km._BASE_ALIVE_MEMO[SID]
+        self.assertIs(hit[1], turns); self.assertTrue(hit[2])
+        km._BASE_ALIVE_MEMO[SID] = (hit[0], turns, "memo")               # a repeat with the same edges and parse reads the memo
+        self.assertEqual(km._base_alive(SID, atom_base, NOW), "memo")
+        c, sent = _client()
+        c["echat"][SID] = dict(note_base)
+        km._send_chat_locked(c, m, None, len(m["events"]) - 1, False)
+        self.assertEqual(sent[-1]["type"], "session", "the detached client edged on notes gets its full frame")
+        km._forget_chat_positions(set())
+        self.assertNotIn(SID, km._BASE_ALIVE_MEMO); self.assertNotIn(SID, km._UUID_POS)
 
     def test_the_fold_entry_carries_the_prefixs_key_counts(self):
         whole, m = self._restored_tail()
@@ -613,7 +816,9 @@ class HydrationRace(Harness):
             def get(self, k, d=None):
                 if k == "lazy":
                     self.n += 1
-                    return super().get(k, d) if self.n <= 1 else None
+                    if self.n == 2:
+                        super().pop("lazy", None)                         # another thread finished it: the marker is GONE, so a
+                    return super().get(k, d) if self.n <= 1 else None    #  re-introduced a["lazy"] subscript raises (round 2)
                 return super().get(k, d)
         a = Flaky({"uuid": "x1", "type": "user", "lazy": {"k": "u", "at": (0, 10)}, "session_id": SID})
         with em._ASM_CKPT_LOCK:

@@ -3,7 +3,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { applyTailAfter, prependHead, appendMore, mergeWindow, historyLabel, indexOfUuid, keyOf } from "./chat-window";
+import { applyTailAfter, prependHead, appendMore, mergeWindow, historyLabel, indexOfUuid, keyOf, windowDetached, fullFrameMerges, afterMore } from "./chat-window";
 
 const ev = (u: string) => ({ uuid: u, kind: "user", md: u });
 const run = (...u: string[]) => u.map(ev);
@@ -53,6 +53,46 @@ test("the history strip shows no number while the head is unknown", () => {
   assert.equal(historyLabel(false, 250, 900), "older history", "a total handed with an unknown head is not shown either");
   assert.equal(historyLabel(true, 250, 900), "650 older");
   assert.equal(historyLabel(true, 900, 900), "");
+});
+
+test("the detach rule: a window re-attaches only a run that was attached and still ends on the live tail (round 2, item 2)", () => {
+  assert.equal(windowDetached(true, true, false, "replace", "z", "q"), false, "the kernel said connected");
+  assert.equal(windowDetached(false, false, true, "replace", "z", "z"), false, "nothing after the window: the tail is resident");
+  assert.equal(windowDetached(true, false, false, "merge", "z", "z"), false, "merged into the attached run, its live tail kept");
+  assert.equal(windowDetached(true, false, false, "merge", "z", "y"), true, "merged, but the run's newest moved: an older window");
+  assert.equal(windowDetached(true, false, true, "merge", "w", "w"), true, "a DETACHED client's heldLast is an older window's last, not the live tail");
+  assert.equal(windowDetached(true, false, false, "replace", "z", "q"), true, "a far window replaces the run: detached");
+});
+
+test("a full frame merges only when it answers this client's own re-attach ask (round 2, item 3)", () => {
+  assert.equal(fullFrameMerges("reattach"), true);
+  for (const why of ["gap", "nobase", "skeleton-click", "prefetch", "skeleton-delta", null, undefined]) assert.equal(fullFrameMerges(why), false, String(why));
+});
+
+test("after a chatMore: detached while more follows; at the tail the count is the run's when the head is known", () => {
+  assert.deepEqual(afterMore(true, true, 40), { detached: true, headTotal: null });
+  assert.deepEqual(afterMore(false, true, 40), { detached: false, headTotal: 40 });
+  assert.deepEqual(afterMore(false, false, 40), { detached: false, headTotal: null });
+});
+
+test("render.ts wires the three rules, tracks the pending needFull reason, hides the paused strip on a frame and a tab switch, and lands orphan notes by record uuid", () => {
+  const upsert = RENDER.slice(RENDER.indexOf("function upsert(msg: any) {"), RENDER.indexOf("\n}\n", RENDER.indexOf("function upsert(msg: any) {")));
+  assert.ok(upsert.includes("fullFrameMerges(fullWhy)"), "upsert merges by the pending reason");
+  assert.ok(upsert.includes("pendingFullWhy.delete(msg.id)"), "…consumed by the frame that answers it");
+  assert.ok(upsert.includes("if (msg.id === activeId) updateLivePaused();"), "the strip re-evaluates when the active tab's frame lands");
+  assert.ok(upsert.includes("mergedRun && prev?.headKnown ? events.length"), "a merged run with a known head carries its own count");
+  assert.match(RENDER, /pendingFullWhy\.set\(id, why\);\n  vscodeApi\?\.postMessage\(\{ type: "needFull", id, why \}\)/, "requestFullSession records the reason before it asks");
+  assert.match(RENDER, /awaitingFull\.clear\(\); pendingFullWhy\.clear\(\);/, "…and a new socket forgets both");
+  const win = RENDER.slice(RENDER.indexOf("function chatWindow(msg: any) {"), RENDER.indexOf("function chatMore(msg: any) {"));
+  assert.ok(win.includes("s.detached = windowDetached(!!msg.moreAfter, !!msg.connected, wasDetached, r.mode, heldLast, s.lastUuid);"), "chatWindow decides through the rule, with the state before the merge");
+  assert.ok(win.includes("if (cur && cur.detached && c && c.scrollHeight <= c.clientHeight + 1) { requestNewer(msg.id); return; }"), "a detached window that does not overflow asks for its next page directly");
+  const more = RENDER.slice(RENDER.indexOf("function chatMore(msg: any) {"), RENDER.indexOf("let livePausedEl"));
+  assert.ok(more.includes("const am = afterMore(!!msg.more, !!s.headKnown, s.events.length);"), "chatMore decides through the rule");
+  const active = RENDER.slice(RENDER.indexOf("function setActive(id: string"), RENDER.indexOf("\n}\n", RENDER.indexOf("function setActive(id: string")));
+  assert.ok(active.includes("showActive();\n  updateLivePaused();"), "a tab switch re-evaluates the strip for the entering tab");
+  assert.ok(RENDER.includes('turn.dataset.orphanOf = String((ev as { orphanOf?: string }).orphanOf)'), "an orphan note's turn carries its record uuid");
+  assert.equal((RENDER.match(/\.turn\[data-orphan-of="\$\{cssEscape\(uuid\)\}"\]/g) || []).length, 2, "…and both anchor lookups read it");
+  assert.ok(RENDER.includes("(e as { orphanOf?: string }).orphanOf === uuid"), "…as does the events-list search behind them");
 });
 
 test("render.ts speaks proto 2 at ready and routes the four proto-2 frames through this module", () => {
