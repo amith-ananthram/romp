@@ -146,6 +146,18 @@ test("cross-pane hover and reveal reach the copies: card-key strips the section'
   assert.match(FEED, /if \(key\.startsWith\("f:"\)\) key = key\.slice\(2\);/, "kbHoverId strips it the same way");
 });
 
+test("the three follow-ups after the review: Tab keeps the copy, Clear from a copy dresses the board's header, a pill repaints both copies", () => {
+  // (a) the keyboard scope remembers which twin it holds and re-finds that one; Tab from a hovered copy lands in the copy
+  assert.match(FEED, /let tabScopeCopy = false;/);
+  assert.match(FEED, /tabScopeCopy = isFocusCopy\(card\);/, "set where the scope is taken");
+  assert.equal((FEED.match(/cardElByKey\(tabScopeKey, tabScopeCopy\)/g) || []).length, 3, "every reader of the scope re-finds the same twin (Tab, Enter, the render-tail restore)");
+  assert.match(FEED, /return document\.querySelector<HTMLElement>\('\[data-key="' \+ \(copy \? "f:" \+ k : k\) \+ '"\]'\);/);
+  // (b) Clear from the copy still gives the board run's header its one-motion exit (the section has no run headers)
+  assert.match(FEED, /dressHeaderIfLast\(askEls\.get\(it\.itemId\) \?\? card, it\.sid\);/);
+  // (c) a section pill picked on either copy repaints both: the disclosure is the card's
+  assert.match(FEED, /const twins = cardTwins\(id\);\s*\n\s*if \(twins\.length\) \{ for \(const c of twins\) applySections\(c as any, \(c as any\)\._it \?\? it, distillShown\); \}/);
+});
+
 // ── feed.css: the section's rules, through the variables ─────────────────────────────────────────────
 test("feed.css: #feed-focus, the head, the caption, the rule and the empty line exist, var() only", () => {
   assert.match(CSS, /#feed-focus \{ display: flex; flex-direction: column; gap: 8px; \}/);
