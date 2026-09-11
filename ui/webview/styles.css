@@ -94,15 +94,19 @@ body.scheme-solarized-dark {
      three unrelated hues, ranked by how much the kind asks of the reader: coordination lowest (an FYI), delegation
      next (work handed over), question highest (an answer owed). More asking = more intense against the page. The
      three are sampled EVENLY, at positions 0, 1/2 and 1 of one straight line in OKLCH (T337, the user 2026-09-10, who
-     found the first three too alike: T320's steps sat at L .66, .76 and .85, a span of .19 against this line's .26,
-     and the top two shared one saturation, so they read as two tints of one blue). On the dark
-     page the line runs from the deepest blue that still reads on a boxed card (L .64, C .085: 4.6:1 on --box-bg, the
-     review's floor being 4.5) to the brightest tint the hue holds (L .90, C .05, the sRGB gamut's edge), hue pinned
-     at the accent's 244 throughout; 5.0:1, 8.1:1 and 12.5:1 on the page, 4.6:1, 7.5:1 and 11.5:1 on a boxed card,
-     whose --box-bg wash the word also sits on. The light theme runs its own line the other way, deepening toward the
-     dark end of its clay accent (below). postal-kind-ramp.test.ts holds the positions, theme-parity.test.ts the
-     contrast. */
-  --postal-coordinate: #5d92bc;  --postal-delegate: #90badd;  --postal-question: #c3e3fd;
+     found the first three too alike: T320's steps sat at L .66, .76 and .85 with the top two at one saturation, so
+     they read as two tints of one blue). The line's two ends are two floors. The deep end is the deepest blue that
+     still reads at 4.5:1 on the PROVISIONAL card, the darkest ground a kind word sits on (a sent card not yet landed
+     wears the pending bubble's dress, an 8.5% wash of --you over the page; the boxed card and the bare page sit above
+     it): L .65, C .10. The far end stops short of the prose ink, so a lone Question still reads as a colour and not
+     as body text: the accent's own height, L .85, C .078, the sRGB gamut's edge for the hue; hue pinned
+     at the accent's 244 throughout. The trade-off is span against distance from the ink: a brighter far end widens
+     the ramp but converges on --fg (L .845), and this end keeps the word 0.079 from it in OKLab, all of it chroma.
+     Contrast: 5.2:1, 7.6:1 and 10.6:1 on the page, 4.8:1, 7.0:1 and 9.8:1 on a boxed card, 4.8:1, 7.0:1 and 9.8:1 on the provisional
+     wash. The light theme runs its own line the other way, deepening toward the dark end of its clay accent (below).
+     postal-kind-ramp.test.ts holds the positions and the distance from the ink, theme-parity.test.ts the contrast on
+     all three grounds. */
+  --postal-coordinate: #5696c8;  --postal-delegate: #7cb5e3;  --postal-question: #a2d4fe;
   /* THE romp accent — light blue (the user 2026-06-24). Use var(--accent) for accent/highlight chrome
      (selected toggles, in-progress loading dots, the Fleet pill, focus) — NOT for STATUS colors, which keep
      their own meaning (--st-working-bg yellow = working, --st-blocked-bg red, etc.). --accent-fg reads on it. */
@@ -240,17 +244,11 @@ body.theme-light {
   --hl-cmt: #67614f; --hl-title: #8C4A00; --hl-meta: #6E6455; --hl-attr: #7A5A20;   /* --hl-cmt from #6E675C (4.39:1 on a code block) to 4.86:1 */
   --box-bg: rgba(0, 0, 0, 0.03);
   --box-border: rgba(0, 0, 0, 0.12);
-  --postal-coordinate: #974a32;  --postal-delegate: #6c2a14;  --postal-question: #430a00;   /* the kind ramp (T320, T337): the
-                                                                                            accent's clay hue (OKLCH 38)
-                                                                                            deepening with rank, sampled
-                                                                                            evenly along the line from
-                                                                                            L .50, C .11 (the same first
-                                                                                            step) to L .25, C .09, a deep
-                                                                                            rust, never black; 5.3:1, 8.9:1
-                                                                                            and 13.7:1 on the cream page,
-                                                                                            4.9:1, 8.3:1 and 12.9:1 on a
-                                                                                            boxed card (the review's floor
-                                                                                            is the box, 4.5:1) */
+  /* the kind ramp (T320, T337): the accent's clay hue (OKLCH 38) deepening with rank, sampled evenly along the line
+     from L .50, C .11 (the same first step as T320, the lightest clay that reads at 4.5:1 on the provisional wash) to
+     L .30, C .10 (a deep rust that stays red, short of the prose ink --fg at L .236: 0.118 from it in OKLab); 5.3:1, 8.1:1 and 11.8:1
+     on the cream page, 4.9:1, 7.6:1 and 11.1:1 on a boxed card, 4.8:1, 7.3:1 and 10.7:1 on the provisional wash */
+  --postal-coordinate: #974a32;  --postal-delegate: #752f18;  --postal-question: #551400;
   --err: #B02A1C;
   --accent: #C2410C; --accent-fg: #FFF8F2;
   --accent-wash: rgba(194, 65, 12, 0.10);
@@ -2028,12 +2026,21 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
    box at the bubble's 72% width until the receipt landed; `.notice.queued-bubble` outranks it. The slim selector stays:
    `.notice.notice-slim`, later in the file too, would otherwise beat `.notice.queued-bubble` on the slim card. */
   max-width: 72%; overflow-wrap: anywhere; display: flow-root;
-  background: color-mix(in srgb, var(--you) 10%, transparent); border: 1px dashed color-mix(in srgb, var(--you) 65%, transparent);
-  border-radius: 14px; padding: 7px 12px; color: var(--fg); opacity: 0.85;
+  /* the FADE is in the dress's colours, not an opacity on the element (T337, the review of the kind colours): an element
+     opacity dimmed every colour inside, the postal kind word included, which then read below 4.5:1 on the wash. The
+     three values are the old 10% wash, 65% dashes and --fg text at the old 0.85, folded in, so the pending bubble looks
+     as it did; what changed is that a descendant with a colour of its own (the postal head's chips, kind word and mark,
+     a link or code span in the pending text) now shows that colour whole. --prov-ink is the faded text, read below by
+     the notice's gist and body, whose own rules would otherwise set --fg back. */
+  --prov-ink: color-mix(in srgb, var(--fg) 85%, transparent);
+  background: color-mix(in srgb, var(--you) 8.5%, transparent); border: 1px dashed color-mix(in srgb, var(--you) 55%, transparent);
+  border-radius: 14px; padding: 7px 12px; color: var(--prov-ink);
 }
 .notice.queued-bubble, .notice.notice-slim.queued-bubble { max-width: none; display: block; }   /* the notice keeps its row
    width and flex head at either density; only the dress is the bubble's (the shared rule's specificities, later in the
    file). The boxed card too: it fills the column while provisional, so nothing snaps when the receipt lands. */
+.notice.queued-bubble .notice-gist, .notice.queued-bubble .notice-body { color: var(--prov-ink); }   /* the words fade with
+   the dress; the head's own colours (the ends' chips, the kind word, the delivery mark) stay whole */
 /* A CANCELABLE queued bubble carries an explicit ✕ (the user 2026-07-08 — the old whole-bubble click was
    undiscoverable and re-render-fragile). The bubble itself is no longer clickable; only the ✕ acts. It sits
    in the top-right corner (the bubble reserves padding for it) — dim until the bubble is hovered, red on
@@ -2518,9 +2525,9 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
    T320 (the user, later that day): the word wears the prose weight, not bold, and its three colours are one
    sequential ramp ranked by how much the kind asks of the reader (the tokens' comment has the ranking). */
 .postal-kind { font-weight: 400; }
-.postal-kind-delegate { color: var(--postal-delegate, #90badd); }
-.postal-kind-coordinate { color: var(--postal-coordinate, #5d92bc); }
-.postal-kind-question { color: var(--postal-question, #c3e3fd); }
+.postal-kind-delegate { color: var(--postal-delegate, #7cb5e3); }
+.postal-kind-coordinate { color: var(--postal-coordinate, #5696c8); }
+.postal-kind-question { color: var(--postal-question, #a2d4fe); }
 /* BOTH ENDS of a postal card in the head, each in its session's identity colour (the peer's chip as before, and this
    session's own chip after it); a narrow head collapses this session's chip to its coloured dot, so both colours
    still show where the words would not fit */

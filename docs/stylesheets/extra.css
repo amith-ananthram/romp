@@ -293,9 +293,9 @@
   font-weight: 400;
   white-space: nowrap;
 }
-.romp-kind-delegate   { color: #90badd; }   /* delegation: a peer handed off work */
-.romp-kind-coordinate { color: #5d92bc; }   /* coordination: a heads-up */
-.romp-kind-question   { color: #c3e3fd; }   /* question: an answer is needed */
+.romp-kind-delegate   { color: #7cb5e3; }   /* delegation: a peer handed off work */
+.romp-kind-coordinate { color: #5696c8; }   /* coordination: a heads-up */
+.romp-kind-question   { color: #a2d4fe; }   /* question: an answer is needed */
 
 /* ── Mermaid legibility ───────────────────────────────────────────────
    Every node in our diagrams carries an explicit LIGHT fill (the classDef

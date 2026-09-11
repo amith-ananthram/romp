@@ -4861,7 +4861,9 @@ function postalServiceIntent(body: string | undefined): { label: string; cls: st
 // The delivery-state icon at the postal head's right edge (T302, the user 2026-09-10): the way messaging apps
 // show sent / delivered / read. The drawings, states and words live in postal-state.ts (DELIVERY_GLYPHS: the
 // circled-check ladder for sent / delivered / read since T337, a clock = parked, a cross = bounced, a return
-// arrow = recalled); this wraps one in its box: 14 px, a 1.5 stroke in the state's colour, round caps and joins.
+// arrow = recalled); this wraps one in its box: 14 px, a 1.5 stroke in the state's colour, round caps and joins,
+// heavier than the envelope glyph at the head's other end (12 px, 1.4) for the reason postal-state.ts gives: a ring
+// with a check inside needs the room, and the stroke is the mark's own specification.
 function clockOf(epochS: number): string {
   return new Date(epochS * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }

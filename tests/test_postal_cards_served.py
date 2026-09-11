@@ -220,6 +220,7 @@ const measure = () => page.evaluate(() => {
       selfText: self ? self.textContent : null, selfBg: self ? getComputedStyle(self).backgroundColor : null,
       selfWidth: self ? Math.round(self.getBoundingClientRect().width) : null,
       bg: cs.backgroundColor, border: cs.borderTopStyle, provisional: n.classList.contains("queued-bubble"),
+      opacity: cs.opacity,   // T337: the provisional dress fades by its colours, never by an element opacity
       // the provisional dress at either density: the card's max-width as computed, and the box it actually takes
       maxWidth: cs.maxWidth, width: Math.round(n.getBoundingClientRect().width),
       gist: (t.querySelector(".notice-gist") || {}).textContent || "",
@@ -249,8 +250,11 @@ const contrast = (a, b) => {
 // a boxed card paints --box-bg, an rgba WASH, over the page: the colour the word actually sits on is the composite (the
 // review of 2026-09-10 found the light coordination step at 4.33:1 there while the page read 4.6:1)
 const composite = (washCss, pageCss) => {
-  const nums = (css) => css.match(/\d+(\.\d+)?/g).map(Number);
-  const w = nums(washCss), p = nums(pageCss), a = w.length > 3 ? w[3] : 1;
+  // a wash is rgba(...) or, for a color-mix() the browser resolved, color(srgb r g b / a) with channels in 0..1
+  const nums = (css) => { const m = css.match(/color\(srgb ([\d.]+) ([\d.]+) ([\d.]+)(?: \/ ([\d.]+))?\)/);
+    if (m) return [255 * +m[1], 255 * +m[2], 255 * +m[3], m[4] === undefined ? 1 : +m[4]];
+    const n = css.match(/\d+(\.\d+)?/g).map(Number); return [n[0], n[1], n[2], n.length > 3 ? n[3] : 1]; };
+  const w = nums(washCss), p = nums(pageCss), a = w[3];
   return "rgb(" + [0, 1, 2].map((i) => Math.round(w[i] * a + p[i] * (1 - a))).join(", ") + ")";
 };
 const results = {};
@@ -275,6 +279,8 @@ for (const pass of [{ width: 1000, theme: "dark" }, { width: 520, theme: "dark" 
   await page.waitForTimeout(300);
   const m = await measure();
   const boxOnPage = composite(m.boxBg, m.pageBg);
+  // every kind word against the ground it actually sits on: the page, the box, or the provisional wash (T337)
+  for (const c of m.cards) c.kindContrast = c.kind && c.kindColor ? contrast(c.kindColor, composite(c.bg, m.pageBg)) : null;
   m.contrast = {}; m.contrastOn = {}; m.contrastPage = {};
   for (const k of ["delegate", "coordinate", "question"]) {
     if (!m.kinds[k]) { m.contrast[k] = null; continue; }
@@ -389,9 +395,19 @@ class ServedPostalCards(unittest.TestCase):
             else:
                 self.assertIn(c["kind"], ("Delegation", "Coordination", "Question"), c)
             self.assertFalse(c["chip"], "no chip: %r" % c)
-        self.assertEqual(card("Take the retry-loop")["kindColor"], "rgb(144, 186, 221)", "delegation: the line's middle position (T320, re-sampled T337)")
-        self.assertEqual(card("Heads-up")["kindColor"], "rgb(93, 146, 188)", "coordination: the line's start (T320, re-sampled T337)")
-        self.assertEqual(card("Which cap")["kindColor"], "rgb(195, 227, 253)", "question: the line's end (T337)")
+        self.assertEqual(card("Take the retry-loop")["kindColor"], "rgb(124, 181, 227)", "delegation: the line's middle position (T320, re-sampled T337)")
+        self.assertEqual(card("Heads-up")["kindColor"], "rgb(86, 150, 200)", "coordination: the line's start (T320, re-sampled T337)")
+        self.assertEqual(card("Which cap")["kindColor"], "rgb(162, 212, 254)", "question: the line's end (T337)")
+        # T337 (the review): the provisional dress fades by its colours, not by an element opacity that dimmed the kind
+        # word too, so every kind word reads at 4.5:1 on the ground it sits on, the provisional wash included, in both themes
+        for m, name in ((wide, "dark"), (light, "light")):
+            for c in m["cards"]:
+                if c["kind"]:
+                    self.assertGreaterEqual(c["kindContrast"] or 0, 4.5, "%s: %s reads on its own ground (%s): %r" % (
+                        name, c["kind"], "the provisional wash" if c["provisional"] else "the card", c))
+                if c["provisional"]:
+                    self.assertEqual(c["opacity"], "1", "no element opacity on the provisional card: %r" % c)
+        self.assertTrue(any(c["provisional"] and c["kind"] for c in wide["cards"]), "a provisional card with a kind word is in the world")
         # (2) the delivery icon per state, at the head's right edge, with a worded title
         states = {c["gist"][:20]: c["state"] for c in cards}
         self.assertIsNone(card("Take the retry-loop")["state"], "an incoming message in hand: no icon")

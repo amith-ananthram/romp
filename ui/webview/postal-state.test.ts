@@ -22,9 +22,11 @@ test("sent / delivered / read is the ladder messaging apps draw: a hollow circle
   assert.equal(new Set(radii).size, 1, "one radius for the three circles: " + radii.join(" "));
   const r = parseFloat(radii[0]);
   assert.ok(r >= 5 && r + 0.75 <= 8, "the circle fills the box without clipping its 1.5 stroke: r=" + r);
+  // every point of the check, its round cap included, stays half a unit clear of the ring's inner edge (ring stroke 1.5
+  // centred on r, cap radius 0.75): a tip that grazes the ring antialiases into it at 14 px (the review of 2026-09-11)
   const pts = check.exec(delivered)![1].match(/[\d.]+/g)!.map(Number);
   for (let i = 0; i < pts.length; i += 2) {
-    assert.ok(Math.hypot(pts[i] - 8, pts[i + 1] - 8) <= r - 0.75, "check point " + pts[i] + "," + pts[i + 1] + " sits inside the circle");
+    assert.ok(Math.hypot(pts[i] - 8, pts[i + 1] - 8) <= r - 1.5 - 0.5, "check point " + pts[i] + "," + pts[i + 1] + " sits clear of the ring");
   }
   assert.ok(pts[3] > pts[1] && pts[3] > pts[5], "the middle point is the check's low corner");
   assert.doesNotMatch(sent, check, "sent: the hollow circle alone");
@@ -42,7 +44,8 @@ test("sent / delivered / read is the ladder messaging apps draw: a hollow circle
   // the drawings are this repo's own primitives (a circle, a three-point check), not an icon set's assets: the module
   // says so where the map is, because Signal's own icons ship under a copyleft licence and may not be copied here
   const src = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "postal-state.ts"), "utf8");
-  assert.match(src, /drawn here from two primitives[\s\S]{0,400}Signal's own icon assets[\s\S]{0,200}not copied/);
+  assert.match(src, /drawn here from two primitives[\s\S]{0,400}Apache-2\.0 \(LICENSE\); Signal's own icon assets ship AGPL-3\.0[\s\S]{0,200}not copied/);
+  assert.match(src, /An adaptation of Signal's ladder, not its rungs one for one/, "the mapping onto Signal's ladder is stated");
 });
 
 test("the kind is a capitalised word per class, empty when unknown", () => {

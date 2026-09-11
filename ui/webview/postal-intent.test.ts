@@ -40,5 +40,5 @@ test("the intent reads as coloured TEXT in the postal head's meta slot — no ch
   assert.match(RENDER, /const kind = kindLabel\(intent \? intent\.cls : null\);/);
   assert.doesNotMatch(RENDER, /meta\.push\("delivered"\)/);
   assert.doesNotMatch(CSS, /\.postal-service-intent/);
-  assert.match(CSS, /\.postal-kind-delegate \{ color: var\(--postal-delegate, #90badd\); \}/);   // the ramp's middle step (T320; re-sampled T337)
+  assert.match(CSS, /\.postal-kind-delegate \{ color: var\(--postal-delegate, #7cb5e3\); \}/);   // the ramp's middle step (T320; re-sampled T337)
 });

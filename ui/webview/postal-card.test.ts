@@ -28,16 +28,16 @@ test("the kind is coloured text in the meta slot, never a chip, at prose weight,
   assert.match(CSS, /\.postal-kind \{ font-weight: 400; \}/, "prose weight, not bold");
   assert.doesNotMatch(CSS, /\.postal-kind \{ font-weight: (600|700|bold)/);
   // (T337: the three are re-sampled evenly along the line; postal-kind-ramp.test.ts holds the positions, these the values)
-  assert.match(CSS, /\.postal-kind-delegate \{ color: var\(--postal-delegate, #90badd\); \}/);
-  assert.match(CSS, /\.postal-kind-coordinate \{ color: var\(--postal-coordinate, #5d92bc\); \}/);
-  assert.match(CSS, /\.postal-kind-question \{ color: var\(--postal-question, #c3e3fd\); \}/);
-  assert.match(CSS, /\n  --postal-coordinate: #5d92bc;\s+--postal-delegate: #90badd;\s+--postal-question: #c3e3fd;/, "the dark ramp, low to high");
+  assert.match(CSS, /\.postal-kind-delegate \{ color: var\(--postal-delegate, #7cb5e3\); \}/);
+  assert.match(CSS, /\.postal-kind-coordinate \{ color: var\(--postal-coordinate, #5696c8\); \}/);
+  assert.match(CSS, /\.postal-kind-question \{ color: var\(--postal-question, #a2d4fe\); \}/);
+  assert.match(CSS, /\n  --postal-coordinate: #5696c8;\s+--postal-delegate: #7cb5e3;\s+--postal-question: #a2d4fe;/, "the dark ramp, low to high");
   const light = CSS.slice(CSS.indexOf("body.theme-light {"), CSS.indexOf("\n}\n", CSS.indexOf("body.theme-light {")));
-  assert.match(light, /--postal-coordinate: #974a32;\s+--postal-delegate: #6c2a14;\s+--postal-question: #430a00;/, "the light ramp, low to high, deepening");
+  assert.match(light, /--postal-coordinate: #974a32;\s+--postal-delegate: #752f18;\s+--postal-question: #551400;/, "the light ramp, low to high, deepening");
   // the ramp IS a ramp: in each theme the three steps are monotone in luminance in rank order (brighter with rank on
   // the dark page, darker with rank on the light one), so the eye reads one scale, not three tags
   const lumOf = (hex: string) => { const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((v) => v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)); return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; };
-  const dark = ["#5d92bc", "#90badd", "#c3e3fd"].map(lumOf), lightRamp = ["#974a32", "#6c2a14", "#430a00"].map(lumOf);
+  const dark = ["#5696c8", "#7cb5e3", "#a2d4fe"].map(lumOf), lightRamp = ["#974a32", "#752f18", "#551400"].map(lumOf);
   assert.ok(dark[0] < dark[1] && dark[1] < dark[2], "dark: coordination < delegation < question in luminance");
   assert.ok(lightRamp[0] > lightRamp[1] && lightRamp[1] > lightRamp[2], "light: coordination > delegation > question in luminance");
   assert.match(CSS, /coordination lowest \(an FYI\), delegation\s+next \(work handed over\), question highest \(an answer owed\)/, "the ranking sits beside the tokens");
@@ -139,6 +139,17 @@ test("a sent card that has not landed wears the pending send's own provisional d
   // the bubble's border + padding move the head line down: the rail dot follows, as it does for a boxed card
   assert.match(CARD, /turn\.classList\.add\("postal-provisional"\)/);
   assert.match(CSS, /\.turn-postal-service\.postal-provisional > \.dot, \.turn-postal-service\.postal-provisional > \.time-marker \{ top: 18px; \}/);
-  assert.equal((CSS.match(/border: 1px dashed color-mix\(in srgb, var\(--you\) 65%, transparent\)/g) || []).length, 1,
+  assert.equal((CSS.match(/border: 1px dashed color-mix\(in srgb, var\(--you\) 55%, transparent\)/g) || []).length, 1,
                "one dashed --you border rule in the file: the bubble's");
+  // T337 (the review of the kind colours): the dress FADES BY ITS COLOURS, not by an element opacity that dimmed every
+  // colour inside (the kind word read below 4.5:1 on the wash): the old 10% / 65% / 0.85 are folded into 8.5% / 55% /
+  // an 85% --fg ink, the ink is a custom property the notice's gist and body read (their own rules set --fg back), and
+  // the head's own colours stay whole
+  const bubble = CSS.slice(CSS.indexOf(".queued-bubble, .notice.queued-bubble, .notice.notice-slim.queued-bubble {"), CSS.indexOf("\n}\n", CSS.indexOf(".queued-bubble, .notice.queued-bubble, .notice.notice-slim.queued-bubble {")));
+  assert.doesNotMatch(bubble, /opacity:/, "no element opacity on the provisional dress");
+  assert.match(bubble, /--prov-ink: color-mix\(in srgb, var\(--fg\) 85%, transparent\);/);
+  assert.match(bubble, /background: color-mix\(in srgb, var\(--you\) 8\.5%, transparent\);/);
+  assert.match(bubble, /color: var\(--prov-ink\);/);
+  assert.match(CSS, /\.notice\.queued-bubble \.notice-gist, \.notice\.queued-bubble \.notice-body \{ color: var\(--prov-ink\); \}/, "the words fade with the dress");
+  assert.doesNotMatch(CSS, /queued-bubble[^\n]*\.postal-kind/, "nothing re-colours the kind word on the provisional card: the token reads there as it is");
 });

@@ -75,13 +75,22 @@ export function deliveryOf(ev: { direction: "in" | "out"; status?: string | null
  *  the page colour (a presentation attribute cannot carry a var()). The other three states keep their own glyphs: a
  *  clock = parked, a cross = bounced, a return arrow = recalled. Each mark carries a worded title (deliveryTitle).
  *
+ *  An adaptation of Signal's ladder, not its rungs one for one: Signal draws sending as the hollow circle, sent as a
+ *  circled check, delivered as a circled double check and read as the filled circle; the kernel files three states, so
+ *  ours maps sent, delivered and read onto hollow, check and filled check.
+ *
+ *  Drawn at 14 px with a 1.5 stroke, heavier than the envelope glyph at the head's other end (12 px, 1.4): a ring with
+ *  a check inside needs the two extra pixels for the check's arms to stay clear of the ring at device scale 1, and the
+ *  1.5 stroke is the mark's own specification (the user's reference).
+ *
  *  The marks keep the STATE colour (the sheet: dim for sent and delivered, the accent for read), never the kind's.
  *
  *  Licence: the ladder is drawn here from two primitives of our own, a circle and a three-point polyline, in this
- *  file's own coordinates; Signal's own icon assets ship under the GPL/AGPL with its apps and are not copied into this
- *  repository, which may go public under a permissive licence. */
+ *  file's own coordinates. This repository is Apache-2.0 (LICENSE); Signal's own icon assets ship AGPL-3.0 with its
+ *  apps and are therefore not copied into it. */
 export const MARK_CHECK_CLASS = "postal-mark-check";
-const CHECK = '<path class="' + MARK_CHECK_CLASS + '" d="M4.9 8.3 L7.1 10.5 L11.3 5.7"/>';   // one three-point check
+const CHECK = '<path class="' + MARK_CHECK_CLASS + '" d="M4.9 8.3 L7.1 10.5 L10.9 6.1"/>';   // one three-point check, its
+                                                                                              // far tip clear of the ring
 export const DELIVERY_GLYPHS: Record<PostalDeliveryState, string> = {
   sent: '<circle cx="8" cy="8" r="6.25"/>',
   delivered: '<circle cx="8" cy="8" r="6.25"/>' + CHECK,
