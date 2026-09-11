@@ -40,11 +40,14 @@ test("the active tab is re-announced on a socket's open only when THAT kernel ow
   assert.equal(activeTabToReannounce(null, ""), false, "no tab open, local socket");
 });
 
-test("the re-announced activeTab reaches exactly the owning host, its id bared (the contract notifyActive relies on)", () => {
+test("the re-announced activeTab reaches the owning host first, its id bared (the contract notifyActive relies on), and the local record", () => {
   // notifyActive posts {type:"activeTab", id: activeId} with the HOST-PREFIXED id; federation's outbound
-  // router must land it on that host's relay with the bare id the remote kernel knows, and a local id local
+  // router must land it on that host's relay with the bare id the remote kernel knows, and a local id local.
+  // Since T347 the LOCAL kernel hears a remote session's report too, prefixed, for its feed's focused-session
+  // section (active-tab-local-route.test.ts); the owning host's route is unchanged and comes first.
   assert.deepEqual(routeOutbound({ type: "activeTab", id: "TESTHOST:" + SID }),
-                   [{ host: "TESTHOST", msg: { type: "activeTab", id: SID } }]);
+                   [{ host: "TESTHOST", msg: { type: "activeTab", id: SID } },
+                    { host: "", msg: { type: "activeTab", id: "TESTHOST:" + SID } }]);
   assert.deepEqual(routeOutbound({ type: "activeTab", id: SID }), [{ host: "", msg: { type: "activeTab", id: SID } }]);
 });
 

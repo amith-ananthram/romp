@@ -388,6 +388,16 @@ export function routeOutbound(msg: any, knownHosts?: ReadonlySet<string>): Route
   // the path as local (see bin/romp-kernel's openFolder handler + _split_host_id).
   if (msg.type === "openFolder") return [{ host: LOCAL, msg }];
 
+  // activeTab (render.ts notifyActive) goes to the owning host AND, for a remote session, to the LOCAL kernel
+  // with the id left prefixed (T347): the local kernel records each window's active tab for its feed pane's
+  // focused-session section, and the section names cards by the merged board's prefixed ids, so a remote
+  // session's focus must reach the local record as "host:sid". The owning host still gets the bare id it
+  // builds and streams first, as before. A local session takes the one local route below.
+  if (msg.type === "activeTab" && typeof msg.id === "string") {
+    const h = hostOf(msg.id);
+    if (h && h !== LOCAL) return [{ host: h, msg: { ...msg, id: stripHost(h, msg.id) } }, { host: LOCAL, msg }];
+  }
+
   // a scalar session id picks the owning host.
   let host = LOCAL;
   for (const k of SCALAR_ID) {

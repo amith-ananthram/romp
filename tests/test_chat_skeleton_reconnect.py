@@ -410,7 +410,7 @@ class SkeletonReconnect(unittest.TestCase):
         self.assertIn("_release_skeleton_locked(client, sid)", inspect.getsource(km._client_reset_chat_sid))
         s = inspect.getsource(km._client_reset_chat_base)
         for k in ('client.pop("skeleton", None)', 'client.pop("skeletonOrder", None)',
-                  'client.pop("reconnect", None)', 'k[0] in ("chat", "status", "taborder")'):
+                  'client.pop("reconnect", None)', 'k[0] in ("chat", "status", "taborder", "activeChat")'):
             self.assertIn(k, s)
         s = inspect.getsource(km._push)
         self.assertIn("_send_chat_or_status(c, m, ms, change_from, led_changed)", s)

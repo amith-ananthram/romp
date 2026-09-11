@@ -402,6 +402,28 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
   .fcol-fold:hover, .fcol-fold:focus-visible { color: var(--fg); }
 }
 
+/* ---------- the FOCUSED SESSION section (T347, the user 2026-09-11, who wanted the focused session's cards on top) ----------
+   When a tab has focus in the chat pane, the feed puts that session's cards ABOVE the board — its name as the
+   head, the board's three column chips, a horizontal rule under it — and the board below stays exactly as it
+   is (feed.ts renderFocusSection). The section's columns carry .feed-cols / .feed-col, so the row layout, the
+   stacked container query above and the dragged --col-order all reach them unchanged; what differs is here:
+   no sticky heads (a miniature is short), no grab cursor (nothing to drag there), and the rule. Both themes
+   read through the variables; the one literal is a var() fallback. */
+#feed-focus { display: flex; flex-direction: column; gap: 8px; }
+/* the head wears the session headers' typography (.feed-sess-head): 600, the name at the card titles' size */
+.feed-focus-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 2px 3px 0; font-weight: 600; }
+.feed-focus-head .fname { font-size: inherit; }
+/* "focused", after the name — why this session sits on top. The fold count's own dress (.feed-sess-foldn):
+   the column head's 0.72em, weight 400, dim; no new size */
+.feed-focus-cap { flex: none; font-weight: 400; font-size: 0.72em; color: var(--dim); }
+.feed-focus-cols .feed-col-head { position: static; }
+.feed-focus-cols .feed-col-head .fcol-chip { cursor: default; }
+/* the rule under the section: the menus' hairline token, so each theme draws it in its own ink. The margin
+   shorthand zeroes the <hr>'s auto inline margins, which would otherwise keep a flex item from stretching. */
+.feed-focus-divider { border: 0; border-top: 1px solid var(--menu-border, rgba(255, 255, 255, 0.12)); margin: 6px 0 2px; }
+/* "No session is focused in the chat" / "<name> has no cards" — one quiet line, the menus' sub-line size */
+.feed-focus-empty { color: var(--dim); font-size: 0.82em; }
+
 /* ---------- ask card (the inbox unit): three rows (the user 2026-06-14) ---------- */
 /* row 1 — ask title, full width across the top. Hit-area still fits its TEXT (the title must
    NOT flex-grow, else clicking blank space right of it triggers locate instead of the modal —
