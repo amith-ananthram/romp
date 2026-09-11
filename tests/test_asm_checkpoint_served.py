@@ -166,8 +166,9 @@ class RestartOverACheckpointedSession(unittest.TestCase):
             if f.endswith(".json"):
                 with open(os.path.join(self.state, "checkpoints", f)) as fh:
                     d = json.load(fh)
-                folds[os.path.basename(d.get("path", f))] = sorted((d.get("folds") or {}).keys())
-        self.assertLessEqual({"agentLaunches", "bgAll", "bgJudge", "bgRunning", "sessionMeta"}, set(folds.get(os.path.basename(self.leaf), [])),
+                folds[d.get("path", f)] = sorted((d.get("folds") or {}).keys())   # by full path: the leaf and its states log
+        leaf_folds = folds.get(os.path.realpath(self.leaf), folds.get(self.leaf, []))   #  share a basename (CI's listdir order)
+        self.assertLessEqual({"agentLaunches", "bgAll", "bgJudge", "bgRunning", "sessionMeta"}, set(leaf_folds),
                          "the exit leaves every leaf fold's cursor, the judges' included, whether or not a pass reached it while the "
                          "kernel lived: a fold with no cursor reads the leaf whole at its first run after the restart; left: %s" % folds)
         size = os.path.getsize(self.leaf)
