@@ -477,6 +477,38 @@ class EventModelReaders(Harness):
         self.assertEqual(em.declared_plan(tree), em.declared_plan(whole))
 
 
+class ConcurrentHydration(Harness):
+    def test_two_threads_hydrating_the_same_atoms_read_each_record_once(self):
+        """CI find (2026-09-11): the judges' unit text and the frame's markdown hydrate the same restored atoms at a boot
+        from two threads; both missed the memo and both read (7806 reads for 7800 atoms). The file's read stripe is held
+        across a group and the memo re-checked under it, so each record is read once whoever asks first."""
+        import threading
+        records, sent = G.SINGLE_FILE["compaction_atom"]
+        path = self.write("threads", records(), sent=sent)
+        self.fresh(); self.parse(path); self.assertTrue(em.asm_checkpoint_write(path, SID))
+        self.fresh(); modes = []
+        tree = self.parse(path, modes); self.assertEqual(modes, ["restore"])
+        lazy = [a for t in tree["turns"] for a in t["atoms"] if a.get("lazy") is not None]
+        self.assertGreater(len(lazy), 0)
+        copies = [[dict(a, lazy=dict(a["lazy"])) for a in lazy] for _ in range(4)]   # each thread its own atom dicts, same uuids
+        em._ASM_CKPT_STATS.update(hydratedAtoms=0, hydratedBytes=0, hydratedBy={})
+        gate, errors = threading.Barrier(4), []
+        def run(atoms):
+            try:
+                gate.wait(5); em.hydrate(atoms, SID, by="thread")
+            except Exception as e:                                # noqa: BLE001
+                errors.append(e)
+        ts = [threading.Thread(target=run, args=(c,)) for c in copies]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(10)
+        self.assertEqual(errors, [])
+        self.assertEqual(em.asm_checkpoint_stats()["hydratedAtoms"], len(lazy), "one read per record across four threads")
+        for c in copies:
+            self.assertEqual([a["message"] for a in c], [a["message"] for a in copies[0]], "every thread holds the same bodies")
+
+
 class ClearedSessionDocument(Harness):
     def test_the_per_file_rewound_walk_leaves_a_lineage_document_standing(self):
         """Review find (B): the one-file walk asked for the leaf's document with the leaf alone as its inputs, so a

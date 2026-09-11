@@ -4413,8 +4413,16 @@ def hydrate(atoms, rompuuid=None, by=None):
             raise LazyBodyRead("atom %s: no file known for fsid %s" % (u, a.get("fsid")))
         by_file.setdefault(path, []).append(a)
     for path, group in by_file.items():
-        with open(path, "rb") as fh:
+        # the file's read stripe is held across the group: two threads hydrating the same atoms (the judges' unit text
+        # and the frame's markdown at a boot) would both miss the memo and both read; the second now waits and hits it
+        with _READ_STRIPES[hash(path) % len(_READ_STRIPES)], open(path, "rb") as fh:
             for a in sorted(group, key=lambda x: x["lazy"].get("at") or (0, 0)):
+                u = a.get("uuid")
+                with _ASM_CKPT_LOCK:
+                    hit = _HYDRATED.get(u) if u else None
+                if hit is not None:
+                    _hydrate_one(a, hit[0]); filled += 1
+                    continue
                 at_ln = a["lazy"].get("at")
                 if not at_ln:
                     raise LazyBodyRead("atom %s: the document carries no record location" % a.get("uuid"))
