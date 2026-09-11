@@ -1395,6 +1395,14 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
    @name to wear this chip's look): the two cannot drift; each sets its own colour and spacing. */
 .chip-peer-name, .mention-chip { background: rgba(0, 0, 0, 0.85); border-radius: 7px; padding: 0 5px; }
 .chip-peer-name { color: #fff; margin-left: 1px; }
+/* a remote session's "host:" on either chip sits on that shared backing, which is the same in both themes,
+   so its colour is too: the global .host-prefix rule's var(--dim) is tuned for the page, and the light
+   theme's dim (#5D574E) reads about 2.2 to 2.7:1 on this backing. White at 0.7 alpha reads 9.1:1 on the
+   Awaiting chip and 9.5:1 on the user bubble, the same in both themes (a queued bubble's 0.85 opacity dims the
+   whole chip alike, and the prefix still clears 4.5:1 there), and stays visibly quieter than the #fff peer name
+   and the identity-coloured mention name. Not color: inherit (.fileview-sess's idiom): on the mention chip that
+   is the identity colour, and the palette's darker swatches are already the faintest text on this backing. */
+.chip-peer-name .host-prefix, .mention-chip .host-prefix { color: rgba(255, 255, 255, 0.7); }
 .chip-awaitingBg { background: var(--st-awaitbg-bg); color: var(--st-awaitbg-fg); }
 /* the Awaiting chip is a BUTTON (slice 2, 2026-09-05): click opens the awaiting box below. The UA
    button chrome is reset so it wears the chip exactly (.chip supplies size, weight, padding, radius);
