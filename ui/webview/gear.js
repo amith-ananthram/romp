@@ -115,6 +115,12 @@ var GEAR_HTML =
   '<span><b>Compact tabs and agents</b>' +
   '<span class=rs-sub>Keeps more of the transcript in view: tighter rows in the background-work panel under the transcript, which shows about four rows and scrolls for the rest, and smaller tabs and group headers in the tab strip. On a phone the session picker stands in for the strip, so there only the panel changes. Off by default.</span>' +
   '</span></label>' +
+  // the session badge (the user 2026-09-10, on the maintainers' word): the composer's placeholder names the session by
+  // default; this opts into a second reading of the name where the state shows. Off by default.
+  '<label class=rs-row><input type=checkbox id=rs-badge>' +
+  '<span><b>Show session badge</b>' +
+  "<span class=rs-sub>A small badge with the session's name, on its colour, before Awaiting / Ready / Working in the chat bottom bar. The message box already names the session; this adds the name where its state reads. Off by default.</span>" +
+  '</span></label>' +
   '<label class=rs-row><input type=checkbox id=rs-branch>' +
   '<span><b>Show git branch</b>' +
   "<span class=rs-sub>Show the session's git branch (when it's in a repo) in the chat bottom bar, beside the directory.</span>" +
@@ -270,7 +276,7 @@ function initGear(post) {
     an = document.getElementById('rs-autonudge'), bk = document.getElementById('rs-backend'),
     cvm = document.getElementById('rs-conserve'),
     csg = document.getElementById('rs-suggestcompact'),
-    dd = document.getElementById('rs-defaultdir'), gb = document.getElementById('rs-branch'),
+    dd = document.getElementById('rs-defaultdir'), gb = document.getElementById('rs-branch'), sbg = document.getElementById('rs-badge'),
     tc = document.getElementById('rs-tabctx'), fl = document.getElementById('rs-filelink'), fsc = document.getElementById('rs-filesctl'),
     sr = document.getElementById('rs-striprows'),
     dn = document.getElementById('rs-dense'),
@@ -290,7 +296,7 @@ function initGear(post) {
     fe = document.getElementById('rs-fileedit'),
     ths = document.getElementById('rs-thinksum'),
     ans = document.getElementById('rs-autonudge-split'), asub = document.getElementById('rs-autonudge-sub');
-  function load() { try { return Object.assign({ compact: true, colormap: 'aurora', subgoals: true, debug: false, backend: 'sdk', defaultDir: '', showBranch: false, tabCtx: 'over50', fileLinkPane: 'chat', filesControl: true, stripGroupRows: true, denseChrome: false, collapseGaps: true, activeOnly: true }, JSON.parse(localStorage.getItem('romp:settings') || 'null')); } catch (e) { return { compact: true, colormap: 'aurora', subgoals: true, debug: false, backend: 'sdk', defaultDir: '', showBranch: false, tabCtx: 'over50', fileLinkPane: 'chat', filesControl: true, stripGroupRows: true, denseChrome: false, collapseGaps: true, activeOnly: true }; } }
+  function load() { try { return Object.assign({ compact: true, colormap: 'aurora', subgoals: true, debug: false, backend: 'sdk', defaultDir: '', showBranch: false, showSessionBadge: false, tabCtx: 'over50', fileLinkPane: 'chat', filesControl: true, stripGroupRows: true, denseChrome: false, collapseGaps: true, activeOnly: true }, JSON.parse(localStorage.getItem('romp:settings') || 'null')); } catch (e) { return { compact: true, colormap: 'aurora', subgoals: true, debug: false, backend: 'sdk', defaultDir: '', showBranch: false, showSessionBadge: false, tabCtx: 'over50', fileLinkPane: 'chat', filesControl: true, stripGroupRows: true, denseChrome: false, collapseGaps: true, activeOnly: true }; } }
   // mirrors settings.ts tabCtxMode (this file can't import the TS module): the gauge shipped for a
   // few hours as a boolean toggle — false was an explicit hide, true the default nobody chose.
   function tabCtxMode(v) { return (v === 'always' || v === 'never') ? v : (v === false ? 'never' : 'over50'); }
@@ -309,6 +315,7 @@ function initGear(post) {
   }
   cc.addEventListener('change', function () { var s = load(); s.compact = cc.checked; save(s); });
   if (gb) gb.addEventListener('change', function () { var s = load(); s.showBranch = gb.checked; save(s); });
+  if (sbg) sbg.addEventListener('change', function () { var s = load(); s.showSessionBadge = sbg.checked; save(s); });
   // one tag group per row in the tab strip (on by default); render.ts repaints the strip on the save
   if (sr) sr.addEventListener('change', function () { var s = load(); s.stripGroupRows = sr.checked; save(s); });
   // compact tabs and agents (off by default): render.ts applies a body class on the save, and the strip and the panel repaint through the cascade
@@ -1287,7 +1294,7 @@ function initGear(post) {
     // burned the whole 5-frame retry against a display:none pane, latched rs-pane-gone, and the
     // full-viewport fallback box blacked out every pane behind the modal.
     try { if (window.parent !== window) window.parent.postMessage({ romp: 'logUnseenQuery' }, '*'); } catch (e) { /* no shell to ask */ }   // T290: the Open log count
-    p.hidden = false; feedFull(true); setModalCls(true); var s = load(); cc.checked = !!s.compact; jix.checked = (s.showIndexJudges !== undefined ? !!s.showIndexJudges : !!s.debug); jtr.checked = (s.showTriageJudges !== undefined ? !!s.showTriageJudges : !!s.debug); if (gb) gb.checked = s.showBranch === true; if (sr) sr.checked = s.stripGroupRows !== false; if (dn) dn.checked = s.denseChrome === true; if (fl) fl.value = s.fileLinkPane === 'pane' ? 'pane' : 'chat'; if (fsc) fsc.checked = (s.filesControl !== false); if (tc) tc.value = tabCtxMode(s.tabCtx); tcPaint(); csPaint(); ttPaint(); if (cg) cg.checked = s.collapseGaps !== false; if (ao) ao.checked = s.activeOnly !== false; if (fc) fc.checked = s.collapsed === true; cmBuild(); cmPaint(s.colormap || 'aurora'); paintBackendOffer(tb ? tb.checked : false); if (dd) dd.value = s.defaultDir || ''; plFill(); fill(); }
+    p.hidden = false; feedFull(true); setModalCls(true); var s = load(); cc.checked = !!s.compact; jix.checked = (s.showIndexJudges !== undefined ? !!s.showIndexJudges : !!s.debug); jtr.checked = (s.showTriageJudges !== undefined ? !!s.showTriageJudges : !!s.debug); if (gb) gb.checked = s.showBranch === true; if (sbg) sbg.checked = s.showSessionBadge === true; if (sr) sr.checked = s.stripGroupRows !== false; if (dn) dn.checked = s.denseChrome === true; if (fl) fl.value = s.fileLinkPane === 'pane' ? 'pane' : 'chat'; if (fsc) fsc.checked = (s.filesControl !== false); if (tc) tc.value = tabCtxMode(s.tabCtx); tcPaint(); csPaint(); ttPaint(); if (cg) cg.checked = s.collapseGaps !== false; if (ao) ao.checked = s.activeOnly !== false; if (fc) fc.checked = s.collapsed === true; cmBuild(); cmPaint(s.colormap || 'aurora'); paintBackendOffer(tb ? tb.checked : false); if (dd) dd.value = s.defaultDir || ''; plFill(); fill(); }
   if (g) g.onclick = function (e) { e.stopPropagation(); openSettings(); };   // hidden anchor; hosts open via the message below
   window.addEventListener('message', function (e) { if (e.data && e.data.romp === 'openSettings') openSettings(); });
   // The shortcuts row: the web shell (same-origin parent) gets the customize link — it opens the
