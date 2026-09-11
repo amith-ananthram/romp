@@ -8,7 +8,7 @@
 //   filesOpen  the shell's Files-pane bit (render.ts panesOn.files, cached from the shell's own broadcast):
 //              the pane is ON SCREEN, a desktop column toggled on or the tab showing on a phone.
 //   filesAvail the shell's word that the Files control exists (render.ts panesAvail.files, the same broadcast):
-//              the gear's "Files control in the dashboard bar" is on (the default). Off, there is no pane to
+//              the gear's "Files control in the dashboard bar" is on (off by default since T317b). Off, there is no pane to
 //              bring forward, so a click that would have gone there opens here (T317).
 // A verdict names the TARGET: "pane" is the Files pane (the shell brings a closed one forward; the click is
 // the gesture), "here" is this document, the viewer or the file browser as a modal over the pane that was

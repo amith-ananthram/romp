@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """T317 (the user 2026-09-10): clicking the dashboard's Files control opened the timeline in a side pane instead of
 the Files pane. Reproduction and guard on the real shell page (`/`) of a hermetic kernel: the desktop rail's Files
-toggle and the phone layout's Files tab open the Files pane, and the gear's "Files control in the dashboard bar"
-setting (T317 add-on) hides both, closes an open pane and refuses a bring-forward. With FILES_SHOTS=<dir> the driver
-writes screenshots (the control shown, and hidden). Skips LOUDLY without
+toggle and the phone layout's Files tab open the Files pane once the gear's "Files control in the dashboard bar"
+setting (T317 add-on) is on; OFF by default since T317b (the user 2026-09-10): a fresh store hides both, closes a pane
+an earlier session left open and refuses a bring-forward, and the gear's write (heard through the storage event) shows
+the control without a reload. With FILES_SHOTS=<dir> the driver writes screenshots (the control shown, and hidden; the
+bottom bar with the control hidden by default and shown after the toggle, dark and light). Skips LOUDLY without
 the extension deps or a Playwright browser. SYNTHETIC fixtures only (the notes-api demo world: session web)."""
 import json
 import os
@@ -82,7 +84,25 @@ for (const pass of cfg.passes) {
   const before = await measure();
   if (cfg.shots) { fs.mkdirSync(cfg.shots, { recursive: true }); await page.screenshot({ path: cfg.shots + "/romp_shell-files-" + pass.name + "-before.png", fullPage: false }); }
   let after = null;
-  if (pass.hidden) {
+  if (pass.toggle) {
+    // the bottom bar, hidden by default: shots in both themes (the shell's light theme is body.theme-light), clipped to the bar
+    const barClip = () => page.evaluate(() => { const rs = Array.from(document.querySelectorAll(".rail-btn")).map((b) => b.getBoundingClientRect()).filter((r) => r.width > 0);   // a hidden button's box is empty: not the bar's
+      const top = Math.min(...rs.map((r) => r.top)), bottom = Math.max(...rs.map((r) => r.bottom)); return { x: 0, y: Math.max(0, Math.floor(top) - 8), width: 1400, height: Math.ceil(bottom - top) + 16 }; });
+    if (cfg.shots) { const c = await barClip(); await page.screenshot({ path: cfg.shots + "/romp_shell-files-control-default-hidden-dark.png", clip: c });
+      await page.evaluate(() => document.body.classList.add("theme-light")); await page.waitForTimeout(200);
+      await page.screenshot({ path: cfg.shots + "/romp_shell-files-control-default-hidden-light.png", clip: c });
+      await page.evaluate(() => document.body.classList.remove("theme-light")); await page.waitForTimeout(100); }
+    // the gear's write, from the feed iframe (the gear's own document): the shell hears it through its storage listener
+    const feed = page.frames().find((f) => f.url().includes("/feed"));
+    if (!feed) { console.error("no feed frame: " + page.frames().map((f) => f.url()).join(" ")); process.exit(1); }
+    await feed.evaluate(() => { const s = JSON.parse(localStorage.getItem("romp:settings") || "{}"); s.showFilesControl = true; localStorage.setItem("romp:settings", JSON.stringify(s)); });
+    await page.waitForTimeout(800);
+    after = await measure();
+    if (cfg.shots) { const c = await barClip(); await page.screenshot({ path: cfg.shots + "/romp_shell-files-control-shown-dark.png", clip: c });
+      await page.evaluate(() => document.body.classList.add("theme-light")); await page.waitForTimeout(200);
+      await page.screenshot({ path: cfg.shots + "/romp_shell-files-control-shown-light.png", clip: c });
+      await page.evaluate(() => document.body.classList.remove("theme-light")); await page.waitForTimeout(100); }
+  } else if (pass.hidden) {
     // the control hidden by the gear's setting: nothing to click; the palette's command and a relay are refused
     await page.evaluate(() => { window.__rompPaneToggle && window.__rompPaneToggle("files", true); });
     await page.waitForTimeout(600);
@@ -176,14 +196,18 @@ class ServedFilesPaneToggle(unittest.TestCase):
         cfg = os.path.join(self.lab, "cfg.json")
         with open(cfg, "w") as f:
             json.dump({"shell": "http://127.0.0.1:%d/?token=%s" % (self.port, self.token),
-                       "passes": [{"name": "desktop", "width": 1400, "height": 900, "mobile": False},
-                                  {"name": "phone", "width": 390, "height": 844, "mobile": True, "touch": True},
-                                  # the control hidden by the gear's setting, with the pane left OPEN by an earlier session
+                       # the control is OFF by default (T317b): the two clicking passes turn it on through the gear's store key
+                       "passes": [{"name": "desktop", "width": 1400, "height": 900, "mobile": False, "storage": {"romp:settings": json.dumps({"showFilesControl": True})}},
+                                  {"name": "phone", "width": 390, "height": 844, "mobile": True, "touch": True, "storage": {"romp:settings": json.dumps({"showFilesControl": True})}},
+                                  # the control hidden: a store the T317-era gear wrote (its whole-object save merged filesControl: true into any
+                                  # profile that touched a setting; the key is never read), with the pane left OPEN by that earlier session
                                   {"name": "desktop-hidden", "width": 1400, "height": 900, "mobile": False, "hidden": True,
-                                   "storage": {"romp:settings": json.dumps({"filesControl": False}),
+                                   "storage": {"romp:settings": json.dumps({"compact": True, "filesControl": True}),
                                                "romp-panes": json.dumps({"chat": True, "fleet": False, "feed": True, "timeline": True, "files": True})}},
                                   {"name": "phone-hidden", "width": 390, "height": 844, "mobile": True, "touch": True, "hidden": True,
-                                   "storage": {"romp:settings": json.dumps({"filesControl": False}), "romp-mobile-tab": "files"}}],
+                                   "storage": {"romp-mobile-tab": "files"}},
+                                  # the default, then the gear's toggle: its write from the feed's document reaches the shell as a storage event
+                                  {"name": "desktop-toggle", "width": 1400, "height": 900, "mobile": False, "toggle": True}],
                        "shots": os.environ.get("FILES_SHOTS", "")}, f)
         driver = os.path.join(self.lab, "driver.mjs")
         with open(driver, "w") as f:
@@ -212,10 +236,11 @@ class ServedFilesPaneToggle(unittest.TestCase):
         # the timeline band stays exactly as it was: the Files toggle never touches it
         self.assertEqual(after["panes"]["tl-pane"]["display"], d["before"]["panes"]["tl-pane"]["display"], "the Files toggle leaves the timeline as it was")
         self.assertEqual("po-timeline" in after["body"].split(), "po-timeline" in d["before"]["body"].split())
-        # the control shown (the default): both layouts offer it
-        self.assertTrue(next(b for b in after["rail"] if b["pane"] == "files")["shown"], "the rail's Files toggle shows by default: %r" % after["rail"])
-        self.assertTrue(next(b for b in r["phone"]["after"]["tabs"] if b["pane"] == "files")["shown"], "the phone's Files tab shows by default")
-        # the control HIDDEN by the gear's setting (T317): the toggle and the tab are gone in both layouts, the pane an
+        # the control shown, by the gear's setting (on in these passes' store): both layouts offer it
+        self.assertTrue(next(b for b in after["rail"] if b["pane"] == "files")["shown"], "the rail's Files toggle shows with the setting on: %r" % after["rail"])
+        self.assertTrue(next(b for b in r["phone"]["after"]["tabs"] if b["pane"] == "files")["shown"], "the phone's Files tab shows with the setting on")
+        # the control hidden (T317b): the desktop store is the T317-era gear's, filesControl: true merged in by a whole-object
+        # save (never read); the phone store has no settings at all. The toggle and the tab are gone in both layouts, the pane an
         # earlier session left open is closed, a bring-forward is refused, and a phone left on the Files tab shows the chat
         h = r["desktop-hidden"]
         for k in ("before", "after"):
@@ -230,6 +255,15 @@ class ServedFilesPaneToggle(unittest.TestCase):
         self.assertFalse(next(b for b in ph["tabs"] if b["pane"] == "files")["shown"], "the phone's Files tab is hidden: %r" % ph["tabs"])
         self.assertEqual(ph["tab"], "chat", "a stored Files tab falls to the chat: %r" % ph["tab"])
         self.assertTrue(ph["panes"]["chat-pane"]["iframe"]["mOn"] and not ph["panes"]["files-pane"]["iframe"]["mOn"])
+        # the default, then the gear's toggle (T317b): a fresh shell hides the control; the gear's write from the feed's
+        # document shows it without a reload, and the panes are told the pane is available again
+        t = r["desktop-toggle"]
+        self.assertIn("no-files-control", t["before"]["body"].split(), "a fresh store hides the control: %r" % t["before"]["body"])
+        self.assertFalse(next(b for b in t["before"]["rail"] if b["pane"] == "files")["shown"], "the rail's Files toggle is hidden by default: %r" % t["before"]["rail"])
+        self.assertEqual(len([b for b in t["before"]["rail"] if b["shown"]]), 4, "the four other toggles show: %r" % t["before"]["rail"])
+        self.assertNotIn("no-files-control", t["after"]["body"].split(), "the gear's write shows the control: %r" % t["after"]["body"])
+        self.assertTrue(next(b for b in t["after"]["rail"] if b["pane"] == "files")["shown"], "the rail's Files toggle appears after the toggle: %r" % t["after"]["rail"])
+        self.assertEqual(len([b for b in t["after"]["rail"] if b["shown"]]), 5)
         m = r["phone"]["after"]
         self.assertTrue(m["mobile"], "the phone pass is the one-pane layout: %r" % m)
         self.assertEqual(m["tab"], "files", "the Files tab is the one showing: %r" % m)

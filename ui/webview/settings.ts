@@ -20,7 +20,7 @@ export interface RompSettings {
   tabCtx: TabCtxMode;        // chat tabs: WHEN the context gauge shows beside each session name (the user 2026-08-08) — "over50" (default: only once half full, so quiet tabs stay clean), "always", or "never".
   fileLinkPane: FileLinkPane;   // where a chat file-link click opens on the WEB while the Files pane is CLOSED: "chat" (the default: the viewer over the pane you clicked) or "pane" (the Files pane, a column of its own that comes forward and stays up). An OPEN Files pane takes the click whatever this says (file-route.ts). Read at click time (render.ts openPath, and openBrowse for a folder click, which walks the same ladder); VS Code (the host editor) and standalone /chat (no shell to relay to) are unaffected.
   stripGroupRows: boolean;   // chat tabs, grouped by tag: start EVERY tag group on its own row (T264, the row breaks in render.ts). ON by default; off, the groups follow one another across the strip and wrap as they need, the untagged trail behind its divider. Per browser profile, like every setting here. Read by renderTabs and part of the strip's rebuild signature, so a gear flip repaints at once.
-  filesControl: boolean;   // the Files control (the dashboard bar's toggle, the phone's tab) shows; off hides it and closes the pane (T317)
+  showFilesControl: boolean;   // the Files control (the dashboard bar's toggle, the phone's tab) shows when on; off, the default since T317b (the user 2026-09-10), hides it and closes the pane (T317). A FRESH key: the T317-era gear merged its default `filesControl: true` into the object and saved it whole on any change, so that key cannot tell a chosen on from a merged-in one; it is never read and is dropped on the next save
   chatScheme: ChatScheme;    // chat TEXT scheme (the user 2026-08-24): raises body-text contrast without collapsing the tool-dimmer-than-prose hierarchy. A scheme = a text-tier variable set (styles.css body.scheme-*); "default" applies nothing — today's values exactly.
   chatTabTheme: ChatTabTheme;   // LEGACY, derived (2026-08-28): the chat TAB STRIP's appearance (T113). Now computed from `theme` on every load/save ("classic" -> classic strip, anything else -> the yatharth strip) so older panes/extension builds keep working; never set it directly.
   theme: Theme;   // the OVERALL dashboard theme (the user 2026-08-27, promoting the tab-strip setting): "classic" = the pre-720 dark look; "yatharth" = dark + the contributed strip aesthetic (what chatTabTheme:"yatharth" was); "yatharth-light" = the warm light theme (body.theme-light + the yatharth strip). Migration: a store written before `theme` existed seeds it from chatTabTheme.
@@ -62,7 +62,7 @@ export function tabCtxMode(v: unknown): TabCtxMode {
 // hand-written "why" as their line; they show the distiller's summary instead (the why demotes to a hover).
 // compact defaults ON (the user 2026-07-14): a fresh install reads the tidy transcript
 // (thinking hidden, tool runs folded); the gear opts back into the full stream.
-export const DEFAULT_SETTINGS: RompSettings = { compact: true, colormap: "aurora", subgoals: true, showIndexJudges: false, showTriageJudges: false, backend: "sdk", defaultDir: "", showBranch: false, showSessionBadge: false, tabCtx: "over50", fileLinkPane: "chat", stripGroupRows: true, filesControl: true, chatScheme: "default", chatTabTheme: "classic", theme: "classic", denseChrome: false };
+export const DEFAULT_SETTINGS: RompSettings = { compact: true, colormap: "aurora", subgoals: true, showIndexJudges: false, showTriageJudges: false, backend: "sdk", defaultDir: "", showBranch: false, showSessionBadge: false, tabCtx: "over50", fileLinkPane: "chat", stripGroupRows: true, showFilesControl: false, chatScheme: "default", chatTabTheme: "classic", theme: "classic", denseChrome: false };
 const KEY = "romp:settings";
 
 export function loadSettings(): RompSettings {
@@ -73,7 +73,8 @@ export function loadSettings(): RompSettings {
       const s = { ...DEFAULT_SETTINGS, ...parsed };
       s.tabCtx = tabCtxMode(s.tabCtx);   // a store written by the boolean-era gear holds true/false
       s.fileLinkPane = fileLinkPane(s.fileLinkPane);   // only "pane" opts in; anything else reads as the default
-      s.filesControl = s.filesControl !== false;   // only the literal false hides the control; anything else shows it (the default)
+      s.showFilesControl = s.showFilesControl === true;   // only the literal true shows the control; anything else hides it (the default since T317b)
+      delete (s as Record<string, unknown>).filesControl;   // the T317-era key (merged in by that gear's whole-object save): never read, gone on the next save
       s.chatScheme = chatScheme(s.chatScheme);   // unknown/legacy values normalize to "default"
       // theme migration (2026-08-28): a store from before `theme` existed seeds it from the old
       // tab-strip pick, so a yatharth strip stays a yatharth strip. chatTabTheme itself is DERIVED
