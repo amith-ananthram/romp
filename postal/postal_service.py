@@ -552,7 +552,10 @@ def _walk_root_record(frm_id):
 
 
 def deliver(to_id, from_name, from_id, body, park=False, kind="", from_host="",
-            relay_mid="", relay_via="", tracked=False, user_ask=None):
+            relay_mid="", relay_via="", tracked=False, user_ask=None, relayed=False):
+    # relayed=True (T334, 2026-09-11): romp sent this on the SENDER's behalf (the kernel relaying a worker's block
+    # toward the peer that delegated its goal, as the worker's own question). The header and the row say so, so
+    # the recipient and the courier can tell it from a typed ask; the message is otherwise ordinary mail.
     # park=True marks a HANDOFF parked for a session that's currently dead. The
     # maildir is keyed by the session UUID (which `romp resume` reuses), so the
     # message simply waits on disk until that session is revived — delivered then,
@@ -594,6 +597,8 @@ def deliver(to_id, from_name, from_id, body, park=False, kind="", from_host="",
         hdr += "X-From-Host: %s\n" % h["from_host"]
     if h["relay_mid"] and h["relay_via"]:
         hdr += "X-Peer-Mid: %s\nX-Peer-Via: %s\n" % (h["relay_mid"], h["relay_via"])
+    if relayed:
+        hdr += "X-Relayed: romp\n"                  # sent by romp on the sender's behalf (T334)
     tmp.write_text(hdr + "\n" + body + "\n")
     # Timeline log: a message was SENT (the matching exec event is logged when
     # the recipient consumes it in read_box). id = maildir filename joins the two.
@@ -603,6 +608,8 @@ def deliver(to_id, from_name, from_id, body, park=False, kind="", from_host="",
         ev["park"] = True
     if kind:
         ev["kind"] = kind                            # additive (consumer contract above)
+    if relayed:
+        ev["relayed"] = True                         # additive (consumer contract above): romp relayed it (T334)
     if tracked:
         ev["tracked"] = True                         # additive (consumer contract above): report-back
         #                                              delegation — the row is the flag's ONE record;
@@ -790,6 +797,7 @@ def read_box(sid, consume):
         out.append({"from": meta.get("from", "?"), "from_id": meta.get("from-id", ""),
                     "date": meta.get("date", ""), "body": body.rstrip("\n"), "id": f.name,
                     "park": bool(meta.get("x-park")), "kind": meta.get("x-kind", ""),
+                    "relayed": bool(meta.get("x-relayed")),   # romp sent it on the sender's behalf (T334)
                     "from_host": meta.get("x-from-host", "")})
     if consume:
         _mark_pending(sid)         # cleared the box -> drop the marker (no-op if more arrived)
@@ -890,6 +898,8 @@ def format_inbox(msgs, me_id=""):
         mid = ("\n<!-- romp-msg-id: %s -->" % m["id"]) if m.get("id") else ""   # exact id for the timeline join
         if m.get("kind"):
             mid += "\n<!-- romp-msg-kind: %s -->" % m["kind"]   # sender-declared kind, read by the courier
+        if m.get("relayed"):
+            mid += "\n<!-- romp-msg-relayed -->"               # romp sent it on the sender's behalf (T334)
         out.append("\n— from %s%s%s:\n%s%s" % (_from_disp(m), d, pk, m.get("body", ""), mid))
     out.append("\n" + REPLY_HINT)
     return "\n".join(out)
@@ -1831,6 +1841,8 @@ def format_push(msgs):
             out.append("<!-- romp-msg-id: %s -->" % m["id"])   # exact id for the timeline join
         if m.get("kind"):
             out.append("<!-- romp-msg-kind: %s -->" % m["kind"])   # sender-declared kind, read by the courier
+        if m.get("relayed"):
+            out.append("<!-- romp-msg-relayed -->")               # romp sent it on the sender's behalf (T334)
         out.append(bar)
     out.append('(to reply, only if substantive: romp mail send --kind delegate|coordinate|question %s "...")'
                % msgs[0].get("from", ""))
@@ -2308,6 +2320,10 @@ class Handler(BaseHTTPRequestHandler):
             if terr:                                   # a string here armed tracking on a plain send
                 return self._send({"error": terr}, 400)
             tracked = tracked and kind == "delegate"
+            relayed, rerr = _as_bool(data.get("relayed"), "relayed")   # the kernel relaying a worker's question (T334)
+            if rerr:
+                return self._send({"error": rerr}, 400)
+            relayed = relayed and kind == "question"
             #   (the user 2026-08-24): only a delegate can be tracked; wire metadata only — nothing
             #   about the flag ever appears in message prose (the injected-voice rule)
             if _postal_off(frm_id):                # the sender is in isolation → sending is disabled
@@ -2390,7 +2406,7 @@ class Handler(BaseHTTPRequestHandler):
                                    "note": _parked_note(phost, frm_id) + tnote})
             a0 = res["agent"]
             try:
-                mid = deliver(a0["id"], frm, frm_id, body, kind=kind, tracked=tracked)
+                mid = deliver(a0["id"], frm, frm_id, body, kind=kind, tracked=tracked, relayed=relayed)
             except DeliveryNotRecorded as e:
                 # 503 + ok:false (see the relay leg): nothing was published; the sender retries.
                 return self._send({"ok": False, "error": str(e)}, 503)
@@ -2646,6 +2662,8 @@ def _rebuild_rows_for_rowless_mail(box, sent, ended):
             row["park"] = True
         if meta.get("x-kind"):
             row["kind"] = meta["x-kind"]
+        if meta.get("x-relayed"):
+            row["relayed"] = True                    # romp sent it on the sender's behalf (T334)
         row["from_host"] = meta.get("x-from-host", "")
         if meta.get("x-peer-mid"):
             row["originMid"] = meta["x-peer-mid"]

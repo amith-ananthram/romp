@@ -2940,6 +2940,196 @@ def _debt_escalate(asker, debtor, ask_ts, now):
     return False
 
 
+def _delegated_to(manager, worker):
+    """True when `manager` delegated a goal to `worker` (a courier-planted top in the worker's store with origin.peer
+    naming the manager): the team relation as recorded, read from the shared store view (T334)."""
+    try:
+        store, _fault = jd.load_goals_shared_or_fault(worker)
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        sys.stderr.write("delegated-to (%s -> %s): %r\n" % (manager, worker, e))
+        return False
+    for nd in (store or {}).get("nodes", {}).values():
+        o = nd.get("origin") if isinstance(nd, dict) else None
+        if nd.get("parentId") is None and isinstance(o, dict) and str(o.get("peer") or "") == str(manager):
+            return True
+    try:                                               # the primary record: a delegate mail from the manager to the worker
+        return any(f == str(manager) for _t, f in jd._delegates_to().get(str(worker), []))
+    except Exception as e:
+        sys.stderr.write("delegated-to (%s -> %s): %r\n" % (manager, worker, e))
+        return False
+
+
+def _bus_send_relay(payload):
+    """POST one relayed question to the bus's /send as the worker (from_id the worker's sid, kind question, relayed):
+    the bus resolves the recipient, writes the maildir and the log row every ending keys on. Returns (ok, error,
+    definitive, response): definitive when the bus REFUSED the send (a 4xx: no such live recipient, an isolated
+    mailbox), so a retry cannot help; a bus that could not be reached or failed (a 5xx) is not definitive. The
+    response carries the bus's id and, for a far host, "parked"."""
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", BUS_PORT, timeout=12)
+        conn.request("POST", "/send", json.dumps(payload), {"Content-Type": "application/json", "X-Romp-Token": TOKEN})
+        resp = conn.getresponse()
+        data = resp.read()
+        conn.close()
+        try:
+            body = json.loads(data.decode("utf-8", "replace") or "{}")
+        except Exception:
+            body = {}
+        if resp.status != 200:
+            return False, "bus /send %d: %s" % (resp.status, data[:200].decode("utf-8", "replace")), 400 <= resp.status < 500, body
+        return True, "", False, body if isinstance(body, dict) else {}
+    except Exception as e:
+        return False, repr(e), False, {}
+
+
+_RELAY_SAID = set()           # (sid, nid) whose relay failed and was said once this boot
+_RELAY_BAD = {"n": 0}         # malformed queue entries dropped this boot (said once each)
+
+
+def _relay_parked_status(sid, peer, mid, at):
+    """A parked relay's outcome so far: "bounced" when a terminal row names its id (the far host refused, the mail was
+    destroyed or withdrawn), "answered" when the peer wrote to the worker after the park, else None (still pending)."""
+    try:
+        for r in _messages_rows():
+            if str(r.get("id") or "") == str(mid) and r.get("ev") in ("bounced", "recall"):
+                return "bounced"
+        last_any, _la, _aw = _postal_wait_maps()
+        if last_any.get((str(peer), str(sid)), 0) >= int(at or 0):
+            return "answered"
+    except Exception as e:
+        sys.stderr.write("relay parked status (%s): %r\n" % (str(mid)[:12], e))
+    return None
+
+
+def _relay_revert(store, nd, rw, err, now):
+    """Nobody can be asked: the block is the user's after all, filed with the refusal in its why, the node's mt bumped
+    and the views woken like every other block writer."""
+    peer = str(rw.get("peer") or "")
+    why = "%s (a relay to %s was refused: %s)" % (str(rw.get("why") or "").strip(), _name_of(peer) or peer[:8], str(err)[:160])
+    if jd.record_verdict(store, nd, "romp", "block", int(now), why=why):
+        nd["mt"] = int(now)
+    nd["relayDone"] = {"peer": peer, "why": str(rw.get("why") or ""), "t": int(now), "outcome": "refused"}
+    nd.pop("relayWanted", None)
+    _mark_views_dirty()
+
+
+def _relay_store(sid, ents, now):
+    """One store's queued relays (see _relay_tick): returns the number sent. Per entry (a file in the queue directory):
+    a node with no marker is consumed when a record (relayed, relayDone) settled it and KEPT when neither exists (the
+    save carrying the marker has not landed yet, never dropped); a node no longer waiting on that peer stands down
+    (relayDone stood-down); a parked relay is watched by its id until the peer answers (relayed) or the mail comes back
+    (a revert); a fresh one is sent, recorded relayed, or reverted on a definitive refusal, or kept on a transient one."""
+    store = jd.load_goals(sid)
+    n = 0
+    dirty = False
+    for f, e in ents:
+        nid = str(e["nid"])
+        nd = store["nodes"].get(nid)
+        rw = nd.get("relayWanted") if isinstance(nd, dict) else None
+        if not isinstance(rw, dict):
+            if nd is None or isinstance(nd.get("relayed"), dict) or isinstance(nd.get("relayDone"), dict):
+                f.unlink(missing_ok=True)                  # settled (or the node is gone): the entry is spent
+            continue                                       # else the marker's save has not landed yet: keep the entry
+        peer = str(rw.get("peer") or "")
+        standing = (nd.get("awaitingKind") == "peer" and peer in (nd.get("awaitingPeers") or ())
+                    and not nd.get("nodeComplete") and not nd.get("cleared") and not nd.get("blocked"))
+        if not standing:
+            nd["relayDone"] = {"peer": peer, "why": str(rw.get("why") or ""), "t": int(now), "outcome": "stood-down"}
+            del nd["relayWanted"]                          # the wait ended or moved on before the relay: stand down
+            f.unlink(missing_ok=True)
+            dirty = True
+            continue
+        if rw.get("parkedMid"):                            # a far-host relay: pending until it lands or comes back
+            status = _relay_parked_status(sid, peer, rw["parkedMid"], rw.get("parkedAt"))
+            if status == "bounced":
+                _relay_revert(store, nd, rw, "the parked message came back", now)
+                f.unlink(missing_ok=True)
+                dirty = True
+            elif status == "answered":
+                nd["relayed"] = {"peer": peer, "why": str(rw.get("why") or ""), "t": int(now), "mid": rw["parkedMid"]}
+                del nd["relayWanted"]
+                f.unlink(missing_ok=True)
+                dirty = True
+                n += 1
+            continue
+        who = _name_of(sid) or sid[:8]
+        body = "%s cannot move further: %s" % (who, str(rw.get("why") or "").strip())
+        ok, err, definitive, resp = _bus_send_relay({"to": peer, "from": who, "from_id": sid, "body": body,
+                                                     "kind": "question", "relayed": True})
+        if ok and resp.get("parked"):
+            rw["parkedMid"] = str(resp.get("id") or "")   # the sent row is there; the entry watches for a bounce
+            rw["parkedAt"] = int(now)
+            dirty = True
+            continue
+        if ok:
+            nd["relayed"] = {"peer": peer, "why": str(rw.get("why") or ""), "t": int(now), "mid": str(resp.get("id") or "")}
+            del nd["relayWanted"]
+            f.unlink(missing_ok=True)
+            _RELAY_SAID.discard((sid, nid))
+            dirty = True
+            n += 1
+            continue
+        if definitive:                                     # nobody can be asked: the block is the user's after all
+            _relay_revert(store, nd, rw, err, now)
+            f.unlink(missing_ok=True)
+            _RELAY_SAID.discard((sid, nid))
+            dirty = True
+            sys.stderr.write("relay (%s, %s -> %s) refused for good: %s; the block stands as the user's\n"
+                             % (sid[:8], nid, peer[:8], err))
+            continue
+        if (sid, nid) not in _RELAY_SAID:
+            _RELAY_SAID.add((sid, nid))
+            sys.stderr.write("relay (%s, %s -> %s): %s; retried next tick\n" % (sid[:8], nid, peer[:8], err))
+    if dirty:
+        jd.rollup_status(store, False)
+        jd.save_goals(sid, store)
+    return n
+
+
+def _relay_tick(now):
+    """The RELAY (T334, the manager's ruling 2026-09-11): a block the judges addressed to the peer that DELEGATED the
+    work, with no question ever sent to that peer, would be a wait nothing can end (every ending keys on a reply-
+    expecting message the worker itself sent). So the judge leaves relayWanted on the node and, once the store is
+    saved, one entry file in STATE/relay-queue/ (a directory: append is a create, consume an unlink, so the judge's
+    thread and this tick never rewrite each other's list), and this tick sends the block's why to that peer as the
+    worker's own question, once per block: kind question, from the worker, body "<worker> cannot move further:
+    <why>", marked relayed (the row, the header and the inbox's comment say so, for the recipient and the courier).
+    That creates the edge: the peer's reply lifts the stamp, the reminder ladder covers it, and the idle-manager
+    escalation is the only door to the user. The recipient is always the delegating peer the record names, never
+    anyone else. A malformed entry is dropped and counted, never the others. Returns the number relayed."""
+    d = jd._relay_queue_dir()
+    if not d.is_dir():
+        return 0
+    by_sid = {}
+    for f in sorted(d.glob("*.json")):
+        try:
+            e = json.loads(f.read_text())
+            if not (isinstance(e, dict) and e.get("sid") and e.get("nid")):
+                raise ValueError("not an entry")
+        except Exception as ex:
+            _RELAY_BAD["n"] += 1
+            sys.stderr.write("relay queue: entry %s malformed (%r); dropped, the others stand\n" % (f.name, ex))
+            f.unlink(missing_ok=True)
+            continue
+        by_sid.setdefault(str(e["sid"]), []).append((f, e))
+    n = 0
+    for sid, ents in by_sid.items():
+        try:
+            n += _relay_store(sid, ents, now)
+        except Exception:
+            sys.stderr.write("relay (%s): %s\n" % (sid[:8], traceback.format_exc()))   # one store's fault never skips the others
+    return n
+
+
+def _postal_unread(sid):
+    """How many delivered postal messages `sid` has not read yet (its maildir new/): the one queued signal the
+    nudge walk's gates do not see (_backend_queued counts composer turns only). Best-effort 0."""
+    try:
+        return sum(1 for _ in (jd.STATE / "postal" / "mail" / str(sid) / "new").iterdir())
+    except OSError:
+        return 0
+
+
 def _debt_reminder_outcomes(sid, lt, now):
     """Judge this DEBTOR's past reminders at their exact outcome events, both once-ever: an ANSWERED ask
     retires its record silently (the reminder worked), and an ask still unanswered after a turn of the
@@ -2969,6 +3159,14 @@ def _debt_reminder_outcomes(sid, lt, now):
             drop.append(key)                           # return is the outcome, the bus told the asker
             continue
         if isinstance(fire_t, (int, float)) and lt_end > fire_t:
+            if _delegated_to(sid, asker) and _postal_unread(sid):
+                continue                               # T334: the asker's MANAGER runs many threads and its turns end
+                                                       #   constantly. This walk already reaches here only for an idle
+                                                       #   debtor (no composer turn queued, no turn in flight, no
+                                                       #   progressing state); the one queue those gates miss is
+                                                       #   delivered mail it has not read, so with worker mail waiting
+                                                       #   the manager is not yet failing to answer and the record stands.
+                                                       #   A peer that is not the asker's manager keeps the ladder as it was.
             _debt_escalate(asker, sid, ts, now)        # moved on without replying → the user's turn
             drop.append(key)
     if drop:
@@ -9911,6 +10109,12 @@ def _auto_nudge_pass(now, live_map, run_dead_wait):
         except Exception:
             sys.stderr.write("auto-nudge (session %s): %s\n"
                              % (s.get("sid") or "?", traceback.format_exc()))
+    try:
+        _relay_tick(now)                               # T334: a worker's block toward its delegating peer goes out as its
+        #                                                question, once per block (mail, not an injected message: the toggle
+        #                                                below governs injected follow-ups, not the postal service)
+    except Exception:
+        sys.stderr.write("relay tick: %s\n" % traceback.format_exc())   # its own failure never skips the sweeps below
     try:
         if on:
             _debt_backstop_tick(now)                   # reminder outcomes for debtors the walk can't reach

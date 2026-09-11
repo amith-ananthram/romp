@@ -4551,6 +4551,18 @@ def _rebase_onto_disk(fsid, store):
             with _authority():
                 mnd["log"] = sorted((mnd.get("log") or []) + add,
                                     key=lambda e: (int(e.get("ev_t") or 0), int(e.get("at") or 0)))
+        # T334: the relay's record rides plain node keys two writers touch (the judge marks relayWanted; the kernel's tick
+        # replaces it with relayed): the newer fact on disk wins over a stale in-memory copy, in either direction
+        for key in ("relayed", "relayDone"):        # the kernel's records of a relay sent, stood down or refused
+            if isinstance(dnd.get(key), dict) and not isinstance(mnd.get(key), dict):
+                mnd[key] = dnd[key]
+        def _settled(node, want):                    # a record at or after the marker settles it
+            return any(isinstance(node.get(k), dict) and int(node[k].get("t") or 0) >= int((want or {}).get("t") or 0)
+                       and node[k].get("why") == (want or {}).get("why") for k in ("relayed", "relayDone"))
+        if isinstance(dnd.get("relayWanted"), dict) and "relayWanted" not in mnd and not _settled(mnd, dnd["relayWanted"]):
+            mnd["relayWanted"] = dnd["relayWanted"]
+        if isinstance(mnd.get("relayWanted"), dict) and _settled(mnd, mnd["relayWanted"]):
+            mnd.pop("relayWanted", None)
         # `mt` is a monotonic last-touched stamp the read side orders and anchors on (a block's mt feeds the
         # card's disp_t), so it must not regress to our older snapshot — take the newer of the two. The
         # verdict FLAGS need no such care: rollup_status below re-derives them all from the merged log.
@@ -5613,6 +5625,7 @@ def save_goals(fsid, store):
         tmp.rename(GOALDIR / (fsid + ".json"))        # atomic publish
         published = True
         _shared_forget(str(GOALDIR / (fsid + ".json")))   # the shared read-only view of the old version goes
+        _relay_flush(fsid)                            # T334: the relay entries of markers this save just published
         #                                               with it (its identity check would miss anyway; this frees the bytes)
     finally:
         if base is not None:
@@ -7080,7 +7093,8 @@ def apply_plan(store, seg_id, seg_t, ops, menu, place_key=None, prompt_uuid=None
                     nodes[t].setdefault("trail", []).append(seg_id)
         elif do == "block":
             t = _target(o)
-            if t and record_verdict(store, nodes[t], "planner", "block", seg_t, why=o["why"], seg=seg_id):
+            _fb = file_block(store, nodes[t], "planner", o["why"], seg_t, seg=seg_id) if t else ("block", False)   # T334: a peer's
+            if _fb[1] and _fb[0] == "block":         #   block is a peer wait; an annotation, so no mt bump and no trail
                 nodes[t]["mt"] = seg_t; touched = t   # the event materialized the flags (blockWhy = why)
                 if seg_id and seg_id not in (nodes[t].get("trail") or []):
                     nodes[t].setdefault("trail", []).append(seg_id)   # same: the blocking segment is history
@@ -10592,6 +10606,27 @@ def _asks_user(nodes, nid):
     return False
 
 
+def _latch_prompt_msg_ids(session, store):
+    """Stamp promptMsgId on every parentless promptUuid-bearing top whose anchor atom the parse holds: the postal message
+    id its delivery text carries (em.postal_pairs, the first marker), or "" when it carries none (checked). The
+    delegating peer of a top is then the sender of THAT mail (_delegator_of), never merely the latest delegate the
+    session received (a worker dispatched by two managers relays each block to the manager that asked, T334)."""
+    cands = [nd for nd in store.get("nodes", {}).values()
+             if isinstance(nd, dict) and nd.get("parentId") is None and nd.get("promptUuid") and "promptMsgId" not in nd]
+    if not cands:
+        return 0
+    by_uuid = {a["uuid"]: a for turn in session.get("turns") or [] for a in turn.get("atoms") or [] if a.get("uuid")}
+    n = 0
+    for nd in cands:
+        a = by_uuid.get(nd["promptUuid"])
+        if a is None:
+            continue                                    # not in this parse: left for a parse that holds it
+        pairs = em.postal_pairs(_atom_text(a))
+        nd["promptMsgId"] = str(pairs[0][0]) if pairs else ""
+        n += 1
+    return n
+
+
 def _latch_skill_load_anchors(store, loads, now=None):
     """Stamp every parentless, promptUuid-bearing, origin-less top anchored on one of `loads` (T333, 2026-09-11:
     {record uuid: skill name} of the harness's own skill-load wrappers, the parse's own report of the records
@@ -11418,6 +11453,7 @@ def _plan_session(fsid, path, now):
         _group_store(store, fsid, now)
         save_goals(fsid, store)
     _note_checked(store, {a.get("uuid") for turn in session.get("turns") or [] for a in turn.get("atoms") or [] if a.get("uuid")})
+    _latch_prompt_msg_ids(session, store)             # T334: the mail a top's anchor names, for its delegating peer
     _latch_skill_load_anchors(store, session.get("skillLoads") or {}, now)   # the parse's own report of the wrappers its
     #                                                   emit skipped: a top the harness's skill load minted (T333)
     _latch_ask_anchors(fsid, session, store)          # durable ask-unit anchor verdicts — no LLM,
@@ -11472,6 +11508,17 @@ def run_plan(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbose=Fal
                                                                               len(_WRAP_INDEX), time.time() - _t0, _sw_tops, _sw_stores))
         except Exception as e:
             _log_judge_error("skill-load-sweep", "-", "the store-side skill-load pass raised: %r" % (e,))
+    if not _PEER_SWEEP["done"]:                       # T334: blocks already filed toward a peer become peer waits, once per boot
+        _PEER_SWEEP["done"] = True
+        try:
+            _pw_stores, _pw_nodes = restamp_peer_wait_blocks_all(now)
+            _rq = _requeue_relays_all()
+            if _rq:
+                sys.stderr.write("judge: %d relay marker(s) re-queued at boot\n" % _rq)
+            if _pw_nodes:
+                sys.stderr.write("judge: %d block(s) in %d store(s) addressed to a peer became peer waits\n" % (_pw_nodes, _pw_stores))
+        except Exception as e:
+            _log_judge_error("peer-wait-sweep", "-", "the store-side peer-wait pass raised: %r" % (e,))
     fleet = [s for s in discover(now) if not _hidden_from_feed(s[0])][:sessions_cap]   # muted sessions are out of task tracking
     for _gone in [f for f in _PLANNER_SEEN if f not in {s[0] for s in fleet}]:
         _PLANNER_SEEN.pop(_gone, None)                # the planner gate, bounded by the sessions this pass discovered
@@ -12630,6 +12677,284 @@ def _open_peer_asks(sid, since=0):
     return bool(_open_ask_peers(sid, since))
 
 
+# ── T334 (2026-09-11): a block addressed to a PEER is a peer wait, not the user's needs-you ──────────
+# CLAUDE.md: interrupt only when the human is the bottleneck; waiting on a peer, a build or another session is
+# not that. A worker session that ends its turn asking its manager (or any peer it has an open question to)
+# used to get the closer's or planner's BLOCK, which the feed shows as the user's needs-you card. The block's
+# ADDRESSEE is read from evidence, never from words alone: (a) the session's own open ask (a kind=question it
+# sent to a live peer with no record back since, the wait graph's and the peer-kind awaiting gate's one
+# source), (b) failing that, the peer that DELEGATED the goal the block sits under (the courier-planted top's
+# origin.peer: the team relation as recorded), and (c) words only to pick AMONG open asks (a peer's session
+# name in the block's text), never to invent a peer. A block in a managed session whose text names the user
+# explicitly still resolves to the delegating peer: the manager relays, and a worker's card reaches the user
+# only through the debt ladder's escalation event. The write is the existing awaiting/peer verdict in place
+# of the block (the chip "Awaiting <peer>" in Working, the auto-nudge already skipping peer waits, the peer's
+# reply the lift). Nothing resolves: the user, the block exactly as before.
+
+
+def _peer_name(sid):
+    """The session name NAMES records for `sid` ("" when none), or the name a cross-host key carries itself
+    ("peer:<host>:<name>" or "peer:<name>"): words pick among peers by this."""
+    key = str(sid)
+    if key.startswith("peer:"):
+        return key.rsplit(":", 1)[-1].strip()
+    try:
+        return (NAMES / key).read_text().split("\t", 1)[0].strip()
+    except Exception:
+        return ""
+
+
+_DELEG_CACHE = [None, {}]    # (mtime_ns, size), {to_sid: [(t, from_id), ...] ascending}: one scan per log change
+_DELEG_BY_MID = {}           # message id -> from_id of that delegate row (filled by the same scan)
+
+
+def _delegates_to():
+    """{recipient sid: [(t, from_id), ...] ascending} for every DELEGATE row in the postal log that reached its recipient
+    (a returned or withdrawn send, _learn_return, makes no entry): the team relation as the mail recorded it. The
+    courier's planted origin, when present, is derived from these rows; today's stores hold none, so this is the
+    primary record (T334). Cross-host rows key on the resolved to_sid like _postal_ask_maps."""
+    try:
+        st = MESSAGES.stat()
+        key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return {}
+    if _DELEG_CACHE[0] == key:
+        return _DELEG_CACHE[1]
+    out, rows, returned, by_mid = {}, [], {}, {}
+    try:
+        for line in MESSAGES.read_text(errors="replace").splitlines():
+            try:
+                o = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(o, dict):
+                rows.append(o)
+                _learn_return(returned, o)
+        for o in rows:
+            if o.get("kind") != "delegate" or o.get("ev") not in (None, "sent"):
+                continue
+            f, t_, ts = o.get("from_id"), o.get("to_sid") or o.get("to_id"), o.get("t")
+            if not (f and t_ and ts) or str(o.get("id") or "") in returned or str(t_).startswith("peer:"):
+                continue
+            out.setdefault(str(t_), []).append((int(ts), str(f)))
+            if o.get("id"):
+                by_mid[str(o["id"])] = str(f)
+        for v in out.values():
+            v.sort()
+    except OSError:
+        return {}
+    _DELEG_BY_MID.clear(); _DELEG_BY_MID.update(by_mid)
+    _DELEG_CACHE[0], _DELEG_CACHE[1] = key, out
+    return out
+
+
+def _delegate_sender(mid):
+    """The from_id of the DELEGATE row with message id `mid` (the mail a top's anchor record names), or None."""
+    _delegates_to()
+    return _DELEG_BY_MID.get(str(mid))
+
+
+def _delegator_of(store, nid):
+    """The peer that delegated the work `nid` sits under, or None when the goal is the user's own. Two records, the
+    courier's first: the top's planted origin.peer; else the sender of the latest DELEGATE mail this session received
+    at or before the top was minted (_delegates_to), provided the latch has POSITIVELY read the top's anchor as a
+    machine record (askAnchor "machine": the dispatch mail, never a prompt the user typed). An unlatched top, one
+    whose anchor is gone ("absent") or a scheduled prompt's top is left to the user (fail open to the block), whatever
+    mail the session got before. A top minted before any delegate reached the session predates the relation."""
+    nodes = store.get("nodes", {})
+    top = _top_of(nodes, nid) if nid in nodes else None
+    tn = nodes.get(top) or {}
+    o = tn.get("origin")
+    if isinstance(o, dict) and o.get("peer"):
+        return None if ":" in str(o["peer"]) else str(o["peer"])   # same rule for a planted ext: origin
+    if not top or tn.get("askAnchor") != "machine":
+        return None
+    sid = str(store.get("rompUuid") or str(nid).rsplit(":", 1)[0])
+    peer = _delegate_sender(tn["promptMsgId"]) if tn.get("promptMsgId") else None   # the mail the anchor names, first
+    if not peer and not tn.get("promptMsgId"):    # no mail id on the anchor: the latest delegate at or before the mint
+        before = [r for r in _delegates_to().get(sid, []) if r[0] <= int(tn.get("t") or 0)]
+        peer = before[-1][1] if before else None
+    return None if not peer or ":" in peer else peer   # an ext: mailer or an unresolved cross-host key is no session that
+                                                       #   could ever be asked (judge _presumed_closed: closed by construction)
+
+
+def block_addressee(store, nd, why):
+    """The peer a block on `nd` is addressed to, else None: block_addressee_via without the how."""
+    return block_addressee_via(store, nd, why)[0]
+
+
+def block_addressee_via(store, nd, why):
+    """(peer, via) for a block on `nd`: via "ask" when the session's own open question names the peer (an ending
+    exists: the reply), "delegator" when only the courier's origin does (no question was ever sent, so the kernel
+    RELAYS the block's why to that peer as a question on the worker's behalf, once per block: relayWanted below),
+    or (None, None) when the block is the user's (T334, the rule above). Only a node
+    under a DELEGATED goal (a courier-planted top) is ever redirected: a managed session's block is the case, and the
+    user's own session, however many open questions it has out, keeps its blocks as its own decisions (an unrelated
+    open ask must never hide the user's own call behind "Awaiting <peer>"). An empty why is never redirected."""
+    if not str(why or "").strip():
+        return None, None
+    if not _delegator_of(store, str(nd.get("id") or "")):
+        return None, None
+    ho = nd.get("handoff") if isinstance(nd.get("handoff"), dict) else None
+    if ho and ho.get("peer") and ":" not in str(ho["peer"]):
+        return str(ho["peer"]), "ask"                 # a block on a "delegated to <peer>" tracker under a delegated goal waits
+                                                       #   on that peer: the delegate is a reply-expecting send its report ends
+    sid = str(store.get("rompUuid") or str(nd.get("id") or "").rsplit(":", 1)[0])
+    nodes = store.get("nodes", {})
+    delegator = _delegator_of(store, str(nd.get("id") or ""))
+    top = _top_of(nodes, str(nd.get("id") or "")) if str(nd.get("id") or "") in nodes else None
+    since = int((nodes.get(top) or {}).get("t") or nd.get("t") or 0)   # an ask sent once the GOAL existed counts, even
+    peers = _open_ask_peers(sid, since=since)                          #   for a step minted after the worker asked
+    text = str(why or "").lower()
+    def named(p):
+        return bool(_peer_name(p)) and bool(re.search(r"\b%s\b" % re.escape(_peer_name(p).lower()), text))
+    if peers:
+        if delegator in peers and not any(named(p) for p in peers if p != delegator):
+            return delegator, "ask"                    # the open ask to the delegator IS the edge
+        hits = [p for p in peers if named(p)]
+        if len(hits) == 1:
+            return hits[0], "ask"                      # the words pick among the open asks
+        if delegator and not hits:
+            return delegator, "delegator"              # an open ask to a peer the block never names does not capture a
+                                                       #   block in the delegator's work: the delegator, relayed
+        _la, last_ask, _al = _postal_ask_maps()
+        return max(peers, key=lambda p: last_ask.get((sid, p), 0)), "ask"   # else the latest ask, the wait graph's rule
+    return delegator, "delegator"
+
+
+def file_block(store, nd, src, why, ev_t, t=None, seg=None):
+    """The one block writer for the judges (closer, planner): a block addressed to a peer (block_addressee) is
+    filed as the awaiting/peer stamp instead (an already-blocked node is unblocked by romp first, so the card
+    leaves Blocked), and only a block addressed to the user is filed as a block. Returns (kind, landed):
+    kind "peer" or "block"; landed True when a verdict was written."""
+    peer, via = block_addressee_via(store, nd, why)
+    if not peer:
+        return "block", bool(record_verdict(store, nd, src, "block", ev_t, why=why, seg=seg))
+    if any(e.get("kind") in ("awaiting", "done") and (e.get("lift") or e.get("kind") == "done")
+           and _wait_end_ev(e) > (ev_t or 0) for e in nd.get("log") or []):
+        return "peer", False                           # the wait this block describes already ENDED in the diary after
+                                                       #   this turn's evidence (the awaiting branch's own stand-down):
+                                                       #   a late closer neither re-stamps nor re-relays it
+    if nd.get("blocked") and next((e.get("src") for e in reversed(nd.get("log") or []) if e.get("kind") == "block"), None) \
+            not in ("closer", "planner"):
+        return "peer", False                           # the standing block is the ladder's escalation or an interrupt, romp's
+                                                       #   own once-ever record: a re-asserted judge block never lifts it
+    prior_standing = nd.get("awaitingKind") == "peer" and peer in (nd.get("awaitingPeers") or ())   # read BEFORE any write:
+    if not prior_standing:                            #   record_verdict materializes awaitingKind at once (the manager's
+        nd.pop("relayed", None)                       #   third review); a wait that ended takes its relay record with it
+    landed = False
+    if nd.get("blocked"):
+        landed = bool(record_verdict(store, nd, "romp", "unblock", ev_t)) or landed
+    if not prior_standing:
+        landed = bool(record_verdict(store, nd, src, "awaiting", t if t is not None else ev_t, why=why,
+                                     await_kind="peer", await_peers=[peer], seg=seg)) or landed
+    # a peer wait on the same peer already standing is not re-filed, whatever the re-asserted words: the stamp keeps
+    # its since-time, so the relay sent after it (and the peer's reply after that) end exactly this wait
+    if via == "delegator" and not prior_standing and not isinstance(nd.get("relayWanted"), dict):
+        nd["relayWanted"] = {"peer": peer, "why": str(why), "t": int(t if t is not None else ev_t)}   # the kernel's
+        _relay_enqueue(store, nd)                  #   relay tick sends it as the worker's question, once per block: a
+        landed = True                              #   re-asserted block on a standing relayed wait never relays twice
+    return "peer", landed
+
+
+_RELAY_PENDING = []          # (sid, nid) marked this pass, written to the queue only once the store is SAVED (save_goals)
+
+
+def _relay_queue_dir():
+    return STATE / "relay-queue"
+
+
+def _relay_entry_path(sid, nid):
+    return _relay_queue_dir() / ("%s__%s.json" % (str(sid), re.sub(r"[^A-Za-z0-9_.-]", "_", str(nid))))
+
+
+def _relay_enqueue(store, nd):
+    """Remember (sid, nid) for the kernel's relay tick. The queue is a DIRECTORY of one file per entry (append = create,
+    consume = unlink: two writers, the judge's thread and the kernel's tick, never rewrite each other's list), and the
+    entry is written only after the store carrying the marker is saved (_relay_flush from save_goals), so the tick
+    never reads a store that lacks the marker and drops the entry. A failed write is said; the boot pass re-queues
+    every marker without an entry (_requeue_relays_all)."""
+    sid = str(store.get("rompUuid") or str(nd.get("id") or "").rsplit(":", 1)[0])
+    _RELAY_PENDING.append((sid, str(nd.get("id") or "")))
+
+
+def _relay_write_entry(sid, nid):
+    try:
+        d = _relay_queue_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        tmp = d / (".tmp-%s-%d" % (re.sub(r"[^A-Za-z0-9_.-]", "_", nid), os.getpid()))
+        tmp.write_text(json.dumps({"sid": sid, "nid": nid, "t": int(time.time())}))
+        tmp.rename(_relay_entry_path(sid, nid))
+        return True
+    except OSError as e:
+        _log_judge_error("relay-queue", sid, "relay queue entry not written (%r)" % (e,))
+        return False
+
+
+def _relay_flush(fsid):
+    """Write the queue entries of the store just saved (save_goals calls this after its publish)."""
+    mine = [(s_, n_) for s_, n_ in _RELAY_PENDING if s_ == str(fsid)]
+    if not mine:
+        return 0
+    _RELAY_PENDING[:] = [e for e in _RELAY_PENDING if e[0] != str(fsid)]
+    return sum(1 for s_, n_ in mine if _relay_write_entry(s_, n_))
+
+
+def _requeue_relays_all():
+    """Once per boot: every node carrying relayWanted with no queue entry gets one (a marker whose entry was lost to a
+    failed write or a stale merge would otherwise wait forever). Returns the number re-queued."""
+    n = 0
+    for p in (sorted(GOALDIR.glob("*.json")) if GOALDIR.is_dir() else []):
+        try:
+            raw = json.loads(p.read_text())
+        except Exception:
+            continue
+        for nid, nd in ((raw or {}).get("nodes") or {}).items():
+            if isinstance(nd, dict) and isinstance(nd.get("relayWanted"), dict) and not _relay_entry_path(p.stem, nid).exists():
+                n += 1 if _relay_write_entry(p.stem, nid) else 0
+    return n
+
+
+_PEER_SWEEP = {"done": False}
+
+
+def restamp_peer_wait_blocks_all(now=None):
+    """Rows already filed before T334: once per boot, every store's nodes blocked by the closer or the planner
+    (the newest block row's src) whose block resolves to a peer today are converted the way file_block does
+    (romp's unblock, then the awaiting/peer stamp with the block's own why), rolled up and saved. Idempotent: a
+    converted node is no longer blocked. Returns (stores, nodes)."""
+    now = now or int(time.time())
+    stores = nodes_n = 0
+    for p in (sorted(GOALDIR.glob("*.json")) if GOALDIR.is_dir() else []):
+        try:
+            raw = json.loads(p.read_text())
+        except Exception:
+            continue
+        if not isinstance(raw, dict):
+            continue
+        hits = [nid for nid, nd in (raw.get("nodes") or {}).items()
+                if isinstance(nd, dict) and nd.get("blocked") and not nd.get("cleared")
+                and next((e.get("src") for e in reversed(nd.get("log") or []) if e.get("kind") == "block"), None)
+                in ("closer", "planner")]
+        if not hits:
+            continue
+        store = load_goals(p.stem)
+        n = 0
+        for nid in hits:
+            nd = store["nodes"].get(nid)
+            if not isinstance(nd, dict) or not nd.get("blocked"):
+                continue
+            if block_addressee(store, nd, nd.get("blockWhy")):
+                kind, landed = file_block(store, nd, "romp", nd.get("blockWhy"), now)
+                n += 1 if landed else 0
+        if n:
+            rollup_status(store, False)
+            save_goals(p.stem, store)
+            stores += 1
+            nodes_n += n
+    return stores, nodes_n
+
+
 def _parse_close(raw, menu_len):
     """Parse the closer's {"done":[{goal,why}], "block":[{goal,why}], "awaiting":[{goal,why,kind}]} reply
     into {"done": {1-based idx: doneWhy}, "block": {1-based idx: blockWhy}, "awaiting": {1-based idx:
@@ -13136,10 +13461,11 @@ def apply_close(store, menu, verdicts, t=None, touched=None, t_overrides=None, t
                 nd["mt"] = ev
             newly.append(nd["id"])
         elif i in block:
-            if not record_verdict(store, nd, "closer", "block", ev, why=block[i] or None):   # the user's follow-up postdates this turn's evidence —
-                continue                               # their reply owns the verdict now, not this stale close
-            if ev is not None:                        # (the event materialized the flags + blockWhy)
-                nd["mt"] = ev
+            kind, landed = file_block(store, nd, "closer", block[i] or None, ev, t)   # T334: a peer's block is a peer wait
+            if not landed:                            # the user's follow-up postdates this turn's evidence: their reply
+                continue                              #   owns the verdict now, not this stale close (or a same stamp)
+            if ev is not None and kind == "block":    # (the event materialized the flags + blockWhy; a peer wait is an
+                nd["mt"] = ev                         #   annotation and never bumps mt)
         elif i in awaiting:
             aw_why = (awaiting[i] or {}).get("why") or None
             aw_kind = (awaiting[i] or {}).get("kind")

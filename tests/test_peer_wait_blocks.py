@@ -1,0 +1,751 @@
+#!/usr/bin/env python3
+"""A block addressed to a PEER is a peer wait, not the user's needs-you (T334, the user 2026-09-10 via the
+philosophy in CLAUDE.md: waiting on a peer or another session is not the human being the bottleneck). Pinned
+here on synthetic stores, postal logs and names (placeholder uuids, the notes-api demo's session names):
+- the closer's and the planner's block on a node whose session has an open question to a live peer files the
+  awaiting/peer stamp naming that peer, in place of the block; with several open asks the block's words pick
+  among them, never invent one;
+- with no open ask, a block under a courier-planted goal is addressed to the peer that delegated it, even when
+  the text names the user (the manager relays); a standalone session's block stays the user's, exactly as before;
+- rows already filed convert once per boot; the manager debtor's escalation waits for its idle turn."""
+import contextlib
+import io
+import json
+import os
+import tempfile
+import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+from romp_load import load_source
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+BIN = os.path.join(os.path.dirname(HERE), "bin")
+os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
+os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
+os.environ.pop("ROMP_STATE_DIR", None)
+km = load_source("romp_kernel_peer_wait", os.path.join(BIN, "romp-kernel"))
+jd = km.jd
+
+NOW = 1781300000
+T0 = NOW - 3600
+WORKER = "11111111-2222-3333-4444-aaaaaaaaaaaa"     # the session whose block is judged
+MANAGER = "11111111-2222-3333-4444-bbbbbbbbbbbb"    # the peer that delegated its goal
+OTHER = "11111111-2222-3333-4444-cccccccccccc"      # another peer it asked something
+
+
+def mail(from_id, to_id, t, kind="question", mid=None):
+    return {"id": mid or "m-%s-%s-%d" % (from_id[-4:], to_id[-4:], t), "from_id": from_id, "to_id": to_id,
+            "from": "api", "to": "web", "t": t, "kind": kind}
+
+
+def node(nid, text, parent=None, t=T0, **kw):
+    d = {"id": nid, "text": text, "parentId": parent, "nodeComplete": False, "blocked": False, "cleared": False,
+         "trail": [], "t": t, "mt": t, "log": []}
+    d.update(kw)
+    return d
+
+
+class _Peer(unittest.TestCase):
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        td = Path(self.td.name)
+        self.saved = (jd.NAMES, jd.GOALDIR, jd.MESSAGES, jd.STATE, km.NAMES)
+        jd.NAMES = td / "names"; jd.NAMES.mkdir()
+        jd.GOALDIR = td / "goals"; jd.GOALDIR.mkdir()
+        jd.MESSAGES = td / "messages.jsonl"
+        jd.STATE = td
+        km.NAMES = jd.NAMES
+        for sid, name in ((WORKER, "api"), (MANAGER, "web"), (OTHER, "tests")):
+            (jd.NAMES / sid).write_text("%s\t/TESTDIR\t#abcdef\n" % name)
+        self.rows = []
+        self._write_mail()
+
+    def tearDown(self):
+        (jd.NAMES, jd.GOALDIR, jd.MESSAGES, jd.STATE, km.NAMES) = self.saved
+        jd._PEER_ASK_CACHE[0] = None
+        jd._DELEG_CACHE[0] = None
+        jd._RELAY_PENDING[:] = []
+        self.td.cleanup()
+
+    def _write_mail(self):
+        jd.MESSAGES.write_text("".join(json.dumps(r) + "\n" for r in self.rows))
+        jd._PEER_ASK_CACHE[0] = None
+        jd._DELEG_CACHE[0] = None
+
+    def ask(self, from_id, to_id, t, kind="question"):
+        self.rows.append(mail(from_id, to_id, t, kind))
+        self._write_mail()
+
+    def store(self, delegated=False, blocked=False):
+        top = WORKER + ":g1"; step = WORKER + ":g2"
+        kw = {"origin": {"peer": MANAGER, "goalId": MANAGER + ":g7", "msgId": "m-deleg"}} if delegated else {}
+        st = {"rompUuid": WORKER, "seq": 2, "placements": {}, "status": {top: "working"}, "confirming": [],
+              "nodes": {top: node(top, "Ship the exporter", **kw),
+                        step: node(step, "Ask which client to change", parent=top, t=T0 + 60)}}
+        if blocked:
+            st["nodes"][step]["blocked"] = True
+            st["nodes"][step]["blockWhy"] = "asked the manager which client"
+            st["nodes"][step]["log"] = [{"kind": "block", "src": "closer", "ev_t": T0 + 400, "why": "asked the manager which client"}]
+        return st, top, step
+
+
+class CloserBlocks(_Peer):
+    def _close(self, st, step, why):
+        menu = [st["nodes"][step]]
+        with contextlib.redirect_stderr(io.StringIO()):
+            jd.apply_close(st, menu, {"done": {}, "block": {1: why}, "awaiting": {}}, t=T0 + 400)
+        return st["nodes"][step]
+
+    def test_an_open_question_to_a_live_peer_makes_the_block_a_peer_wait(self):
+        st, top, step = self.store(delegated=True)
+        self.ask(WORKER, MANAGER, T0 + 300)
+        nd = self._close(st, step, "cannot move further without an answer")
+        self.assertFalse(nd["blocked"], "no needs-you")
+        self.assertEqual(nd.get("awaitingKind"), "peer")
+        self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER])
+        self.assertNotIn("relayWanted", nd, "the open ask to the delegator is the edge: nothing to relay")
+        rows = [e for e in nd["log"] if e.get("kind") in ("block", "awaiting")]
+        self.assertEqual([(e["kind"], e["src"]) for e in rows], [("awaiting", "closer")])
+
+    def test_an_unrelated_open_ask_does_not_capture_a_block_in_the_delegators_work(self):
+        # the worker asked another peer about ports; its block toward its manager names nobody: the manager, relayed
+        st, top, step = self.store(delegated=True)
+        self.ask(WORKER, OTHER, T0 + 300)
+        nd = self._close(st, step, "cannot move further without an answer")
+        self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER])
+        self.assertEqual(nd["relayWanted"]["peer"], MANAGER)
+        st2, top2, step2 = self.store(delegated=True)
+        self.ask(WORKER, OTHER, T0 + 300)
+        nd2 = self._close(st2, step2, "waiting on tests for the port")      # names the peer it asked: that peer
+        self.assertEqual(list(nd2.get("awaitingPeers") or ()), [OTHER])
+        self.assertNotIn("relayWanted", nd2)
+
+    def test_words_pick_among_several_open_asks_and_never_invent_a_peer(self):
+        st, top, step = self.store(delegated=True)
+        self.ask(WORKER, OTHER, T0 + 300)
+        self.ask(WORKER, MANAGER, T0 + 310)
+        nd = self._close(st, step, "waiting on tests to say which fixture")   # "tests" is OTHER's session name
+        self.assertEqual(list(nd.get("awaitingPeers") or ()), [OTHER])
+        st2, top2, step2 = self.store(delegated=True)
+        nd2 = self._close(st2, step2, "waiting on an answer")                  # no name: the latest ask
+        self.assertEqual(list(nd2.get("awaitingPeers") or ()), [MANAGER])
+        st3, top3, step3 = self.store(delegated=True)
+        nd3 = self._close(st3, step3, "the user or the contest judge must say")   # names nobody who asked: the latest
+        self.assertEqual(list(nd3.get("awaitingPeers") or ()), [MANAGER], "words never invent a peer")
+        st4, top4, step4 = self.store(delegated=True)
+        nd4 = self._close(st4, step4, "the apitests harness is red")            # "tests" inside a longer word: no match
+        self.assertEqual(list(nd4.get("awaitingPeers") or ()), [MANAGER])
+
+    def test_with_no_open_ask_a_delegated_goals_block_goes_to_the_peer_that_delegated_it(self):
+        st, top, step = self.store(delegated=True)
+        nd = self._close(st, step, "PR is green and cannot move further without you")
+        self.assertFalse(nd["blocked"])
+        self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER])
+        self.assertEqual(nd["relayWanted"], {"peer": MANAGER, "why": "PR is green and cannot move further without you", "t": T0 + 400},
+                         "no question was ever sent: the kernel relays it as the worker's own")
+        st2, top2, step2 = self.store(delegated=True)
+        self.ask(WORKER, MANAGER, T0 + 300)
+        nd2 = self._close(st2, step2, "cannot move further without an answer")
+        self.assertNotIn("relayWanted", nd2, "the open ask already is the edge: nothing to relay")
+
+    def test_a_block_naming_the_user_in_a_delegated_goal_still_goes_to_the_manager(self):
+        # the requirement: a worker's card never reaches the user except through the escalation event
+        st, top, step = self.store(delegated=True)
+        nd = self._close(st, step, "only the user can decide this; please relay the question to them")
+        self.assertFalse(nd["blocked"], "the manager relays")
+        self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER])
+
+    def test_a_standalone_sessions_block_is_the_users_exactly_as_before(self):
+        st, top, step = self.store()
+        nd = self._close(st, step, "which client should change?")
+        self.assertTrue(nd["blocked"])
+        self.assertIsNone(nd.get("awaitingKind"))
+        self.assertEqual([e["src"] for e in nd["log"] if e.get("kind") == "block"], ["closer"])
+
+    def test_the_users_own_session_keeps_its_block_whatever_questions_it_has_out(self):
+        # a standalone session with an unrelated open question: its decision must never hide behind "Awaiting <peer>"
+        st, top, step = self.store()
+        self.ask(WORKER, OTHER, T0 + 300)
+        nd = self._close(st, step, "need your call on breaking the v1 API")
+        self.assertTrue(nd["blocked"])
+        self.assertIsNone(nd.get("awaitingKind"))
+
+    def test_an_empty_why_is_never_redirected(self):
+        st, top, step = self.store(delegated=True)
+        self.ask(WORKER, OTHER, T0 + 300)
+        nd = self._close(st, step, "")
+        self.assertTrue(nd["blocked"], "a block with nothing to relay stays a block")
+
+    def test_the_ladders_own_escalation_block_is_never_lifted_by_a_re_asserted_judge_block(self):
+        st, top, step = self.store(delegated=True)
+        self.ask(WORKER, MANAGER, T0 + 300)
+        st["nodes"][top]["blocked"] = True
+        st["nodes"][top]["log"] = [{"kind": "block", "src": "nudge", "ev_t": T0 + 500, "why": "web has not answered"}]
+        menu = [st["nodes"][top]]
+        with contextlib.redirect_stderr(io.StringIO()):
+            jd.apply_close(st, menu, {"done": {}, "block": {1: "still waiting on the manager"}, "awaiting": {}}, t=T0 + 900)
+        self.assertTrue(st["nodes"][top]["blocked"], "the once-ever escalation stands")
+        self.assertEqual([e["kind"] for e in st["nodes"][top]["log"]], ["block"], "nothing filed over it")
+
+    def test_a_delegate_or_coordinate_row_is_no_open_ask(self):
+        st, top, step = self.store(delegated=True)
+        self.ask(WORKER, OTHER, T0 + 300, kind="coordinate")
+        self.ask(WORKER, OTHER, T0 + 301, kind="delegate")
+        nd = self._close(st, step, "which client should change?")
+        self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER], "a heads-up or a handoff asks nothing back: the delegator")
+
+    def test_an_answered_question_is_no_open_ask(self):
+        st, top, step = self.store(delegated=True)
+        self.ask(WORKER, OTHER, T0 + 300)
+        self.ask(OTHER, WORKER, T0 + 350, kind="coordinate")                    # any reply answers
+        nd = self._close(st, step, "which client should change?")
+        self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER], "the answered ask is gone; the delegator remains")
+
+    def test_a_re_asserted_block_on_an_already_blocked_node_unblocks_it_into_the_wait(self):
+        st, top, step = self.store(delegated=True, blocked=True)
+        nd = self._close(st, step, "still waiting on the manager")
+        self.assertFalse(nd["blocked"], "romp's unblock lifts the old block, the peer wait replaces it")
+        kinds = [(e["kind"], e["src"]) for e in nd["log"] if e.get("kind") in ("block", "unblock", "awaiting")]
+        self.assertEqual(kinds, [("block", "closer"), ("unblock", "romp"), ("awaiting", "closer")])
+
+    def test_the_delegate_mail_is_the_relation_when_the_courier_planted_nothing(self):
+        # today's stores hold no planted origin; the DELEGATE row the manager sent is the primary record. A top anchored
+        # on a machine record (the dispatch mail) minted after that delegate belongs to the relation; a top the user
+        # typed (askAnchor human) never does, whatever mail the session received; a top minted before any delegate
+        # predates it
+        self.ask(MANAGER, WORKER, T0 - 100, kind="delegate")
+        st, top, step = self.store()
+        st["nodes"][top]["askAnchor"] = "machine"
+        nd = self._close(st, step, "cannot move further without you")
+        self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER])
+        self.assertEqual(nd["relayWanted"]["peer"], MANAGER)
+        for anchor in ("human", None, "absent", "scheduled"):        # only the latch's positive machine verdict qualifies
+            st2, top2, step2 = self.store()
+            if anchor is None:
+                st2["nodes"][top2].pop("askAnchor", None)
+            else:
+                st2["nodes"][top2]["askAnchor"] = anchor
+            nd2 = self._close(st2, step2, "cannot move further without you")
+            self.assertTrue(nd2["blocked"], "anchor %r: the user's, fail open" % anchor)
+        st3, top3, step3 = self.store()
+        st3["nodes"][top3]["askAnchor"] = "machine"; st3["nodes"][top3]["t"] = T0 - 500
+        nd3 = self._close(st3, step3, "cannot move further without you")
+        self.assertTrue(nd3["blocked"], "minted before any delegate reached the session: not the relation")
+        self.assertTrue(km._delegated_to(MANAGER, WORKER), "the kernel reads the same record for the ladder")
+
+    def test_a_script_mailers_pseudo_sid_is_never_the_delegating_peer(self):
+        # a cron mailer delegates as ext:<label>: no session behind it could ever be asked, so the block stays the user's
+        self.ask("ext:morning", WORKER, T0 - 100, kind="delegate")
+        st, top, step = self.store()
+        st["nodes"][top]["askAnchor"] = "machine"
+        nd = self._close(st, step, "cannot move further without you")
+        self.assertTrue(nd["blocked"])
+        st2, top2, step2 = self.store(delegated=True)
+        st2["nodes"][top2]["origin"]["peer"] = "ext:morning"
+        nd2 = self._close(st2, step2, "cannot move further without you")
+        self.assertTrue(nd2["blocked"], "a planted ext: origin is no session either")
+
+    def test_a_block_on_a_handoff_tracker_waits_on_the_peer_it_was_handed_to(self):
+        # a manager blocked on its own "delegated to <worker>" tracker waits on that worker (the delegate edge the
+        # worker's report ends), never on whoever delegated to the manager
+        st, top, step = self.store(delegated=True)
+        st["nodes"][step]["handoff"] = {"peer": OTHER, "goalId": OTHER + ":g3"}
+        nd = self._close(st, step, "waiting on their report")
+        self.assertEqual(list(nd.get("awaitingPeers") or ()), [OTHER])
+        self.assertNotIn("relayWanted", nd, "the delegate already is the edge: nothing to relay")
+
+    def test_an_ask_sent_once_the_goal_existed_counts_for_a_step_minted_later(self):
+        # the worker asked its manager after the goal was minted but before this step: still the edge, no relay
+        st, top, step = self.store(delegated=True)
+        st["nodes"][step]["t"] = T0 + 500
+        self.ask(WORKER, MANAGER, T0 + 300)
+        nd = self._close(st, step, "cannot move further without an answer")
+        self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER])
+        self.assertNotIn("relayWanted", nd, "the earlier question is the edge: nothing to relay twice")
+
+    def test_a_late_closer_never_re_stamps_or_re_relays_a_wait_the_diary_already_ended(self):
+        st, top, step = self.store(delegated=True)
+        nd = self._close(st, step, "cannot move further without you")          # stamped and relay wanted, at T0 + 400
+        self.assertIn("relayWanted", nd)
+        del nd["relayWanted"]
+        jd.record_verdict(st, nd, "romp", "awaiting", T0 + 900, why="", lift=True, end_ev=T0 + 900)   # the reply lifted it
+        self.assertIsNone(nd.get("awaitingKind"))
+        menu = [nd]
+        with contextlib.redirect_stderr(io.StringIO()):
+            jd.apply_close(st, menu, {"done": {}, "block": {1: "still cannot move further without you"}, "awaiting": {}}, t=T0 + 400)
+        self.assertIsNone(nd.get("awaitingKind"), "a closer auditing the OLD turn stands down before the newer lift")
+        self.assertNotIn("relayWanted", nd)
+        self.assertFalse(nd.get("blocked"))
+
+    def test_the_planners_block_op_files_a_peer_wait_with_no_mt_bump_and_a_users_block_with_one(self):
+        st, top, step = self.store(delegated=True)
+        mt0, trail0 = st["nodes"][step]["mt"], list(st["nodes"][step]["trail"])
+        with contextlib.redirect_stderr(io.StringIO()):
+            jd.apply_plan(st, "seg-9", T0 + 900, [{"do": "block", "why": "needs the manager's call", "goal": 1}], [st["nodes"][step]])
+        nd = st["nodes"][step]
+        self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER])
+        self.assertFalse(nd["blocked"])
+        self.assertEqual((nd["mt"], nd["trail"]), (mt0, trail0), "an annotation: no mt bump, no trail entry")
+        st2, top2, step2 = self.store()                                          # standalone: the user's block, as before
+        with contextlib.redirect_stderr(io.StringIO()):
+            jd.apply_plan(st2, "seg-9", T0 + 900, [{"do": "block", "why": "needs your call", "goal": 1}], [st2["nodes"][step2]])
+        nd2 = st2["nodes"][step2]
+        self.assertTrue(nd2["blocked"])
+        self.assertEqual(nd2["mt"], T0 + 900)
+        self.assertIn("seg-9", nd2["trail"])
+
+    def test_the_planner_shares_the_one_block_writer(self):
+        import inspect
+        src = inspect.getsource(jd.apply_plan)
+        self.assertIn('file_block(store, nodes[t], "planner", o["why"], seg_t, seg=seg_id)', src)
+        st, top, step = self.store(delegated=True)
+        kind, landed = jd.file_block(st, st["nodes"][step], "planner", "needs the manager's call", T0 + 400)
+        self.assertEqual((kind, landed), ("peer", True))
+        self.assertEqual(list(st["nodes"][step]["awaitingPeers"] or ()), [MANAGER])
+
+
+class RowsAlreadyFiled(_Peer):
+    def test_the_boot_pass_converts_a_closer_block_addressed_to_a_peer_once(self):
+        st, top, step = self.store(delegated=True, blocked=True)
+        (jd.GOALDIR / (WORKER + ".json")).write_text(json.dumps(st))
+        self.assertEqual(jd.restamp_peer_wait_blocks_all(NOW), (1, 1))
+        got = json.loads((jd.GOALDIR / (WORKER + ".json")).read_text())["nodes"][step]
+        self.assertFalse(got["blocked"])
+        self.assertEqual(got.get("awaitingKind"), "peer")
+        self.assertEqual(list(got.get("awaitingPeers") or ()), [MANAGER])
+        self.assertEqual(jd.restamp_peer_wait_blocks_all(NOW + 1), (0, 0), "idempotent")
+
+    def test_the_boot_pass_leaves_a_users_block_and_a_nudge_block_alone(self):
+        st, top, step = self.store(blocked=True)                                # standalone: the user's
+        st["nodes"][top]["blocked"] = True
+        st["nodes"][top]["log"] = [{"kind": "block", "src": "nudge", "ev_t": T0 + 500}]
+        (jd.GOALDIR / (WORKER + ".json")).write_text(json.dumps(st))
+        self.assertEqual(jd.restamp_peer_wait_blocks_all(NOW), (0, 0))
+        got = json.loads((jd.GOALDIR / (WORKER + ".json")).read_text())["nodes"]
+        self.assertTrue(got[step]["blocked"] and got[top]["blocked"])
+
+
+class RelayEndToEnd(_Peer):
+    """A worker's closer block under a delegated goal with no open ask: one relayed question in the manager's inbox,
+    the manager's reply lifts the wait, and a re-asserted block never relays twice."""
+
+    def setUp(self):
+        super().setUp()
+        self._orig_send = km._bus_send_relay
+        self.sent = []
+        self.inbox = jd.STATE / "postal" / "mail" / MANAGER / "new"
+        self.inbox.mkdir(parents=True)
+        test = self
+
+        def fake_bus(payload):                       # the bus's own outcome: the maildir file and the log row
+            test.sent.append(payload)
+            mid = "relay-%d" % len(test.sent)
+            (test.inbox / mid).write_text("X-Relayed: romp\n\n" + payload["body"])
+            test.rows.append({"id": mid, "from_id": payload["from_id"], "to_id": payload["to"], "from": payload["from"],
+                              "t": NOW, "kind": payload["kind"], "relayed": True})
+            test._write_mail()
+            return True, "", False, {"ok": True, "id": mid}
+        km._bus_send_relay = fake_bus
+
+    def tearDown(self):
+        km._bus_send_relay = self._orig_send
+        km._RELAY_SAID.clear()
+        km._RELAY_BAD["n"] = 0
+        super().tearDown()
+
+    def _save(self, st):
+        jd.save_goals(WORKER, st)                   # the real path: the entry is written once the store is published
+
+    def _queue(self):
+        d = jd._relay_queue_dir()
+        return sorted(f.name for f in d.glob("*.json")) if d.is_dir() else []
+
+    def _close(self, st, step, why, t):
+        with contextlib.redirect_stderr(io.StringIO()):
+            jd.apply_close(st, [st["nodes"][step]], {"done": {}, "block": {1: why}, "awaiting": {}}, t=t)
+
+    def test_the_relay_creates_the_edge_the_reply_lifts_and_a_re_asserted_block_never_relays_twice(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "PR is green and cannot move further without you", T0 + 400)
+        self.assertEqual(self._queue(), [], "nothing queued before the store is saved")
+        self._save(st)
+        self.assertEqual(len(self._queue()), 1, "the judge queued the node once its store was published")
+        self.assertEqual(km._relay_tick(NOW), 1)
+        self.assertEqual(self._queue(), [], "consumed")
+        self.assertEqual(self.sent, [{"to": MANAGER, "from": "api", "from_id": WORKER, "kind": "question", "relayed": True,
+                                      "body": "api cannot move further: PR is green and cannot move further without you"}],
+                         "the worker's own words with a plain lead-in, as the worker, marked relayed")
+        self.assertEqual(len(list(self.inbox.iterdir())), 1, "one question in the manager's inbox")
+        nd = jd.load_goals(WORKER)["nodes"][step]
+        self.assertNotIn("relayWanted", nd)
+        self.assertEqual(nd["relayed"]["peer"], MANAGER)
+        self.assertEqual(jd._open_ask_peers(WORKER), [MANAGER], "the edge every ending keys on now exists")
+        self.assertEqual(km._relay_tick(NOW + 1), 0, "once")
+        # the closer re-asserts the block on the standing wait: no second relay
+        st2 = jd.load_goals(WORKER)
+        self._close(st2, step, "still cannot move further without you", NOW + 5)
+        self.assertNotIn("relayWanted", st2["nodes"][step])
+        self.assertEqual(list(st2["nodes"][step]["awaitingPeers"]), [MANAGER])
+        # the manager replies: the pair-aware supersede lifts the wait (the stamp's WRITE time is the wall clock, so
+        # the reply must postdate it: a reply the gate had already weighed never supersedes)
+        import time as _time
+        self.rows.append(mail(MANAGER, WORKER, int(_time.time()) + 60, kind="coordinate"))
+        self._write_mail()
+        self.assertTrue(km._peer_stamp_superseded(st2["nodes"][step], km._peer_answered(WORKER)), "the reply ends the wait")
+        self.assertEqual(jd._open_ask_peers(WORKER), [], "answered: no open ask")
+
+    def test_a_transient_failure_keeps_the_entry_and_is_said_once(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        self._save(st)
+        km._bus_send_relay = lambda payload: (False, "ConnectionRefusedError", False, {})
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(km._relay_tick(NOW), 0)
+            self.assertEqual(km._relay_tick(NOW + 1), 0)
+        self.assertEqual(err.getvalue().count("retried next tick"), 1, "said once")
+        self.assertIn("relayWanted", jd.load_goals(WORKER)["nodes"][step], "the marker stands for the next tick")
+        self.assertEqual(len(self._queue()), 1, "the entry stays queued")
+
+    def test_a_definitive_refusal_reverts_to_the_users_block(self):
+        # the delegating peer is dead or not a session: nobody can be asked, so the block is the user's after all
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        self._save(st)
+        km._bus_send_relay = lambda payload: (False, "bus /send 404: no live session answers to that id", True, {})
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(km._relay_tick(NOW), 0)
+        nd = jd.load_goals(WORKER)["nodes"][step]
+        self.assertTrue(nd["blocked"], "the needs-you is back")
+        self.assertIn("cannot move further without you", nd["blockWhy"])
+        self.assertIn("relay to web was refused", nd["blockWhy"])
+        self.assertNotIn("relayWanted", nd)
+        self.assertEqual(nd["mt"], NOW, "bumped like every other block writer")
+        self.assertEqual(nd["relayDone"]["outcome"], "refused", "the removal is a record the merge honours")
+        self.assertEqual(self._queue(), [])
+
+    def test_a_wait_that_ended_before_the_tick_is_never_relayed(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        jd.record_verdict(st, st["nodes"][step], "romp", "done", T0 + 500)         # resolved before the tick ran
+        self._save(st)
+        self.assertEqual(km._relay_tick(NOW), 0)
+        self.assertEqual(self.sent, [], "nothing sent")
+        nd = jd.load_goals(WORKER)["nodes"][step]
+        self.assertNotIn("relayWanted", nd, "the marker stood down")
+        self.assertEqual(nd["relayDone"]["outcome"], "stood-down")
+
+
+class RelayEdges(RelayEndToEnd):
+    """The manager's third review: the guard reads the state before the write, two writers never lose an entry, an
+    unsaved marker keeps its entry, a parked relay is pending until it lands or comes back, malformed entries drop alone."""
+
+    def test_a_block_after_the_lift_relays_again(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        self._save(st)
+        self.assertEqual(km._relay_tick(NOW), 1)
+        st = jd.load_goals(WORKER)
+        self.rows.append(mail(MANAGER, WORKER, NOW + 5, kind="coordinate"))    # the manager answers the relayed question...
+        self._write_mail()
+        jd.record_verdict(st, st["nodes"][step], "romp", "awaiting", NOW + 5, why="", lift=True, end_ev=NOW + 5)   # ...and the wait lifts
+        self.assertIsNone(st["nodes"][step].get("awaitingKind"))
+        self._close(st, step, "now stuck on the second question", NOW + 60)   # a NEW block on the same node
+        self.assertEqual(st["nodes"][step]["relayWanted"]["why"], "now stuck on the second question", "a second relay")
+        self.assertNotIn("relayed", st["nodes"][step], "the ended wait took its relay record with it")
+
+    def test_an_entry_whose_marker_is_not_saved_yet_is_kept_not_dropped(self):
+        st, top, step = self.store(delegated=True)
+        self._save(st)                                     # the store on disk carries no marker...
+        jd._relay_write_entry(WORKER, step)                # ...but an entry exists (the save carrying it has not landed)
+        self.assertEqual(km._relay_tick(NOW), 0)
+        self.assertEqual(len(self._queue()), 1, "kept for the save to land, never dropped")
+        st2, top2, step2 = self.store(delegated=True)
+        st2["nodes"][step2]["relayed"] = {"peer": MANAGER, "why": "x", "t": NOW}
+        self._save(st2)
+        self.assertEqual(km._relay_tick(NOW), 0)
+        self.assertEqual(self._queue(), [], "a settled node's entry is spent")
+
+    def test_two_writers_never_lose_an_entry(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        self._save(st)
+        other = WORKER + ":g9"
+        st["nodes"][other] = node(other, "Another question", parent=top, t=T0 + 700, relayWanted={"peer": MANAGER, "why": "q", "t": T0 + 700})
+        self._save(st)
+        real = km._bus_send_relay
+        def slow_bus(payload):                            # the judge appends an entry WHILE the tick is mid-send
+            jd._relay_write_entry(WORKER, other)
+            return real(payload)
+        km._bus_send_relay = slow_bus
+        self.assertGreaterEqual(km._relay_tick(NOW), 1)
+        self.assertIn(jd._relay_entry_path(WORKER, other).name, self._queue(),
+                      "the entry appended mid-tick survives for the next tick: two writers never rewrite one list")
+
+    def test_a_parked_relay_is_pending_until_it_lands_or_comes_back(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        self._save(st)
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "relay-far-1", "parked": "TESTHOST"})
+        self.assertEqual(km._relay_tick(NOW), 0, "parked is not sent")
+        nd = jd.load_goals(WORKER)["nodes"][step]
+        self.assertEqual(nd["relayWanted"]["parkedMid"], "relay-far-1")
+        self.assertEqual(len(self._queue()), 1, "pending")
+        self.rows.append({"id": "relay-far-1", "ev": "bounced", "t": NOW + 30, "to_id": MANAGER, "from_id": WORKER})
+        self._write_mail()
+        self.assertEqual(km._relay_tick(NOW + 60), 0)
+        nd = jd.load_goals(WORKER)["nodes"][step]
+        self.assertTrue(nd["blocked"], "the bounce is the definitive refusal: the user's block")
+        self.assertEqual(self._queue(), [])
+
+    def test_a_parked_relay_the_peer_answers_completes(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        self._save(st)
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "relay-far-2", "parked": "TESTHOST"})
+        self.assertEqual(km._relay_tick(NOW), 0)
+        self.rows.append(mail(MANAGER, WORKER, NOW + 40, kind="coordinate"))
+        self._write_mail()
+        self.assertEqual(km._relay_tick(NOW + 60), 1, "the peer answered: the relay stands as sent")
+        nd = jd.load_goals(WORKER)["nodes"][step]
+        self.assertEqual(nd["relayed"]["mid"], "relay-far-2")
+        self.assertEqual(self._queue(), [])
+
+    def test_a_malformed_entry_drops_alone(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        self._save(st)
+        (jd._relay_queue_dir() / "garbage.json").write_text("{not json")
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(km._relay_tick(NOW), 1, "the good entry was relayed")
+        self.assertEqual(self._queue(), [])
+        self.assertEqual(km._RELAY_BAD["n"], 1)
+
+    def test_the_boot_pass_requeues_an_orphaned_marker(self):
+        st, top, step = self.store(delegated=True)
+        st["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "q", "t": T0 + 400}
+        (jd.GOALDIR / (WORKER + ".json")).write_text(json.dumps(st))   # a marker on disk with no entry
+        self.assertEqual(self._queue(), [])
+        self.assertEqual(jd._requeue_relays_all(), 1)
+        self.assertEqual(len(self._queue()), 1)
+        self.assertEqual(jd._requeue_relays_all(), 0, "idempotent")
+
+
+class TwoDelegators(_Peer):
+    def test_a_top_is_attributed_to_the_mail_its_anchor_names(self):
+        # two managers dispatched this worker; each goal's block goes to the manager whose mail anchored it
+        self.rows.append(mail(MANAGER, WORKER, T0 - 200, kind="delegate", mid="m-web-1"))
+        self.rows.append(mail(OTHER, WORKER, T0 - 100, kind="delegate", mid="m-tests-1"))
+        self._write_mail()
+        st, top, step = self.store()
+        st["nodes"][top]["askAnchor"] = "machine"; st["nodes"][top]["promptMsgId"] = "m-web-1"
+        nd = self._close_block(st, step, "cannot move further without you")
+        self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER], "web's mail anchored it, though tests wrote later")
+        st2, top2, step2 = self.store()
+        st2["nodes"][top2]["askAnchor"] = "machine"; st2["nodes"][top2]["promptMsgId"] = ""
+        nd2 = self._close_block(st2, step2, "cannot move further without you")
+        self.assertEqual(list(nd2.get("awaitingPeers") or ()), [OTHER], "no mail id on the anchor: the latest delegate")
+
+    def test_the_planner_pass_latches_the_anchors_mail_id_from_the_parse(self):
+        st, top, step = self.store()
+        session = {"turns": [{"atoms": [{"uuid": "u1", "type": "user", "message": {"role": "user", "content": [{"type": "text",
+                   "text": "Ship the exporter\n<!-- romp-msg-id: m-web-1 -->\n<!-- romp-msg-kind: delegate -->"}]}}]}]}
+        st["nodes"][top]["promptUuid"] = "u1"
+        self.assertEqual(jd._latch_prompt_msg_ids(session, st), 1)
+        self.assertEqual(st["nodes"][top]["promptMsgId"], "m-web-1")
+        self.assertEqual(jd._latch_prompt_msg_ids(session, st), 0, "latched once")
+
+    def _close_block(self, st, step, why):
+        with contextlib.redirect_stderr(io.StringIO()):
+            jd.apply_close(st, [st["nodes"][step]], {"done": {}, "block": {1: why}, "awaiting": {}}, t=T0 + 400)
+        return st["nodes"][step]
+
+
+class MoreRules(_Peer):
+    def _close_block(self, st, step, why, t=T0 + 400):
+        with contextlib.redirect_stderr(io.StringIO()):
+            jd.apply_close(st, [st["nodes"][step]], {"done": {}, "block": {1: why}, "awaiting": {}}, t=t)
+        return st["nodes"][step]
+
+    def test_a_tracker_in_the_users_own_session_keeps_its_block(self):
+        st, top, step = self.store()                                          # no delegation: the user's own session
+        st["nodes"][step]["handoff"] = {"peer": OTHER, "goalId": OTHER + ":g3"}
+        nd = self._close_block(st, step, "need your call before I hand more over")
+        self.assertTrue(nd["blocked"], "a decision only the user can make")
+
+    def test_one_stamp_per_standing_wait_whatever_the_words(self):
+        st, top, step = self.store(delegated=True)
+        self.ask(WORKER, MANAGER, T0 + 300)
+        nd = self._close_block(st, step, "cannot move further without an answer")
+        nd = self._close_block(st, step, "still waiting, now on the second point too", T0 + 900)
+        rows = [e for e in nd["log"] if e.get("kind") == "awaiting"]
+        self.assertEqual(len(rows), 1, "the standing wait keeps its since-time; no second stamp")
+        self.assertEqual(nd["awaitingWhy"], "cannot move further without an answer")
+
+    def test_a_cross_host_open_ask_is_a_peer_wait_with_no_relay(self):
+        st, top, step = self.store(delegated=True)
+        self.rows.append({"id": "m-x", "from_id": WORKER, "to_id": "peer:TESTHOST", "toName": "far", "from": "api", "t": T0 + 300, "kind": "question"})
+        self._write_mail()
+        nd = self._close_block(st, step, "waiting on far")
+        self.assertEqual(len(nd.get("awaitingPeers") or ()), 1)
+        self.assertTrue(str(nd["awaitingPeers"][0]).startswith("peer:"), "the wait maps' own key for an unresolved far recipient")
+        self.assertNotIn("relayWanted", nd, "the ask exists: nothing to relay")
+
+    def test_a_host_qualified_sender_is_never_the_delegating_peer(self):
+        self.ask("TESTHOST:" + OTHER, WORKER, T0 - 100, kind="delegate")
+        st, top, step = self.store()
+        st["nodes"][top]["askAnchor"] = "machine"
+        nd = self._close_block(st, step, "cannot move further without you")
+        self.assertTrue(nd["blocked"])
+
+    def test_an_interrupt_block_is_never_lifted_into_a_wait(self):
+        st, top, step = self.store(delegated=True)
+        self.ask(WORKER, MANAGER, T0 + 300)
+        st["nodes"][step]["blocked"] = True
+        st["nodes"][step]["log"] = [{"kind": "block", "src": "interrupt", "ev_t": T0 + 350, "why": "stopped by the user"}]
+        nd = self._close_block(st, step, "still waiting on the manager")
+        self.assertTrue(nd["blocked"], "the interrupt stands")
+        self.assertEqual([e["kind"] for e in nd["log"]], ["block"])
+
+    def test_the_planners_block_row_carries_its_segment(self):
+        st, top, step = self.store()
+        with contextlib.redirect_stderr(io.StringIO()):
+            jd.apply_plan(st, "seg-7", T0 + 900, [{"do": "block", "why": "needs your call", "goal": 1}], [st["nodes"][step]])
+        row = [e for e in st["nodes"][step]["log"] if e.get("kind") == "block"][0]
+        self.assertEqual(row.get("seg"), "seg-7")
+
+
+class SendRouteRelayed(unittest.TestCase):
+    """The bus's /send carries relayed into deliver: the maildir header, the row and the inbox read all say so."""
+
+    def test_the_send_route_relays_end_to_end(self):
+        ps = load_source("romp_postal_service_pw_route", os.path.join(os.path.dirname(HERE), "postal", "postal_service.py"))
+        live = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False); json.dump([{"id": MANAGER, "name": "web"}], live); live.close()
+        prior = os.environ.get("ROMP_SESSIONS_FILE"); os.environ["ROMP_SESSIONS_FILE"] = live.name
+        try:
+            h = object.__new__(ps.Handler)
+            raw = json.dumps({"to": MANAGER, "from": "api", "from_id": WORKER, "kind": "question", "relayed": True,
+                              "body": "api cannot move further: which client?"}).encode()
+            h.path = "/send"; h.headers = {"Content-Length": str(len(raw)), "X-Romp-Token": ps.SERVE_TOKEN}; h.rfile = io.BytesIO(raw)
+            out = []; h._send = lambda obj, code=200: out.append((obj, code))
+            h.do_POST()
+        finally:
+            if prior is None: os.environ.pop("ROMP_SESSIONS_FILE", None)
+            else: os.environ["ROMP_SESSIONS_FILE"] = prior
+            os.unlink(live.name)
+        obj, code = out[0]
+        self.assertEqual(code, 200, obj)
+        got = [m for m in ps.read_box(MANAGER, False) if m.get("from_id") == WORKER]
+        self.assertTrue(got and got[-1].get("relayed"), "the recipient's inbox read carries the mark")
+        rows = [json.loads(l) for l in (ps.TLDIR / "messages.jsonl").read_text().splitlines()]
+        self.assertTrue(any(r.get("relayed") and r.get("from_id") == WORKER and r.get("kind") == "question" for r in rows))
+
+
+class MergeCarriesTheRelay(_Peer):
+    """Two writers touch the relay keys (the judge marks relayWanted, the kernel's tick replaces it with relayed): the
+    store merge on save carries the newer fact, so a stale copy never resurrects a relay or loses its record."""
+
+    def test_a_stale_judge_copy_does_not_resurrect_a_relay_the_kernel_sent(self):
+        st, top, step = self.store(delegated=True)
+        mem = json.loads(json.dumps(st)); disk = json.loads(json.dumps(st))
+        mem["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "cannot move further", "t": T0 + 400}
+        disk["nodes"][step]["relayed"] = {"peer": MANAGER, "why": "cannot move further", "t": NOW}
+        (jd.GOALDIR / (WORKER + ".json")).write_text(json.dumps(disk))
+        jd._rebase_onto_disk(WORKER, mem)
+        self.assertEqual(mem["nodes"][step]["relayed"]["peer"], MANAGER)
+        self.assertNotIn("relayWanted", mem["nodes"][step])
+
+    def test_a_stale_kernel_copy_keeps_a_relay_the_judge_just_asked_for(self):
+        st, top, step = self.store(delegated=True)
+        mem = json.loads(json.dumps(st)); disk = json.loads(json.dumps(st))
+        disk["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "cannot move further", "t": T0 + 400}
+        (jd.GOALDIR / (WORKER + ".json")).write_text(json.dumps(disk))
+        jd._rebase_onto_disk(WORKER, mem)
+        self.assertEqual(mem["nodes"][step]["relayWanted"]["peer"], MANAGER)
+
+    def test_a_removal_the_kernel_recorded_is_never_resurrected(self):
+        st, top, step = self.store(delegated=True)
+        mem = json.loads(json.dumps(st)); disk = json.loads(json.dumps(st))
+        mem["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "q", "t": T0 + 400}
+        disk["nodes"][step]["relayDone"] = {"peer": MANAGER, "why": "q", "t": NOW, "outcome": "stood-down"}
+        (jd.GOALDIR / (WORKER + ".json")).write_text(json.dumps(disk))
+        jd._rebase_onto_disk(WORKER, mem)
+        self.assertNotIn("relayWanted", mem["nodes"][step], "the stand-down stands")
+        self.assertEqual(mem["nodes"][step]["relayDone"]["outcome"], "stood-down")
+
+
+class PostalRelayedFlag(unittest.TestCase):
+    """The postal deliver and its row carry the relayed mark, so the recipient and the courier can tell a relayed
+    question from a typed ask."""
+
+    def test_deliver_marks_a_relayed_question_in_the_header_and_the_row(self):
+        ps = load_source("romp_postal_service_pw", os.path.join(os.path.dirname(HERE), "postal", "postal_service.py"))
+        mid = ps.deliver(MANAGER, "api", WORKER, "api cannot move further: which client?", kind="question", relayed=True)
+        text = (ps._mailbox(MANAGER) / "new" / mid).read_text()
+        self.assertIn("X-Relayed: romp\n", text)
+        self.assertIn("X-Kind: question\n", text)
+        rows = [json.loads(l) for l in (ps.TLDIR / "messages.jsonl").read_text().splitlines()]
+        row = next(r for r in rows if r.get("id") == mid)
+        self.assertEqual((row.get("relayed"), row.get("kind"), row.get("from_id"), row.get("to_id")), (True, "question", WORKER, MANAGER))
+        got = [m for m in ps.read_box(MANAGER, False) if m.get("from_id") == WORKER]
+        self.assertTrue(got and all(m.get("relayed") for m in got), "the inbox read carries the mark to the recipient")
+        plain = ps.deliver(MANAGER, "api", WORKER, "a typed question", kind="question")
+        self.assertNotIn("X-Relayed", (ps._mailbox(MANAGER) / "new" / plain).read_text())
+        rows = [json.loads(l) for l in (ps.TLDIR / "messages.jsonl").read_text().splitlines()]
+        self.assertNotIn("relayed", next(r for r in rows if r.get("id") == plain))
+
+
+class ManagerEscalation(_Peer):
+    """The debt ladder's escalation for a MANAGER debtor waits until nothing is queued for it: the nudge walk already
+    runs the outcomes only for an idle debtor, and the one queue its gates miss is delivered mail the manager has not
+    read, so with worker mail waiting the record stands. A peer that is not the asker's manager keeps the ladder."""
+
+    def setUp(self):
+        super().setUp()
+        self._orig = {n: getattr(km, n) for n in ("_mark_views_dirty",)}
+        self.inbox = jd.STATE / "postal" / "mail" / MANAGER / "new"
+        self.inbox.mkdir(parents=True)
+        km._autonudge_cache.clear()
+        self.asker, self.debtor, self.ts, self.fire = WORKER, MANAGER, T0 + 300, T0 + 600
+        self.ask(self.asker, self.debtor, self.ts)                                     # the unanswered ask
+        st, top, step = self.store(delegated=True)                                     # the manager delegated the goal
+        (jd.GOALDIR / (self.asker + ".json")).write_text(json.dumps(st))
+        (jd.STATE / "auto-nudge.json").write_text(json.dumps(
+            {"enabled": True, "nudged": {}, "debtNudged": {"%s>%s:%d" % (self.asker, self.debtor, self.ts): self.fire}}))
+        km._autonudge_cache.clear()
+        km._mark_views_dirty = lambda *a, **k: None
+
+    def tearDown(self):
+        for n, v in self._orig.items():
+            setattr(km, n, v)
+        km._autonudge_cache.clear()
+        super().tearDown()
+
+    def _outcomes(self, unread):
+        for f in self.inbox.iterdir():
+            f.unlink()
+        for i in range(unread):
+            (self.inbox / ("m%d" % i)).write_text("{}")
+        with contextlib.redirect_stderr(io.StringIO()):
+            km._debt_reminder_outcomes(self.debtor, {"id": "t9", "t": self.fire + 100, "end": self.fire + 160, "ended": True}, NOW)
+        keys = list((km._auto_nudge_data().get("debtNudged") or {}).keys())
+        top = json.loads((jd.GOALDIR / (self.asker + ".json")).read_text())["nodes"][self.asker + ":g1"]
+        return keys, top.get("blocked", False)
+
+    def test_a_manager_with_unread_mail_is_not_yet_failing_to_answer(self):
+        keys, blocked = self._outcomes(unread=3)
+        self.assertEqual(len(keys), 1, "the record stands: mail waits for the manager")
+        self.assertFalse(blocked)
+
+    def test_an_idle_managers_turn_ending_without_an_answer_escalates(self):
+        keys, blocked = self._outcomes(unread=0)
+        self.assertEqual(keys, [], "the record retires on the event")
+        self.assertTrue(blocked, "the asker's card reaches the user, through the ladder alone")
+
+    def test_a_peer_that_is_not_the_managers_keeps_the_ladder_as_it_was(self):
+        st, top, step = self.store()                                                   # no delegation from the debtor
+        (jd.GOALDIR / (self.asker + ".json")).write_text(json.dumps(st))
+        (jd.STATE / "postal" / "mail" / OTHER / "new").mkdir(parents=True)
+        keys, blocked = self._outcomes(unread=3)
+        self.assertEqual(keys, [], "an ordinary peer with mail waiting that moved on still escalates")
+        self.assertTrue(blocked)

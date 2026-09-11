@@ -194,6 +194,48 @@ turn. Its diary events carry src `closer`, so planner and closer verdicts
 stay distinguishable, and both defer to the user floor: a verdict computed
 from evidence at or before your last reply loses.
 
+A block addressed to a peer is a peer wait, not your needs-you (the user
+2026-09-10, via the philosophy: waiting on a peer or another session is not
+you being the bottleneck). Both judges file blocks through one writer that
+reads the addressee from evidence, never from words alone: the session's own
+open question to a live peer (the wait graph's source), failing that the peer
+that delegated the work the block sits under (the courier-planted top's
+origin when present; else the sender of the delegate mail the session received
+before the goal was minted, the primary record, and only for a top the latch
+has read as a machine record: a goal you typed keeps its blocks, and a script
+mailer's pseudo-sid is never a peer), and words only to pick among
+several open asks; a block on a
+"delegated to <peer>" tracker waits on that peer, whose report ends the
+delegate edge. A block in a
+delegated goal whose text names you still goes to the delegating manager, who
+relays; a worker's card reaches you only through the debt ladder's escalation
+event. The write is the existing awaiting-a-peer stamp in place of the block
+(the "Awaiting <peer>" chip in Working, the auto-nudge skipping it, the peer's
+reply the lift); an already-blocked node is unblocked by romp first. When the
+worker never mailed that peer, nothing could end the wait, so the kernel RELAYS
+it: the block's why goes to the delegating peer as the worker's own question
+(kind question, from the worker, "<worker> cannot move further: <why>", marked
+relayed in the row, the header and the inbox's bookkeeping comment), once per
+block off a marker the judge
+leaves on the node and an entry the judge writes to a queue directory once the
+store is saved (one file per entry, so the two writers never rewrite each
+other's list), so the reply lifts the stamp and the reminder ladder covers it;
+a wait that ended before the tick is never relayed, a far-host relay stays
+pending until it lands or comes back, and a refusal the bus cannot retry (no
+live recipient, a bounced parked message) reverts the node to your block with
+the refusal in its why, since nobody can be asked. A block filed again after
+the peer's reply ended the wait relays again; a block re-asserted on a
+standing wait never does. A top is attributed to the delegate mail its anchor
+names, so a worker two managers dispatched relays each block to the manager
+that asked.
+An open question to a peer the block never names does not capture a block in
+the delegator's work: that block goes to the delegator, relayed. Rows filed before the rule convert once per boot. The debt ladder judges a debtor's
+reminder only at an idle turn end (the nudge walk's own gates); for a manager
+debtor the record also stands while delivered mail waits unread in its inbox,
+so a manager with worker mail queued is not yet failing to answer. Any other
+peer keeps the ladder as it was, and the dead-man backstop still applies. A block nothing
+resolves to a peer stays yours, exactly as before.
+
 **unblocker.** The stale-block backstop; it exists because answers arrive
 in passing and work overtakes asks. A goal blocked on a question is only
 ever unblocked by work filed on that exact node, but the answer usually
