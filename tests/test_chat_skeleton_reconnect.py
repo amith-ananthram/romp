@@ -351,10 +351,14 @@ class SkeletonReconnect(unittest.TestCase):
     # ── item 9 ──
     def test_09_the_handshake_records_the_flag_and_wakes_the_pusher(self):
         # the third dial is a later chat column's FIRST (the split, 2026-09-11): skeleton=1 arms `reconnect` like a redial
-        # AND `skeletonOnReady`, the flag the ready arm's reset spares (test_11_a runs the cycle)
-        for path, expect, view in (("/ws?app=chat&delta=1&iid=page-9&active=%s&reconnect=1" % S1, True, False),
-                                   ("/ws?app=chat&delta=1&iid=page-9&active=%s" % S1, False, False),
-                                   ("/ws?app=chat&delta=1&iid=page-9&active=%s&col=2&skeleton=1" % S1, True, True)):
+        # AND `skeletonOnReady`, the flag the ready arm's reset spares (test_11_a runs the cycle). The fourth is that
+        # column's REDIAL (the shim reads skeleton=1 off the address on every dial, reconnect=1 once its gate passes):
+        # `reconnect` alone — its page said ready on an earlier socket, so no arm would ever pop the flag, and armed it
+        # left the client unstamped for the page's life (review find 2026-09-11; test_11_c runs the cycle)
+        for path, expect, view, flag in (("/ws?app=chat&delta=1&iid=page-9&active=%s&reconnect=1" % S1, True, False, False),
+                                         ("/ws?app=chat&delta=1&iid=page-9&active=%s" % S1, False, False, False),
+                                         ("/ws?app=chat&delta=1&iid=page-9&active=%s&col=2&skeleton=1" % S1, True, True, True),
+                                         ("/ws?app=chat&delta=1&iid=page-9&active=%s&col=2&reconnect=1&skeleton=1" % S1, True, True, False)):
             got = []
             real_reg, real_recv = km._register_ws_client, km._ws_recv
             km._register_ws_client = lambda c: (got.append(c), km._clients.append(c))
@@ -380,10 +384,11 @@ class SkeletonReconnect(unittest.TestCase):
                 self.assertIsNone(c.get("reconnect"), path)
                 self.assertFalse(km._pusher_wake.is_set(), "a fresh page wakes nothing new")
             if view:
-                self.assertIs(c.get("skeletonOnReady"), True, "a later chat column: the flag that survives the ready arm's reset")
                 self.assertEqual(c.get("col"), "2")
+            if flag:
+                self.assertIs(c.get("skeletonOnReady"), True, "a later chat column's first dial: the flag that survives the ready arm's reset")
             else:
-                self.assertNotIn("skeletonOnReady", c, path)
+                self.assertNotIn("skeletonOnReady", c, path + ": a redial (or no skeleton) arms no flag no arm would pop")
 
     # ── item 10 ──
     def test_10_source_pins_every_strip_sender_resolves_and_uses_the_one_builder(self):
@@ -505,10 +510,12 @@ class SkeletonReconnect(unittest.TestCase):
     def test_11_a_skeleton_dial_survives_the_ready_reset(self):
         # The shell opens a later chat column as /chat?col=N&skeleton=1 with the column's state blob naming the session
         # it opens on, so the page's FIRST dial carries active=<sid>&skeleton=1 and _ws arms both flags (test_09). A
-        # pusher cycle before the bundle's ready serves the set into a document that cannot hear it yet; the ready arm's
-        # _client_reset_chat_base pops the set and `reconnect`, and the survivor (`skeletonOnReady`) re-arms the flag
-        # for the connect push the page CAN hear — the same view, one full, not the board. Until that ready the client
-        # is not stamped and a parked reveal stands: the arm's own stamp and consume land it, as for any fresh page.
+        # pusher cycle before the bundle's ready serves the strip (with the skeleton list) and the statuses into a
+        # document that cannot hear it yet, and WITHHOLDS the session frames (review find 2026-09-11: the one full crossed
+        # the wire twice per open); the ready arm's _client_reset_chat_base pops the set and `reconnect`, and the survivor
+        # (`skeletonOnReady`) re-arms the flag for the connect push the page CAN hear — the same view, and THAT push's one
+        # full is the only one. Until that ready the client is not stamped and a parked reveal stands: the arm's own stamp
+        # and consume land it, as for any fresh page.
         km._PENDING_REVEAL[0] = None
         km._live_map = lambda: {S1: {}}       # the tapped session is live, so the reveal is a focus, not a revive
         try:
@@ -516,15 +523,17 @@ class SkeletonReconnect(unittest.TestCase):
             with contextlib.redirect_stderr(trail):
                 self.assertFalse(km._reveal_request(S1, "W1", via="sw"), "a tap for the window parks: no ready pane yet")
             c = self._client(active=S1, reconnect=True, skeletonOnReady=True, wid="W1")
-            # 1. the pusher's cycle BEFORE the ready: the set, one full, a status per other tab — no stamp, no consume
+            # 1. the pusher's cycle BEFORE the ready: the set, the strip, a status per other tab — no session frame (the
+            #    document cannot hear it, and the ready arm re-sends the one full anyway), no stamp, no consume
             with contextlib.redirect_stderr(trail):
                 km._push([c])
             self.assertEqual(c["skeleton"], {S2, S3})
             to = self._tab_orders(c)
             self.assertEqual(len(to), 1)
             self.assertEqual(to[0]["skeleton"], [S3, S2], "the strip carries the set, as a redial's does")
-            self.assertEqual(self._sessions(c), [S1, S4], "one full for the session the column opened on (+ the transcript-less)")
+            self.assertEqual(self._sessions(c), [], "no session frame before the ready: the connect push the arm makes is the one full")
             self.assertEqual(sorted(s for s, _ in self._statuses(c)), sorted([S2, S3]), "a status per other tab")
+            self.assertEqual(c.get("echat") or {}, {}, "…and nothing is believed held: the arm's push sends the full, not a delta")
             self.assertNotIn("ready", c, "a pre-ready pop stamps nothing: the page has no listener yet")
             self.assertEqual(km._PENDING_REVEAL[0], {"sid": S1, "wid": "W1"}, "…and consumes nothing: the park stands for the ready arm")
             self.assertEqual(self._frames(c, "focus"), [])
@@ -544,7 +553,7 @@ class SkeletonReconnect(unittest.TestCase):
             to = self._tab_orders(c)
             self.assertEqual(len(to), 1, "the reset cleared the strip's slot, so the strip went again")
             self.assertEqual(to[0]["skeleton"], [S3, S2])
-            self.assertEqual(self._sessions(c), [S1, S4], "one full again: the reset had cleared echat and the chat slots")
+            self.assertEqual(self._sessions(c), [S1, S4], "the one full (+ the transcript-less), from this push alone")
             self.assertEqual(sorted(s for s, _ in self._statuses(c)), sorted([S2, S3]))
             self.assertIs(c.get("ready"), True)
             self.assertIsNone(km._PENDING_REVEAL[0], "the park was consumed at the ready")
@@ -562,12 +571,61 @@ class SkeletonReconnect(unittest.TestCase):
         finally:
             km._PENDING_REVEAL[0] = None
 
+    def test_11_c_a_later_columns_redial_is_stamped_by_its_first_strip_and_lands_a_parked_reveal(self):
+        # The shim reads skeleton=1 off the address on EVERY dial of a later column, so its redial after a kernel restart
+        # or a laptop sleep carries reconnect=1 AND skeleton=1. Armed with `skeletonOnReady`, that client was never stamped:
+        # its page said ready on an earlier socket, no arm ever popped the flag, and _resolve_reconnect's fresh guard held
+        # for the page's life — no reveal aimed at it, a parked one never consumed (review find 2026-09-11). _ws arms
+        # `reconnect` alone for it (test_09's fourth dial), and the redial is served like any redial (test_12): the first
+        # strip stamps the client, still carries the skeleton list, and the park lands behind it.
+        km._PENDING_REVEAL[0] = None
+        km._live_map = lambda: {S1: {}}       # the tapped session is live, so the reveal is a focus, not a revive
+        got = []
+        real_reg, real_recv = km._register_ws_client, km._ws_recv
+        km._register_ws_client = lambda cl: got.append(cl)
+        km._ws_recv = lambda rfile: (0x8, b"", True)              # the peer closes at once
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                km.Handler._ws(_fake_self("/ws?app=chat&delta=1&iid=page-11c&wid=W1&active=%s&col=2&reconnect=1&skeleton=1" % S1))
+        finally:
+            km._register_ws_client, km._ws_recv = real_reg, real_recv
+        self.assertEqual(len(got), 1)
+        armed = {k: got[0][k] for k in ("reconnect", "skeletonOnReady") if k in got[0]}   # exactly what the real handshake armed
+        self.assertEqual(armed, {"reconnect": True}, "a redial of a later column: the redial flag alone")
+        try:
+            trail = io.StringIO()
+            with contextlib.redirect_stderr(trail):
+                self.assertFalse(km._reveal_request(S1, "W1", via="sw"), "no stamped pane for the window: parked")
+            c = self._client(active=S1, wid="W1", **armed)
+            with contextlib.redirect_stderr(trail):
+                km._push([c])
+            self.assertIs(c.get("ready"), True, "the redial's first strip stamps the client, as for any redial")
+            self.assertIsNone(km._PENDING_REVEAL[0], "the park was consumed")
+            self.assertIsNone(c.get("reconnect"))
+            self.assertNotIn("skeletonOnReady", c)
+            types = [f["type"] for f in c["_frames"]]
+            self.assertEqual(types.count("focus"), 1, "one focus: the parked tap")
+            self.assertLess(types.index("tabOrder"), types.index("focus"), "behind the strip that names its tab")
+            self.assertEqual([(f["id"], f["live"]) for f in self._frames(c, "focus")], [(S1, True)])
+            self.assertEqual(self._tab_orders(c)[0]["skeleton"], [S3, S2], "still a skeleton client of the session it opened on")
+            self.assertEqual(self._sessions(c), [S1, S4], "one full (+ the transcript-less): the diet, not the board, and not withheld — this page listens")
+            self.assertRegex(trail.getvalue(), REDIAL_TRAIL % "sw", "the journal says the redial landed the park")
+            # …and a tap that arrives now is aimed at it directly (stamped), never parked
+            km._clients.append(c)
+            c["_frames"].clear()
+            with contextlib.redirect_stderr(trail):
+                self.assertTrue(km._reveal_request(S1, "W1", via="sw"), "a stamped client for the window takes the tap")
+            self.assertEqual([f["type"] for f in c["_frames"]], ["focus"])
+            self.assertIsNone(km._PENDING_REVEAL[0])
+        finally:
+            km._PENDING_REVEAL[0] = None
+
     def test_11_b_a_skeleton_dial_with_no_active_hint_is_served_whole_and_stamps_only_at_the_ready(self):
         # a missing or corrupt blob: the shim sends no hint, the kernel cannot know what the column shows → the whole
         # push, the fail-safe _resolve_reconnect already has (test_07); the ready arm's stamp is still the only one
         c = self._client(reconnect=True, skeletonOnReady=True)
         km._push([c])
-        self.assertEqual(sorted(self._sessions(c)), sorted(TAB_ORDER), "everything, as for a hint-less redial")
+        self.assertEqual(self._sessions(c), [], "no session frame before the ready, hint or no hint (the arm's push serves them)")
         self.assertNotIn("skeleton", self._tab_orders(c)[0])
         self.assertNotIn("skeleton", c)
         self.assertNotIn("ready", c, "a pre-ready pop stamps nothing, hint or no hint")

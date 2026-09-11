@@ -98,7 +98,17 @@ class SplitSourcePins(unittest.TestCase):
         src = inspect.getsource(km.Handler)
         self.assertIn('skeleton = (q.get("skeleton") or [""])[0] == "1"', src)
         self.assertIn('if skeleton:', src)
-        self.assertIn('client["reconnect"] = True\n            client["skeletonOnReady"] = True', src)
+        # …the survivor only for a FIRST dial: a later column's REDIAL carries skeleton=1 too (the shim reads it off the
+        # address on every dial) and its page said ready on an earlier socket, so no arm would ever pop the flag, and
+        # armed it left the client unstamped for the page's life (review find 2026-09-11; test_chat_skeleton_reconnect
+        # test_09's fourth dial and test_11_c run it)
+        self.assertIn('client["reconnect"] = True\n            if not reconnect:\n                client["skeletonOnReady"] = True', src)
+        # a pre-ready skeleton client is sent no session frame: the ready arm's connect push is the one full (the strip and
+        # the statuses still go; review find 2026-09-11: the full crossed the wire twice per open)
+        so = inspect.getsource(km._send_chat_or_status)
+        self.assertIn('if c.get("skeletonOnReady"):', so)
+        self.assertLess(so.index('if sid in (c.get("skeleton") or ()):'), so.index('if c.get("skeletonOnReady"):'))
+        self.assertLess(so.index('if c.get("skeletonOnReady"):'), so.index('return _send_chat_locked(c, m, ms, change_from, led_changed)'))
         # the ready arm re-arms the flag PAST the reset and BEFORE its connect push
         i = src.index('msg.get("type") == "ready"')
         body = src[i:i + 3500]
@@ -156,6 +166,13 @@ class SplitSourcePins(unittest.TestCase):
         self.assertIn("body.theme-light #col-ghost,body.theme-light .col-drop.over{background:rgba(194,65,12,0.10)}", self.html)
         self.assertIn("body.theme-light #col-ghost.refused{background:transparent}", self.html)
         self.assertLess(self.html.index("body.theme-light #col-ghost,"), self.html.index("body.theme-light #col-ghost.refused"))
+        # …and the rectangle's line takes the rail's LIGHT label colour under the light theme (review find 2026-09-11: it
+        # kept the dark theme's grey on the cream wash)
+        self.assertIn("body.theme-light .rail-btn{color:#5D574E}", self.html)
+        self.assertIn("body.theme-light #col-ghost{color:#5D574E}", self.html)
+        # a body class toggled for the gesture that nothing read is gone (review find 2026-09-11)
+        self.assertNotIn("tabdrag", split)
+        self.assertNotIn("tabdrag", self.html)
 
     def test_the_css_hides_columns_with_the_chat_group_lifts_by_class_and_never_shows_them_on_the_phone(self):
         self.assertIn("body:not(.po-chat) .chat-col,body:not(.po-chat) .gv-chat{display:none}", self.html)
@@ -209,6 +226,7 @@ class SplitSourcePins(unittest.TestCase):
         # …and a new column takes HALF the rightmost one (2026-09-11), through the gutters' own normalisation
         # (tests/test_pane_gutters.py runs it); the split calls it with the rightmost pane and the new key
         self.assertIn("window.__rompSplitGrow=function(leftId,newKey){", gut)
+        self.assertIn("window.__rompSplitShrink=function(leftId,goneId){", gut, "…and its twin: a closing column's pixels go to the column on its left (review find 2026-09-11)")
         split = km._LANDING_SPLIT_JS
         self.assertIn("if(window.__rompSplitGrow)window.__rompSplitGrow(lastPane(),'chat'+n);", split)
         self.assertIn("if(window.__rompGrowFairIfNew)window.__rompGrowFairIfNew('chat'+n);", split)
@@ -246,6 +264,30 @@ class SplitSourcePins(unittest.TestCase):
         self.assertIn("m.romp==='colEmpty'&&Array.isArray(m.gone)", split)
         self.assertIn("f.contentWindow.postMessage({romp:'adopt',sid:sid,state:state},'*');", split)
         self.assertIn("__rompTakeSessionState", split)
+        # the page's two answers the shell asks for before it moves a tab or closes a column (review finds 2026-09-11), and
+        # the one refusal line each; the movable check at the top of the one mutation, the busy check where a column's
+        # last listed member would leave and where a column is closed by hand (a reconcile of another tab's write is not)
+        for needle in ["function movable(f,sid){", "function busy(f){", "function loaded(f){",
+                       "if(!movable(src,sid))return notify('Only an open session can be moved between columns.');",
+                       "var BUSY='A session is still being created in this column.';",
+                       "var se2=entry(from);if(se2&&se2.ids.length===1&&busy(src))return notify(BUSY);",
+                       "if(!keep&&busy(f)){notify(BUSY);return;}"]:
+            self.assertIn(needle, split, needle)
+        mt = split[split.index("function moveTab(sid,to){"):split.index("function close(n,keep){")]
+        self.assertLess(mt.index("if(!movable(src,sid))"), mt.index("if(to==='new'){"), "refused before anything is taken or grown")
+        self.assertLess(mt.index("busy(src)"), mt.index("var st=take(src,sid)"), "refused before the hand-off")
+        # a column closed for emptiness tells the first column which ids are on their way home, ahead of the store write
+        self.assertIn("home.contentWindow.postMessage({romp:'closing',ids:gone},'*');", split)
+        ce = split[split.index("if(m.romp==='colEmpty'"):split.index("if(m.romp==='orphanState'")]
+        self.assertLess(ce.index("{romp:'closing'"), ce.index("close(en.n)"))
+        # …and orphaned state offered by a page is handed to the owner's page when that page can hear it
+        self.assertIn("if(m.romp==='orphanState'&&Array.isArray(m.sids)){", split)
+        self.assertIn("if(t&&t!==sf&&loaded(t))adopt(t,sid,take(sf,sid));", split)
+        # a closing column's width goes to the column on its left before its key is dropped (the halving's twin)
+        cl = split[split.index("function close(n,keep){"):split.index("function closeFocused(){")]
+        self.assertIn("if(window.__rompSplitShrink)window.__rompSplitShrink(left,paneId(n));", cl)
+        self.assertLess(cl.index("__rompSplitShrink(left,paneId(n))"), cl.index("__rompUnregisterPane(paneId(n))"))
+        self.assertLess(cl.index("var left=i>0?paneId(cols[i-1].n):'chat-pane';"), cl.index("cols.splice(i,1);"))
         self.assertIn("window.addEventListener('storage',function(e){if(!e||e.key!==CK||mobile())return;var r=read();if(!r.migrated)reconcile(r.cols);});", split)
         # the cross's title reads as what it does now
         self.assertIn("x.title='Close this column';", split)
@@ -265,8 +307,11 @@ class SplitSourcePins(unittest.TestCase):
 HARNESS = r"""
 'use strict';
 let STORE = {};
-const CALLS = { register: [], unregister: [], growFair: [], splitGrow: [], gutter: [], wireFocus: [], wireEsc: [], colGone: [], events: [], posted: [], focus: [], notify: [], toggle: [], taken: [], sets: [] };
-global.localStorage = { getItem: (k) => (k in STORE ? STORE[k] : null), setItem: (k, v) => { STORE[k] = String(v); CALLS.sets.push(k); }, removeItem: (k) => { delete STORE[k]; } };
+const CALLS = { register: [], unregister: [], growFair: [], splitGrow: [], splitShrink: [], gutter: [], wireFocus: [], wireEsc: [], colGone: [], events: [], posted: [], focus: [], notify: [], toggle: [], taken: [], sets: [] };
+let SEQ = [];             // the order of the shell's side effects across stubs (a store write, a post, a grow, a key drop)
+let UNMOVABLE = new Set(); // ids the pages answer "not a session a column can hold" for (a create in flight, a viewer)
+let BUSY = {};            // frame id → whether that page reports a create in flight
+global.localStorage = { getItem: (k) => (k in STORE ? STORE[k] : null), setItem: (k, v) => { STORE[k] = String(v); CALLS.sets.push(k); SEQ.push('set:' + k); }, removeItem: (k) => { delete STORE[k]; } };
 let BODY_CLASSES = new Set(['po-chat', 'po-feed', 'po-timeline']);
 let FOCUSED = 'f-chat';   // what the shell's focus script would report as the column last worked in
 let MOBILE = false;       // whether #mtabs is displayed (the phone layout)
@@ -299,8 +344,10 @@ function mkEl(tag) {
   };
   if (tag === 'iframe') {
     el.contentWindow = {
-      postMessage(m) { CALLS.posted.push({ id: el.id, m }); }, focus() { CALLS.focus.push(el.id); },
+      postMessage(m) { CALLS.posted.push({ id: el.id, m }); SEQ.push('post:' + el.id + ':' + (m.romp || m.type)); }, focus() { CALLS.focus.push(el.id); },
       __rompTakeSessionState(sid) { const held = TAKE[el.id] && TAKE[el.id][sid]; CALLS.taken.push([el.id, sid, !!held]); if (!held) return null; delete TAKE[el.id][sid]; return held; },
+      __rompMovableSession(sid) { return !UNMOVABLE.has(sid); },
+      __rompColumnBusy() { return !!BUSY[el.id]; },
     };
     el.contentDocument = { querySelector(sel) { return (sel === '#tabs .tab.active[data-id]' && el._active) ? { getAttribute: () => el._active } : null; } };
   }
@@ -319,7 +366,8 @@ global.addEventListener = (t, f) => { (WL[t] = WL[t] || []).push(f); };
 global.dispatchEvent = (ev) => { CALLS.events.push(ev); (WL[ev.type] || []).forEach((f) => f(ev)); return true; };
 global.CustomEvent = class { constructor(type, o) { this.type = type; this.detail = (o || {}).detail; } };
 global.__rompRegisterPane = (id, k) => CALLS.register.push([id, k]);
-global.__rompUnregisterPane = (id) => CALLS.unregister.push(id);
+global.__rompUnregisterPane = (id) => { CALLS.unregister.push(id); SEQ.push('unregister:' + id); };
+global.__rompSplitShrink = (left, gone) => { CALLS.splitShrink.push([left, gone]); SEQ.push('shrink:' + gone); return true; };   // the gutters' hand-back (tests/test_pane_gutters.py runs the real one)
 global.__rompGrowFair = (k) => CALLS.growFair.push('fair:' + k);
 global.__rompGrowFairIfNew = (k) => CALLS.growFair.push(k);   // what the split calls: fair only when the store holds nothing
 global.__rompSplitGrow = (left, key) => { CALLS.splitGrow.push([left, key]); return true; };   // the gutters' halving (tests/test_pane_gutters.py runs the real one)
@@ -332,6 +380,7 @@ global.__rompColGone = (c) => CALLS.colGone.push(c);
 global.__rompFocusedChatId = () => FOCUSED;
 function boot(store, mobile) {
   STORE = Object.assign({}, store || {}); MOBILE = !!mobile; BYID = {}; WL = {}; TAKE = {}; FOCUSED = 'f-chat'; BODY_CLASSES = new Set(['po-chat', 'po-feed', 'po-timeline']);
+  SEQ = []; UNMOVABLE = new Set(); BUSY = {};
   for (const k in CALLS) CALLS[k] = [];
   ROW = mkEl('div'); ROW.className = 'row';
   const cp = mkEl('div'); cp.id = 'chat-pane'; const fc = mkEl('iframe'); fc.id = 'f-chat'; cp.appendChild(fc); ROW.appendChild(cp);
@@ -479,6 +528,68 @@ const PHONE_STORE = JSON.stringify({ v: 2, cols: [{ n: 2, ids: [WEB] }] });
 boot({ 'romp-chat-cols': PHONE_STORE }, true);
 out.mobile = { ids: ids(), sets: window.__rompChatSets(), moved: window.__rompMoveTab(WEB, 'new'), order: order(), notify: CALLS.notify.slice(), canSplit: window.__rompCanSplit(),
                stored: STORE['romp-chat-cols'], storedWas: PHONE_STORE, saves: saves(), target: tgt(WEB) };
+// L) REFUSALS the page decides (review finds 2026-09-11): an id no column can hold (a create in flight, a sub-agent viewer)
+//    is refused at the one mutation with a line and nothing changes, from the palette too; a column whose last listed
+//    member would leave over a create in flight keeps it — from a move, the cross and the palette's close alike — while a
+//    column with two members lets one go, and the create resolving frees it; another dashboard tab's write is the truth
+boot({}, false);
+window.__rompMoveTab(API, 'new');
+const PROV = 'new-abc123', VIEWER = WEB + '/agent/a1';
+UNMOVABLE.add(PROV); UNMOVABLE.add(VIEWER);
+CALLS.notify = []; CALLS.sets = []; CALLS.taken = []; CALLS.splitGrow = [];
+out.unmovable = { prov: window.__rompMoveTab(PROV, 'new'), provInto2: window.__rompMoveTab(PROV, 2), viewer: window.__rompMoveTab(VIEWER, 'new'),
+                  notify: CALLS.notify.slice(), stored: cols(), ids: ids(), saves: saves(), taken: CALLS.taken.slice(), grown: CALLS.splitGrow.slice() };
+BYID['f-chat']._active = PROV; CALLS.notify = [];
+out.unmovable.palette = { r: window.__rompSplitChat(), notify: CALLS.notify.slice(), stored: cols(), ids: ids() };
+BYID['f-chat']._active = '';
+BUSY['f-chat-2'] = true; CALLS.notify = []; CALLS.sets = []; CALLS.taken = []; CALLS.unregister = [];
+out.busy = { home: window.__rompMoveTab(API, 1), ids: ids(), stored: cols(), notify: CALLS.notify.slice(), saves: saves(), taken: CALLS.taken.slice() };
+crossOf('f-chat-2').fire('click', { stopPropagation() {} });
+out.busy.cross = { ids: ids(), stored: cols(), notify: CALLS.notify.slice(), unregister: CALLS.unregister.slice(), taken: CALLS.taken.slice() };
+window.__rompCloseSplit(2);
+out.busy.palette = { ids: ids(), notify: CALLS.notify.length };
+window.__rompMoveTab(TESTS, 2); CALLS.notify = [];
+out.busy.twoMembers = { home: (window.__rompMoveTab(TESTS, 1) || {}).id, stored: cols(), notify: CALLS.notify.slice(), ids: ids() };
+BUSY['f-chat-2'] = false; CALLS.notify = [];
+out.busy.thenFree = { home: (window.__rompMoveTab(API, 1) || {}).id, ids: ids(), stored: cols(), notify: CALLS.notify.slice() };
+boot({ 'romp-chat-cols': JSON.stringify({ v: 2, cols: [{ n: 2, ids: [WEB] }] }) }, false);
+BUSY['f-chat-2'] = true; STORE['romp-chat-cols'] = JSON.stringify({ v: 2, cols: [] }); CALLS.notify = [];
+window.dispatchEvent({ type: 'storage', key: 'romp-chat-cols' });
+out.busy.reconciled = { ids: ids(), notify: CALLS.notify.slice() };
+// M) a colEmpty that closes a column tells the first column which ids are on their way home, ahead of the store write;
+//    a prune that leaves members says nothing
+boot({}, false);
+window.__rompMoveTab(API, 'new'); window.__rompMoveTab(TESTS, 2);
+CALLS.posted = []; SEQ = [];
+msg({ romp: 'colEmpty', gone: [TESTS] }, 'f-chat-2');
+out.closing = { partial: CALLS.posted.slice() };
+CALLS.posted = []; SEQ = [];
+msg({ romp: 'colEmpty', gone: [API, X] }, 'f-chat-2');
+out.closing.all = { posted: CALLS.posted.slice(), seq: SEQ.filter((x) => x.indexOf('post:') === 0 || x === 'set:romp-chat-cols'), ids: ids(), stored: cols() };
+// N) ORPHANED STATE: a page's offer of state for sessions it does not show is taken from it and handed to the owner's page
+//    when that page can hear it; its own member and junk are skipped; a target not yet evaluated leaves the state where it is
+boot({ 'romp-chat-cols': '[2]', 'romp-vscode-state-chat:2': JSON.stringify({ activeId: WEB, drafts: { [WEB]: 'a', [API]: 'b' } }) }, false);
+window.__rompMoveTab(TESTS, 'new');   // column 3 holds TESTS
+TAKE['f-chat-2'] = { [API]: { draft: 'b', citations: [], files: [], staged: [] }, [TESTS]: { draft: 't', citations: [], files: [], staged: [] }, [WEB]: { draft: 'a', citations: [], files: [], staged: [] } };
+CALLS.posted = []; CALLS.taken = [];
+msg({ romp: 'orphanState', sids: [API, TESTS, WEB, '', 7] }, 'f-chat-2');
+out.orphan = { posted: CALLS.posted.slice(), taken: CALLS.taken.slice(), left: Object.keys(TAKE['f-chat-2']), stored: cols() };
+delete BYID['f-chat'].contentWindow.__rompTakeSessionState;   // the first column's bundle has not evaluated: it cannot hear an adopt
+TAKE['f-chat-2'] = { [API]: { draft: 'b', citations: [], files: [], staged: [] } };
+CALLS.posted = []; CALLS.taken = [];
+msg({ romp: 'orphanState', sids: [API] }, 'f-chat-2');
+out.orphan.unloaded = { posted: CALLS.posted.slice(), taken: CALLS.taken.slice(), left: Object.keys(TAKE['f-chat-2']) };
+msg({ romp: 'orphanState', sids: [API] });   // from no chat column: nothing
+out.orphan.unknown = CALLS.posted.length;
+// O) a closing column's width goes to the column on its left, measured before its key is dropped
+boot({}, false);
+window.__rompMoveTab(API, 'new'); window.__rompMoveTab(TESTS, 'new');
+CALLS.splitShrink = []; CALLS.unregister = []; SEQ = [];
+window.__rompCloseSplit(3);
+out.shrink = { third: CALLS.splitShrink.slice(), unregister: CALLS.unregister.slice(), seq: SEQ.filter((x) => x.indexOf('set:') !== 0) };
+CALLS.splitShrink = [];
+window.__rompCloseSplit(2);
+out.shrink.second = CALLS.splitShrink.slice();
 console.log(JSON.stringify(out));
 """
 
@@ -704,6 +815,78 @@ class SplitExecutes(unittest.TestCase):
         self.assertFalse(c["canSplit"], "…and the tab menu can ask before offering the item")
         self.assertEqual(c["stored"], {"v": 2, "cols": [{"n": 2, "ids": [WEB]}, {"n": 3, "ids": [API]}, {"n": 4, "ids": [TESTS]}]})
 
+    def test_an_id_no_column_can_hold_is_refused_at_the_one_mutation_with_a_line(self):
+        # a create in flight and a sub-agent viewer carry data-id on the strip, and the palette's DOM read can name them
+        # (review find 2026-09-11: a column opened on a provisional id the kernel does not know flashed open and shut)
+        u = self.out["unmovable"]
+        self.assertIsNone(u["prov"]); self.assertIsNone(u["provInto2"]); self.assertIsNone(u["viewer"])
+        self.assertEqual(u["notify"], [["warn", "Only an open session can be moved between columns."]] * 3, "each refusal says why")
+        self.assertEqual(u["stored"], {"v": 2, "cols": [{"n": 2, "ids": [API]}]}, "the store is untouched")
+        self.assertEqual(u["ids"], ["f-chat", "f-chat-2"], "no column opened")
+        self.assertEqual(u["saves"], 0); self.assertEqual(u["grown"], [], "nothing halved")
+        self.assertEqual(u["taken"], [], "no page was asked for drafts: refused before the hand-off")
+        p = u["palette"]
+        self.assertIsNone(p["r"], "the palette's move of a create in flight (the active tab) is the same refusal")
+        self.assertEqual(p["notify"], [["warn", "Only an open session can be moved between columns."]])
+        self.assertEqual(p["stored"], u["stored"]); self.assertEqual(p["ids"], ["f-chat", "f-chat-2"])
+
+    def test_a_column_with_a_create_in_flight_keeps_its_last_member_and_stays_open(self):
+        # its queued text and draft would die with the document (review find 2026-09-11): the move that would empty it,
+        # its cross and the palette's close are refused with the line; a column with two members lets one go; the create
+        # resolving frees it; another dashboard tab's write is the truth and is not refused
+        b = self.out["busy"]
+        self.assertIsNone(b["home"], "the move that would empty the column is refused")
+        self.assertEqual(b["notify"], [["warn", "A session is still being created in this column."]])
+        self.assertEqual(b["ids"], ["f-chat", "f-chat-2"]); self.assertEqual(b["stored"], {"v": 2, "cols": [{"n": 2, "ids": [API]}]})
+        self.assertEqual(b["saves"], 0); self.assertEqual(b["taken"], [], "nothing was taken from the page: refused before the hand-off")
+        c = b["cross"]
+        self.assertEqual(c["ids"], ["f-chat", "f-chat-2"], "the cross is refused too: the column would die with the create")
+        self.assertEqual(c["notify"], [["warn", "A session is still being created in this column."]] * 2)
+        self.assertEqual(c["unregister"], []); self.assertEqual(c["taken"], [])
+        self.assertEqual(b["palette"], {"ids": ["f-chat", "f-chat-2"], "notify": 3}, "…and the palette's close")
+        t = b["twoMembers"]
+        self.assertEqual(t["home"], "f-chat", "with two members one may leave: the column stays")
+        self.assertEqual(t["stored"], {"v": 2, "cols": [{"n": 2, "ids": [API]}]}); self.assertEqual(t["notify"], []); self.assertEqual(t["ids"], ["f-chat", "f-chat-2"])
+        f = b["thenFree"]
+        self.assertEqual(f["home"], "f-chat", "the create resolved: the last member leaves and the column closes")
+        self.assertEqual(f["ids"], ["f-chat"]); self.assertEqual(f["stored"], {"v": 2, "cols": []}); self.assertEqual(f["notify"], [])
+        self.assertEqual(b["reconciled"], {"ids": ["f-chat"], "notify": []}, "another dashboard tab's write closes a busy column all the same, and says nothing")
+
+    def test_a_column_closed_for_emptiness_tells_the_first_column_which_ids_are_on_their_way_home(self):
+        # the kernel may still list a member closed from its own cross for a push or two, and the first column would draw
+        # its tab until then (review find 2026-09-11): the ids ride ahead of the store write, so the first column's page
+        # holds them back (closingTabs) until the kernel's strip omits them
+        c = self.out["closing"]
+        self.assertEqual(c["partial"], [], "a prune that leaves members posts nothing")
+        a = c["all"]
+        self.assertEqual(a["posted"], [{"id": "f-chat", "m": {"romp": "closing", "ids": [API]}}], "the entry's members the page reported gone, never an id it did not hold")
+        self.assertEqual(a["seq"], ["post:f-chat:closing", "set:romp-chat-cols"], "the message is queued ahead of the store write's storage event")
+        self.assertEqual(a["ids"], ["f-chat"]); self.assertEqual(a["stored"], {"v": 2, "cols": []})
+
+    def test_orphaned_state_is_handed_to_the_column_that_shows_the_session_when_its_page_can_hear_it(self):
+        # a v1 column's blob held drafts for many sessions and the migration keeps one (review find 2026-09-11): the page
+        # offers the rest, each is taken from it and handed to its owner's page — the first column, or a later one
+        o = self.out["orphan"]
+        self.assertEqual(o["stored"], {"v": 2, "cols": [{"n": 2, "ids": [WEB]}, {"n": 3, "ids": [TESTS]}]})
+        self.assertEqual(o["taken"], [["f-chat-2", API, True], ["f-chat-2", TESTS, True]], "taken from the offering page for the sids it does not show; its own member and junk are skipped")
+        self.assertEqual(o["posted"], [{"id": "f-chat", "m": {"romp": "adopt", "sid": API, "state": {"draft": "b", "citations": [], "files": [], "staged": []}}},
+                                       {"id": "f-chat-3", "m": {"romp": "adopt", "sid": TESTS, "state": {"draft": "t", "citations": [], "files": [], "staged": []}}}],
+                         "each lands in the column that shows the session")
+        self.assertEqual(o["left"], [WEB], "the page keeps what it shows")
+        u = o["unloaded"]
+        self.assertEqual(u["taken"], [], "a target whose page has not evaluated cannot hear an adopt: nothing is taken, the offer repeats on the next render")
+        self.assertEqual(u["posted"], []); self.assertEqual(u["left"], [API])
+        self.assertEqual(o["unknown"], 0, "an offer from no chat column changes nothing")
+
+    def test_a_closing_column_hands_its_width_to_the_column_on_its_left_before_its_key_goes(self):
+        # the halving's twin (review find 2026-09-11: with only the key deleted, the freed pixels went to every pane by
+        # weight, and a tab dragged out and back narrowed the chat by a third each round trip)
+        s = self.out["shrink"]
+        self.assertEqual(s["third"], [["chat-pane-2", "chat-pane-3"]], "column 3's pixels go to column 2, its left neighbour")
+        self.assertEqual(s["unregister"], ["chat-pane-3"])
+        self.assertEqual(s["seq"], ["shrink:chat-pane-3", "unregister:chat-pane-3"], "measured while the pane is still registered and in the row, then the key goes")
+        self.assertEqual(s["second"], [["chat-pane", "chat-pane-2"]], "the first later column's pixels go to the first column")
+
     def test_the_phone_never_splits_and_filters_nothing(self):
         m = self.out["mobile"]
         self.assertEqual(m["ids"], ["f-chat"])
@@ -738,7 +921,7 @@ function fire(z, kind, extra) { const ev = Object.assign(EV(), extra || {}); z.f
 boot({}, false);
 window.__rompMoveTab(API, 'new'); window.__rompMoveTab(TESTS, 'new'); rects();
 on(WEB, 'web', 'f-chat');
-out.fromFirst = { zones: allZones(), tabdrag: BODY_CLASSES.has('tabdrag'), ghost: ghost() };
+out.fromFirst = { zones: allZones(), ghost: ghost() };
 // the cue: .over on the column zone under the pointer alone; a leave whose relatedTarget is inside the zone is not a leave; a leave clears
 const z2 = zoneIn('chat-pane-2', false), z3 = zoneIn('chat-pane-3', false), e3 = zoneIn('chat-pane-3', true);
 const enter2 = fire(z2, 'dragenter');
@@ -752,14 +935,14 @@ fire(e3, 'dragleave'); out.edgeCue.afterLeave = ghost();
 // the drop on the edge: a new column holding the dragged session, everything unmounted; the page's dragend after it has nothing left to do
 CALLS.notify = [];
 fire(e3, 'dragenter'); const dropEv = fire(e3, 'drop');
-out.dropEdge = { prevented: dropEv.prevented, ids: ids(), stored: cols(), zones: allZones(), ghost: ghost(), tabdrag: BODY_CLASSES.has('tabdrag'), notify: CALLS.notify.slice(), blob4: blob(4), targetWeb: tgt(WEB) };
+out.dropEdge = { prevented: dropEv.prevented, ids: ids(), stored: cols(), zones: allZones(), ghost: ghost(), notify: CALLS.notify.slice(), blob4: blob(4), targetWeb: tgt(WEB) };
 off(); out.dropEdge.afterOff = { zones: allZones(), ghost: ghost() };
 // B) from the RIGHTMOST column (3, holding two): the edge sits on pane 3 under its strip and pane 3 gets no column zone; off unmounts; a second on re-mounts cleanly
 boot({}, false);
 window.__rompMoveTab(API, 'new'); window.__rompMoveTab(TESTS, 'new'); window.__rompMoveTab(X, 3); rects();
 on(TESTS, 'tests', 'f-chat-3', 44);
 out.fromLast = { zones: allZones() };
-off(); out.fromLast.afterOff = { zones: allZones(), tabdrag: BODY_CLASSES.has('tabdrag'), ghost: ghost() };
+off(); out.fromLast.afterOff = { zones: allZones(), ghost: ghost() };
 on(TESTS, 'tests', 'f-chat-3', 44); on(TESTS, 'tests', 'f-chat-3', 44);
 out.fromLast.remounted = allZones(); off();
 // C) from a later column holding ONLY the dragged session: no edge zone anywhere (a new column would twin the origin); a drop on pane 3's zone moves it there and the emptied origin closes
@@ -768,7 +951,7 @@ window.__rompMoveTab(API, 'new'); window.__rompMoveTab(TESTS, 'new'); rects();
 on(API, 'api', 'f-chat-2');
 out.alone = { zones: allZones() };
 fire(zoneIn('chat-pane-3', false), 'drop');
-out.alone.dropped = { ids: ids(), stored: cols(), zones: allZones(), tabdrag: BODY_CLASSES.has('tabdrag') };
+out.alone.dropped = { ids: ids(), stored: cols(), zones: allZones() };
 // D) a drop on the FIRST column's zone: home (the first column derives); the origin keeps its other member
 boot({}, false);
 window.__rompMoveTab(API, 'new'); window.__rompMoveTab(TESTS, 2); rects();
@@ -807,7 +990,7 @@ out.single.dropped = { ids: ids(), stored: cols() };
 // I) the phone mounts nothing; a message from no chat column, or with no sid, mounts nothing
 boot({}, true);
 on(WEB, 'web', 'f-chat');
-out.phone = { zones: zonesOf('chat-pane'), tabdrag: BODY_CLASSES.has('tabdrag') };
+out.phone = { zones: zonesOf('chat-pane'), body: Array.from(BODY_CLASSES).sort() };
 boot({}, false); rects();
 msg({ romp: 'tabDrag', on: true, sid: WEB, name: 'web', stripH: 38 });
 out.unknown = { zones: zonesOf('chat-pane') };
@@ -848,7 +1031,6 @@ class DragZonesExecute(unittest.TestCase):
         o = self.out["fromFirst"]
         self.assertEqual(o["zones"], {"chat-pane": [], "chat-pane-2": [self._col("2")], "chat-pane-3": [self._col("3"), self._edge("0px")]},
                          "no zone on the source; a whole-pane zone on the others; the edge from the rightmost pane's top, a fifth of 400 px")
-        self.assertTrue(o["tabdrag"], "body.tabdrag for the gesture")
         self.assertEqual(o["ghost"], {"cls": "", "text": "", "top": "", "height": "", "left": "", "width": ""}, "the rectangle waits for the edge")
 
     def test_the_cue_marks_the_zone_under_the_pointer_alone_and_a_leave_clears_it(self):
@@ -880,7 +1062,6 @@ class DragZonesExecute(unittest.TestCase):
         self.assertEqual(o["notify"], [])
         self.assertEqual(o["zones"], {"chat-pane": [], "chat-pane-2": [], "chat-pane-3": [], "chat-pane-4": []}, "every zone unmounted at the drop")
         self.assertEqual(o["ghost"]["cls"], "", "the rectangle hidden at the drop"); self.assertEqual(o["ghost"]["text"], "")
-        self.assertFalse(o["tabdrag"])
         self.assertEqual(o["afterOff"]["zones"], o["zones"], "the page's dragend after the drop finds nothing left to unmount")
         self.assertEqual(o["afterOff"]["ghost"]["cls"], "")
 
@@ -889,7 +1070,7 @@ class DragZonesExecute(unittest.TestCase):
         self.assertEqual(o["zones"], {"chat-pane": [self._col("")], "chat-pane-2": [self._col("2")], "chat-pane-3": [self._edge("44px")]},
                          "the first column's zone carries data-col=''; the source pane has the edge alone, from the strip's bottom (its strip stays reorder territory)")
         self.assertEqual(o["afterOff"]["zones"], {"chat-pane": [], "chat-pane-2": [], "chat-pane-3": []}, "tabDrag off unmounts everything")
-        self.assertFalse(o["afterOff"]["tabdrag"]); self.assertEqual(o["afterOff"]["ghost"]["cls"], "")
+        self.assertEqual(o["afterOff"]["ghost"]["cls"], "")
         self.assertEqual(o["remounted"], o["zones"], "a second on (twice, even) re-mounts cleanly: never doubled")
 
     def test_a_later_column_holding_only_the_dragged_session_gets_no_edge_and_its_drop_on_another_column_closes_it(self):
@@ -899,7 +1080,7 @@ class DragZonesExecute(unittest.TestCase):
         d = o["dropped"]
         self.assertEqual(d["ids"], ["f-chat", "f-chat-3"], "__rompMoveTab(sid, 3): the emptied origin closed")
         self.assertEqual(d["stored"], {"v": 2, "cols": [{"n": 3, "ids": [TESTS, API]}]})
-        self.assertEqual(d["zones"], {"chat-pane": [], "chat-pane-3": []}); self.assertFalse(d["tabdrag"])
+        self.assertEqual(d["zones"], {"chat-pane": [], "chat-pane-3": []})
 
     def test_a_drop_on_the_first_column_s_zone_brings_the_session_home(self):
         o = self.out["home"]
@@ -943,7 +1124,7 @@ class DragZonesExecute(unittest.TestCase):
         self.assertEqual(o["dropped"]["ids"], ["f-chat", "f-chat-2"]); self.assertEqual(o["dropped"]["stored"], {"v": 2, "cols": [{"n": 2, "ids": [WEB]}]})
 
     def test_the_phone_and_a_message_from_no_chat_column_mount_nothing(self):
-        self.assertEqual(self.out["phone"], {"zones": [], "tabdrag": False})
+        self.assertEqual(self.out["phone"], {"zones": [], "body": ["po-chat", "po-feed", "po-timeline"]}, "no zone, and no body class for the gesture (nothing read one; review find 2026-09-11)")
         self.assertEqual(self.out["unknown"], {"zones": [], "noSid": []})
 
 

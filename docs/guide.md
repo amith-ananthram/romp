@@ -243,9 +243,11 @@ the palette walk it across the columns you have. Your unsent draft travels with 
 Drag the gutter between two columns to resize them. The **×** in a column's top-right corner
 closes it and returns its sessions to the first column, as does **Close this column** in the
 palette (the column you are in, or the last one when you are in the first); a column whose last
-tab leaves, whether moved away or ended, closes on its own. Clicking a card in the feed, a
-notification, or a tab of a session shown in another column lands you in the column that holds
-it, so no session is ever shown twice. The arrangement, each column's sessions and widths, is
+tab leaves, whether moved away or ended, closes on its own (a column with a session still being
+created in it waits for that session to open). Clicking a card in the feed or a
+notification, or picking a session from the **+** picker, the switcher, an at-mention or a link
+in a transcript when it is shown in another column, lands you in the column that holds it, so
+no session is ever shown twice. The arrangement, each column's sessions and widths, is
 remembered per browser across reloads. Four columns at most; the phone shows one pane at a time
 and never splits.
 

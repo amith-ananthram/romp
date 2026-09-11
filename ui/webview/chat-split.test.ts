@@ -29,7 +29,13 @@ test("the pane asks the shell which column holds a session, acts only when it is
   assert.match(RENDER, /else if \(m\.type === "focus" && !focusIsOurs\(m\.id\)\) \{[\s\S]*?if \(m\.own\) \{ const copy = \{ \.\.\.m \}; delete copy\.own; forwardToOwner\(copy\); \}[\s\S]*?\n  \}\n  else if \(m\.type === "focus"\) \{/);
   // …and the create this focus answers still retires in the column that asked (the provisional tab is that column's)
   const gate = RENDER.slice(RENDER.indexOf('else if (m.type === "focus" && !focusIsOurs(m.id)) {'), RENDER.indexOf('else if (m.type === "focus") {'));
-  assert.match(gate, /if \(focusResolvesProvisional\(m\.id, sessions\.get\(m\.id\)\?\.name, pendingNewSession, provisionalId\)\) resolveProvisionalToExisting\(m\.id\);/);
+  assert.match(gate, /if \(focusResolvesProvisional\(m\.id, tabName\(m\.id\), pendingNewSession, provisionalId\)\) resolveProvisionalToExisting\(m\.id\);/);
+  // …reading the name where this page has it: a skeleton tab (every tab a later column did not open on) never reaches
+  // `sessions`, so `sessions.get(id)?.name` was undefined for the very sessions this branch exists for and the create
+  // waited out the 90 s backstop instead (review find 2026-09-11); both focus branches read the same helper
+  assert.match(RENDER, /function tabName\(id: string\): string \| undefined \{ return sessions\.get\(id\)\?\.name \?\? tabMeta\.get\(id\)\?\.name; \}/);
+  assert.equal((RENDER.match(/focusResolvesProvisional\(m\.id, tabName\(m\.id\), pendingNewSession, provisionalId\)/g) || []).length, 2, "the swallow branch and the acting branch");
+  assert.doesNotMatch(RENDER, /focusResolvesProvisional\(m\.id, sessions\.get/);
   // the revive prompt: the same gate, the same forward
   assert.match(RENDER, /else if \(m\.type === "confirmRevive" && m\.id && !focusIsOurs\(m\.id\)\) \{[\s\S]*?if \(m\.own\) \{ const copy = \{ \.\.\.m \}; delete copy\.own; forwardToOwner\(copy\); \}\n  \}\n  else if \(m\.type === "confirmRevive" && m\.id\) \{/);
   // the hop itself: the owner's frame by the same shell lookup, the message posted and the keyboard following; false
@@ -60,10 +66,29 @@ test("a pick of a session another column holds is shown where it lives: the setA
   const adopt = RENDER.slice(RENDER.indexOf("function adoptProvisional("), RENDER.indexOf("function resolveProvisionalToExisting("));
   assert.ok(adopt.indexOf("claimSession(realId);") > 0 && adopt.indexOf("claimSession(realId);") < adopt.indexOf("setActive(realId);"));
   assert.match(RENDER, /function claimSession\(id: string\): void \{\n\s*if \(!COL\) return;[\s\S]*?__rompClaimSession;[\s\S]*?c\(id, COL\);[\s\S]*?colSets = readColSets\(\);\n\}/);
-  // the stale-active fallback and the emptiness post exist, each gated on the kernel's first strip
-  assert.match(RENDER, /function staleActiveFallback\(ids: readonly string\[\], visibleIds: readonly string\[\]\): void \{\n\s*if \(activeId \|\| !tabOrderSeen \|\| provisionalId \|\| !visibleIds\.length\) return;\n\s*if \(wantActive && ids\.includes\(wantActive\) && heldHere\(wantActive\)\) return;/);
-  assert.match(RENDER, /function noteColumnEmptiness\(ids: readonly string\[\]\): void \{\n\s*if \(!COL \|\| !colSets \|\| !tabOrderSeen\) return;[\s\S]*?window\.parent\.postMessage\(\{ romp: "colEmpty", gone: mine\.slice\(\) \}, "\*"\);/);
+  // the stale-active fallback and the emptiness post exist, each gated on the kernel's first strip (chat-split-exec.test.ts
+  // runs them); the fallback is the PARTITION's — a page with no sets (standalone, VS Code) boots exactly as before, the first
+  // arriving frame adopted (review find 2026-09-11) — and a create in flight, or a failed one holding its text, keeps a
+  // column: no emptiness post while it stands (review find 2026-09-11: the column closed under it and the queued text died)
+  assert.match(RENDER, /function staleActiveFallback\(ids: readonly string\[\], visibleIds: readonly string\[\]\): void \{\n\s*if \(colSets === null\) return;[^\n]*\n\s*if \(activeId \|\| !tabOrderSeen \|\| provisionalId \|\| !visibleIds\.length\) return;\n\s*if \(wantActive && ids\.includes\(wantActive\) && heldHere\(wantActive\)\) return;/);
+  assert.match(RENDER, /function noteColumnEmptiness\(ids: readonly string\[\]\): void \{\n\s*if \(!COL \|\| !colSets \|\| !tabOrderSeen\) return;\n(?:\s*\/\/[^\n]*\n)*\s*if \(provisionalId \|\| failedProvisionals\.size\) return;[\s\S]*?window\.parent\.postMessage\(\{ romp: "colEmpty", gone: mine\.slice\(\) \}, "\*"\);/);
   assert.match(RENDER, /tabOrderSeen = true;[^\n]*\n\s*renderTabs\(\);\n\}/, "set in applyTabOrder, ahead of its render");
+  // the shell's two questions before it moves a tab or closes a column (kernel.py moveTab / close; tests/test_chat_split.py
+  // runs the refusals): an id a column can hold, and a create in flight here
+  assert.match(RENDER, /\(window as any\)\.__rompMovableSession = \(sid: unknown\): boolean => typeof sid === "string" && !!sid && !isProvisionalId\(sid\) && !isSubId\(sid\);/);
+  assert.match(RENDER, /\(window as any\)\.__rompColumnBusy = \(\): boolean => !!provisionalId \|\| failedProvisionals\.size > 0;/);
+  assert.match(KERNEL, /function movable\(f,sid\)\{[^\n]*__rompMovableSession/);
+  assert.match(KERNEL, /function busy\(f\)\{[^\n]*__rompColumnBusy/);
+  // the ids a colEmpty close sends home are held back on the first column's strip until the kernel's strip omits them
+  // (the same closingTabs a ✕ uses), so no tab flashes into that strip on its way out
+  assert.match(RENDER, /if \(m\.romp === "closing"\) \{ if \(Array\.isArray\(m\.ids\)\) for \(const id of m\.ids\) \{ if \(typeof id === "string" && id\) closingTabs\.set\(id, Date\.now\(\)\); \} renderTabs\(\); return; \}/);
+  assert.ok(KERNEL.includes("home.contentWindow.postMessage({romp:'closing',ids:gone},'*');"));
+  // orphaned state (a v1 column blob's drafts for sessions the column no longer shows) is offered to the shell every
+  // render while it remains, from renderTabs right after the emptiness post, and the shell hands it to the owner's page
+  assert.match(RENDER, /noteColumnEmptiness\(ids\);[^\n]*\n\s*noteOrphanState\(\);/);
+  assert.match(RENDER, /function orphanStateSids\(\): string\[\] \{[\s\S]*?\[\.\.\.drafts\.keys\(\), \.\.\.composerCitations\.keys\(\), \.\.\.composerFiles\.keys\(\), \.\.\.Object\.keys\(stagedMsgs\.entries\(\)\)\][\s\S]*?if \(!isProvisionalId\(id\) && !isSubId\(id\) && !heldHere\(id\)\) out\.add\(id\);/);
+  assert.match(RENDER, /function noteOrphanState\(\): void \{\n\s*if \(!colSets \|\| !tabOrderSeen\) return;[\s\S]*?window\.parent\.postMessage\(\{ romp: "orphanState", sids \}, "\*"\);/);
+  assert.ok(KERNEL.includes("if(m.romp==='orphanState'&&Array.isArray(m.sids)){"));
   // the no-sessions copy's third case: sessions listed, none this column's
   assert.match(RENDER, /const txt = totalCount > 0 && heldCount === 0\n\s*\? "Every session is in another column\. Drag a tab here, or start one with the \+ above\."/);
 });

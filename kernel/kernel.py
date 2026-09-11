@@ -39902,8 +39902,9 @@ def _resolve_reconnect(c, chat_list):
             return False
         # A SKELETON client's pre-ready pop (the chat split, 2026-09-11): a later column dials ?skeleton=1 and _ws arms
         # the flag at the handshake, so this pop can run before the page's bundle has said ready — into a document
-        # with no listener. The set is built all the same (the cycle's frames are the cheap ones, and the ready arm
-        # re-arms the flag past its reset for the push the page CAN hear), but the client is NOT stamped ready
+        # with no listener. The set is built all the same (the cycle's strip carries the skeleton list and the statuses
+        # go; the session frames themselves wait for the ready, _send_chat_or_status, since the arm re-arms the flag
+        # past its reset for the push the page CAN hear and that push is the one full), but the client is NOT stamped ready
         # (_reveal_request aims taps at stamped clients, and this page cannot hear one yet) and the caller consumes
         # no parked reveal (the return): the ready arm's own stamp and consume run as for any fresh page. The arm
         # pops `skeletonOnReady` before re-arming, so its own pop here is not fresh.
@@ -39949,6 +39950,13 @@ def _send_chat_or_status(c, m, ms, change_from, led_changed):
         sid = m["id"]
         if sid in (c.get("skeleton") or ()):
             _send_client(c, ("status", sid), {"type": "status", "id": sid, "status": m.get("status")})
+            return ms
+        if c.get("skeletonOnReady"):
+            # A skeleton client BEFORE its bundle's ready (the chat split, 2026-09-11): the handshake's `reconnect` woke
+            # a pusher cycle into a document that cannot hear it yet, and the ready arm's reset re-sends whatever it
+            # held anyway, so a full sent here crossed the wire twice per open (about 95 KB on the lab board; review
+            # find 2026-09-11). The strip and the statuses above still go (cheap, and heard when the bundle won the
+            # race); the session frames wait for the connect push the ready arm makes, which is then the one full.
             return ms
         return _send_chat_locked(c, m, ms, change_from, led_changed)
 
@@ -46421,6 +46429,16 @@ var px={};PANES.forEach(function(id){if(shown(id))px[id]=document.getElementById
 Object.keys(px).forEach(function(id){setGrow(key(id),px[id]);});
 var w=px[leftId];setGrow(key(leftId),w/2);setGrow(newKey,w/2);
 try{localStorage.setItem(GK,JSON.stringify(grow));}catch(e){}return true;};
+// …and a CLOSING chat column hands its width to the column on its LEFT (review find 2026-09-11): the twin of the halving,
+// so a tab dragged out and back leaves the chat where it was. With only the key deleted, the freed pixels went to EVERY
+// pane by weight (flex), and each round trip narrowed the chat by a third. The same read-all-then-write, then the left
+// pane's key takes the closing pane's width plus the 7 px gutter that goes with it (the row keeps its width: one gutter
+// fewer). Runs while the closing pane is still in the row and shown; __rompUnregisterPane drops its key after.
+window.__rompSplitShrink=function(leftId,goneId){var L=document.getElementById(leftId),G=document.getElementById(goneId);if(!L||!G||!shown(leftId)||!shown(goneId))return false;
+var px={};PANES.forEach(function(id){if(shown(id))px[id]=document.getElementById(id).offsetWidth;});
+Object.keys(px).forEach(function(id){setGrow(key(id),px[id]);});
+setGrow(key(leftId),px[leftId]+px[goneId]+7);
+try{localStorage.setItem(GK,JSON.stringify(grow));}catch(e){}return true;};
 // A drag moves a LANDING LINE and the panes take their widths ONCE, at release. A grow write re-lays out the row
 // and with it every same-origin pane document in that frame, so writing the pair on every mousemove cost one
 // relayout of every pane per pointer step, a cost that grows with what the panes hold (seconds a step once a pane
@@ -49593,6 +49611,16 @@ function seedFor(c){var st=null;try{st=JSON.parse(localStorage.getItem(BK+c.n)||
 // column) or at once (an open one). null when the source held nothing or has no such function (an older page).
 function take(f,sid){try{var t=f&&f.contentWindow&&f.contentWindow.__rompTakeSessionState;return typeof t==='function'?(t(sid)||null):null;}catch(e){return null;}}
 function adopt(f,sid,state){if(!f||!state)return;try{f.contentWindow.postMessage({romp:'adopt',sid:sid,state:state},'*');}catch(e){}}
+// Two questions a page answers before the shell moves a tab or closes a column (review finds 2026-09-11). movable: the
+// id is a session a column can hold — a create in flight (a provisional tab) and a sub-agent viewer are the page's own,
+// never the store's, yet both carry data-id and the palette's DOM read can name them (a column opened on an id the
+// kernel does not know flashed open and shut). busy: the column has a create in flight, whose queued text and draft
+// would die with the document if its last listed member left and the column closed under it. Shape checks and a flag
+// on the page, so any column's page answers for any id; an older page without them answers movable, not busy.
+function movable(f,sid){try{var m=f&&f.contentWindow&&f.contentWindow.__rompMovableSession;return typeof m==='function'?!!m(sid):true;}catch(e){return true;}}
+function busy(f){try{var b=f&&f.contentWindow&&f.contentWindow.__rompColumnBusy;return typeof b==='function'&&!!b();}catch(e){return false;}}
+function loaded(f){try{return !!(f&&f.contentWindow&&typeof f.contentWindow.__rompTakeSessionState==='function');}catch(e){return false;}}   // the page's bundle has evaluated, so a posted message is heard
+var BUSY='A session is still being created in this column.';
 function make(n,sid,state){var have=document.getElementById(frameId(n));if(have)return have;
 var g=document.createElement('div');g.className='gv gv-chat';g.id='gv-chat-'+n;
 var p=document.createElement('div');p.className='pane chat-col';p.id=paneId(n);p.setAttribute('data-col',String(n));
@@ -49623,6 +49651,7 @@ function unlist(sid){for(var i=0;i<cols.length;i++){var c=cols[i],j=c.ids.indexO
 // of the origin and the origin would close, so that is refused with a line rather than done for nothing.
 function moveTab(sid,to){if(typeof sid!=='string'||!sid)return null;
 var from=ownerOf(sid),src=frameOfCol(from);
+if(!movable(src,sid))return notify('Only an open session can be moved between columns.');
 if(to==='new'){var se=entry(from);if(se&&se.ids.length===1)return notify('This session is already alone in its column.');
 if(!canSplit())return refuse();
 try{if(!document.body.classList.contains('po-chat')&&window.__rompPaneToggle)window.__rompPaneToggle('chat',true);}catch(e){}   // a hidden chat group comes forward first
@@ -49633,6 +49662,7 @@ var nf=make(n,sid,state);try{nf.contentWindow.focus();}catch(e){}return nf;}
 var tn=Number(to);if(tn!==1&&!entry(tn))return null;
 var tf=frameOfCol(tn);if(!tf)return null;
 if(tn===from)return tf;   // already there: nothing moves
+var se2=entry(from);if(se2&&se2.ids.length===1&&busy(src))return notify(BUSY);   // its last listed member leaving would close it over a create in flight
 var st=take(src,sid),emptied=unlist(sid);if(tn!==1)entry(tn).ids.push(sid);save();
 adopt(tf,sid,st);try{tf.contentWindow.postMessage({type:'focus',id:sid},'*');}catch(e){}   // a plain focus: the target is the owner now, so its own gate takes it
 if(emptied)close(emptied);   // the origin's last member left: it closes (the ring lands on the target below, not on the origin's neighbour)
@@ -49643,9 +49673,12 @@ try{tf.contentWindow.focus();}catch(e){}return tf;}
 // store write (a reconcile of another dashboard tab's write, which is already the truth).
 function close(n,keep){var i=idx(n);if(i<0)return;
 var f=document.getElementById(frameId(n)),home=document.getElementById('f-chat');
+if(!keep&&busy(f)){notify(BUSY);return;}   // a create in flight would die with the document (its queued text with it)
 if(f&&home)cols[i].ids.forEach(function(sid){adopt(home,sid,take(f,sid));});
+var left=i>0?paneId(cols[i-1].n):'chat-pane';   // the column on its left: takes the ring below, and the width first
 cols.splice(i,1);if(!keep)save();
 var p=document.getElementById(paneId(n)),g=document.getElementById('gv-chat-'+n);
+if(window.__rompSplitShrink)window.__rompSplitShrink(left,paneId(n));   // its pixels go to the column on its left (the halving's twin), while the pane is still in the row
 if(window.__rompUnregisterPane)window.__rompUnregisterPane(paneId(n));
 if(p)p.remove();if(g)g.remove();
 if(window.__rompColGone)window.__rompColGone(String(n));
@@ -49689,14 +49722,14 @@ var r=ghostRect(z.parentElement.getBoundingClientRect(),row.getBoundingClientRec
 ghost.style.top=r.top+'px';ghost.style.height=r.height+'px';ghost.style.left=r.left+'px';ghost.style.width=r.width+'px';
 ghost.textContent=refused?'Four columns at most':drag.name;ghost.classList.toggle('refused',refused);ghost.classList.add('on');}
 function cue(z,on){if(z.classList.contains('col-drop-edge'))showGhost(on?z:null);else z.classList.toggle('over',on);}   // the zone under the pointer: the rectangle for the edge, .over on a column zone itself
-function unmountZones(){zones.forEach(function(z){z.remove();});zones=[];showGhost(null);document.body.classList.remove('tabdrag');}   // idempotent: every drop and the page's dragend call it
+function unmountZones(){zones.forEach(function(z){z.remove();});zones=[];showGhost(null);}   // idempotent: every drop and the page's dragend call it
 function zone(p,cls,col,onDrop){var z=document.createElement('div');z.className='col-drop'+(cls?' '+cls:'');if(col!==null)z.setAttribute('data-col',col===1?'':String(col));
 z.addEventListener('dragenter',function(ev){ev.preventDefault();cue(z,true);});
 z.addEventListener('dragover',function(ev){ev.preventDefault();try{if(ev.dataTransfer)ev.dataTransfer.dropEffect='move';}catch(e){}cue(z,true);});
 z.addEventListener('dragleave',function(ev){if(ev.relatedTarget&&z.contains(ev.relatedTarget))return;cue(z,false);});
 z.addEventListener('drop',function(ev){ev.preventDefault();var d=drag;unmountZones();drag=null;if(d)onDrop(d.sid);});
 p.appendChild(z);zones.push(z);return z;}
-function mountZones(){unmountZones();if(!drag||mobile())return;document.body.classList.add('tabdrag');
+function mountZones(){unmountZones();if(!drag||mobile())return;
 var from=drag.from,last=lastPane(),se=from===1?null:entry(from),alone=!!(se&&se.ids.length===1&&se.ids[0]===drag.sid);
 [{n:1,pid:'chat-pane'}].concat(cols.map(function(c){return {n:c.n,pid:paneId(c.n)};})).forEach(function(c){var p=document.getElementById(c.pid);if(!p)return;
 if(c.n!==from)zone(p,'',c.n,function(sid){moveTab(sid,c.n);});   // the column zone: a drop anywhere in the pane moves the session here
@@ -49709,7 +49742,20 @@ drag={sid:m.sid,name:typeof m.name==='string'?m.name:'',from:Number(colOf(e.sour
 // a column whose members the kernel's strip no longer lists (ended, or closed from a tab's cross) says so: the gone
 // ids leave its entry, and an entry left empty closes its column — a member added meanwhile keeps it open
 if(m.romp==='colEmpty'&&Array.isArray(m.gone)){var c=Number(colOf(e.source)),en=c>=2?entry(c):null;if(!en)return;
-en.ids=en.ids.filter(function(id){return m.gone.indexOf(id)<0;});if(en.ids.length)save();else close(en.n);}});
+var gone=en.ids.filter(function(id){return m.gone.indexOf(id)>=0;});en.ids=en.ids.filter(function(id){return m.gone.indexOf(id)<0;});
+if(en.ids.length){save();return;}
+// the ids return to the first column, but the kernel may still list one closed from its own cross for a push or two: the
+// first column's page holds them back (closingTabs) until the kernel's strip omits them, so no tab flashes into its strip
+// on the way out (review find 2026-09-11; the message is queued ahead of the store write's storage event)
+var home=document.getElementById('f-chat');try{if(home&&gone.length)home.contentWindow.postMessage({romp:'closing',ids:gone},'*');}catch(e){}
+close(en.n);return;}
+// ORPHANED STATE (review find 2026-09-11): a page holds a draft, citations, attachments or staged messages for a session
+// it does not show — a column blob written before the partition (a v1 column was a whole chat page, so its blob may name
+// many sessions and the migration keeps one), a reused number's blob, another dashboard's write that moved a tab. The
+// page offers the sids once it has heard the board; each is taken from it and handed to the column that shows the
+// session, when that page can hear the message — else it stays where it is and the page offers it again on its next render
+if(m.romp==='orphanState'&&Array.isArray(m.sids)){var sf=frameOfWin(e.source);if(!sf)return;var sc=Number(colOf(e.source))||1;
+m.sids.forEach(function(sid){if(typeof sid!=='string'||!sid)return;var o=ownerOf(sid);if(o===sc)return;var t=frameOfCol(o);if(t&&t!==sf&&loaded(t))adopt(t,sid,take(sf,sid));});}});
 // THE STORE, read: the v2 object, or a v1 array of numbers migrated once (each number to the session its blob names;
 // a number with no session is dropped). Sanitised on the way in: integer numbers from 2, each once; string ids, each
 // in one entry; no empty entry; at most MAX-1 entries.
@@ -50878,6 +50924,7 @@ def _landing():
             # #col-ghost.refused (1,1,0) and wash it
             "body.theme-light #col-ghost,body.theme-light .col-drop.over{background:rgba(194,65,12,0.10)}"
             "body.theme-light #col-ghost.refused{background:transparent}"
+            "body.theme-light #col-ghost{color:#5D574E}"   # the rail's light label colour (.rail-btn's twin above): the dark grey read as ink on the cream wash
             "body.theme-light .gv{background:linear-gradient(90deg,transparent 3px,rgba(0,0,0,0.14) 3px,rgba(0,0,0,0.14) 4px,transparent 4px)}"
             "body.theme-light .gh{background:linear-gradient(180deg,transparent 3px,rgba(0,0,0,0.14) 3px,rgba(0,0,0,0.14) 4px,transparent 4px)}"
             "body.theme-light .gv::after,body.theme-light .gh::after{background:rgba(0,0,0,0.22)}"
@@ -54970,8 +55017,14 @@ class Handler(BaseHTTPRequestHandler):
             # ready nor lets its caller consume a parked reveal (the fresh guard): the page has no listener yet, and
             # the arm's own stamp and consume run as for any fresh page. No `active` (a corrupt blob): the whole push,
             # the fail-safe _resolve_reconnect already has.
+            # A REDIAL of a later column carries both terms (the shim reads skeleton=1 off the address on every dial,
+            # reconnect=1 once its gate passes), and its page said ready on an earlier socket: no arm will ever pop the
+            # flag, so armed here it would leave the client unstamped for the page's life (_resolve_reconnect's fresh
+            # guard never lifting: no reveal aimed at it, a parked one never consumed; review find 2026-09-11). A redial
+            # is served like any redial: `reconnect` alone, the first strip's pop stamps it and lands a parked reveal.
             client["reconnect"] = True
-            client["skeletonOnReady"] = True
+            if not reconnect:
+                client["skeletonOnReady"] = True
         if col:
             client["col"] = col
         _register_ws_client(client)

@@ -17,8 +17,9 @@ driver run walks the whole story in order, each step landing in its own assertio
   2. routing by the owner: with C moved into column 2 as well and active there, the feed's click echo for C
      (a romp:focus-echo storage write) and a jumpSession for B posted into COLUMN 1 both land in column 2 —
      column 1 keeps A throughout — and __rompChatTarget names the owner for every session;
-  3. __rompMoveTab(B, 1) with B alone in column 2 (C moved home first) closes column 2, column 1 lists B again,
-     and the draft typed for B in column 2's box is in column 1's box when B is picked there;
+  3. __rompMoveTab(B, 1) with B alone in column 2 (C moved home first) closes column 2, column 1 lists B again
+     and is back at the width it had before the column opened (the closing column's pixels go to the column on its
+     left, the halving's twin), and the draft typed for B in column 2's box is in column 1's box when B is picked there;
   4. a new column on B again, then dragging the chat|chat gutter moves width between the two columns and
      persists column 2's grow;
   5. column 2's new-session picker lifts ITS iframe and pane (.lifted), never column 1's, and unlifts on toggle;
@@ -28,7 +29,10 @@ driver run walks the whole story in order, each step landing in its own assertio
   9. THE DRAG (the user 2026-09-11): a real pointer drag of B's tab in column 1 into the shell's edge zone — the
      zone mounted on the page's tabDrag message, the rectangle shown at the pane's right half with B's name while
      the pointer is over the zone, hidden after the drop — opens column 2 on B and column 1 lists no B; B's tab
-     dragged from column 2 onto column 1's pane wears the cue there and, dropped, comes home and column 2 closes.
+     dragged from column 2 onto column 1's pane wears the cue there and, dropped, comes home and column 2 closes;
+ 10. a column blob from BEFORE the partition (a v1 store, its column-2 blob naming B and holding a draft for A, as a
+     whole chat page's blob could) reloads into column 2 on B, and A's draft reaches column 1's box: the page offers
+     state for a session it no longer shows to the shell, which hands it to the column that does.
 Skips LOUDLY when the extension deps or a playwright browser are absent (CI installs none). Synthetic only:
 placeholder sids, invented notes-api prompt text, no real session data."""
 import json
@@ -76,6 +80,7 @@ BOARD = 2 + len(FILLERS)
 DRAG_PX = 200
 SLACK_PX = 40
 DRAFT = "a half-typed note for the api session, kept across the move"
+ORPHAN_DRAFT = "a note for the web session, left in a column blob from before the partition"
 
 
 def _free_port():
@@ -262,6 +267,7 @@ out.s3.moveTarget = await page.evaluate((sidB) => { const f = window.__rompMoveT
 await waitGone("chat-pane-2");
 await waitTabs("f-chat", [cfg.sidA, cfg.sidB, cfg.sidC]);
 out.s3.after = await shell();
+out.s3.pane1W = await width("chat-pane");   // the closed column's pixels came back to column 1 (the halving's twin)
 out.s3.col1Tabs = await tabsIn("f-chat");
 await clickTab("f-chat", cfg.sidB);
 await waitActive("f-chat", cfg.sidB);
@@ -339,19 +345,19 @@ if ((await activeIn("f-chat")) !== cfg.sidA) { await clickTab("f-chat", cfg.sidA
 out.s9 = { pane1: await rectOf("#chat-pane"), row: await rectOf(".row"), stripBottom: (await rectIn("f-chat", "#tabbar")) };
 await dragStart("f-chat", cfg.sidB);
 await waitFn(() => !!document.querySelector(".col-drop.col-drop-edge"), null, "the edge zone never mounted for B's drag");
-out.s9.zones = await zones(); out.s9.tabdrag = await page.evaluate(() => document.body.classList.contains("tabdrag"));
+out.s9.zones = await zones();
 const edge = out.s9.zones.find((z) => z.cls.includes("col-drop-edge"));
 if (!edge) await die("no edge zone among " + JSON.stringify(out.s9.zones));
 await page.mouse.move(edge.left + edge.width / 2, edge.rtop + edge.height / 2, { steps: 8 });
 await waitFn(() => document.getElementById("col-ghost").classList.contains("on"), null, "the rectangle never showed over the edge zone");
 out.s9.ghost = await page.evaluate(() => { const g = document.getElementById("col-ghost"); const r = g.getBoundingClientRect(); const cs = getComputedStyle(g);
-  return { cls: g.className, text: g.textContent, left: r.left, top: r.top, width: r.width, height: r.height, display: cs.display, bg: cs.backgroundColor, shadow: cs.boxShadow, font: cs.fontSize + "/" + cs.fontWeight }; });
-// the light theme's twin, read while the rectangle is up: the ring follows --accent, the wash is the light value
-out.s9.light = await page.evaluate(() => { document.body.classList.add("theme-light"); const cs = getComputedStyle(document.getElementById("col-ghost")); const o = { bg: cs.backgroundColor, shadow: cs.boxShadow }; document.body.classList.remove("theme-light"); return o; });
+  return { cls: g.className, text: g.textContent, left: r.left, top: r.top, width: r.width, height: r.height, display: cs.display, bg: cs.backgroundColor, shadow: cs.boxShadow, font: cs.fontSize + "/" + cs.fontWeight, color: cs.color }; });
+// the light theme's twin, read while the rectangle is up: the ring follows --accent, the wash and the line's colour are the light values
+out.s9.light = await page.evaluate(() => { document.body.classList.add("theme-light"); const cs = getComputedStyle(document.getElementById("col-ghost")); const o = { bg: cs.backgroundColor, shadow: cs.boxShadow, color: cs.color }; document.body.classList.remove("theme-light"); return o; });
 await page.mouse.up();
 await waitTabs("f-chat-2", [cfg.sidB]); await waitActive("f-chat-2", cfg.sidB); await waitNoTabs("f-chat", [cfg.sidB]);
 out.s9.after = await shell();
-out.s9.afterDrop = await page.evaluate(() => { const g = document.getElementById("col-ghost"); return { cls: g.className, display: getComputedStyle(g).display, zones: document.querySelectorAll(".col-drop").length, tabdrag: document.body.classList.contains("tabdrag") }; });
+out.s9.afterDrop = await page.evaluate(() => { const g = document.getElementById("col-ghost"); return { cls: g.className, display: getComputedStyle(g).display, zones: document.querySelectorAll(".col-drop").length }; });
 out.s9.col1Tabs = await tabsIn("f-chat"); out.s9.col2Tabs = await tabsIn("f-chat-2"); out.s9.col1Active = await activeIn("f-chat");
 out.s9.pane1W = await width("chat-pane"); out.s9.pane2W = await width("chat-pane-2");
 // …and back: B's tab from column 2 (its only member: no edge zone) onto column 1's pane
@@ -367,6 +373,27 @@ await page.mouse.up();
 await waitGone("chat-pane-2"); await waitTabs("f-chat", [cfg.sidA, cfg.sidB, cfg.sidC]); await waitActive("f-chat", cfg.sidB);
 out.s9.home = await shell(); out.s9.homeTabs = await tabsIn("f-chat"); out.s9.homeActive = await activeIn("f-chat");
 out.s9.homeZones = await page.evaluate(() => document.querySelectorAll(".col-drop").length);
+
+// ---- 10. a column blob from BEFORE the partition holds a draft for a session the column no longer shows: it reaches the column that does ----
+// a v1 store ([2]) whose column-2 blob names B and holds a draft for A (a whole chat page's blob could): the migration
+// keeps B for column 2; column 2's page, once it has heard the board, offers A's draft to the shell, which takes it and
+// hands it to column 1, where A is shown
+await page.evaluate(([sidA, sidB, draft]) => {
+  localStorage.setItem("romp-chat-cols", "[2]");
+  localStorage.setItem("romp-vscode-state-chat:2", JSON.stringify({ activeId: sidB, drafts: { [sidA]: draft } }));
+}, [cfg.sidA, cfg.sidB, cfg.orphan]);
+await page.reload();
+await waitTabs("f-chat", [cfg.sidA, cfg.sidC]);
+await waitTabs("f-chat-2", [cfg.sidB]);
+await waitActive("f-chat-2", cfg.sidB);
+await waitBootGone();
+await waitNoTabs("f-chat", [cfg.sidB]);
+out.s10 = { cols: await page.evaluate(() => localStorage.getItem("romp-chat-cols")), col2Tabs: await tabsIn("f-chat-2") };
+await clickTab("f-chat", cfg.sidA);
+await waitActive("f-chat", cfg.sidA);
+await waitFn(([fid, draft]) => { const d = document.getElementById(fid).contentDocument; const ta = d && d.getElementById("composer-input"); return !!ta && ta.value === draft; }, ["f-chat", cfg.orphan], "column 1's box never showed the draft column 2's blob held for A");
+out.s10.draftInCol1 = await composerIn("f-chat");
+out.s10.blob2 = await page.evaluate(() => JSON.parse(localStorage.getItem("romp-vscode-state-chat:2") || "null"));
 out.ms = Date.now() - out.t0;
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
@@ -441,7 +468,7 @@ class ServedChatSplit(unittest.TestCase):
         cfg = os.path.join(cls.lab, "cfg.json")
         with open(cfg, "w") as f:
             json.dump({"url": "http://127.0.0.1:%d/?token=%s" % (cls.port, cls.token),
-                       "sidA": SID_A, "sidB": SID_B, "sidC": SID_C, "sidX": SID_X, "dragPx": DRAG_PX, "draft": DRAFT}, f)
+                       "sidA": SID_A, "sidB": SID_B, "sidC": SID_C, "sidX": SID_X, "dragPx": DRAG_PX, "draft": DRAFT, "orphan": ORPHAN_DRAFT}, f)
         driver = os.path.join(cls.lab, "driver.mjs")
         with open(driver, "w") as f:
             f.write(DRIVER)
@@ -530,17 +557,18 @@ class ServedChatSplit(unittest.TestCase):
         a create). The kernel's send counters across the open tell a column served WHOLE (a full frame per tab: eight
         here, and no status frame — a client that declared nothing gets none) from one served as a VIEW of B (the
         strip with a skeleton list, B's one full, a status per other tab): the status delta is at least the other
-        tabs, and the full delta is well under the board. The full delta is not pinned to exactly one: the pusher
-        cycle the handshake wakes can land before the bundle's ready, into a document that cannot hear it, and the
-        ready arm's connect push then re-sends the one full (two); and the page's idle prefetch may have loaded a
-        skeleton tab or two by the time B's transcript is painted. Never the board."""
+        tabs, and the full delta is the mechanism's fingerprint: ONE full by the open (the pusher cycle the handshake
+        wakes withholds the session frames from a pre-ready skeleton client, so the ready arm's connect push is the one
+        full; review find 2026-09-11, when it crossed the wire twice), plus at most one more from the page's idle
+        prefetch, which may have loaded a skeleton tab by the time B's transcript is painted (needFull repairs at once).
+        Never the board."""
         s = self._r()["s1"]
         o = s["obs"]
         self.assertTrue(o["done"], "the observer saw B's transcript painted in column 2: %r" % o)
         self.assertGreaterEqual(s["statusDelta"], BOARD - 1,
                                 "a status frame per other tab: the column was served as a skeleton client, not whole: %r" % s)
         self.assertGreaterEqual(s["fullChatDelta"], 1, "B's one full frame: %r" % s)
-        self.assertLess(s["fullChatDelta"], BOARD, "never the board (eight full frames per push before 2026-09-11): %r" % s)
+        self.assertLessEqual(s["fullChatDelta"], 2, "one full per open, plus at most one idle prefetch by the paint — never the board (eight per push before 2026-09-11), never the open's full twice: %r" % s)
         # the copy between the call and the paint: the pane loader, never the create flow's words or the no-sessions copy
         self.assertEqual(o["emptyState"], 0, "no 'No session open' / no-sessions copy in a column opened on a session: %r" % o)
         self.assertEqual(o["openingText"], 0, "no 'Opening session' or 'opening …' line — a view of a running session is not a create: %r" % o)
@@ -562,7 +590,8 @@ class ServedChatSplit(unittest.TestCase):
         self.assertEqual(s["targetB"], "f-chat-2"); self.assertEqual(s["targetC"], "f-chat-2"); self.assertEqual(s["targetA"], "f-chat")
 
     def test_3_a_move_home_closes_the_emptied_column_and_the_draft_travels_with_the_tab(self):
-        s = self._r()["s3"]
+        r = self._r()
+        s = r["s3"]
         self.assertEqual(s["typed"], DRAFT, "the draft was typed into column 2's box for B: %r" % s)
         self.assertEqual(s["col1BeforeMove"], SID_C, "C's move home showed C in column 1 (a move into an open column focuses the moved tab there): %r" % s)
         self.assertEqual(s["moveTarget"], "f-chat", "a move to the first column returns its iframe")
@@ -575,6 +604,10 @@ class ServedChatSplit(unittest.TestCase):
         self.assertEqual(len(s["col1Tabs"]), BOARD)
         self.assertEqual(s["draftInCol1"], DRAFT, "B's draft, typed in column 2, is in column 1's box once B is picked there: %r" % s)
         self.assertEqual(s["targetB"], "f-chat")
+        # the closed column's pixels came back to column 1 (the halving's twin; review find 2026-09-11: they went to every
+        # pane by weight, and a tab dragged out and back narrowed the chat by a third each round trip)
+        self.assertLessEqual(abs(s["pane1W"] - r["s1"]["pane1Before"]), SLACK_PX,
+                             "column 1 is back at the width it had before the column opened: %r vs %r" % (s["pane1W"], r["s1"]["pane1Before"]))
 
     def test_4_dragging_the_chat_gutter_moves_width_between_the_columns_and_persists_it(self):
         """The grab's normalisation writes each pane's grow only after reading every pane's offsetWidth (a 2026-09-08
@@ -650,7 +683,6 @@ class ServedChatSplit(unittest.TestCase):
         self.assertEqual(len(s["zones"]), 1, "no column zone on the source pane, none on the other panes: %r" % s["zones"])
         e = s["zones"][0]
         self.assertEqual(e["cls"], "col-drop col-drop-edge"); self.assertEqual(e["pane"], "chat-pane"); self.assertIsNone(e["refused"])
-        self.assertTrue(s["tabdrag"], "body.tabdrag for the gesture")
         want_w = max(72, min(180, 0.2 * p1["width"]))
         self.assertLessEqual(abs(e["width"] - want_w), 1, "the edge is a fifth of the pane, 72 to 180 px: %r for a pane %r wide" % (e["width"], p1["width"]))
         self.assertLessEqual(abs(e["right"] - (p1["left"] + p1["width"])), 1, "flush with the pane's right edge: %r" % e)
@@ -668,8 +700,10 @@ class ServedChatSplit(unittest.TestCase):
         self.assertEqual(g["bg"], "rgba(156, 210, 255, 0.12)", "the accent wash")
         self.assertIn("rgb(156, 210, 255)", g["shadow"]); self.assertIn("2px", g["shadow"]); self.assertIn("inset", g["shadow"])
         self.assertEqual(g["font"], "11px/600", "the rail's label dress")
+        self.assertEqual(g["color"], "rgb(138, 138, 138)", "…in the rail's label colour")
         self.assertEqual(s["light"]["bg"], "rgba(194, 65, 12, 0.1)", "the light twin's wash")
         self.assertIn("rgb(194, 65, 12)", s["light"]["shadow"], "the ring resolves through --accent under the light theme: %r" % s["light"])
+        self.assertEqual(s["light"]["color"], "rgb(93, 87, 78)", "the line takes the rail's light label colour, never the dark grey on the cream wash: %r" % s["light"])
         # the drop: column 2 on B, column 1 without B, the honest half; everything unmounted, the rectangle hidden
         a = s["after"]
         self.assertEqual(a["frameIds"], ["f-chat", "f-chat-2"]); self.assertEqual(json.loads(a["cols"]), {"v": 2, "cols": [{"n": 2, "ids": [SID_B]}]})
@@ -677,7 +711,7 @@ class ServedChatSplit(unittest.TestCase):
         self.assertLessEqual(abs(s["pane2W"] - (p1["width"] - 7) / 2), SLACK_PX, "the new column is the half the rectangle promised: %r vs %r" % (s["pane2W"], p1))
         d = s["afterDrop"]
         self.assertEqual(d["cls"], "", "the rectangle hidden after the drop"); self.assertEqual(d["display"], "none")
-        self.assertEqual(d["zones"], 0, "every zone unmounted"); self.assertFalse(d["tabdrag"])
+        self.assertEqual(d["zones"], 0, "every zone unmounted")
         # back: from column 2, alone, onto column 1's pane — one zone (no edge for a twin), the cue on it, the drop brings B home and closes column 2
         self.assertEqual([(z["pane"], z["col"], z["cls"]) for z in s["backZones"]], [("chat-pane", "", "col-drop")], "column 1's whole-pane zone alone: %r" % s["backZones"])
         z1 = s["backZones"][0]
@@ -687,6 +721,16 @@ class ServedChatSplit(unittest.TestCase):
         self.assertEqual(h["frameIds"], ["f-chat"]); self.assertEqual(json.loads(h["cols"]), {"v": 2, "cols": []}); self.assertEqual(h["sets"], {})
         self.assertIn(SID_B, s["homeTabs"]); self.assertEqual(s["homeActive"], SID_B, "the move's focus shows B where it landed")
         self.assertEqual(s["homeZones"], 0)
+
+    def test_10_a_blob_from_before_the_partition_hands_its_draft_for_a_session_shown_elsewhere_to_that_column(self):
+        """A v1 column was a whole chat page, so its blob may hold drafts for many sessions while the migration keeps one
+        (review find 2026-09-11): the page offers state for a session it does not show to the shell (orphanState), which
+        takes it and hands it to the column that shows the session — here A's draft from column 2's blob into column 1."""
+        s = self._r()["s10"]
+        self.assertEqual(json.loads(s["cols"]), {"v": 2, "cols": [{"n": 2, "ids": [SID_B]}]}, "the v1 store migrated to B's column: %r" % s)
+        self.assertEqual(s["col2Tabs"], [SID_B])
+        self.assertEqual(s["draftInCol1"], ORPHAN_DRAFT, "A's draft, held in column 2's blob, is in column 1's box once A is picked there: %r" % s)
+        self.assertNotIn(SID_A, ((s["blob2"] or {}).get("drafts") or {}), "…and left column 2's blob: %r" % s["blob2"])
 
 
 if __name__ == "__main__":

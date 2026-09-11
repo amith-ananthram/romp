@@ -65,7 +65,7 @@ test("render.ts: for as long as the page is in this state every drag starter and
     "the drop is committed only when the reorder happened: a refused one FLIPs the strip home on dragend");
   assert.match(RENDER, /tab\.addEventListener\("dragstart", \(e\) => \{\n\s*if \(fedMissing\) \{ e\.preventDefault\(\); return; \}/, "the one drag starter refuses first (skeleton tabs and rename-restored tabs included)");
   // every draggable flag agrees (the pinned-tabs peer branch adds its own clause to the strip's, hence the optional group)
-  assert.match(RENDER, /tab\.draggable = !s\.sub && (?:!pinned && )?!fedMissing;/, "the strip's tabs");
+  assert.match(RENDER, /tab\.draggable = !s\.sub && (?:!pinned && )?!fedMissing && !isProvisionalId\(id\);/, "the strip's tabs (a create in flight has no session to move either: the chat split, 2026-09-11)");
   assert.equal((RENDER.match(/tab\.draggable = !fedMissing;/g) || []).length, 2, "the skeleton tab and the rename's restore");
   assert.doesNotMatch(RENDER, /tab\.draggable = true;/, "no starter is unconditionally draggable any more");
 });

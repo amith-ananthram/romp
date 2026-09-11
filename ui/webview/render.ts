@@ -6050,6 +6050,7 @@ function renderTabs() {
   for (const id of tabMeta.keys()) { if (!seen.has(id) && !closingTabs.has(id)) { seen.add(id); ids.push(id); } }   // any pushed tab not yet in `order` (placeholder)
   auditTabOrder(ids);
   noteColumnEmptiness(ids);   // a later column none of whose members the kernel lists any more tells the shell (the chat split)
+  noteOrphanState();          // …and state held for a session another column shows is offered to the shell (the chat split)
   // demo/recording view filter (the user 2026-07-14): `#only=<tag>` shows only matching-name tabs; the
   // real sessions keep running, just hidden from this view. No tag → visibleIds === ids (unchanged).
   const only = onlyTag();
@@ -6194,7 +6195,7 @@ function renderTabs() {
     tab.addEventListener("keydown", onTabKey);
     // drag-to-reorder (synced with the timeline via the shared session-order file). A subagent viewer
     // stays put: it is client-only, and a reorder would post its id into the kernel's order.
-    tab.draggable = !s.sub && !fedMissing;   // …and a page without its manager offers no drag at all (fedMissing)
+    tab.draggable = !s.sub && !fedMissing && !isProvisionalId(id);   // …and a page without its manager offers no drag at all (fedMissing); a create in flight has no session to move yet (the chat split: a zone's drop would open a column on an id the kernel does not know)
     wireTabDrag(tab, id);   // the dragstart/dragend pair, shared with the skeleton tab (2026-09-07)
     if (s.color) {
       tab.style.setProperty("--chip-bg", s.color.bg);
@@ -7336,6 +7337,13 @@ const failedProvisionals = new Set<string>();
 // warn / createDirMissing and lands the dialog at once; this covers a spawn that dies silently. It is
 // deliberately long — the point is that it is no longer what you wait on, the way the old 30s cue was.
 const PROVISIONAL_WAIT_MS = 90_000;
+// The shell's two questions before it moves a tab or closes a column (the chat split; _LANDING_SPLIT_JS moveTab and
+// close, review finds 2026-09-11): whether an id is a session a column can hold (a create in flight and a sub-agent
+// viewer are this page's own, never the store's, though both carry data-id on the strip), and whether this column has
+// a create in flight, or a failed one still holding its text, that would die with the document. Shape checks and a flag
+// read: any column's page answers for any id.
+(window as any).__rompMovableSession = (sid: unknown): boolean => typeof sid === "string" && !!sid && !isProvisionalId(sid) && !isSubId(sid);
+(window as any).__rompColumnBusy = (): boolean => !!provisionalId || failedProvisionals.size > 0;
 
 function openProvisional(req: CreateReq): void {
   dropProvisional();                       // never two at once: a second create supersedes the first
@@ -7482,6 +7490,10 @@ function revealSelfPane(): void {
 // a session-focus belongs to (__rompChatTarget: the column that HOLDS the session under the partition, 2026-09-11,
 // else the first; with no session named, the one the user last worked in) and the others stand down — one
 // lookup, exactly one taker. Standalone and VS Code have no shell and always act, exactly as before.
+// The name a listed tab wears, from its loaded session or the strip's meta: a skeleton tab (a later column holds every
+// tab but the ones it opened as skeletons) never reaches `sessions`, so a create resolved by the kernel's focus on a
+// running session read no name there and stayed on "opening" until the backstop failed it (review find 2026-09-11).
+function tabName(id: string): string | undefined { return sessions.get(id)?.name ?? tabMeta.get(id)?.name; }
 function focusIsOurs(sid: string): boolean {
   try {
     if (!window.parent || window.parent === window) return true;
@@ -7526,6 +7538,10 @@ function claimSession(id: string): void {
 let colEmptyPosted = false;
 function noteColumnEmptiness(ids: readonly string[]): void {
   if (!COL || !colSets || !tabOrderSeen) return;
+  // a create in flight, or a failed one still holding its text, is this column's own tab and in no entry: the column
+  // stays until it resolves (adoptProvisional claims the real id) or its ✕ discards it — closed under it, the queued
+  // text and the draft died with the document (review find 2026-09-11)
+  if (provisionalId || failedProvisionals.size) return;
   const mine = colSets[COL] || [];
   const empty = mine.length > 0 && !mine.some((id) => ids.includes(id));
   if (!empty) { colEmptyPosted = false; return; }
@@ -7533,11 +7549,32 @@ function noteColumnEmptiness(ids: readonly string[]): void {
   colEmptyPosted = true;
   try { window.parent.postMessage({ romp: "colEmpty", gone: mine.slice() }, "*"); } catch (e) { /* no shell */ }
 }
+// ORPHANED STATE (the chat split, review find 2026-09-11): a draft, citations, attachments or staged messages this page
+// holds for a session it does not show — a column blob written before the partition (a v1 column was a whole chat page,
+// so its blob may hold drafts for many sessions and the migration keeps one), a reused number's blob, another dashboard's
+// write that moved a tab — would be unreachable here: the strip filters the session out, and only a move or a close hands
+// state over. So, once the board has been heard, every such sid is offered to the shell, which takes it
+// (__rompTakeSessionState) and hands it to the column that shows the session when that page can hear it; until then it
+// stays here and the offer repeats on the next render. One message per render while an orphan remains, none otherwise.
+function orphanStateSids(): string[] {
+  const out = new Set<string>();
+  for (const id of [...drafts.keys(), ...composerCitations.keys(), ...composerFiles.keys(), ...Object.keys(stagedMsgs.entries())]) {
+    if (!isProvisionalId(id) && !isSubId(id) && !heldHere(id)) out.add(id);
+  }
+  return [...out];
+}
+function noteOrphanState(): void {
+  if (!colSets || !tabOrderSeen) return;
+  const sids = orphanStateSids();
+  if (!sids.length) return;
+  try { window.parent.postMessage({ romp: "orphanState", sids }, "*"); } catch (e) { /* no shell */ }
+}
 // STALE ACTIVE (the chat split): a skeleton client whose hinted session has ended gets no full frame to adopt, and
 // a column whose wanted tab another column now holds must not sit on nothing. With the kernel's first strip
 // landed, no active tab, no create in flight, the wanted id null, unlisted or held elsewhere, and a visible member,
 // the first visible member is activated — deferred and re-checked at fire time, like the hidden-active re-point.
 function staleActiveFallback(ids: readonly string[], visibleIds: readonly string[]): void {
+  if (colSets === null) return;   // no partition (standalone, the VS Code webview, an older shell): the first arriving frame is adopted, as always
   if (activeId || !tabOrderSeen || provisionalId || !visibleIds.length) return;
   if (wantActive && ids.includes(wantActive) && heldHere(wantActive)) return;   // its frame is on the way: the restore takes it
   const first = visibleIds[0];
@@ -15837,8 +15874,8 @@ function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: s
   noteMru(id);
   // A PICK OF A SESSION ANOTHER COLUMN HOLDS (the chat split): the picker, an at-mention, a transcript link, the
   // trail and the shell's switcher all land here; the session is shown where it lives and the focus moves there —
-  // a jump, not a move (only a move command, the tab menu's item, the drag or a create changes which column holds
-  // a session). The same fields ride the hop and the owner's own focus gate takes it. Ahead of the peek and the
+  // a jump, not a move (only a move command, the drag or a create changes which column holds a session). The same
+  // fields ride the hop and the owner's own focus gate takes it. Ahead of the peek and the
   // drafts swap below, so this page's box and strip never change hands for a session it does not show.
   if (colSets && !heldHere(id) && forwardToOwner({ type: "focus", id, anchor, anchorT, anchorKind, anchorEventT })) return;
   // EPHEMERAL PEEK (see peekId): an out-of-view target opens as the peek; activating anything else
@@ -16619,6 +16656,10 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   // a moved tab's drafts (the chat split): the shell took them from the source page (__rompTakeSessionState) and
   // hands them to this page, the session's column now — into the maps, persisted, and into the box when it is active
   if (m.romp === "adopt") { adoptSessionState(m.sid, m.state); return; }
+  // the shell closed a later column whose members the kernel's strip no longer lists (colEmpty): they return to this,
+  // the first column, but the kernel may still list one closed from its own cross for a push or two — held back here
+  // (closingTabs, retired by the kernel's next strip as any ✕ is) so no tab flashes into this strip on its way out
+  if (m.romp === "closing") { if (Array.isArray(m.ids)) for (const id of m.ids) { if (typeof id === "string" && id) closingTabs.set(id, Date.now()); } renderTabs(); return; }
   // the shell's pane set, which panes are on screen by key: the cache openPath routes file links by (panesOn
   // above; the shell posts it on every toggle, on this iframe's load and on a phone's tab switch). Whole-set
   // replace: a key the shell stopped naming must not linger as on.
@@ -16674,7 +16715,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
     // socket. A create this focus answers (a running session under the requested name) retires here too, so the
     // provisional tab goes in the creating column while the owner shows the session.
     if (m.own) { const copy = { ...m }; delete copy.own; forwardToOwner(copy); }
-    if (focusResolvesProvisional(m.id, sessions.get(m.id)?.name, pendingNewSession, provisionalId)) resolveProvisionalToExisting(m.id);
+    if (focusResolvesProvisional(m.id, tabName(m.id), pendingNewSession, provisionalId)) resolveProvisionalToExisting(m.id);
   }
   else if (m.type === "focus") {
     revealSelfPane();   // every focus is someone jumping HERE — on mobile, come forward (incl. from a remote kernel)
@@ -16688,7 +16729,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
     // a create naming a RUNNING session is answered by this focus, never by a new session (see
     // resolveProvisionalToExisting): the pending tab is done — retire it before the switch below, so the
     // real tab is what stays active, and a warn that follows finds no create pending and toasts
-    if (focusResolvesProvisional(m.id, sessions.get(m.id)?.name, pendingNewSession, provisionalId)) resolveProvisionalToExisting(m.id);
+    if (focusResolvesProvisional(m.id, tabName(m.id), pendingNewSession, provisionalId)) resolveProvisionalToExisting(m.id);
     if (revivePending && m.id === revivePending) clearReviveLoader();   // the revive landed — the loader's success event
     assertPeekFor(m.id);   // an out-of-view focus peeks even on the already-active fast path below (setActive is skipped there)
     // `live` (the user 2026-07-08): land on the LIVE TAIL. A blocked card's picker/permission prompt IS the
