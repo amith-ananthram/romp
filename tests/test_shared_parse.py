@@ -406,5 +406,69 @@ class OneParseForBoth(unittest.TestCase):
         self.assertEqual(self._misses() - m0, 1, "and the cache-only read still parsed nothing")
 
 
+class DeadCodexSessionKeepsItsAuthor(unittest.TestCase):
+    """2026-09-11: the display's sdk_human (_display_sdk_human) and the judges' (the owner hook the kernel installs)
+    answered for Codex with CodexBackend.owns, which is live-only, so a Codex session's typed prompts (promptSource
+    "sdk", the Codex convention) re-authored from human to programmatic the moment its registry row was marked dead
+    (an end, a kernel restart over a dead row) — the same transcript, nothing new learned — while a dead SDK session's
+    kept theirs (SdkBackend.owns is the reg file's existence). Both sides answer by record presence now. A REAL
+    CodexBackend on a private state root, its registry holding a dead row and a live one the way a restart loads
+    them, stands in for the kernel's singleton; nothing else is stubbed."""
+    DEAD = "77777777-2222-4333-8444-000000000771"
+    LIVE = "77777777-2222-4333-8444-000000000772"
+    NONE = "77777777-2222-4333-8444-000000000773"
+
+    def setUp(self):
+        km._display_sdk_human(A)               # builds the SDK backend once: its setter installs the owner hook
+        self.assertIsNotNone(jd._SDK_OWNER_FN, "the kernel installed its owner hook")
+        cx0 = km._codex()
+        self.assertIsNotNone(cx0, "the kernel's Codex backend module loads in this process")
+        root = Path(tempfile.mkdtemp())
+        (root / "codex").mkdir()
+        (root / "codex" / "registry.json").write_text(json.dumps({
+            self.DEAD: {"tid": self.DEAD, "name": "web", "cwd": "/TESTDIR", "dead": True},
+            self.LIVE: {"tid": self.LIVE, "name": "api", "cwd": "/TESTDIR", "dead": False}}))
+        self.cx = type(cx0)(root, log=lambda m: None)   # the real backend class, loading the rows as a restart does
+        saved = km._codex
+        km._codex = lambda: self.cx
+        self.addCleanup(setattr, km, "_codex", saved)
+        jd.parse_cache_clear()
+        self.d = tempfile.mkdtemp()
+        self.now = int(time.time())
+
+    def _codex_transcript(self, sid):
+        p = Path(self.d) / (sid + ".jsonl")
+        recs = [{"type": "user", "uuid": "u0", "parentUuid": None, "timestamp": "2026-09-10T00:00:00Z",
+                 "promptSource": "sdk", "message": {"role": "user", "content": [{"type": "text", "text": "wire the fixtures"}]}},
+                {"type": "assistant", "uuid": "a0", "parentUuid": "u0", "timestamp": "2026-09-10T00:00:30Z",
+                 "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}], "stop_reason": "end_turn"}}]
+        p.write_text("".join(json.dumps(r) + "\n" for r in recs))
+        return str(p)
+
+    @staticmethod
+    def _prompt_authors(tree):
+        return [a["author"] for t in tree["turns"] for a in t["atoms"] if a.get("type") == "user"]
+
+    def test_a_dead_codex_row_answers_human_on_both_sides(self):
+        self.assertFalse(self.cx.owns(self.DEAD), "owns() stays live-only: send routing relies on it")
+        self.assertTrue(km._display_sdk_human(self.DEAD), "the display: a dead row is still the session's record")
+        self.assertTrue(jd._sdk_owned(self.DEAD), "the judges, through the kernel's hook: the same answer")
+        p = self._codex_transcript(self.DEAD)
+        disp = km._parse(p, self.DEAD, self.now)
+        self.assertEqual(self._prompt_authors(disp), ["human"], "the typed prompt keeps its human bubble after the death")
+        judges = jd.parsed_session(self.DEAD, [p], self.now)
+        self.assertIs(judges, disp, "one slot: the judges read the display's tree, never a second flag's")
+        self.assertTrue(jd._PARSE_CACHE[self.DEAD][3])
+
+    def test_a_live_row_and_no_row_answer_as_before(self):
+        self.assertTrue(self.cx.owns(self.LIVE))
+        self.assertTrue(km._display_sdk_human(self.LIVE)); self.assertTrue(jd._sdk_owned(self.LIVE))
+        self.assertFalse(km._display_sdk_human(self.NONE), "no record on any backend: not a backend's session")
+        self.assertFalse(jd._sdk_owned(self.NONE))
+        p = self._codex_transcript(self.NONE)
+        self.assertEqual(self._prompt_authors(km._parse(p, self.NONE, self.now)), ["sdk"],
+                         "an unowned transcript's promptSource sdk stays programmatic")
+
+
 if __name__ == "__main__":
     unittest.main()

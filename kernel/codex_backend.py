@@ -941,6 +941,13 @@ class CodexBackend:
         with s.lock:
             return not s.dead
 
+    def has_record(self, sid):
+        """True while the registry holds a row for sid, alive or ended. The kernel's answer to whether a session's
+        typed prompts were a person's (the shared parse's sdk_human, read by the display and the judges) must not
+        flip the moment the row is marked dead, so it reads record presence here, never owns(), which send routing
+        keeps live-only."""
+        return self._session(sid) is not None
+
     def live_sessions(self):
         out = {}
         for sid, s in self._session_items():
