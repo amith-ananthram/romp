@@ -78,13 +78,14 @@ test("a filtered view re-points the CHAT BODY, not just the tab bar", () => {
   // whole point of the filter is a clean recording frame, so the selection must follow it.
   // the re-point covers BOTH filters since session views landed (2026-08-18): a hidden or
   // filtered-out active session must not keep its transcript on screen
-  assert.match(RENDER, /if \(activeId && ids\.includes\(activeId\) && !visibleIds\.includes\(activeId\) && visibleIds\.length\)/);
+  // (T357 follow-up: the first-visible-tab fallback is GONE. assertPeekFor runs before every renderTabs and makes an
+  // active tab the view excludes the PEEK, so it stays on the strip and the pane never re-points itself; the filter's
+  // "clean frame" holds because the excluded tab is the peek, not a re-pointed selection.)
+  assert.doesNotMatch(RENDER, /if \(activeId && ids\.includes\(activeId\) && !visibleIds\.includes\(activeId\) && visibleIds\.length\)/);
+  assert.match(RENDER, /function assertPeekFor\(id: string\): void \{\s*\n\s*const next = chatVisible\(id\) \? null : id;/);
   // the deferred bounce re-validates at FIRE time since the ephemeral peek (2026-08-24): an
   // activation between schedule and fire (a feed click opening a peek) makes the active tab
   // visible again — bouncing then would kick the user off the tab they just opened
-  // (T357: the fallback no longer re-points the pane at another session; it goes UNFOCUSED naming the tab the view
-  // hides, which still takes the hidden transcript off screen, and comes back to it when the view shows it again)
-  assert.match(RENDER, /setTimeout\(\(\) => \{ if \(activeId !== next && activeId && !tabInView\(activeId\)\) unfocusHiddenByView\(activeId\); \}, 0\);/);
 });
 
 test("feed cards filter by the #only tag; clear bookkeeping still uses the FULL payload", () => {

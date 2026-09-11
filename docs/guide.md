@@ -411,10 +411,11 @@ session name in it. When that same session's tab returns, the pane goes back
 to it. After a kernel restart the page reloads and remembers the tab you were
 on: until that session is listed again the pane stays blank and names it as not
 listed yet, and it never settles on another session meanwhile; if it never
-returns, the blank body stays until you pick a tab. A tab view that stops
-showing your session (a tag removed) blanks the pane the same way and comes back
-to it when the view shows it again. From the blank pane an arrow key or Next Tab
-lands on the first visible tab. Focus moves to a different session only when
+returns, the blank body stays until you pick a tab (a remembered tab that can
+never return, a subagent's viewer or a session still being created, says so at
+once). A tab view that stops showing your session keeps it on the strip as the
+peek. From the blank pane an arrow key or Next Tab lands on the first visible
+tab. Focus moves to a different session only when
 you pick a tab, or when you close the active tab yourself (then the pane returns
 to the tab you used before it).
 

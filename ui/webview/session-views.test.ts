@@ -65,9 +65,11 @@ test("the tabOrder frame carries the blob and the strip filters on it, composing
     "echo-less frames still reach captureViews — an older kernel must age out a pending edit");
   assert.match(RENDER, /const inViewIds = ids\.filter\(tabInView\);/);
   assert.match(RENDER, /const visibleIds = only \? inViewIds\.filter\(\(id\) => matchesOnly\(nameOf\(id\), only\)\) : inViewIds;/);
-  // the active-tab re-point covers BOTH filters — but only for a session that still EXISTS: a
-  // torn-down session's reselect belongs to the teardown path's MRU logic, not to us
-  assert.match(RENDER, /if \(activeId && ids\.includes\(activeId\) && !visibleIds\.includes\(activeId\) && visibleIds\.length\) \{/);
+  // no active-tab re-point any more (T357 follow-up): assertPeekFor runs before every renderTabs and makes an active
+  // tab either filter excludes the PEEK, so it stays on the strip and the pane never re-points itself at another
+  // session; the old first-visible-tab fallback was unreachable for that reason and is gone
+  assert.doesNotMatch(RENDER, /if \(activeId && ids\.includes\(activeId\) && !visibleIds\.includes\(activeId\) && visibleIds\.length\)/);
+  assert.match(RENDER, /function tabInView\(id: string\): boolean \{ return id === peekId \|\| chatVisible\(id\); \}/);
 });
 
 test("every cycling path walks the VISIBLE order — keyboard can never land on a hidden session", () => {

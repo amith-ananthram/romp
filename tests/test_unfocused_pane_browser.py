@@ -36,6 +36,7 @@ SID_A = "11111111-2222-3333-4444-555555555555"
 SID_B = "aaaaaaaa-1111-2222-3333-444444444444"
 SID_C = "bbbbbbbb-1111-2222-3333-444444444444"   # a session that appears while the user's tab is away: never adopted
 REMOTE = "REMOTEBOX:cccccccc-1111-2222-3333-444444444444"   # a remote host's session this kernel never lists: the reload road's awaited tab
+PROVISIONAL = "new-" + "docs"   # a provisional create's id (ui/webview/provisional.ts): a persisted choice that can never be listed again
 
 
 def _free_port():
@@ -145,6 +146,29 @@ await page.waitForFunction((sid) => { const a = document.querySelector("#tabs .t
 await inject({ type: "tabOrder", order: [cfg.remote, cfg.sidA, cfg.sidB, cfg.sidC], tabs: [R_TAB, A_TAB, B_TAB, C_TAB], live: [cfg.remote, cfg.sidA, cfg.sidB, cfg.sidC], skeleton: [cfg.remote, cfg.sidC] });
 await page.waitForTimeout(500);
 out.pickWins = await state();
+// ---- the follow-up's roads ----
+// (e) an ADOPTED tab (the pane never clicked) is persisted like a pick: clear the choice, reload, the first session
+// adopts the box, and the persisted state names it
+await page.evaluate(() => { const key = Object.keys(localStorage).find((k) => k.startsWith("romp-vscode-state-")); const st = key ? JSON.parse(localStorage.getItem(key) || "{}") : {}; delete st.activeId; delete st.activeName; localStorage.setItem(key, JSON.stringify(st)); });
+await page.reload();
+await page.waitForFunction(() => !!document.querySelector("#tabs .tab.active[data-id]"), null, { timeout: 20000 });
+out.adopted = await page.evaluate(() => { const key = Object.keys(localStorage).find((k) => k.startsWith("romp-vscode-state-")); const st = JSON.parse(localStorage.getItem(key) || "{}"); return { active: document.querySelector("#tabs .tab.active[data-id]").dataset.id, persisted: st.activeId || null, name: st.activeName || "" }; });
+// (c) a persisted state that predates the name: the body never shows a raw sid
+await page.evaluate((remote) => { const key = Object.keys(localStorage).find((k) => k.startsWith("romp-vscode-state-")); const st = JSON.parse(localStorage.getItem(key) || "{}"); st.activeId = remote; delete st.activeName; localStorage.setItem(key, JSON.stringify(st)); }, cfg.remote);
+await page.reload();
+await page.waitForFunction((n) => document.querySelectorAll("#tabs .tab[data-id]").length >= n, 2, { timeout: 20000 });
+await page.waitForTimeout(500);
+out.nameless = await state();
+// (a) the strip EMPTIES under the unfocused pane: the body and the box's placeholder follow
+await inject({ type: "tabOrder", order: [], tabs: [], live: [], skeleton: [] });
+await page.waitForFunction(() => { const e = document.getElementById("empty-state"); return !!e && /No sessions yet/.test(e.textContent || ""); }, null, { timeout: 10000 });
+out.emptied = await state();
+// (b) a persisted id that can never be listed again (a provisional create): gone, not awaited
+await page.evaluate((prov) => { const key = Object.keys(localStorage).find((k) => k.startsWith("romp-vscode-state-")); const st = JSON.parse(localStorage.getItem(key) || "{}"); st.activeId = prov; st.activeName = "docs"; localStorage.setItem(key, JSON.stringify(st)); }, cfg.provisional);
+await page.reload();
+await page.waitForFunction((n) => document.querySelectorAll("#tabs .tab[data-id]").length >= n, 2, { timeout: 20000 });
+await page.waitForTimeout(500);
+out.gone = await state();
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
 process.exit(0);
@@ -214,7 +238,7 @@ class ServedUnfocusedPane(unittest.TestCase):
     def test_the_focused_tab_leaving_on_its_own_unfocuses_the_pane_and_its_return_restores_it(self):
         cfg = os.path.join(self.lab, "cfg.json")
         with open(cfg, "w") as f:
-            json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "sidA": SID_A, "sidB": SID_B, "sidC": SID_C, "remote": REMOTE,
+            json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "sidA": SID_A, "sidB": SID_B, "sidC": SID_C, "remote": REMOTE, "provisional": PROVISIONAL,
                        "shots": os.environ.get("PV_SHOTS", "")}, f)
         driver = os.path.join(self.lab, "driver.mjs")
         with open(driver, "w") as f:
@@ -265,6 +289,18 @@ class ServedUnfocusedPane(unittest.TestCase):
         self.assertTrue(a["composer"]["disabled"]); self.assertEqual(a["statusline"], "")
         self.assertEqual(r["reloadRestored"]["active"], REMOTE, "the remote host relays its strip: focus goes to the remembered tab")
         self.assertEqual(r["pickWins"]["active"], SID_B, "a pick before the relay wins; the relay changes nothing: %r" % r["pickWins"])
+        # the follow-up's roads
+        ad = r["adopted"]
+        self.assertEqual(ad["persisted"], ad["active"], "an adopted tab is persisted like a pick: %r" % ad); self.assertIn(ad["name"], ("web", "api"))
+        nl = r["nameless"]
+        self.assertIsNone(nl["active"]); self.assertIn("a session is not listed yet", nl["empty"]["text"], "no raw sid in the body: %r" % nl["empty"])
+        self.assertNotIn("cccccccc", nl["empty"]["text"])
+        em = r["emptied"]
+        self.assertIsNone(em["active"]); self.assertEqual(em["tabs"], [], "the strip emptied")
+        self.assertIn("No sessions yet.", em["empty"]["text"]); self.assertEqual(em["composer"]["placeholder"], "Click + to add a session", "the box's placeholder followed the strip: %r" % em["composer"])
+        g = r["gone"]
+        self.assertIsNone(g["active"], "a provisional id is never awaited or adopted: %r" % g)
+        self.assertIn("docs", g["empty"]["text"]); self.assertIn("is no longer available. Pick a tab.", g["empty"]["text"])
 
 
 if __name__ == "__main__":
