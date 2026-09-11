@@ -32,6 +32,7 @@ import { backendLabel, effectiveDefaultBackend } from "./backend-names";
 import { delegate } from "./actions";
 import { flash } from "./actions";   // its own line: the import above is pinned verbatim by click-safe.test.ts (the file-view precedent)
 import { awaitWord, awaitBreakdown, groupRows, rowIds, waitsNote, GROUP_TITLE, workingFor, type AwaitRow } from "./spin-caption";
+import { CHIP_LABEL, chipWords, statusChip, type ChipState } from "./status-chip";   // the session status chip: its words and its classes, the one builder the bar and the tag overview's rows share (T322b)
 import { isClearCmd, openTopTitles, clearConfirmDetail, endConfirmDetail } from "./clear-confirm";
 import { prebuildPlan, type ViewState } from "./prebuild";
 import { historyMarks, historyBands, windowSpans, HIST_H, HIST_GAP } from "./glow-history";
@@ -73,6 +74,8 @@ import { MENTION_MAX_ROWS, mentionQuery, rankMentions, mentionMoreNote, mentionT
 import type { MentionCandidate, MentionQuery } from "./composer-mention";
 import { defaultCommentName, defaultBreakoutName, defaultForkName, nameToSend } from "./comment-name";
 import { followReader, keepPlaceAcrossShow, followTail, atBottomDist, followBoxBelow, followTailShrink, reshowStick } from "./scroll-keep";
+import { phParts } from "./composer-placeholder";   // the resting placeholder names the session (2026-09-09)
+import { badgeSpec } from "./session-badge";   // the statusline badge names the session (2026-09-09)
 import { retainLiveOmitted } from "./tab-order";
 import { userTurnShows } from "./user-turn-content";
 import { ScrollDiagBudget, classifyScroll, scrollWriteRow, tailChangeRow, tailLabel, spacerRow, readScrollDiagCap, summarizeTailMutations, tailMutRow, unitChangeRow, unitChanges, boxChanges, boxLabel, BOX_FROM_TAIL } from "./scroll-write";
@@ -288,7 +291,9 @@ type ChatEvent = (
 
 interface TodoTask { id: string; subject: string; activeForm?: string; status: string }
 
-type ChipState = "working" | "ready" | "needsInput" | "awaiting" | "awaitingBg" | "idle" | "closed" | "compacting" | "clearing" | "blocked" | "retrying" | "interrupting" | "opening";   // needsInput = a live permission/picker prompt (on YOU) — renamed from the legacy "awaiting" (2026-08-15), which stays accepted for OLDER REMOTE KERNELS across federation; awaitingBg = idle main thread waiting on background work it dispatched (the user 2026-07-13)
+// ChipState, the kernel's chip states, lives in status-chip.ts since T322b beside its labels (imported above), so the label
+// map is checked exhaustive over it: needsInput = a live permission/picker prompt (on YOU), the legacy "awaiting" accepted
+// for older remote kernels; awaitingBg = idle main thread waiting on background work it dispatched (the user 2026-07-13).
 type PeerIdent = { name: string; host?: string; sid?: string; color?: { bg: string; fg: string } | null };   // a named peer behind a peer-kind wait (kernel _peer_identity, 2026-08-26)
 // which billing sides this box can bill, and why not for the other (kernel _auth_avail, 2026-09-08): the
 // Billing submenu lists both and greys the unavailable one with the reason in its hover
@@ -5965,6 +5970,12 @@ function renderTabs() {
   const mslotEl = document.getElementById("mtag-slot");
   if (stripSig === tabStripSig && !(mslotEl && !mslotEl.firstChild)) { stripAftermath(visibleIds, ids); return; }
   tabStripSig = stripSig;
+  // the strip is about to be REBUILT: the hover tip belongs to a tab node this rebuild discards, and its mouseleave
+  // (the tip's only closer) never fires on a discarded node, so a tip shown for the tab the user just clicked stood
+  // stranded over the page until another tab was hovered and left (T327, found by the tag-overview served lab on
+  // 2026-09-10: its screenshots caught the tip after every pick). The rebuild is the event: hide it here, once, before
+  // the nodes go.
+  hideTabTip();
   // Preserve TAB-MODE keyboard focus across the rebuild (the user 2026-06-29). renderTabs runs on EVERY kernel
   // push (0.5–3s), and replaceChildren() destroys the focused tab — dropping focus out of the strip (often out
   // of the chat iframe entirely), which silently killed ←/→/Enter nav after a send or any push: you were left
@@ -6263,6 +6274,7 @@ function setSessionColor(id: string, bg: string) {
   const meta = tabMeta.get(id);
   if (meta) meta.color = color;
   renderTabs();
+  if (id === activeId) { syncComposerPh(); updateStatusline(); }   // the box's name and the badge wear the new colour on this very click
   // OPTIMISTIC cross-pane echo (the user 2026-08-08): the tabs repaint on this very click, but the
   // FEED kept the old colour until the kernel's next feed rebuild pushed — a second or two. Tell the
   // other panes kernel-free, on the same host-matched pair settings sync rides: the browser's
@@ -11452,8 +11464,12 @@ function fillSnapshotRow(btn: HTMLElement, r: SnapRow, now: number): void {
   const name = el("span", "snap-sess"); name.replaceChildren(...hostNameNodes(r.name, r.id));
   if (r.color) name.style.color = r.color.bg;
   btn.appendChild(name);
-  if (r.needsYou) { const f = el("span", "snap-flag needs"); f.textContent = "needs you"; btn.appendChild(f); }
-  else if (r.waiting) { const f = el("span", "snap-flag"); f.textContent = "waiting"; btn.appendChild(f); }
+  // the state in words, when the row says one: the SHARED status chip (status-chip.ts), the same words and dress the
+  // bar under the transcript wears for the session you are reading — Blocked (API error when that is the state) on
+  // you, "Awaiting 3 agents" / "Awaiting watch" / the peer's name for background work (T322b, the user 2026-09-10:
+  // a grey outlined pill of the row's own reading "waiting" was not it). The model picks the chip (tab-snapshot.ts
+  // snapshotRow); the pip stays beside it: the strip's colour language says the state, the chip says what.
+  if (r.chip) btn.appendChild(statusChip(r.chip));
   const nowEl = el("span", "snap-now"); nowEl.textContent = r.loading ? "opening…" : r.now; btn.appendChild(nowEl);
   if (r.lastT) {
     const when = el("span", "snap-when"); when.dataset.t = String(r.lastT);
@@ -11599,6 +11615,7 @@ function showActive(keep?: { uuid: string; y: number } | null) {
   // tint the whole-window border with the active session's identity color
   if (s.color && s.color.bg) document.body.style.setProperty("--active-accent", s.color.bg);
   else document.body.style.removeProperty("--active-accent");
+  syncComposerPh();   // the box names the session it now messages, in that session's colour
   syncHostOfflineFoot();   // the tab we just switched to may sit on an unreachable host
   touchMru(activeId!); // record activation order so close returns to the previous tab
   const v = ensureView(activeId!);
@@ -13051,6 +13068,55 @@ function composerRestingPlaceholder(): string {
   return "Message this session…  (⏎ send · ⇧⏎ newline · ⌘⏎ stage · ↑ history · / for commands)";
 }
 
+// ── the resting placeholder names the session (the user 2026-09-09) ────────────────────────────────────
+// "Message this session…" reads "Message <name>…", the name BOLD and in the session's identity colour — the
+// colour its tab label and timeline lane wear — so the box says who you are about to message; with the chat
+// split into columns every column is a different session behind a same-looking box. A native placeholder is
+// plain text, so the styled form is an OVERLAY (#composer-ph) painted over the empty box exactly where the
+// first line of text would sit; the native placeholder stays for assistive tech and goes transparent beneath
+// it (.ph-on). It mirrors whatever the placeholder says (composer-placeholder.ts): the resting forms take the
+// name, the closed notice and a picker's "add your own answer…" show natively, and the overlay hides the
+// moment the box holds text. Re-synced by every writer of the box's value or placeholder — never polled.
+function syncComposerPh(): void {
+  const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
+  const box = document.getElementById("composer");
+  if (!ta || !box) return;
+  let ph = document.getElementById("composer-ph");
+  if (!ph) {
+    ph = el("div", ""); ph.id = "composer-ph"; ph.setAttribute("aria-hidden", "true"); box.appendChild(ph);
+    // The box's LAYOUT moves the textarea too, not only its value: a quote chip seeded by a highlight, a dropped
+    // file or a staged note adds a row above it (the user 2026-09-10: the name overlay sat on top of the chip
+    // row). Every such change resizes #composer, so its ResizeObserver re-places the overlay — event-based,
+    // whatever code path added the row. The overlay is absolutely positioned, so re-placing it never resizes
+    // the box back (no observer loop).
+    try { new ResizeObserver(() => syncComposerPh()).observe(box); } catch (e) { /* tests: no ResizeObserver in the DOM shim */ }
+  }
+  // the session's name and colour: the LIVE session when its tab is loaded, else what the strip itself knows of the
+  // tab (tabMeta: a skeleton's or a placeholder's name and colour) — never a stale pre-outage session (skeleton-tabs-wiring)
+  const live = liveSession(activeId);
+  const meta = activeId ? tabMeta.get(activeId) : undefined;
+  const colorBg = (live?.color?.bg || meta?.color?.bg) || null;
+  const parts = phParts(ta.placeholder, live?.name || meta?.name || "");
+  const show = parts.kind === "named" && !ta.value && !ta.disabled && ta.offsetParent !== null;
+  ph.style.display = show ? "" : "none";
+  ta.classList.toggle("ph-on", show);
+  if (!show || parts.kind !== "named") return;
+  ph.replaceChildren();
+  ph.appendChild(document.createTextNode(parts.before));
+  const nm = el("b", "composer-ph-name"); nm.textContent = parts.name;
+  if (colorBg) nm.style.color = colorBg; else nm.style.removeProperty("color");
+  ph.appendChild(nm);
+  ph.appendChild(document.createTextNode(parts.after));
+  // where the box's own first line sits: inside its border and padding, in its font (offsets are relative to
+  // #composer, the overlay's positioned parent)
+  const cs = getComputedStyle(ta);
+  const num = (v: string) => parseFloat(v) || 0;
+  ph.style.left = (ta.offsetLeft + num(cs.borderLeftWidth) + num(cs.paddingLeft)) + "px";
+  ph.style.top = (ta.offsetTop + num(cs.borderTopWidth) + num(cs.paddingTop)) + "px";
+  ph.style.width = Math.max(0, ta.clientWidth - num(cs.paddingLeft) - num(cs.paddingRight)) + "px";
+  ph.style.fontFamily = cs.fontFamily; ph.style.fontSize = cs.fontSize; ph.style.lineHeight = cs.lineHeight;
+}
+
 // How a message typed into the NORMAL composer should be routed while a live picker is up — the picker's
 // dropped inline "add your own" field, now served by the composer (the user 2026-07-09). null → no active
 // free-text path, so the composer sends a normal message as usual (a permission Allow/Deny prompt, or an
@@ -13089,6 +13155,7 @@ function setComposerAskMode() {
     ta.placeholder = composerRestingPlaceholder();
     ta.classList.remove("answering");
   }
+  syncComposerPh();
 }
 
 // Render the widget matching the active session's pending prompt. It lives at the BOTTOM of the transcript
@@ -14116,15 +14183,8 @@ function setCtxBar(bar: HTMLElement, ctxStr: string | undefined, compacting = fa
     : `context ${pct}% used — click to /compact`;
 }
 
-const CHIP_LABEL: Record<ChipState, string> = {
-  working: "Working", ready: "Ready", needsInput: "Blocked",
-  awaiting: "Blocked",   // the legacy name for needsInput — an older remote kernel still sends it
-  awaitingBg: "Awaiting",   // idle, waiting on background work it dispatched — the romp await-green, not working-yellow (the user 2026-07-13; recolored from straw 2026-07-22)
-  idle: "Idle", closed: "Closed", compacting: "Compacting", clearing: "Clearing", blocked: "API error",
-  retrying: "API retrying…",   // a live session stalled on an API rate-limit/overload auto-retry (api 2026-06-23)
-  interrupting: "Interrupting…",   // stop sent, turn not yet settled (the user 2026-07-02) — clears to READY on its own
-  opening: "Opening…",             // spawned, transcript not on disk yet — the first record clears it (the user 2026-08-05)
-};
+// CHIP_LABEL, the state words, lives in status-chip.ts since T322b (the user 2026-09-10): the tag overview's rows wear
+// the same chip as this bar, so the words and the classes have one home the two import (imported above).
 
 // A stop/interrupt button that lives beside the state badge in the statusline (the user 2026-06-19):
 // it sends the SAME interrupt the composer's Ctrl+C does (host → Esc into the pane) — a less fiddly way
@@ -14197,6 +14257,16 @@ function updateStatusline() {
     sl.appendChild(ro);
     return;
   }
+  // The session's own badge FIRST (the user 2026-09-09): its name on its identity colour — the colour its
+  // tab label and timeline lane wear — with the name in black, so the line reads "<session> · Working" and a
+  // glance at any chat column says which session it is. Built from the same record as the chips beside it.
+  const bs = settings.showSessionBadge === true ? badgeSpec(s) : null;   // an opt-in (Settings → Chat → Show session badge; off by default, the maintainers 2026-09-10): the composer's placeholder names the session already
+  if (bs) {
+    const b = el("span", "chip chip-session"); b.textContent = bs.text;
+    if (bs.bg) b.style.background = bs.bg;
+    b.title = bs.text;   // the full name when the chip clips a long one
+    sl.appendChild(b);
+  }
   // Left: the state chip — WORKING gets a sine color-pulse + elapsed timer; idle
   // states get the plain chip (no timer). Right: model + effort · ctx%, always.
   if (s.status.state === "working") {
@@ -14218,37 +14288,20 @@ function updateStatusline() {
     // #bg-tasks box below and scrolls it into view — the chip used to be the one status word on the
     // pane you could not click through. data-act on the stable #statusline delegate (click-safe across
     // the per-push rebuild); the delegate's .romp-acted pulse acknowledges the press.
-    const chip = el("button", "chip chip-awaitingBg chip-btn") as HTMLButtonElement;
+    // the chip itself is the SHARED status chip (status-chip.ts chipWords + statusChip, T322b): `chip chip-awaitingBg`
+    // wearing "Awaiting <word>" — the KIND rides the label so a glance says WHAT is awaited (the user 2026-08-15;
+    // tooltips are dead on the touch PWA), by ONE rule (awaitWord, agreeing in number, T225): "Awaiting agent" /
+    // "Awaiting command" / "Awaiting watch" for one, "Awaiting 3 agents" for several of a kind, "Awaiting 4" when
+    // the kinds are mixed; a single named peer's NAME in its identity colour on the .chip-peer-name backing (the
+    // user 2026-08-26). The tag overview's rows build theirs from the same two calls, so the two cannot drift. This
+    // bar adds what only it has: the button, the per-kind hook and the tip (the breakdown "2 agents · 1 command ·
+    // 1 watch" rides there).
+    const chip = statusChip(chipWords(s.status), "button") as HTMLButtonElement;
+    chip.classList.add("chip-btn");
     chip.type = "button";
     chip.dataset.act = "awaitingChip";
-    // the KIND rides the label so a glance says WHAT is awaited (the user 2026-08-15) — tooltips are
-    // dead on the touch PWA, so the word must be visible; the subject stays in the #bg-tasks box. ONE
-    // rule words it (awaitWord): "Awaiting agent" / "Awaiting command" / "Awaiting watch" for one,
-    // "Awaiting 3 agents" for several of a kind, "Awaiting 4" when the kinds are mixed — the
-    // breakdown ("2 agents · 1 command · 1 watch") rides the tooltip.
     const chipItems = s.status.awaitingItems || [];
     chip.classList.add("chip-awaiting-" + (s.status.awaitingKind || "untyped"));   // per-kind hook, one hue today
-    const chipPeers = s.status.awaitingPeers || [];
-    const chipWord = awaitWord(s.status.awaitingKind, s.status.awaitingCount, chipItems);
-    if (chipPeers.length && groupRows(chipItems).every((g) => g.kind === "peer")) {
-      // the pill names the actual session (the user 2026-08-26): "Awaiting <name>", the NAME itself
-      // in the peer's identity colour — the dot it launched with retired the same day (round two:
-      // it read stupid). The name sits on an always-on ~85% black backing (.chip-peer-name), mostly
-      // opaque so ANY identity colour reads against any chip hue (their green-on-green example),
-      // translucent enough that the chip's own colour still glows through around it. Several peers
-      // keep the one-line rule as a count, names on the tooltip.
-      chip.append(CHIP_LABEL.awaitingBg + " ");
-      if (chipPeers.length === 1) {
-        const nm = el("span", "chip-peer-name");
-        // the HOUSE session-reference idiom (the user 2026-08-26, round three — one undifferentiated
-        // string read wrong): the shared renderer, so the host prefix wears .host-prefix (italic
-        // gray) and the NAME text takes the identity colour — the card headers' own treatment,
-        // never a restyled copy
-        nm.replaceChildren(...hostPartsNodes(chipPeers[0].host, chipPeers[0].name));
-        if (chipPeers[0].color && chipPeers[0].color.bg) nm.style.color = chipPeers[0].color.bg;
-        chip.appendChild(nm);
-      } else chip.append(chipWord || chipPeers.length + " peers");
-    } else chip.textContent = CHIP_LABEL.awaitingBg + (chipWord ? " " + chipWord : "");   // agrees in number (T225); the plain words of slice 2
     // the tip: the per-kind breakdown when there are rows, the kernel's why, and what the click does
     setTip(chip, [awaitBreakdown(chipItems), s.status.awaitingWhy || "idle, waiting on background work it dispatched",
                   "click to see what it's waiting on"].filter(Boolean).join("\n"));
@@ -14271,9 +14324,7 @@ function updateStatusline() {
   } else if (s.status.state === "opening") {
     sl.appendChild(openingLine());             // spawned, transcript not on disk yet — dots until the first record
   } else {
-    const chip = el("span", `chip chip-${s.status.state}`);
-    chip.textContent = CHIP_LABEL[s.status.state] ?? (s.status.state[0].toUpperCase() + s.status.state.slice(1).toLowerCase());
-    sl.appendChild(chip);
+    sl.appendChild(statusChip(chipWords(s.status)));   // the shared chip (status-chip.ts): `chip chip-<state>`, the state's words in sentence case
   }
 
   // The right-side cluster — dir · branch · mode/model/effort/fast badges · ctx battery — grouped in ONE
@@ -14661,7 +14712,10 @@ function flushStaged(sid: string, typed?: { text: string; cites?: Citation[]; im
   return run.length;
 }
 
-function renderStagedStrip(id: string | null, opts?: { reveal?: "last" }): void {
+  // every exit path re-places the name overlay: a row above the textarea coming or going moves the box's first line
+  // (the user 2026-09-10); the ResizeObserver on #composer is the backstop, this is the exact event
+  function renderStagedStrip(id: string | null, opts?: { reveal?: "last" }): void { renderStagedStripInner(id, opts); syncComposerPh(); }
+  function renderStagedStripInner(id: string | null, opts?: { reveal?: "last" }): void {
   const strip = document.getElementById("composer-staged");
   if (!strip) return;
   // the list's scroll position survives the rebuild: expanding or discarding an item re-renders the
@@ -15003,7 +15057,8 @@ function fireRewindDelete(sid: string, uuid: string): void {
 function cancelComposerEdit(sid: string): void {
   if (!composerEdits.delete(sid)) return;
   if (sid !== activeId) return;
-  clearComposerBox?.();   // the composer's one clear path: the menus see the message box go empty
+    clearComposerBox?.();   // the composer's one clear path: the menus see the message box go empty
+    syncComposerPh();       // …and the name overlay comes back over the emptied box (2026-09-09)
   drafts.delete(sid); persistDrafts();
   renderComposerChips(sid);
 }
@@ -15012,7 +15067,10 @@ function cancelComposerEdit(sid: string): void {
 // with the cited title + an ✕; clicking the ✕ dismisses it, clicking the pill itself opens an AUDIT preview
 // of the exact prompt romp will send (the user 2026-07-01). It lives ABOVE the textarea (a textarea can't
 // host inline DOM), so it reads as attached-but-separate context, not typed text.
-function renderComposerChips(id: string | null): void {
+// every exit path re-places the name overlay: a row above the textarea coming or going moves the box's first line
+// (the user 2026-09-10); the ResizeObserver on #composer is the backstop, this is the exact event
+function renderComposerChips(id: string | null): void { renderComposerChipsInner(id); syncComposerPh(); }
+function renderComposerChipsInner(id: string | null): void {
   const strip = document.getElementById("composer-chips");
   if (!strip) return;
   closeCitePreview();   // the chip is being rebuilt (or removed) → drop any open audit popover for the old chip
@@ -15072,7 +15130,10 @@ function renderComposerChips(id: string | null): void {
 // imgRequest data-URL flow in the VS Code webview (the sandbox can't reach the kernel origin) — and any
 // other file wears a compact ext + name chip. Click opens the file (the same openFile the path links
 // use); the ✕ removes just that attachment. Rendered per session, like the citation chips beside it.
-function renderComposerFiles(id: string | null): void {
+// every exit path re-places the name overlay: a row above the textarea coming or going moves the box's first line
+// (the user 2026-09-10); the ResizeObserver on #composer is the backstop, this is the exact event
+function renderComposerFiles(id: string | null): void { renderComposerFilesInner(id); syncComposerPh(); }
+function renderComposerFilesInner(id: string | null): void {
   const strip = document.getElementById("composer-files");
   if (!strip) return;
   // the held-send state rides the send button (see sendOnShip): dimmed + titled while a "wait for
@@ -16600,7 +16661,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   else if (m.type === "renamed" && m.id && typeof m.name === "string") {
     notePendingMeta(pendingTabMeta, m.id, { name: m.name });   // kernel truth — hold it against a push built pre-rename
     const s = sessions.get(m.id);
-    if (s && s.name !== m.name) { s.name = m.name; renderTabs(); }
+    if (s && s.name !== m.name) { s.name = m.name; renderTabs(); if (m.id === activeId) { syncComposerPh(); updateStatusline(); } }   // the box and the badge name the session as it is now called
   }
   else if (m.type === "droppedPath" && typeof m.path === "string") {   // host-saved drop/paste/pick → a thumbnail, not path text (the user 2026-08-04)
     const ackShip = typeof m.shipId === "string" && m.shipId ? m.shipId : undefined;
@@ -16810,6 +16871,7 @@ function growComposer(ta: HTMLTextAreaElement) {
   ta.style.height = "auto";
   const cap = composerManualH ?? 120;                      // dragged cap, else the default ~6-line cap
   ta.style.height = Math.min(ta.scrollHeight, cap) + "px";
+  syncComposerPh();   // every programmatic write of the box's value comes through here: the overlay follows the box
 }
 
 // One slash command from the kernel's /commands (the Agent SDK's get_server_info): the name (no leading "/"),
@@ -16946,8 +17008,9 @@ function markMentions(root: HTMLElement): void {
 // chip word counts, a run of letters inside a chip does not and copies as rendered. Every range is read (a
 // multi-select holds several and sel.toString() concatenates them). A selection with no whole chip is left
 // to the browser in both flavours, including a copy inside the composer (the document's selection holds no
-// chip then). The rich flavour is the ranges' own markup with each chip's hover title (live status text) and
-// data attributes dropped, so a paste keeps the chip's class and text and nothing about the session behind it.
+// chip then). The rich flavour is the ranges' own markup with each chip's hover titles (live status text, on the
+// chip and on a down host's prefix) and data attributes dropped, so a paste keeps the chip's class and text and
+// nothing about the session behind it.
 // The Comment/Quote seed (transcriptSelection) keeps reading the rendered text: a thread's quoted passage
 // anchors on what the transcript shows.
 function mentionCopyText(sel: Selection): { text: string; html: string } | null {
@@ -16974,7 +17037,9 @@ function mentionCopyText(sel: Selection): { text: string; html: string } | null 
   try {
     const scratch = document.createElement("div");
     for (let i = 0; i < sel.rangeCount; i++) scratch.appendChild(sel.getRangeAt(i).cloneContents());
-    for (const c of Array.from(scratch.querySelectorAll<HTMLElement>(".mention-chip"))) {   // class and text travel; the hover title and the ids do not
+    // class and text travel; the hover titles and the ids do not: the chip's own, and the reconnect note a down
+    // host's prefix span wears (hostNameNodes sets it), so the chip's descendants are stripped with it
+    for (const c of Array.from(scratch.querySelectorAll<HTMLElement>(".mention-chip, .mention-chip *"))) {
       c.removeAttribute("title");
       for (const k of Object.keys(c.dataset)) delete c.dataset[k];
     }
@@ -17244,6 +17309,7 @@ function setupComposer() {
   try {
     new ResizeObserver(() => {
       if (ta.placeholder.startsWith("Message this session…")) ta.placeholder = composerRestingPlaceholder();
+      syncComposerPh();
     }).observe(ta);
   } catch (e) { /* tests: no ResizeObserver in the DOM shim */ }
 
@@ -17720,6 +17786,7 @@ function setupComposer() {
     }
   });
   ta.addEventListener("input", () => {
+    syncComposerPh();   // typed text hides the overlay; an emptied box shows it again
     // a MANUAL edit ends any history walk (the user 2026-08-17): the text becomes an ordinary
     // draft, and recall stays away from drafts. The recall's own synthetic dispatch is fenced.
     if (!recalling && activeId) histWalk.delete(activeId);

@@ -115,7 +115,8 @@ console.log(JSON.stringify(out));
 
 
 # ── the Files control hidden by its gear setting (T317) ─────────────────────────────────────────────────
-# The store holds romp:settings.filesControl false and the Files pane is ON (a desktop session left it open):
+# The store holds NO romp:settings at all (a fresh install: the control is OFF by default since T317b, the user
+# 2026-09-10) and the Files pane is ON (a desktop session of the shown-by-default era left it open):
 # the boot apply hides the control (body.no-files-control), closes the pane and saves that, tells the panes the
 # pane is unavailable (avail.files false), and refuses to bring it forward; a phone left on the Files tab is
 # switched to the chat. Flipping the store back on (the gear's write, heard through the storage listener) shows
@@ -130,7 +131,7 @@ out.refused = { poFiles: CLS.has('po-files'), chat: last('chat'), counts: counts
 MOBILE = true; TAB = 'files'; SWITCHED.length = 0; window.__rompPaneToggle('feed');   // any apply (here a feed flip) on a phone left on the Files tab
 out.phone = { switched: SWITCHED.slice() };
 MOBILE = false;
-STORE['romp:settings'] = JSON.stringify({ filesControl: true }); STORAGE_LISTENERS.forEach((f) => f());   // the gear turns it back on
+STORE['romp:settings'] = JSON.stringify({ showFilesControl: true }); STORAGE_LISTENERS.forEach((f) => f());   // the gear turns it back on
 out.shown = { cls: CLS.has('no-files-control'), chat: last('chat') };
 window.__rompPaneToggle('files', true);
 out.reopened = { poFiles: CLS.has('po-files'), chat: last('chat') };
@@ -156,7 +157,7 @@ class HiddenControlBookmark(unittest.TestCase):
         # the store is seeded through the harness's __SEED__ slot (the OptionalPanes convention): the declaration
         # line it once rewrote grew the optional-pane collections and no longer matched, leaving the slot unfilled
         harness = (_COLLAPSE_HARNESS.replace("__KEYS__", json.dumps(keys))
-                   .replace("__SEED__", "STORE['romp:settings'] = JSON.stringify({ filesControl: false }); STORE['romp-panes'] = " + json.dumps(stored) + ";")
+                   .replace("__SEED__", "STORE['romp:settings'] = JSON.stringify({ filesControl: true }); STORE['romp-panes'] = " + json.dumps(stored) + ";")   # the T317-era key's true (a whole-object save merged it in): never read, the control stays hidden (T317b)
                    .replace("global.location = { search: '' };", "global.location = { search: '?panes=chat,files' };")
                    .replace("global.URLSearchParams = class { get() { return null; } };", "global.URLSearchParams = class { get(k) { return k === 'panes' ? 'chat,files' : null; } };"))
         cls.stored = stored
@@ -177,8 +178,7 @@ class HiddenControl(unittest.TestCase):
         # seeded through __SEED__ (see HiddenControlBookmark); the harness already collects the storage listeners
         # (STORAGE) and the phone's tab switches (TABS), which the driver reads under its own names
         harness = (_COLLAPSE_HARNESS.replace("__KEYS__", json.dumps(keys))
-                   .replace("__SEED__", "STORE['romp:settings'] = JSON.stringify({ filesControl: false }); "
-                            "STORE['romp-panes'] = JSON.stringify({ chat: true, fleet: false, feed: true, timeline: true, files: true });"
+                   .replace("__SEED__", "STORE['romp-panes'] = JSON.stringify({ chat: true, fleet: false, feed: true, timeline: true, files: true });"   # no romp:settings: the default hides (T317b)
                             "const STORAGE_LISTENERS = STORAGE, SWITCHED = TABS;"))
         cls.out = _run(harness + km._LANDING_COLLAPSE_JS + _HIDDEN_DRIVER)
 
@@ -212,12 +212,14 @@ class Broadcast(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.keys = [k for k, _ in km._PANE_ORDER]
-        cls.out = _run(_COLLAPSE_HARNESS.replace("__KEYS__", json.dumps(cls.keys)).replace("__SEED__", "") + km._LANDING_COLLAPSE_JS + _COLLAPSE_DRIVER)
+        # the control turned ON by its gear setting (off by default since T317b): the toggles the driver makes are the
+        # user's clicks on a control they asked for; seeded through the harness's __SEED__ slot
+        cls.out = _run(_COLLAPSE_HARNESS.replace("__KEYS__", json.dumps(cls.keys)).replace("__SEED__", "STORE['romp:settings'] = JSON.stringify({ showFilesControl: true });") + km._LANDING_COLLAPSE_JS + _COLLAPSE_DRIVER)
 
     def test_the_boot_apply_tells_every_pane_the_set_as_the_flags_stand(self):
         self.assertEqual(self.out["boot"]["counts"], {k: 1 for k in self.keys}, "one message per pane at boot")
         self.assertEqual(self.out["boot"]["chat"], {"romp": "panes", "on": {"chat": True, "timeline": True, "fleet": False, "feed": True, "files": False},
-                                                     "avail": {"files": True}})   # avail: the Files control's setting rides every tell (T317)
+                                                     "avail": {"files": True}})   # avail: the Files control's setting rides every tell (T317); on here by the store (off by default since T317b)
         self.assertEqual(self.out["boot"]["files"], self.out["boot"]["chat"], "every pane hears the same set")
 
     def test_a_toggle_is_the_event_and_a_no_change_toggle_is_silent(self):
@@ -276,20 +278,20 @@ out.refused = { counts: counts(), cls: CLS.has('po-feed'), chat: last('chat') };
 window.__rompPaneToggle('files', true);          // the other panes toggle as ever, and the set persisted omits the hidden one
 out.files = { chat: last('chat'), store: JSON.parse(STORE['romp-panes'] || 'null') };
 // the gear turns the feed back on: its save lands here as a storage event for romp:settings
-STORE['romp:settings'] = JSON.stringify({ panes: { feed: true } });
+STORE['romp:settings'] = JSON.stringify({ showFilesControl: true, panes: { feed: true } });
 STORAGE.forEach((f) => f({ key: 'romp:settings' }));
 out.enabled = { counts: counts(), chat: last('chat'), feed: last('feed'), src: src(), hidden: hidden(), cls: CLS.has('po-feed'), sets: Object.assign({}, SETS) };
 (LOADS.feed || []).forEach((f) => f());          // the feed page loads now, after the shell: it hears the set on its load
 out.loaded = { counts: counts(), feed: last('feed') };
 // and off again, then on: the src is never reassigned (no reload of a live pane), the flag it had comes back
-STORE['romp:settings'] = JSON.stringify({ panes: { feed: false } });
+STORE['romp:settings'] = JSON.stringify({ showFilesControl: true, panes: { feed: false } });
 STORAGE.forEach((f) => f({ key: 'romp:settings' }));
 out.off = { chat: last('chat'), cls: CLS.has('po-feed'), hidden: hidden(), src: src() };
-STORE['romp:settings'] = JSON.stringify({ panes: {} });
+STORE['romp:settings'] = JSON.stringify({ showFilesControl: true, panes: {} });
 STORAGE.forEach((f) => f({ key: 'romp:settings' }));
 out.back = { chat: last('chat'), cls: CLS.has('po-feed'), sets: Object.assign({}, SETS) };
 // a storage event for another key re-applies but does not re-read the panes
-STORE['romp:settings'] = JSON.stringify({ panes: { fleet: false } });
+STORE['romp:settings'] = JSON.stringify({ showFilesControl: true, panes: { fleet: false } });
 STORAGE.forEach((f) => f({ key: 'romp-pane-grow' }));
 out.otherKey = { chat: last('chat'), hidden: hidden() };
 STORAGE.forEach((f) => f({ key: null }));       // a cleared store is read again
@@ -298,7 +300,7 @@ out.cleared = { chat: last('chat'), hidden: hidden() };
 // fair width, and the set persists so a reload keeps it; the pane's own rail toggle hides it from there
 const GREW = []; window.__rompGrowFair = (k) => GREW.push(k);
 out.fleetBefore = { cls: CLS.has('po-fleet'), store: JSON.parse(STORE['romp-panes'] || 'null') };
-STORE['romp:settings'] = JSON.stringify({ panes: {} });
+STORE['romp:settings'] = JSON.stringify({ showFilesControl: true, panes: {} });
 STORAGE.forEach((f) => f({ key: 'romp:settings' }));
 out.fleetOn = { cls: CLS.has('po-fleet'), chat: last('chat'), hidden: hidden(), grew: GREW.slice(), store: JSON.parse(STORE['romp-panes'] || 'null'), src: src() };
 window.__rompPaneToggle('fleet');
@@ -314,7 +316,9 @@ class OptionalPanes(unittest.TestCase):
     def setUpClass(cls):
         cls.keys = [k for k, _ in km._PANE_ORDER]
         # this browser hid the Feed pane in the gear, and a phone was left on the Feed tab
-        seed = "STORE['romp:settings'] = JSON.stringify({ panes: { feed: false } }); TAB = 'feed';"
+        # the Files control is ON in this browser (off by default since T317b), so the driver's Files toggle is a control the
+        # user asked for; every gear save below carries the key too, as the gear's whole-object save does
+        seed = "STORE['romp:settings'] = JSON.stringify({ showFilesControl: true, panes: { feed: false } }); TAB = 'feed';"
         cls.out = _run(_COLLAPSE_HARNESS.replace("__KEYS__", json.dumps(cls.keys)).replace("__SEED__", seed) + km._LANDING_COLLAPSE_JS + _OPT_DRIVER)
 
     def test_a_pane_hidden_in_the_gear_is_not_in_the_dashboard_at_boot(self):
@@ -493,10 +497,35 @@ console.log(JSON.stringify(out));
 """
 
 
+class MobileScriptDefault(unittest.TestCase):
+    """The phone script with NO settings store (a fresh install): the Files control is off by default (T317b, the user
+    2026-09-10), so its tab is hidden and a switch aimed at it (a relay, a stored tab) shows the chat instead."""
+    @classmethod
+    def setUpClass(cls):
+        driver = r"""
+const out = {};
+out.boot = { tab: TAB };
+window.__rompMobileTab('files');
+out.files = { tab: TAB, store: STORE['romp-mobile-tab'] || null };
+window.__rompMobileTab('feed');
+out.feed = { tab: TAB };
+console.log(JSON.stringify(out));
+"""
+        cls.out = _run(_MOBILE_HARNESS + km._LANDING_MOBILE_JS + driver)
+
+    def test_a_switch_to_the_hidden_files_tab_shows_the_chat(self):
+        self.assertEqual(self.out["files"]["tab"], "chat", "the Files tab is hidden by default: the chat shows instead")
+        self.assertEqual(self.out["feed"]["tab"], "feed", "every other tab switches as ever")
+
+
 class MobileScript(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.out = _run(_MOBILE_HARNESS + km._LANDING_MOBILE_JS + _MOBILE_DRIVER)
+        # the Files control turned ON by its gear setting (off by default since T317b): the taps below land on a tab
+        # the person asked for
+        harness = _MOBILE_HARNESS.replace('const TOGGLES = [], TELLS = [], MQL = [], MSGS = [], STORE = {};', "const TOGGLES = [], TELLS = [], MQL = [], MSGS = [], STORE = { 'romp:settings': JSON.stringify({ showFilesControl: true }) };")
+        assert harness != _MOBILE_HARNESS
+        cls.out = _run(harness + km._LANDING_MOBILE_JS + _MOBILE_DRIVER)
 
     def test_the_layout_probe_answers_the_stylesheets_own_media_query(self):
         # one constant lays out the grid AND answers the JS, never two strings that can drift

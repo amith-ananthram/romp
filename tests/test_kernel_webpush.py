@@ -1392,7 +1392,8 @@ class RevealAiming(unittest.TestCase):
         # answered yet (pingAt set — the peer is unproven since the last heartbeat). The focus goes
         # out as before, AND stays parked: the pong that proves the socket alive retires the copy
         # (the frame is ordered behind the ping it answers); a dead socket never pongs, the pane
-        # redials, and its ready consumes the copy instead of finding nothing.
+        # redials, and the redial's first tab strip consumes the copy instead of finding nothing
+        # (_resolve_reconnect stamps the client, its strip sender consumes; the redial posts no ready).
         c, got = self._register("chat", "W1")
         c["pingAt"] = 100.0
         with mock.patch.object(km, "_tmux_sessions", return_value={"S": {}}):
@@ -1411,7 +1412,7 @@ class RevealAiming(unittest.TestCase):
         with mock.patch.object(km, "_tmux_sessions", return_value={"S": {}}):
             self.assertTrue(km._reveal_request("S", "W1"))
         self.assertIsNone(km._PENDING_REVEAL[0], "a socket with no ping outstanding is proven — nothing parked")
-        # the dead case: never pongs; the pane's redial says ready and takes the copy
+        # the dead case: never pongs; the redial's first strip takes the copy (its sender's consume, called here)
         c["pingAt"] = 100.0
         with mock.patch.object(km, "_tmux_sessions", return_value={"S": {}}):
             km._reveal_request("S", "W1")
@@ -1419,6 +1420,40 @@ class RevealAiming(unittest.TestCase):
             km._consume_pending_reveal(fresh)
         self.assertEqual(fresh_got, [{"type": "focus", "id": "S", "live": True}])
         self.assertIsNone(km._PENDING_REVEAL[0])
+
+    def test_a_redialed_pane_is_a_target_and_its_first_strip_consumes_the_park(self):
+        """A pane whose socket died in the SAME kernel process redials (the shim's ?reconnect=1), and its
+        bundle posts ready once per page life, so no ready ever arrives on the new socket: nothing stamped
+        the redial, so it was never a target and nothing consumed a park aimed at its window. The tap after
+        a phone suspend or a dropped link parked for good, until the page reloaded. The redial's first tab
+        strip is the event that stands in for the ready: _resolve_reconnect stamps the client when it pops
+        the flag and says so, and the strip sender consumes the park right behind the strip it just sent."""
+        with mock.patch.object(km, "_tmux_sessions", return_value={"S": {}}):
+            self.assertFalse(km._reveal_request("S", "W1", via="vanish"), "the socket died: the tap parks")
+            self.assertEqual(km._PENDING_REVEAL[0], {"sid": "S", "wid": "W1"})
+            c, got = self._register("chat", "W1")
+            del c["ready"]                    # registered at its handshake; no ready will follow on this socket
+            c["reconnect"] = True             # the shim's own statement: this page held the sessions before
+            self.assertFalse(km._reveal_request("S", "W1", via="sw"), "before its first strip the redial is no target")
+            self.assertEqual(got, [], "nothing is sent to a pane whose strip has not gone yet")
+            self.assertEqual(km._PENDING_REVEAL[0], {"sid": "S", "wid": "W1"}, "the park stands")
+            # the first strip sender pops the flag: the client is stamped, and the sender is told to consume
+            self.assertTrue(km._resolve_reconnect(c, []), "a popped redial flag says so")
+            self.assertIs(c.get("ready"), True, "the redial is stamped like a pane whose ready was heard")
+            self.assertIsNone(c.get("reconnect"))
+            km._consume_pending_reveal(c, why="the pane's redial")
+            self.assertEqual(len(got), 1)
+            self.assertEqual((got[0]["type"], got[0]["id"], got[0]["live"]), ("focus", "S", True))
+            self.assertIsNone(km._PENDING_REVEAL[0], "consumed")
+            # from here the redialed pane is an ordinary target: the next tap lands at once
+            self.assertTrue(km._reveal_request("S", "W1", via="sw"))
+            self.assertEqual((got[-1]["type"], got[-1]["id"]), ("focus", "S"))
+            self.assertEqual(len(got), 2)
+            # a client that declared no redial is left as it was: not stamped, and its sender told nothing
+            fresh, fresh_got = self._register("chat", "W2")
+            del fresh["ready"]
+            self.assertFalse(km._resolve_reconnect(fresh, []))
+            self.assertNotIn("ready", fresh)
 
 
 class RevealRoute(unittest.TestCase):

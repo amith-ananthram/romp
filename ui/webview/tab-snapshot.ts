@@ -14,9 +14,11 @@
 // paints it; the shapes below are the minimal "Like" views of render.ts's types (the tab-state.ts idiom),
 // so the rule runs in node tests without a DOM.
 import { tabStateClass, type TabStateLike } from "./tab-state";
+import { chipWords, type ChipStatusLike, type ChipWords } from "./status-chip";
 import { stripInline } from "./docreview";
 
-export interface SnapStatusLike extends TabStateLike { sinceEpoch?: number | null }
+/** The tab's state fields, the chip's awaiting fields (kind, count, rows, peers: what an awaiting session waits on), the clock. */
+export interface SnapStatusLike extends TabStateLike, ChipStatusLike { sinceEpoch?: number | null }
 export interface SnapEventLike { kind?: string; md?: string; text?: string; ts?: string; t?: number }
 export interface SnapColor { bg: string; fg: string }
 export interface SnapSessionLike {
@@ -55,6 +57,13 @@ export interface SnapRow {
   needsYou: boolean;
   /** waiting on something that is not you: dispatched background work */
   waiting: boolean;
+  /** the state chip the row wears beside the name, or null for none: the SHARED status chip's words and class
+   *  (status-chip.ts chipWords), the same the bar under the transcript shows for the session you are reading.
+   *  Only the states a row says in words: on you (needsInput's "Blocked", the feed's column word; the tab's own
+   *  "API error" when its rule sees an API error only you can clear) and awaiting background work ("Awaiting 3 agents", "Awaiting watch", the
+   *  one peer's name). Working, ready and the rest ride the pip alone: a blank beside the name means alive and
+   *  quiet, the Sessions pane's rule (T322b, the user 2026-09-10). */
+  chip: ChipWords | null;
   /** what it is doing now, in the user's terms: the judges' current task, else the archiver's headline,
    *  else the most recent top task; "" when nothing is known */
   now: string;
@@ -157,18 +166,11 @@ export function rowState(st: SnapStatusLike | null | undefined): { pip: SnapPip;
   if (cls === "tab-compacting") return { pip: "compacting", state: s === "clearing" ? "clearing" : "compacting", needsYou: false, waiting: false, closed: false };
   if (cls === "tab-closed") return { pip: "", state: "closed", needsYou: false, waiting: false, closed: true };
   if (cls === "tab-working") return { pip: "working", state: "working", needsYou: false, waiting: false, closed: false };
-  if (s === "awaitingBg") return { pip: "waiting", state: "waiting on background work", needsYou: false, waiting: true, closed: false };
+  if (s === "awaitingBg") return { pip: "waiting", state: chipWords(st).text, needsYou: false, waiting: true, closed: false };   // the chip's own words ("Awaiting 3 agents"), spoken as shown (T322b)
   if (s === "interrupting") return { pip: "", state: "interrupting", needsYou: false, waiting: false, closed: false };
   if (s === "opening") return { pip: "unknown", state: "opening", needsYou: false, waiting: false, closed: false };
   return { pip: "", state: "", needsYou: false, waiting: false, closed: false };
 }
-
-/** The state word for a session the feed files under needs-you while the tab's own rule sees nothing (an
- *  idle session that asked a question and stopped, the common case): the feed's own word for that column,
- *  and nothing more. The column also holds cards that stop nothing (a peer's held message waiting for your
- *  approval), so a claim like "stopped until you answer" would be false for some rows the word reaches;
- *  "needs you" is true of every card there. */
-export const FEED_BLOCK_STATE = "needs you";
 
 /** A member's name as its tab shows it; "(unnamed)" for a blank one (the tab-state.ts rule). */
 const memberName = (s: { name?: string } | null | undefined): string => String(s?.name || "").trim() || "(unnamed)";
@@ -186,14 +188,21 @@ export function snapshotRow(id: string, s: SnapSessionLike | null | undefined, l
   // column, per session, from the kernel's last feed build (build_session); the tab's own cases stay as a
   // floor because the feed build trails the chip by one push.
   const feedBlock = lg?.needsInput === true;
+  // the chip: on you → "API error" when the tab's own rule sees an API error only you can clear (tab-blocked: the
+  // flags ride beside the state; a flagless API error is the kernel's transient, auto-retried one, and with a feed-filed
+  // block it reads "Blocked" like every other on-you row), else the feed's column word ("Blocked", needsInput's chip);
+  // awaiting → the awaiting chip's words from the status's kind, count, rows and peers; otherwise none
+  const chip = (feedBlock || st.needsYou) ? chipWords({ state: s?.status && tabStateClass(s.status) === "tab-blocked" ? "blocked" : "needsInput" })
+    : st.waiting ? chipWords(s?.status || {}) : null;
   return {
     id,
     name: memberName(src),
     color: src?.color && src.color.bg && src.color.fg ? { bg: src.color.bg, fg: src.color.fg } : null,
     pip: s ? st.pip : "unknown",
-    state: st.state || (feedBlock && !st.closed ? FEED_BLOCK_STATE : ""),
+    state: st.state,   // the tab's own phrase; a feed-filed block on a quiet session has none, its chip ("Blocked") is the word (T322b)
     needsYou: feedBlock || st.needsYou,
     waiting: st.waiting,
+    chip,
     now: nowLine(lg),
     note: noteLine(lg),
     lastT: s ? lastActivity(s) : null,
@@ -203,9 +212,13 @@ export function snapshotRow(id: string, s: SnapSessionLike | null | undefined, l
   };
 }
 
+const sameChip = (a: ChipWords | null, b: ChipWords | null): boolean =>
+  a === b || (!!a && !!b && a.state === b.state && a.text === b.text
+    && (a.peer === b.peer || (!!a.peer && !!b.peer && a.peer.name === b.peer.name && (a.peer.host || "") === (b.peer.host || "")
+                              && (a.peer.color?.bg || "") === (b.peer.color?.bg || ""))));
 const sameRow = (a: SnapRow, b: SnapRow): boolean =>
   a.id === b.id && a.name === b.name && a.pip === b.pip && a.state === b.state
-  && a.needsYou === b.needsYou && a.waiting === b.waiting && a.now === b.now && a.note === b.note
+  && a.needsYou === b.needsYou && a.waiting === b.waiting && sameChip(a.chip, b.chip) && a.now === b.now && a.note === b.note
   && a.lastT === b.lastT && a.lastMsg === b.lastMsg && a.closed === b.closed && a.loading === b.loading
   && (a.color === b.color || (!!a.color && !!b.color && a.color.bg === b.color.bg && a.color.fg === b.color.fg));
 
@@ -233,15 +246,16 @@ export function snapshotHeading(name: string, n: number): { count: string; label
   return { count, label: `Overview of ${name}: ${count}; click one to open it` };
 }
 
-/** A row's spoken label (name, needs you, state, what it is doing, its own note) and its hover title.
- *  NEEDS YOU is spoken whenever the row wears it: the tab's own state words carry it in their text; every
- *  other state word (working, closed, compacting) gets the word in front of it, where the painted chip sits
- *  beside the pip. The button's aria-label replaces its content for a reader, so a word only the chip
- *  carried would never be spoken. */
+/** A row's spoken label (name, the chip's words, the state phrase, what it is doing, its own note) and its hover
+ *  title. The CHIP's words are spoken whenever the row wears one ("Blocked", "API error", "Awaiting 3 agents"),
+ *  once, where the painted chip sits beside the pip: an awaiting row's state phrase IS the chip's words, so it is
+ *  not repeated; an on-you row's tab phrase ("needs you: waiting on your answer") follows the word. The button's
+ *  aria-label replaces its content for a reader, so a word only the chip carried would never be spoken, and a
+ *  word the chip does not show would be heard and not seen (T322b: the label says what is shown). */
 export function rowWords(r: SnapRow): { label: string; title: string } {
   const parts = [r.name];
   const stateWord = r.loading ? "opening" : r.state;
-  if (r.needsYou && !stateWord.startsWith(FEED_BLOCK_STATE)) parts.push(FEED_BLOCK_STATE);
+  if (r.chip && r.chip.text && stateWord !== r.chip.text) parts.push(r.chip.text);
   if (stateWord) parts.push(stateWord);
   if (r.now) parts.push(r.now);
   if (r.note) parts.push(`its note: ${r.note}`);

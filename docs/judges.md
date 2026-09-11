@@ -134,6 +134,30 @@ coordinate/question mail, a bookkeeping record): the anchor substitutes the
 segment's first assistant atom. The clear wrap-up is exempt: its one
 blocked card is the designed needs-you escape.
 
+A card appears only for work that traces to something the user asked for (the
+user 2026-09-10, whose feed filled with cards titled after the workflows their
+sessions ran on their own). The planner labels every mint `kind`: `ask` (a
+deliverable the user's message asked for) or `process` (work the session started
+for itself: a review round, an audit, a workflow or agent it launched), and the
+rule at minting time trusts the labels: an ask keeps its card, on both the
+unplaced and the already-placed path; a process mint nests as a step under the
+goal the turn ran in (the seam's own top, the segment's placement, this reply's
+ask, else the open top nearest in words), carrying `born` (`{kind: session, via:
+workflow | agent | work, why, parentText}`), with the matching background launch
+(a Workflow run, or an Agent or Task with `run_in_background` or an asynchronous
+ack; a foreground subagent is no launch) supplying `via` and the why; with
+nothing to nest under it files nothing and the ops chained onto it go with it. A
+segment whose trigger is not a human ask (a seam tail a completion notification
+woke, an autonomous stretch) treats every mint as process; a scheduled or
+programmatic prompt is left untouched. A missing label is filled by the words
+alone: without a launch a mint is an ask; with one, every unlabelled mint is
+process except the one nearest the user's own words (its text against the
+message, never its why or its position), and only among the mints no launch
+fits better; when all read like a launch and a top exists, all nest. A harness
+report (a background task's completion, a system reminder) or a teammate's line
+never appears under USER ASKED in the text the judges read and never roots a
+mint. `_demote_session_mints`, `_seg_launches`.
+
 **placer.** The second, scoped call, only when the chosen card already has
 open sub-goals: it sees just that card's subtree and picks the spot, biased
 to the highest level that makes sense. Most cards have no open sub-goals,

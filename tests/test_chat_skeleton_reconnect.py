@@ -49,6 +49,8 @@ GONE = "11111111-2222-3333-4444-555555555559"  # an ended session, listed nowher
 NAMES = {S1: "web", S2: "api", S3: "tests", S4: "docs"}
 TAB_ORDER = [S2, S1, S3, S4]                  # big, mid, small — the tab order is NOT the size order
 SIZES = {S2: 3000, S1: 2000, S3: 1000}        # transcript bytes; S4 has none
+# the journal of a tap that parked on the named road and was landed by the redial's first strip (item 12)
+REDIAL_TRAIL = r"\[reveal\] %s sid=\S+ wid=W1: parked[\s\S]*\[reveal\] sid=\S+ wid=W1: consumed \S+ the pane's redial"
 
 
 def _sess(sid, n, state):
@@ -388,6 +390,9 @@ class SkeletonReconnect(unittest.TestCase):
             self.assertIn("_send_tab_order(c, tab_order, tab_meta, tmux)", s, fn.__name__)
             self.assertLess(s.index("_resolve_reconnect(c, chat_list)"), s.index("_send_tab_order(c, tab_order, tab_meta, tmux)"),
                             fn.__name__ + ": resolve BEFORE the strip")
+            self.assertIn("_consume_pending_reveal(c", s, fn.__name__ + ": a redial's first strip consumes a parked reveal")
+            self.assertLess(s.index("_send_tab_order(c, tab_order, tab_meta, tmux)"), s.index("_consume_pending_reveal(c"),
+                            fn.__name__ + ": the strip BEFORE the focus it names a tab of")
         i = src.find('msg.get("type") == "ready"')
         body = src[i:i + 2600]
         self.assertNotIn("_send_tab_order(client", body,
@@ -483,6 +488,117 @@ class SkeletonReconnect(unittest.TestCase):
         for name in ("_send_chat", "_send_chat_or_status"):
             s = inspect.getsource(getattr(km, name))
             self.assertLess(s.index("with _client_lock("), s.index("_send_chat_locked("), name)
+
+    # ── item 12 ──
+    def test_12_a_reveal_parked_while_the_page_had_no_socket_lands_behind_the_redials_first_strip(self):
+        # A push tap (or a deep link, or a vanished notification) reached the kernel while the page's socket was
+        # dead: /reveal found no ready chat pane for the window and parked. The page redials with ?reconnect=1 and
+        # its bundle, which posted ready once, never posts another, so no ready arm runs for the new socket. The
+        # pusher's first strip for the redial is the event that stands in: it stamps the client, sends the strip,
+        # then delivers the parked focus, so the focus names a tab the strip has already listed.
+        km._PENDING_REVEAL[0] = None
+        km._tmux_sessions = lambda: {S1: {}}       # the tapped session is live, so the reveal is a focus, not a revive
+        try:
+            trail = io.StringIO()
+            with contextlib.redirect_stderr(trail):
+                self.assertFalse(km._reveal_request(S1, "W1", via="vanish"), "no socket for the window: parked")
+                self.assertEqual(km._PENDING_REVEAL[0], {"sid": S1, "wid": "W1"})
+                c = self._client(active=S1, reconnect=True, wid="W1")
+                km._push([c])
+            self.assertIs(c.get("ready"), True, "the redial's first strip stamps the client as the ready arm would")
+            self.assertIsNone(km._PENDING_REVEAL[0], "the park was consumed")
+            types = [f["type"] for f in c["_frames"]]
+            self.assertIn("focus", types, "the parked focus landed on the redialed socket")
+            self.assertLess(types.index("tabOrder"), types.index("focus"), "behind the strip that names its tab")
+            self.assertLess(types.index("focus"), types.index("session"), "and ahead of the cycle's session frames")
+            focus = self._frames(c, "focus")
+            self.assertEqual(len(focus), 1)
+            self.assertEqual((focus[0]["id"], focus[0]["live"]), (S1, True))
+            self.assertEqual(self._tab_orders(c)[0]["skeleton"], [S3, S2], "the redial is still served as a skeleton set")
+            self.assertRegex(trail.getvalue(), REDIAL_TRAIL % "vanish", "the journal says which event landed the park")
+            # the next cycle consumes nothing: the flag is gone, and there is nothing parked
+            c["_frames"].clear()
+            with contextlib.redirect_stderr(io.StringIO()):
+                km._push([c])
+            self.assertEqual(self._frames(c, "focus"), [])
+            # a fresh page (no redial) with a park for its window is left to its own ready, as before
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertFalse(km._reveal_request(S1, "W2", via="sw"))
+                fresh = self._client(active=S1, wid="W2")
+                km._push([fresh])
+            self.assertEqual(self._frames(fresh, "focus"), [], "no redial: the strip consumes nothing")
+            self.assertNotIn("ready", fresh)
+            self.assertEqual(km._PENDING_REVEAL[0], {"sid": S1, "wid": "W2"}, "the park stands for the ready arm")
+        finally:
+            km._PENDING_REVEAL[0] = None
+
+    def _park_for_a_redialing_page(self, via):
+        """A tap parked while the window had no socket, then the page's redial registered at its handshake:
+        the client is in _clients with the flag and no stamp, exactly as _ws leaves it before any strip."""
+        km._PENDING_REVEAL[0] = None
+        km._tmux_sessions = lambda: {S1: {}}       # the tapped session is live, so the reveal is a focus, not a revive
+        trail = io.StringIO()
+        with contextlib.redirect_stderr(trail):
+            self.assertFalse(km._reveal_request(S1, "W1", via=via), "no socket for the window: parked")
+        c = self._client(active=S1, reconnect=True, wid="W1")
+        km._clients.append(c)
+        return c, trail
+
+    def _assert_landed_behind_the_first_strip(self, c, trail, via):
+        self.assertIs(c.get("ready"), True, "stamped by the strip sender that popped the flag")
+        self.assertIsNone(c.get("reconnect"))
+        self.assertIsNone(km._PENDING_REVEAL[0], "the park was consumed")
+        types = [f["type"] for f in c["_frames"]]
+        self.assertIn("focus", types)
+        self.assertLess(types.index("tabOrder"), types.index("focus"), "behind the strip that names its tab")
+        self.assertEqual([(f["id"], f["live"]) for f in self._frames(c, "focus")], [(S1, True)])
+        self.assertEqual(self._tab_orders(c)[0]["skeleton"], [S3, S2], "the strip is still the redial's skeleton strip")
+        self.assertRegex(trail.getvalue(), REDIAL_TRAIL % via)
+
+    def test_12b_a_close_confirmation_as_the_redials_first_strip_lands_the_park_too(self):
+        # the off-cycle sender that can be the FIRST strip a redialing page sees (test_10b): it stamps and consumes
+        # like the pusher's pass does, so a park does not wait for the next cycle
+        c, trail = self._park_for_a_redialing_page("sw")
+        try:
+            with contextlib.redirect_stderr(trail):
+                self.assertTrue(km._confirm_close_now(GONE))
+            self._assert_landed_behind_the_first_strip(c, trail, "sw")
+        finally:
+            km._PENDING_REVEAL[0] = None
+
+    def test_12c_a_session_push_as_the_redials_first_strip_lands_the_park_too(self):
+        # the other off-cycle sender (a create or a handshake for one tab, test_05), as the redial's first strip
+        c, trail = self._park_for_a_redialing_page("link")
+        try:
+            with contextlib.redirect_stderr(trail):
+                km._push_session_now(S3)
+            self._assert_landed_behind_the_first_strip(c, trail, "link")
+            self.assertEqual(self._sessions(c), [S3], "the push's own full still follows")
+        finally:
+            km._PENDING_REVEAL[0] = None
+
+    def test_12d_the_ready_arm_over_a_still_flagged_client_lands_the_park_once_as_the_ready(self):
+        # the arm's path and the strip's cannot both land one park: _client_reset_chat_base pops the flag before the
+        # connect push, so that push's strip resolves nothing, and the arm's own consume (after the push) is the one;
+        # the journal names the ready, not the redial, and there is one focus (green before and after the change)
+        c, trail = self._park_for_a_redialing_page("sw")
+        try:
+            h = _Self(lambda cl: km._push([cl], connect=True))   # the real _push_one body
+            with contextlib.redirect_stderr(trail):
+                km.Handler._dispatch_ws(h, {"type": "ready"}, c)
+            self.assertEqual(h.calls, [c])
+            self.assertIs(c.get("ready"), True)
+            self.assertIsNone(km._PENDING_REVEAL[0])
+            for k in ("skeleton", "skeletonOrder", "reconnect"):
+                self.assertNotIn(k, c, k)
+            types = [f["type"] for f in c["_frames"]]
+            self.assertEqual(types.count("focus"), 1, "one focus: the arm's")
+            self.assertLess(types.index("tabOrder"), types.index("focus"))
+            self.assertEqual(sorted(self._sessions(c)), sorted(TAB_ORDER), "the arm's push is every full, no set")
+            self.assertRegex(trail.getvalue(), r"consumed \S+ the pane's ready")
+            self.assertNotIn("the pane's redial", trail.getvalue(), "the strip inside the arm's push resolved no flag")
+        finally:
+            km._PENDING_REVEAL[0] = None
 
 
 if __name__ == "__main__":

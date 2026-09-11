@@ -101,6 +101,19 @@ test("no sheet sets a weight on a tag chip class: the sheets add layout and stat
   for (const [name, sheet] of [["styles.css", CSS], ["feed.css", FEED_CSS]] as const) assert.match(sheet, /\n\.tag-chip-off \{ opacity: 0\.45; \}\n/, name + ": the off state");
 });
 
+test("there is one off look, the fade: the struck variant is gone from the renderer, both sheets, the picker and the rules (T321c)", () => {
+  // the user tried a diagonal drawn through the picker's off tag and reversed it the same day: off is the faded chip everywhere,
+  // the picker's call the same shape as the tag-lens menu's; nothing of the variant stays behind as dead code
+  assert.doesNotMatch(MENU, /TAG_CHIP_STRUCK|struck\??:/, "no struck option or constant in the renderer");
+  assert.doesNotMatch(CSS + FEED_CSS, /tag-chip-struck/, "no struck rule on either sheet");
+  assert.doesNotMatch(RENDER, /struck: !b\.classList/, "the picker passes no struck flag");
+  assert.doesNotMatch(RULES, /struck through with a diagonal/, "the rules name one off look");
+  assert.match(RENDER, /b\.replaceChildren\(tagChip\(u\.name, u\.color, \{ inheritSize: true, off: !b\.classList\.contains\("sel"\) \}\)\);/,
+    "the picker's off chip is tagChip's `off`, the tag-lens menu's own call shape");
+  const lensMenu = MENU.slice(MENU.indexOf("export function openTagMenu("), MENU.indexOf("export const TAG_CHIP_OFF_CLASS"));
+  assert.match(lensMenu, /\{ off: !on \}/);
+});
+
 test("the standard is written in ui/CLAUDE.md, one sentence", () => {
   assert.match(RULES, /\*\*Tags render as ONE chip everywhere\*\* \(the user 2026-09-10\): `tagChip` in\s*\n`ui\/webview\/tag-menu\.ts` builds every tag the UI shows/);
   assert.match(RULES, /weight 400, the\s*\ncontext's size, faded when off; never bold, which is the session names' weight/);

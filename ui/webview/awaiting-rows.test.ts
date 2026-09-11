@@ -108,7 +108,9 @@ test("the card caption stands down under rows of ANY kind, and still speaks when
 // --- the chat statusline chip -------------------------------------------------------------------------
 test("the Awaiting chip is a BUTTON on the stable statusline delegate, acknowledged, that opens the box", () => {
   const branch = RENDER.split('state === "awaitingBg") {')[1].split("} else if")[0];
-  assert.match(branch, /const chip = el\("button", "chip chip-awaitingBg chip-btn"\) as HTMLButtonElement;/);
+  // the chip itself is the SHARED status chip since T322b (status-chip.ts): the bar asks for the button form and adds its own class
+  assert.match(branch, /const chip = statusChip\(chipWords\(s\.status\), "button"\) as HTMLButtonElement;/);
+  assert.match(branch, /chip\.classList\.add\("chip-btn"\);/);
   assert.match(branch, /chip\.type = "button";/);
   assert.match(branch, /chip\.dataset\.act = "awaitingChip";/, "keyed for the delegate — never a listener on the rebuilt node");
   // the tooltip: the per-kind breakdown, the kernel's why, and what the click does (setTip, one line each)
@@ -124,10 +126,13 @@ test("the Awaiting chip is a BUTTON on the stable statusline delegate, acknowled
 });
 
 test("the chip's label: a single named peer keeps its coloured name; every other wait wears awaitWord", () => {
-  const branch = RENDER.split('state === "awaitingBg") {')[1].split("} else if")[0];
-  assert.match(branch, /if \(chipPeers\.length && groupRows\(chipItems\)\.every\(\(g\) => g\.kind === "peer"\)\) \{/, "the name path only when every row is a peer — a peer beside an agent is a mixed wait");
-  assert.match(branch, /\} else chip\.append\(chipWord \|\| chipPeers\.length \+ " peers"\);/);
-  assert.match(branch, /\} else chip\.textContent = CHIP_LABEL\.awaitingBg \+ \(chipWord \? " " \+ chipWord : ""\);/);
+  // the rule moved to status-chip.ts with T322b (the tag overview's rows wear the same chip); the bar builds from it
+  const CHIP = W("status-chip.ts");
+  assert.match(CHIP, /const word = awaitWord\(st\.awaitingKind, st\.awaitingCount, items\);/);
+  assert.match(CHIP, /if \(peers\.length && groupRows\(items\)\.every\(\(g\) => g\.kind === "peer"\)\) \{/, "the name path only when every row is a peer — a peer beside an agent is a mixed wait");
+  assert.match(CHIP, /return \{ state, text: head \+ " " \+ \(word \|\| peers\.length \+ " peers"\), peer: null \};/);
+  assert.match(CHIP, /return \{ state, text: head \+ \(word \? " " \+ word : ""\), peer: null \};/);
+  assert.match(RENDER.split('state === "awaitingBg") {')[1].split("} else if")[0], /statusChip\(chipWords\(s\.status\), "button"\)/);
 });
 
 // --- the box: rows grouped by kind, per-kind affordances ------------------------------------------------

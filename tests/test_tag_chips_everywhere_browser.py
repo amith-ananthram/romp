@@ -3,7 +3,10 @@
 ui/webview/tag-menu.ts) builds every tag chip: the tab strip's group rows and its filter chips at the strip's right,
 the feed's and the outline's filter chips, the tag-lens menu, the tab menu's Tags flyout, the feed's session dialog,
 and the new-session picker's Tags row, where each tag shows as the chip (a thin border in the tag's own colour) and on
-versus off by the visual the tag toggles already use: the faded chip (TAG_CHIP_OFF_CLASS at 0.45). No identity dot.
+versus off by the visual the tag toggles already use: the faded chip (TAG_CHIP_OFF_CLASS at 0.45). No identity dot. The
+picker's off chip and the tag-lens menu's off chip are read from the live page and must render identically (T321c, the
+user reversing, the same day, a diagonal drawn through the picker's off tag: the same class, the same computed opacity,
+no pseudo-element on either).
 
 The strip guard reads the LIVE computed style of a group row's chip and of the same tag's filter chip at the strip's
 right (a chat lens seeded with two tags, so both rows and both filter chips show) and asserts they are one rendering:
@@ -88,6 +91,18 @@ const strip = await page.evaluate((lookSrc) => {
            filters: Array.from(document.querySelectorAll("#tabs .tab-tagchips > span")).map(look),
            names: Array.from(document.querySelectorAll("#tabs .tab-label")).map((e) => getComputedStyle(e).fontWeight) };
 }, look.toString());
+// the tag-lens menu from the strip's filter button: its unselected rows wear the off chip the picker must match
+await page.click('#tabs button[title="filter these tabs by tag"]');
+await page.waitForSelector('[data-tag-menu] span[aria-pressed="false"]', { timeout: 10000 });
+const lensMenu = await page.evaluate(() => {
+  const read = (e) => { const cs = getComputedStyle(e); return { text: e.textContent, cls: e.getAttribute("class") || "", opacity: cs.opacity, after: getComputedStyle(e, "::after").content }; };
+  return { off: Array.from(document.querySelectorAll('[data-tag-menu] span[aria-pressed="false"]')).map(read),
+           on: Array.from(document.querySelectorAll('[data-tag-menu] span[aria-pressed="true"]')).map(read) };
+});
+// close it before the picker opens: Escape, else the strip's own filter button toggles it shut; the wait is not swallowed
+await page.keyboard.press("Escape");
+if (await page.$("[data-tag-menu]")) await page.click('#tabs button[title="filter these tabs by tag"]');
+await page.waitForFunction(() => !document.querySelector("[data-tag-menu]"), null, { timeout: 5000 });
 await page.click("#tabs .tab-add");
 await page.waitForSelector("#picker .picker-tags .picker-be-opt", { timeout: 10000 });
 await page.waitForTimeout(200);
@@ -107,6 +122,7 @@ const survey = () => page.evaluate(() => {
                chipText: chip ? chip.textContent : null,
                chipBorder: cs ? cs.borderTopColor : null, chipBorderW: cs ? cs.borderTopWidth : null, chipColor: cs ? cs.color : null,
                chipOpacity: cs ? cs.opacity : null, chipBg: cs ? cs.backgroundColor : null, chipFont: cs ? cs.fontFamily : null,
+               chipAfter: chip ? getComputedStyle(chip, "::after").content : null,
                btnBg: bs.backgroundColor, btnBorder: bs.borderTopStyle, btnOpacity: bs.opacity, btnFilter: bs.filter, btnPad: bs.paddingLeft };
     }),
   };
@@ -119,6 +135,12 @@ const on = await survey();
 await page.click('#picker .picker-tags .picker-be-opt[data-tag="infra"]');
 await page.waitForTimeout(100);
 const off = await survey();
+// the light theme: the chips keep the tag's colour on border and text (a theme rule must never recolour a tag)
+await page.evaluate(() => document.body.classList.add("chat-theme-yatharth", "theme-light"));
+await page.waitForTimeout(150);
+const light = await survey();
+await page.evaluate(() => document.body.classList.remove("chat-theme-yatharth", "theme-light"));
+await page.waitForTimeout(100);
 // the tmux pick: the row greys behind its note
 const hasTmux = await page.evaluate(() => { const b = document.querySelector('#picker .picker-be-opt[data-be="tmux"]'); return !!b && getComputedStyle(b).display !== "none"; });
 let tmux = null;
@@ -127,7 +149,7 @@ if (hasTmux) {
   await page.waitForTimeout(150);
   tmux = await survey();
 }
-fs.writeSync(1, "RESULT:" + JSON.stringify({ strip, open, on, off, tmux, hasTmux }) + "\n");
+fs.writeSync(1, "RESULT:" + JSON.stringify({ strip, lensMenu, open, on, off, light, tmux, hasTmux }) + "\n");
 await browser.close();
 process.exit(0);
 """
@@ -250,14 +272,28 @@ class ServedPickerTagChips(unittest.TestCase):
             self.assertEqual(x["chipFont"], out["strip"]["rows"][0]["fontFamily"], "the page's typeface, as the strip's chip: a bare button wears the browser's control face (review find): %r" % x)
         # the active tab's tag is selected: the full chip; the others unselected: the faded chip
         self.assertTrue(by["web"]["sel"]); self.assertFalse(by["infra"]["sel"]); self.assertFalse(by["docs"]["sel"])
-        self.assertEqual((by["web"]["chipClass"], by["web"]["chipOpacity"]), ("", "1"), "selected = the full chip")
+        self.assertEqual((by["web"]["chipClass"], by["web"]["chipOpacity"], by["web"]["chipAfter"]), ("", "1", "none"), "selected = the full chip")
         for name in ("infra", "docs"):
-            self.assertEqual((by[name]["chipClass"], by[name]["chipOpacity"]), ("tag-chip-off", "0.45"), "unselected = the off chip (the tag toggles' look): %r" % by[name])
+            self.assertEqual((by[name]["chipClass"], by[name]["chipOpacity"], by[name]["chipAfter"]), ("tag-chip-off", "0.45", "none"),
+                             "unselected = the off chip (the tag toggles' look), nothing drawn over it: %r" % by[name])
+        # …identical to the tag-lens menu's off chip, read from the same page (T321c): the one off look
+        menu = out["lensMenu"]
+        self.assertTrue(menu["off"], "the seeded lens leaves a tag unselected in the menu: %r" % menu)
+        for m in menu["off"]:
+            self.assertEqual((m["cls"], m["opacity"], m["after"]), ("tag-chip-off", "0.45", "none"), "the menu's off chip: %r" % m)
+            self.assertEqual((m["cls"], m["opacity"], m["after"]), (by["infra"]["chipClass"], by["infra"]["chipOpacity"], by["infra"]["chipAfter"]),
+                             "the picker's off chip renders as the menu's: %r vs %r" % (m, by["infra"]))
+        for m in menu["on"]:
+            self.assertEqual((m["cls"], m["opacity"], m["after"]), ("", "1", "none"), "the menu's selected chip is the full chip, as the picker's: %r" % m)
         # the flip: the state class and the chip's look move together, and back
         on = {x["tag"]: x for x in out["on"]["opts"]}
         self.assertTrue(on["infra"]["sel"])
         self.assertEqual((on["infra"]["chipClass"], on["infra"]["chipOpacity"]), ("", "1"), "clicked on: the full chip")
         self.assertTrue(on["web"]["sel"], "multi-select: the other stays")
+        light = {x["tag"]: x for x in out["light"]["opts"]}
+        for name in ("web", "infra", "docs"):
+            self.assertEqual((light[name]["chipBorder"], light[name]["chipColor"]), (_rgb(colors[name]), _rgb(colors[name])), "theme parity: %r" % light[name])
+        self.assertEqual((light["infra"]["chipClass"], light["infra"]["chipOpacity"]), ("tag-chip-off", "0.45"), "the off look holds on the light theme")
         off = {x["tag"]: x for x in out["off"]["opts"]}
         self.assertFalse(off["infra"]["sel"])
         self.assertEqual((off["infra"]["chipClass"], off["infra"]["chipOpacity"]), ("tag-chip-off", "0.45"), "clicked again: the off chip")

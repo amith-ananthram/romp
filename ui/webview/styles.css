@@ -1278,9 +1278,10 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 .mention-chip { display: inline-block; line-height: 1.35; font-weight: 600; color: var(--chip-bg, #fff); }
 
 /* A SECTION AT A GLANCE (tab-snapshot.ts, render.ts renderSnapshot): one row per session of a tab-strip
-   section, in the transcript's place. Two sizes only: the body size for the name and the now line, and
-   0.82em, the header's label size, for the heading, the flag word, the time and the note (labels match
-   labels, times match the strip's sub-lines). The heading wears the header's own dress (letter-spaced dim
+   section, in the transcript's place. Two sizes of its own: the body size for the name and the now line, and
+   0.82em, the header's label size, for the heading, the time and the note (labels match
+   labels, times match the strip's sub-lines); the state chip keeps the shared .chip rule's 0.7em, the bar's
+   own size (T322b). The heading wears the header's own dress (letter-spaced dim
    label + the tag's swatch bar); a row is a real button with the one action hover (accent border + accent
    wash) and the accent focus ring; the pip wears the tab's state colors by the tab's rule (the retrying
    amber is the same status token the tab and the folded header's pip use); the name takes the session's
@@ -1305,8 +1306,8 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 .snap-sess { flex: 0 0 auto; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .snap-row.closed .snap-sess { text-decoration: line-through; opacity: 0.6; }
 .snap-row.loading .snap-sess { opacity: 0.6; }
-.snap-flag { flex: 0 0 auto; padding: 0 6px; border: 1px solid var(--box-border); border-radius: var(--radius-pill); font-size: 0.82em; color: var(--dim); }
-.snap-flag.needs { border-color: transparent; background: var(--st-blocked-bg); color: var(--st-blocked-fg); }
+/* (the row's state words are the SHARED status chip, .chip / .chip-<state> below, the same the bar under the transcript
+   wears — the row adds no rule of its own for it; its grey "waiting" pill is gone, T322b) */
 .snap-now { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); }
 /* the row's second line: the session's own working note (render.ts fillSnapshotRow), the header's 0.82em in
    the dim token a step quieter, one line, indented past the pip and its gap so it sits under the name */
@@ -1348,6 +1349,12 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 }
 #composer-input:disabled { opacity: 0.55; cursor: not-allowed; }
 #composer-input::placeholder { color: var(--dim); }
+/* the resting placeholder names the session (the user 2026-09-09): an overlay over the empty box, the name bold in
+   the session's identity colour (its tab label's); the native placeholder beneath it goes transparent while it
+   shows, and stays for assistive tech. Positioned and sized by render.ts syncComposerPh from the box's own metrics. */
+#composer-ph { position: absolute; pointer-events: none; color: var(--dim); white-space: pre; overflow: hidden; text-overflow: ellipsis; box-sizing: border-box; z-index: 1; }
+#composer-ph .composer-ph-name { font-weight: 600; }
+#composer-input.ph-on::placeholder { color: transparent; }
 /* A box grown past the height cap scrolls — and the scrollbar's TRACK paints square into the rounded
    right corners (the user 2026-07-30, on a multi-line box). A thin bar on a transparent track keeps the
    corners round; the thumb alone floats inside the box. */
@@ -1389,7 +1396,11 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
   display: inline-flex; align-items: center;
   font-size: 0.7em; font-weight: 700; letter-spacing: 0.07em;
   padding: 3px 10px; border-radius: 11px;
+  line-height: normal;   /* a span chip and a button chip stand the same height: the UA gives a button normal, a span would inherit the body's 1.6 (T322b: the overview row's span beside the bar's button) */
 }
+/* the session badge (the user 2026-09-09): the session's name on its identity colour (render.ts sets the fill from
+   the same colour the tab label wears), the text black by request; the neutral fill is for a session not yet coloured */
+.chip-session { color: #000; background: var(--box-border); max-width: 14em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chip-working { background: var(--st-working-bg); color: var(--st-working-fg); }
 /* blocked = API error: red chip; the TAB itself goes dashed-red (above), no dot — it isn't working. */
 .chip-blocked { background: var(--st-blocked-bg); color: var(--st-blocked-fg); }

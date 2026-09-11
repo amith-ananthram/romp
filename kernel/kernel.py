@@ -312,6 +312,10 @@ class _PerfStats:
                                         "bg_miss": {k: 0 for k in self.CHAT_MISS}})   # see build_chat
             self.sends = {k: {} for k in self.SEND_KINDS}
             self.judge = {"passes": 0, "ms_sum": 0.0, "ms_last": 0.0, "cpu_ms_sum": 0.0}
+            # cold event-model parses this kernel ran (T323 stage 1): the kernel's own _parse misses, per session
+            # (sid8) and in total, plus the bytes of the files parsed; the judges' misses ride the snapshot from
+            # jd.parse_misses(). The acceptance number of the lazy-transcript work: a boot with no client parses zero.
+            self.parses = {"total": 0, "bytes": 0, "bySid": {}}
             self.http = {}
 
     # ── writers (hot paths) ──
@@ -353,6 +357,16 @@ class _PerfStats:
     def stage(self, name, dt):
         with self.lock:
             self.stages[name] = self.stages.get(name, 0.0) + dt * 1000.0
+
+    def parse(self, sid, nbytes=0):
+        """One COLD parse by the kernel's _parse (a cache miss that ran em.parse_session)."""
+        with self.lock:
+            p = self.parses
+            p["total"] += 1
+            p["bytes"] += int(nbytes or 0)
+            k = str(sid or "")[:8]
+            if len(p["bySid"]) < 1024 or k in p["bySid"]:
+                p["bySid"][k] = p["bySid"].get(k, 0) + 1
 
     def build(self, kind, cached, dt=0.0):
         with self.lock:
@@ -452,6 +466,7 @@ class _PerfStats:
             stages = dict(self.stages)
             builds = {k: dict(v) for k, v in self.builds.items()}
             builds["chat"]["bg_miss"] = dict(self.builds["chat"]["bg_miss"])   # the nested map: a copy too
+            parses = {"total": self.parses["total"], "bytes": self.parses["bytes"], "bySid": dict(self.parses["bySid"])}
             sends = {k: {sl: {"count": e[0], "bytes": e[1]} for sl, e in d.items()}
                      for k, d in self.sends.items()}
             judge = dict(self.judge)
@@ -498,7 +513,8 @@ class _PerfStats:
         now = time.time()
         return {"now": now, "since": since, "uptime_s": now - _STARTED, "log": _PERF,
                 "process": _process_stats(), "pusher": pusher, "stages_ms": stages,
-                "builds": builds, "sends": sends, "goals": goals, "memos": memos, "judge": judge, "http": http}
+                "builds": builds, "sends": sends, "goals": goals, "memos": memos, "judge": judge, "http": http,
+                "parses": dict(parses, judge=int(getattr(jd, "parse_misses", lambda: 0)()))}   # T323: cold parses
 
 
 _PERF_STATS = _PerfStats()
@@ -8893,6 +8909,131 @@ def _intr_block_stands(sid, gid):
     return bool(nd and nd.get("blocked"))
 
 
+_PARSE_WARM_STATES = ("working", "compacting", "retrying")   # a session the feed warm still parses when it did not move
+
+
+def _warm_wanted(s, tm):
+    """Whether the feed warm would parse session row `s` (its tmux row `tm`): it moved since this kernel booted, or
+    it is working now. build_feed asks for a warm only for such a session; one the gate leaves cold is cold by
+    design (its card reads the store, its dots wait for a client), not a cold parse to chase every cycle."""
+    return _session_moved_since_boot(s) or (tm or {}).get("state", "") in _PARSE_WARM_STATES
+
+
+def _session_files_stat(s):
+    """(mtime, size) of the transcript, the state log and the session's goal store, zeros for a missing file: the
+    three inputs every event-keyed tick job reads. A change in any of them is the only event that can change the
+    job's answer; the store is in the tuple because a judge can clear or complete the goal a marker points at with
+    no transcript change at all, and the interrupt tick must re-block on exactly that (its docstring's stale-marker
+    rule; tests/test_kernel_interrupt_machine_cut.py pins it)."""
+    sid = str(s.get("sid") or "")
+    out = []
+    for p in (s.get("path") or "", str(jd.STATE / "states" / (sid + ".jsonl")), str(jd.GOALDIR / (sid + ".json"))):
+        try:
+            st = os.stat(p)
+            out += [st.st_mtime, st.st_size]
+        except OSError:
+            out += [0.0, 0]
+    return tuple(out)
+
+
+def _session_moved_since_boot(s):
+    """Whether the session's transcript or state log was written after THIS kernel started (_STARTED)."""
+    st = _session_files_stat(s)
+    return st[0] > _STARTED or st[2] > _STARTED or st[4] > _STARTED
+
+
+_TICK_SEEN: dict = {}          # (job, sid) -> the files' stat tuple at the job's last COMPLETED evaluation (T323 stage 1)
+_TICK_SEEN_LOCK = threading.Lock()
+_TICK_SEEN_FILE = "tick-seen.json"   # the memo PERSISTED under the state dir (jd.STATE): written when dirty at the end
+#                                      of a pusher cycle and at exit, read at boot, so the next kernel's first look
+#                                      compares against the previous kernel's last evaluation rather than its own
+#                                      start (review find: a stop landing in the gap between the previous kernel's
+#                                      last tick and this boot read as unchanged and was never blocked). A crash
+#                                      loses the newest writes: the affected sessions are evaluated once, the safe way.
+_TICK_SEEN_DIRTY = [False]
+
+
+def _tick_seen_path():
+    return jd.STATE / _TICK_SEEN_FILE
+
+
+def _load_tick_seen():
+    """Read the persisted memo into _TICK_SEEN (best-effort; a missing or torn file is an empty memo)."""
+    try:
+        d = json.loads(_tick_seen_path().read_text(encoding="utf-8"))
+    except Exception:
+        return 0
+    n = 0
+    with _TICK_SEEN_LOCK:
+        for k, v in (d.items() if isinstance(d, dict) else ()):
+            if isinstance(k, str) and "|" in k and isinstance(v, list) and len(v) == 6:
+                job, sid = k.split("|", 1)
+                _TICK_SEEN[(job, sid)] = tuple(v)
+                n += 1
+    return n
+
+
+def _persist_tick_seen(force=False):
+    """Write the memo when a completed evaluation moved it since the last write (or `force`); atomic, best-effort."""
+    with _TICK_SEEN_LOCK:
+        if not (_TICK_SEEN_DIRTY[0] or force):
+            return False
+        snap = {"%s|%s" % k: list(v) for k, v in _TICK_SEEN.items()}
+        _TICK_SEEN_DIRTY[0] = False
+    try:
+        p = _tick_seen_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(p.name + ".tmp.%d" % os.getpid())
+        tmp.write_text(json.dumps(snap), encoding="utf-8")
+        os.replace(tmp, p)
+        return True
+    except Exception:
+        return False
+
+
+def _tick_job_check(job, s):
+    """T323 stage 1: (skip, stat) for an event-keyed tick job, one whose answer is a pure function of the
+    session's transcript, state log and goal store, never of the wall clock. `skip` is True when those files
+    are UNCHANGED since the job's last COMPLETED evaluation (_tick_job_done) on record, this kernel's or a
+    previous one's (the memo persists, _TICK_SEEN_FILE); a session no kernel on record has looked at is
+    evaluated once. Why: before this, every such job parsed every alive session on the first cycle after a
+    restart to re-derive what the previous kernel had already filed in the store (the interrupt block marker,
+    the working note), a full parse per session for nothing new (T311: 388 chats' worth of parses in five
+    minutes). A session that moved since its last look is evaluated; one that did not keeps the store's
+    verdict, which is what the card reads. Nothing is recorded here: the caller marks the evaluation done only
+    once its store work landed, so a fault mid-tick (an unproved ledger, an unreadable store, a refused marker
+    write) leaves the session to the next tick exactly as before (the fault-boundary tests pin that). A job
+    with a wall-clock leg (the nudge's timers) must not use this."""
+    st = _session_files_stat(s)
+    if not st[0]:
+        return False, st                      # no transcript to stat: nothing is known about it, so never a skip
+    key = (job, str(s.get("sid") or ""))
+    with _TICK_SEEN_LOCK:
+        prev = _TICK_SEEN.get(key)
+    if prev is None:
+        return False, st                      # never evaluated by any kernel on record: evaluate once
+    return st == prev, st
+
+
+def _tick_job_done(job, s, st):
+    """The job's evaluation of `s` completed with its store work landed: the files' stat tuple `st` (from
+    _tick_job_check) becomes the baseline the next check compares against."""
+    key = (job, str(s.get("sid") or ""))
+    with _TICK_SEEN_LOCK:
+        _TICK_SEEN[key] = st
+        _TICK_SEEN_DIRTY[0] = True
+        if len(_TICK_SEEN) > 4096:            # bounded by jobs × sessions; never unbounded
+            _TICK_SEEN.clear()
+
+
+def _tick_job_skips(job, s):
+    """Check and, when unchanged, nothing else: the skip needs no record (the baseline it matched still stands)."""
+    return _tick_job_check(job, s)[0]
+
+
+_load_tick_seen()               # the previous kernel's last evaluations, if it left them
+
+
 def _interrupt_block_tick(now, tmux):
     """Interrupt → Blocked, INDEPENDENT of the auto-nudge switch (the user 2026-07-14). A session the
     user genuinely STOPPED mid-turn is waiting on their next instruction: its focus goal needs THEM, so
@@ -8931,6 +9072,9 @@ def _interrupt_block_tick(now, tmux):
             continue                                     # awaiting you / compacting → a different needs-you path owns it
         if _api_error(s["path"]):                        # stopped on an API error → not a user stop
             continue
+        skip, files_st = _tick_job_check("interrupt-block", s)   # nothing appended since the last COMPLETED look (or
+        if skip:                                                 # since boot): the store already carries the verdict
+            continue                                             # this tick would re-derive
         try:
             turns = jd.parsed_session(sid, [s["path"]], now)["turns"]
         except Exception:
@@ -8951,9 +9095,20 @@ def _interrupt_block_tick(now, tmux):
                 continue
             _auto_nudge_resume()
             ib = _intr_blocked(sid)                      # once per interrupt episode (the intrBlocked marker) —
+            if ib:
+                # an UNREADABLE store keeps the marker (_intr_block_stands reads a fault as standing, by design)
+                # but is no evidence the block holds its card, so it is no completed evaluation either: the
+                # session stays unmarked and the next tick reads again (review find, 2026-09-11: marking it
+                # done here skipped the session for good, across a graceful restart, with its new focus top in
+                # Working while it sat stopped)
+                _store, _fault = jd.load_goals_shared_or_fault(sid)
+                if _fault is not None:
+                    continue
             if ib and not _intr_block_stands(sid, ib):   # but VERIFY the marked block still holds its card (see
                 _set_intr_blocked(sid, None)             # _intr_block_stands): a stale marker is the 'already
                 ib = None                                # surfaced' claim with its evidence gone
+            if ib:
+                _tick_job_done("interrupt-block", s, files_st)   # the standing block still holds its card: evaluated
             if not ib:
                 # the evidence is the CURRENT quiet, not just the stop: the transcript's newest event
                 # time is the horizon the user has stayed silent through — injected activity (a task
@@ -8970,9 +9125,14 @@ def _interrupt_block_tick(now, tmux):
                     # the tag check above and here refuses the marker, the next tick stands down at the check,
                     # and the first healed tick re-mints the marker (_record_interrupt_block hands back the
                     # gid of a card our own block already holds, appending nothing)
-                    _set_intr_blocked(sid, g)
+                    if _set_intr_blocked(sid, g) is not False:       # False: the marker write was refused (an unproved
+                        _tick_job_done("interrupt-block", s, files_st)   # ledger snapshot); the next tick re-mints it.
+                    #                                                    Filed AND marked: evaluated (a refused record
+                    #                                                    leaves the session to the next tick as well)
         else:                                            # working / re-engaged / machine cut → lift OUR block if any
             ib = _intr_blocked(sid)
+            if not ib:
+                _tick_job_done("interrupt-block", s, files_st)   # nothing to lift: evaluated
             if ib:
                 # the re-engagement IS the newest turn's trigger — the same stamp the judges will put on
                 # every verdict about that turn, so their ruling outranks this lift on arrival order.
@@ -8984,6 +9144,7 @@ def _interrupt_block_tick(now, tmux):
                 # the marker too, so the next tick retries the lift rather than erasing it (the #1019 boundary)
                 if _lift_interrupt_block(sid, ib, turns[-1].get("t") if turns else 0):
                     _set_intr_blocked(sid, None)     # spent → the marker goes; refused under a fault it stays
+                    _tick_job_done("interrupt-block", s, files_st)   # lifted: evaluated
                 #                                      in the last proved snapshot and the next tick retries
     alive_sids = {s["sid"] for s in alive}              # a sid that left the alive set is the event that retires
     _intr_marks_forget(alive_sids)                      # its interrupt-marks entries and its states-overlay fold
@@ -9183,8 +9344,8 @@ def _pure_delegation_top(nodes, top_id, sid=None, path=None):
         pu = root.get("promptUuid")
         if pu and not isinstance(root.get("origin"), dict):
             latch = root.get("askAnchor")
-            if latch in ("human", "absent"):
-                return False                          # the dictated ask (or durable doubt) — stable
+            if latch in ("human", "absent", "scheduled"):
+                return False                          # the dictated ask, a scheduled prompt's, or durable doubt: stable
             if latch != "machine" and _dictated_prompt_uuid(sid, path, pu) is not False:
                 return False                          # unlatched → the cached-parse read, fail-open
     children = {}
@@ -12076,10 +12237,14 @@ def _clear_done_working_notes(now, tmux):
             continue
         if (tmux.get(sid) or {}).get("state", "") in ("working", "compacting", "permission", "picker", "retrying"):
             continue                                     # actively progressing / awaiting input per tmux → keep (cheap pre-gate, no parse)
+        skip, files_st = _tick_job_check("working-notes", s)   # nothing appended since the last completed look (or
+        if skip:                                               # since boot) → the note's fate was settled then
+            continue
         try:
             turns = jd.parsed_session(sid, [s["path"]], now)["turns"]
         except Exception:
             continue
+        _tick_job_done("working-notes", s, files_st)      # evaluated (every branch below reads, at most one writes)
         if not turns or _session_working(turns):         # still working per the event model → keep its claim
             continue
         if _open_top_goal(sid):                           # working OR blocked top remains → still its work
@@ -17558,8 +17723,10 @@ def _ensure_postal_bus():
     no-ops when the bus is already up, so the kernel can insist at every boot. Absolute paths: a
     bootstrap-started kernel's non-login shell has neither the repo's bin/ nor a guaranteed PATH."""
     try:
-        subprocess.run([sys.executable, str(BIN / "romp-postal-service"), "ensure"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+        r = subprocess.run([sys.executable, str(BIN / "romp-postal-service"), "ensure"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=30)
+        if r.returncode != 0:   # the bus said no (2026-09-10: it refuses the machine's fixed port under a test): say so here, where the kernel's log is
+            sys.stderr.write("postal bus ensure refused (exit %d): %s\n" % (r.returncode, (r.stderr or "").strip()[-2000:]))
     except Exception:
         sys.stderr.write("postal bus ensure failed:\n%s" % traceback.format_exc())
 
@@ -25654,6 +25821,101 @@ def _bg_scan_all_cached(path):
     return em.scan_bg_tasks_cached(path, _bgall_cache, want_all=True)
 
 
+def _session_started_face(nodes, nid, healed):
+    """The one-line story for a session-started ROOT card: {why, parent} or None for an ordinary ask."""
+    nd = nodes.get(nid) or {}
+    born = nd.get("born") if isinstance(nd.get("born"), dict) else None
+    if born is None and nid in healed:
+        born = healed[nid][1]
+    if not born:
+        return None
+    parent = str(born.get("parentText") or "") or None   # recorded at demotion / heal time: names the request
+    pid = nd.get("parentId")                              # even after the parent node itself is gone
+    if not parent and pid and pid in nodes:
+        parent = str(nodes[pid].get("text") or "") or None
+    return {"why": str(born.get("why") or ""), "parent": parent}
+
+
+_HEAL_LOG = {"n": 0}          # tops the feed has nested as session-started this boot (logged once per rise)
+_HEAL_STOP = {"the", "and", "for", "with", "over", "into", "from", "that", "this", "each", "then", "them", "they", "their", "your", "onto", "about"}   # function words: never a shared word
+
+
+def _heal_session_tops(path, nodes, status=None, keep=()):
+    """READ-SIDE heal for stores written before the minting-time rule (T319): a top-level goal rooted in a
+    MACHINE record, not in anything the user asked for, is rendered inside the session's human-asked top that
+    was current when it was minted. The deciding fact is the judge's own latched anchor verdict (askAnchor
+    "machine": the node's prompt anchor resolved to a peer mail, the agent's own record or romp bookkeeping,
+    _latch_ask_anchors); never a word match, and never a top that merely lacks an anchor (older stores hold
+    plain tops without one). Excluded: cleared tops, handoff trackers, delegate-rooted tops (origin.peer: a
+    chain the courier traced) and steps born of a session (never tops). A top a live floor RESOLVES to (a
+    permission prompt, an API error or a judge-auth refusal keys the card on it) is un-nested by build_feed once
+    the floors are known: it keeps its card and its face record, like a blocked one. HOSTS are the asks that trace to the user: human-anchored
+    prompt tops and courier-planted delegated goals whose chain the courier proved to a human (origin.peer with
+    userAsk), never a handoff
+    tracker (the delegation fold hides those) and never a session-born step; a completed host still holds its
+    rows and a cleared host hides them with it (what a real step does; a cleared ask never resurfaces its rows
+    as root cards). NEEDS-YOU BREAKS THROUGH: a candidate that is blocked (its own flag or its exported status)
+    or a clear wrap-up's decision card is not nested, keeps its card, and still gets the face record so it
+    never poses as an ask. The launch match reads the launch record's OWN description (`launchDesc`, kept from
+    the dispatch and never overwritten by the completion's summary; never the brief or script) and shares by
+    the smaller word set, more than half and at least two, so one stray word never carries it; it only picks
+    WHICH launch supplies the why and, when several hosts are open, which is the parent; with no matching
+    launch the parent is the newest host minted before the node (else the oldest) and the why says the record
+    it is rooted in. Returns {nid: (parent nid or None, born)}; None for a top not nested (blocked, or no
+    host). Deterministic: a pure function of the store and the task stream. Never writes the store."""
+    out = {}
+    status = status or {}
+    def toks(x):
+        return {w for w in re.findall(r"[a-z0-9]+", str(x or "").lower()) if len(w) > 3 and w not in _HEAL_STOP}
+    def delegate(nd):
+        return isinstance(nd.get("handoff"), dict) or (isinstance(nd.get("origin"), dict) and nd["origin"].get("peer"))
+    cands = [(nid, nd) for nid, nd in nodes.items()
+             if nd.get("parentId") is None and not nd.get("cleared") and not nd.get("born") and not delegate(nd)
+             and nd.get("askAnchor") == "machine"]      # never "scheduled": a scheduled prompt's top is the user's
+             #                                           configured work (the mint-time rule's sdk carve-out)
+    if not cands:
+        return out
+    try:
+        tasks = _bg_scan_all_cached(path) if path else []
+    except Exception:
+        tasks = []
+    launches = [t for t in tasks if isinstance(t, dict) and _bg_is_agent(t.get("type")) and (t.get("launchDesc") or t.get("summary"))]
+    def planted(hd):                                  # a courier-planted goal whose chain the courier PROVED reaches the
+        return (isinstance(hd.get("origin"), dict) and hd["origin"].get("peer")   # user (userAsk); a mid-chain coordination
+                and isinstance(hd.get("userAsk"), dict))                          # top the feed folds away never hosts
+    hosts = sorted(((hid, hd) for hid, hd in nodes.items()
+                    if hd.get("parentId") is None and not hd.get("born") and not isinstance(hd.get("handoff"), dict)
+                    and hd.get("askAnchor") != "machine" and (hd.get("promptUuid") or planted(hd))),
+                   key=lambda h: (h[1].get("t") or 0, h[0]))      # keyed by the store's own ids, never a node's "id" field
+    for nid, nd in sorted(cands, key=lambda c: (c[1].get("t") or 0, c[0])):
+        tt = toks(nd.get("text"))
+        best, hit = 0.0, None
+        for l in launches:
+            lt = toks(l.get("launchDesc") or l.get("summary"))    # the dispatch's own words, never the brief
+            shared = len(tt & lt)
+            share = shared / float(min(len(tt), len(lt))) if tt and lt and shared >= 2 else 0.0
+            if share > 0.5 and share > best:
+                best, hit = share, l
+        via = ("workflow" if hit.get("type") == "local_workflow" else "agent") if hit else "work"
+        why = ("matched a background %s the session started (%s)" % (via, " ".join(str(hit.get("launchDesc") or hit.get("summary")).split())[:120])
+               if hit else "rooted in the session's own record (a peer's line, a report, its own turn), not in a request")
+        born = {"kind": "session", "via": via, "why": why, "healed": True}
+        nest = not (nd.get("blocked") or status.get(nid) == "blocked" or nd.get("clearWrap") or nid in set(keep or ()))
+        host = None
+        if nest:
+            before = [h for h in hosts if (h[1].get("t") or 0) <= (nd.get("t") or 0) and h[0] != nid]
+            pool = before or [h for h in hosts if h[0] != nid][:1]
+            if pool:
+                host = pool[-1]
+                if hit and len(pool) > 1:            # several open: the launch's words pick the parent, ties the newest
+                    ht = toks(hit.get("launchDesc") or hit.get("summary"))
+                    host = max(pool, key=lambda h: (len(toks(h[1].get("text")) & ht), h[1].get("t") or 0))
+        if host:
+            born["parentText"] = str(host[1].get("text") or "")[:120]
+        out[nid] = (host[0] if host else None, born)
+    return out
+
+
 def _bg_tasks(path, spawned_at=None, live=None):
     """The chat's background-task box payload: {count, tasks}. count = how many tasks to surface (drives the
     'N background tasks' header); tasks = up to 16 of them (newest first) enriched with each one's output tail
@@ -28385,6 +28647,10 @@ def _parse(path, sid, now):
     # parse it just made, so a racing parse of the same path can only make it MORE conservative
     # (a "full" read where a "fold" happened) — never less.
     _parse_mode[path] = _mode[-1] if _mode else "full"
+    try:
+        _PERF_STATS.parse(sid, key[1] if key is not None else 0)   # a cold parse ran (T323: /perf parses)
+    except Exception:
+        pass
     if key is not None:
         if len(_parse_cache) > 256:              # backstop: bounded by fleet size, but never unbounded
             _parse_cache.clear()
@@ -28915,10 +29181,13 @@ def _has_parsing_client():
 
 
 def _warm_fleet_bg(now):
-    """Parse every LIVING session into the kernel parse cache in the background, then drop the feed cache and
-    re-push — so a FEED-ONLY window (no chat/timeline to warm the cache for it) still gets its working-dots +
-    anchors a beat after the cards. A no-op when nobody's connected, or when a chat/timeline client IS (it
-    warms the cache itself); and it bails mid-sweep the instant one connects, so it never competes."""
+    """Parse the living sessions that MOVED since this kernel booted, or are working now, into the kernel parse
+    cache in the background, then drop the feed cache and re-push — so a FEED-ONLY window (no chat/timeline to
+    warm the cache for it) still gets its working-dots + anchors a beat after the cards for the sessions whose
+    dots can differ. Until T323 stage 1 (2026-09-10) it parsed EVERY living session, O(file bytes) each, for dots
+    that an untouched session's card would not change; those now fill the cache on demand. A no-op when nobody's
+    connected, or when a chat/timeline client IS (it warms the cache itself); and it bails mid-sweep the instant
+    one connects, so it never competes."""
     with _clients_lock:
         if not _clients:
             return
@@ -28930,14 +29199,23 @@ def _warm_fleet_bg(now):
         _warming[0] = True
 
     def go():
+        parsed_any = False
         try:
             tmux = _tmux_sessions()
             for s in _alive_sessions(now, tmux):         # live sessions first
                 if _has_parsing_client():                 # a chat/timeline tab just opened → it'll warm the rest
                     break
+                # T323 stage 1: only a session that MOVED since this kernel booted (its transcript or state log
+                # appended) or is working right now is worth a cold parse here; the rest cost O(file bytes)
+                # each for working dots nobody's card will show differently, and the cache fills on demand
+                if not _warm_wanted(s, tmux.get(s["sid"])):
+                    continue
                 _parse(s["path"], s["sid"], now)          # warm the kernel parse cache
-            _built_feed[1] = None                         # force the next build to use the now-warm parses
-            _push_soon()   # ack-fast (the 2026-08-30 wedge: inline fleet builds piled 53 POST handlers; the pusher coalesces)
+                parsed_any = True
+            if parsed_any:                                # (review find: a warm that parsed nothing must not
+                _built_feed[1] = None                     #  invalidate the feed and wake the pusher, or a feed-only
+                _push_soon()   # ack-fast (the 2026-08-30 wedge: inline fleet builds piled 53 POST handlers; the pusher coalesces)
+            #                                                window rebuilt the whole feed every cycle for ever)
         except Exception:
             sys.stderr.write("warm: %s\n" % traceback.format_exc())
         finally:
@@ -28947,27 +29225,25 @@ def _warm_fleet_bg(now):
 
 
 def _boot_warm():
-    """Warm the live fleet's parse cache at kernel STARTUP (the user 2026-07-03: after `romp refresh`, local
-    sessions take a long time to load while remote ones — served by their own still-warm kernel over federation
-    — appear at once). A fresh kernel has EMPTY caches, so the first connect pays the full cold serial parse
-    (~2-4s: build_timeline bars + every chat tab). But between the restart and that connect there's a 1-2s gap
-    while the browser notices the socket dropped, reconnects, and reloads — during which the kernel is IDLE.
-    Spend it: pre-parse the living sessions into _parse_cache so the first connect finds them WARM. Best-effort;
-    bails the instant a chat/timeline client connects (that connect warms what it needs — no GIL contention),
-    warms discover() first (its own cache, shared by every builder), and never throws. Safe: this only
-    PRE-COMPUTES the same (mtime,size)-keyed cache the connect would build — no new state, no staleness."""
+    """Warm the shared discover() cache at kernel STARTUP, and nothing else. Until T323 stage 1 (2026-09-10) this
+    parsed every living session into the kernel parse cache so a reconnecting dashboard found its frames warm (the
+    user 2026-07-03: after `romp refresh` local sessions loaded slowly while federated ones, served by a warm remote
+    kernel, appeared at once); that cost a full read and parse of every transcript on every boot, for nobody, and
+    the redial road has since made it moot: a reconnecting dashboard gets its ACTIVE tab whole and every other tab
+    as a skeleton, so the one parse it needs is the one its own connect push runs. See go() below for the rest of
+    the reasoning."""
     def go():
         try:
             now = int(time.time())
             jd.discover(now)                              # warm the shared discover cache (every builder needs it)
-            tmux = _tmux_sessions()
-            for s in _alive_sessions(now, tmux):
-                if _has_parsing_client():                 # the browser reconnected → it warms the rest; stand down
-                    return
-                try:
-                    _parse(s["path"], s["sid"], now)      # warm the kernel parse cache (build_timeline/-session reuse it)
-                except Exception:
-                    pass
+            # T323 stage 1 (the user 2026-09-10, who wants nothing read at boot that nobody asked for): the warm
+            # PARSES NOTHING any more. It used to parse every living session, O(file bytes) per session per boot,
+            # 15 GB read and 6.6 GB resident within minutes on a 47-session box (T311), for a first frame that
+            # parses its own tab anyway: the redial road ships the ACTIVE tab whole and every other tab as a
+            # skeleton (_client_reset_chat_base, the ?reconnect=1 path), so the only parse a reconnecting
+            # dashboard needs is the one its connect push runs. No tab strip is persisted in the kernel (tabs are
+            # every living session; the active tab is the client's fact, sent after it reconnects), so there is
+            # nothing to pre-parse selectively either. Per boot per session: O(file) → 0.
         except Exception:
             sys.stderr.write("boot-warm: %s\n" % traceback.format_exc())
     threading.Thread(target=go, daemon=True, name="boot-warm").start()
@@ -35120,6 +35396,7 @@ def build_feed(now, tmux=None):
     dbg_rows = _judge_error_rows(now) if jd._debug_mode() else None
     asks, working, awaiting = [], [], []
     serving_folds = []                                # T137: worker mirror cards awaiting the view-side fold
+    heal_total = 0                                    # T319: session-started tops nested this build (logged once per rise)
     bg_services = {}          # session name -> live SERVICE descs (judge-classified, _bg_split) → the neutral chip
     alive = _alive_sessions(now, tmux)               # hard filter: living sessions only
     wmap = _wait_for_graph(now, {s["sid"] for s in alive})   # per-session 'waiting on a live peer' (the user 2026-06-22)
@@ -35139,7 +35416,8 @@ def build_feed(now, tmux=None):
         # and anchors snap in a beat later.
         ps = _parse_cached(s["path"])
         if ps is None:
-            cold_parse = True
+            if _warm_wanted(s, tm):                      # cold by design otherwise (T323 stage 1): no warm to chase
+                cold_parse = True
         else:
             ps = _merge_live_atoms(ps, fsid)         # the same LIVE-MERGED session the chat chip + timeline lane read
             #                                          (the feed was the one surface deriving from the bare cache, 2026-07-05)
@@ -35239,9 +35517,15 @@ def build_feed(now, tmux=None):
                             cite_uuids.add(_a["uuid"])
         except Exception:
             pass
+        healed = _heal_session_tops(s.get("path"), nodes, status)   # T319: machine-rooted tops nest (read-side)
+        heal_total += sum(1 for v in healed.values() if v[0])
         children = {}
         for nid, nd in nodes.items():
-            children.setdefault(nd.get("parentId"), []).append(nid)
+            _hp = healed.get(nid)
+            _pk = _hp[0] if (_hp and _hp[0]) else nd.get("parentId")
+            if _pk is not None and _pk not in nodes and isinstance(nd.get("born"), dict):
+                _pk = None                           # T319: a born step whose parent is gone renders as a root that says so
+            children.setdefault(_pk, []).append(nid)
         agent_open = _agent_open_set(nodes, children)   # authoritative-open subtree → never rendered 'done' (see helper)
         parked_rows = _parked_rows(nodes, children)     # leapfrogged open rows → the quiet "parked" row cue (see helper)
 
@@ -35355,7 +35639,9 @@ def build_feed(now, tmux=None):
             # courier-recorded handoff.peer, never inferred.
             _ho = nd.get("handoff") if isinstance(nd.get("handoff"), dict) else None
             _ho_sid = str(_ho.get("peer") or "") if _ho else ""
+            _born = nd.get("born") if isinstance(nd.get("born"), dict) else (healed.get(nid) or (None, None))[1]
             out.append({"id": nid, "kind": "handoff" if _ho_sid else "ask", "text": nd["text"],
+                        "born": _born or None,   # T319: a step the session started on its own (why it sits here)
                         "who": (_name_of(_ho_sid) or _ho_sid[:8]) if _ho_sid else name,
                         "whoSid": _ho_sid or fsid,
                         "whoColor": _name_color(_ho_sid) if _ho_sid else color,
@@ -35474,6 +35760,18 @@ def build_feed(now, tmux=None):
                 f = nodes[f]["parentId"]
             if f in nodes and status.get(f) not in ("completed", "cleared"):
                 jauth_top = f
+        _unnested = False
+        for _f in (perm_top, api_top, jauth_top):    # T319: a floor that RESOLVES to a healed top un-nests exactly that top:
+            _h = healed.get(_f) if _f else None      #   it keeps its card (the floor keys the card on it) and its face; the
+            if _h and _h[0] and _f in children.get(_h[0], []):   #   host's other rows are untouched
+                children[_h[0]].remove(_f)
+                children.setdefault(None, []).append(_f)
+                healed[_f] = (None, _h[1])
+                heal_total -= 1
+                _unnested = True
+        if _unnested:                                # the derivations below read the tree the card SHOWS (item 8 of the
+            agent_open = _agent_open_set(nodes, children)   #   fourth review): recomputed over the un-nested layout
+            parked_rows = _parked_rows(nodes, children)
         plain_user_t = _last_plain_user_turn_t(ps["turns"]) if ps else 0   # re-check: a plain reply after a soft block de-urgents it
         had_working = False                          # does this session show ANY working card? → drives the provisional placeholder
         had_awaiting = False                         # …and does any of them read AWAITING? → the session's await-green dot (below)
@@ -36016,6 +36314,10 @@ def build_feed(now, tmux=None):
                 "warnRows": (_card_warn_rows(dbg_rows, fsid, set(_subtree(nid)),
                                              store.get("placements") or {}) or None)
                             if dbg_rows is not None else None,   # debug mode only: the card's judge failures, modal "Warnings" section
+                # T319: this root is work the SESSION started (a planner-born step whose parent is gone, or a
+                # pre-rule machine-rooted top the heal found no request to nest under): the face names the
+                # parent request when one is known and says why the work exists, in one line
+                "sessionStarted": _session_started_face(nodes, nid, healed),
                 "tree": flatten(nid, [], boundary=jd.review_boundary(nodes[nid]))}
             # THE SERVING FOLD, candidate side (the user 2026-08-28, T137: fan-out lives inside the
             # ask card — the T101 ruling applied to the mirror, view-side): a to-do mirror top the
@@ -36075,6 +36377,10 @@ def build_feed(now, tmux=None):
     # globally unique, so the tracker id is the whole key). A candidate whose tracker row is not
     # on this build's board keeps its own card — suppression without a rendered home would
     # silently hide live work.
+    if heal_total > _HEAL_LOG["n"]:                   # T319: said once per boot, and again only when the count rises
+        _HEAL_LOG["n"] = heal_total
+        sys.stderr.write("feed: %d session-started top(s) nested under the goal they ran in "
+                         "(no request behind them; the planner nests new ones at mint time)\n" % heal_total)
     if serving_folds:
         _byrow = {}
         for _c in asks:
@@ -38452,7 +38758,8 @@ def _lane_segments(sid, session, goals, caps, live, bft, full_prompts=None):
     memo (_lane_memo; the comment above _lanes_memo names every input) can hold its result: (bars, seg_ends,
     last_t, compactions, cap_marks, other_marks, nsegs, complained). bars are the lane's wire bars in turn order
     (the compact shape below, every default omitted); seg_ends maps a segment's start t to its work-END t; last_t
-    is the lane's last awake activity (its `since` when the liveness snapshot has none); compactions are the
+    is the lane's last recorded activity, the newest atom time of its newest bar (its `since` when the liveness
+    snapshot has none), never a turn's `end`, which for the tail turn is the parse clock (T324); compactions are the
     compact_boundary markers; cap_marks and other_marks are this lane's judging marks, unfiltered
     (_derive_judging_marks); nsegs counts the segments visited (the cost a memo hit saves); complained is True
     when the seams or the marks stage failed, or a mark carries a time the assembly could not compare, and
@@ -38488,8 +38795,22 @@ def _lane_segments(sid, session, goals, caps, live, bft, full_prompts=None):
             # asleep gaps between pieces read as idle (and collapse under 'collapse gaps'). The segment's
             # atom times go in too: an awake stretch with NO activity in it is a dark-wake sliver, not
             # work, and drawing it redrew this segment's summary all night long (the user 2026-07-23).
-            spans = _awake_spans(seg["t"], seg["end"], [a.get("t") for a in seg["atoms"]])
-            last_t = max(last_t or 0, spans[-1][1])            # the true work END (last awake activity) — drives the lane `since`
+            acts = [a.get("t") for a in seg["atoms"]]
+            # A bar stretched by an IDLE atom ends at the segment's last recorded EVENT instead (T324, the user
+            # 2026-09-10): a finished turn's end is its trailing idle atom's end (synthesize_idle), the NEXT state
+            # record, or, for the tail turn, the PARSE CLOCK, and the parse is cached until the transcript moves, so
+            # every dormant session's last bar reached the same instant, the first build after the last kernel boot,
+            # and the board read as every session stopping at once. Only a segment whose end IS an idle span's end is
+            # clipped (the idle atom's own `t` is the Stop transition, the moment work ended, so it stays in): a
+            # segment cut at the next input keeps that input's time as its end, so a follow-up absorbed mid-turn on
+            # the live echo road (stamped at send time, minutes ahead of the tool result the turn is inside) leaves
+            # no hole before it (review find on the first cut), and an open turn has no idle atom and ends at its
+            # newest record as before.
+            bar_end = seg["end"]
+            if any(a.get("type") == "idle" and a.get("end") == seg["end"] for a in seg["atoms"]):
+                bar_end = max(seg["t"], max((t for t in acts if t is not None), default=seg["end"]))
+            spans = _awake_spans(seg["t"], bar_end, acts)
+            last_t = max(last_t or 0, spans[-1][1])            # the true work END (last recorded activity) — drives the lane `since`
             seg_ends[seg["t"]] = spans[-1][1]                  # a completion mark lands at its segment's END (after the work)
             cap = _seg_work_caption(caps, seg["id"])       # WORK caption (the bar) — drift-safe
             msg_cap = _seg_caption(caps, seg["id"])    # MESSAGE caption (the dot) — gist of the ask, ready early; drift-safe
@@ -38529,7 +38850,7 @@ def _lane_segments(sid, session, goals, caps, live, bft, full_prompts=None):
                 mids = _seg_mids(seg)
                 if mids:
                     bar["d"] = mids
-                if turn_open and si == len(segs) - 1 and sj == len(spans) - 1 and bend == seg["end"]:
+                if turn_open and si == len(segs) - 1 and sj == len(spans) - 1 and bend == bar_end:
                     bar["u"] = True                        # open: the live turn's last piece
                 if sj > 0:
                     bar["t"] = True                        # a post-sleep continuation piece: NO new prompt dot
@@ -40434,7 +40755,19 @@ def _resolve_reconnect(c, chat_list):
     it (the pusher, the connect push a `ready` triggers included, _push_session_now, _confirm_close_now), so no
     strip can reach a reconnecting client before its set exists: a close confirmation landing in the gap before
     the pusher's first pass would otherwise paint the page's stale sessions as loaded tabs. No active hint (no
-    localStorage) → the kernel cannot know what the page shows → no set → today's full push (fail safe)."""
+    localStorage) → the kernel cannot know what the page shows → no set → today's full push (fail safe).
+    Returns whether the flag was popped HERE, so the caller knows the strip it is about to send is the redial's
+    first. That strip stands in for the `ready` a redial never posts: the bundle posted its one ready on an
+    earlier socket of this page, so no ready arm runs for this socket, and the pop stamps the client `ready` in
+    the arm's place (the target filter of _reveal_request reads the stamp); the caller then consumes a reveal
+    parked for the page's window right behind the strip (_consume_pending_reveal): strip, then focus, the order
+    the ready arm sends them in. The stamp itself lands earlier than the arm's (the arm stamps after its push;
+    this stamps before the caller's strip is enqueued), so a tap that reaches _reveal_request between this lock's
+    release and the strip's enqueue is sent ahead of the strip. Accepted: a redial is not a reload, so the page
+    still shows every tab it had, and a focus naming a session created during the outage arrives ahead of the
+    strip that lists it only the way a live tap outruns the pusher today (the bundle's focus handler acts by id
+    and treats the session's presence as optional). A client that declared no redial is left as it was, and the
+    caller does nothing more."""
     # ATOMIC under the client's slot lock, flag to set (review find 2026-09-07): with the pop and the stats outside
     # it, a second strip sender racing this one popped False, sent a keyless strip and a FULL for some sid, and
     # this sender then wrote a set still naming that sid — held whole by the client yet served only status frames
@@ -40442,14 +40775,19 @@ def _resolve_reconnect(c, chat_list):
     # holds whole (echat) is excluded outright, so a full that won the race can never be re-listed.
     with _client_lock(c):
         if not c.pop("reconnect", False):
-            return
+            return False
+        # The redial's stamp (2026-09-10): the page listens (the shim dials ?reconnect=1 only once the kernel's caps
+        # frame has answered its bundle's ready), and the bundle posts ready once, so nothing else would ever stamp
+        # this socket; without the stamp a tap for this window parked for the rest of the page's life.
+        c["ready"] = True
         act = c.get("active")
         if not act:
-            return
+            return True
         held = c.get("echat") or {}
         skel = [sid for sid in _skeleton_for(c, str(act), chat_list) if sid not in held]
         c["skeleton"] = set(skel)
         c["skeletonOrder"] = skel
+    return True
 
 
 def _send_tab_order(c, tab_order, tab_meta, live):
@@ -42907,8 +43245,10 @@ def _push(targets, connect=False, tmux=None):
                 _send_client(c, ("globalRetryPaused",), {"type": "globalRetryPaused", "value": _retry_paused_on(),
                                                          "resumeAt": _retry_resume_at(),   # limit reset epoch → the card counts down to the real retry
                                                          "reason": _retry_pause_reason()})   # "spend" → the card says 'raise your cap', no countdown
-                _resolve_reconnect(c, chat_list)         # a redialing page: fix its skeleton set BEFORE any strip
+                redialed = _resolve_reconnect(c, chat_list)   # a redialing page: fix its skeleton set BEFORE any strip
                 _send_tab_order(c, tab_order, tab_meta, tmux)
+                if redialed:                             # the redial's first strip stands in for the ready it never posts:
+                    _consume_pending_reveal(c, why="the pane's redial")   # a reveal parked for its window lands behind the strip
             active = {c.get("active") for c in chat_clients if c.get("active")}
             # Stable: active tabs first — and TRANSCRIPT-LESS sessions with them. A just-created session
             # has no transcript, so its build is near-free, and its creator is guaranteed to be staring
@@ -43412,8 +43752,10 @@ def _push_session_now(sid):
             return                                   # the periodic pusher owns the sid until content returns
         ms = None                                    # lazy: the first full send materializes it, the rest reuse
         for c in targets:
-            _resolve_reconnect(c, chat_list)         # a redialing page must never see a strip before its set exists
+            redialed = _resolve_reconnect(c, chat_list)   # a redialing page must never see a strip before its set exists
             _send_tab_order(c, tab_order, tab_meta, tmux)
+            if redialed:                             # this strip is the redial's first: a reveal parked for its window lands behind it
+                _consume_pending_reveal(c, why="the pane's redial")
             ms = _send_chat(c, m, ms, 0, True)       # change_from 0 → always the full-session form (…and releases a skeleton)
     except Exception:
         sys.stderr.write("push-session-now (%s): %s\n" % (sid, traceback.format_exc()))
@@ -43462,8 +43804,10 @@ def _confirm_close_now(sid):
             targets = [c for c in _clients if c["app"] == "chat"]
         for c in targets:
             try:
-                _resolve_reconnect(c, chat_list)     # a confirmation may be the FIRST strip a redialing page sees
+                redialed = _resolve_reconnect(c, chat_list)   # a confirmation may be the FIRST strip a redialing page sees
                 _send_tab_order(c, tab_order, tab_meta, tmux)
+                if redialed:                         # ...and then the sender that lands a reveal parked for its window
+                    _consume_pending_reveal(c, why="the pane's redial")
             except Exception:
                 c["alive"] = False
         return sid not in tab_order
@@ -45376,7 +45720,8 @@ def _sw_js():
 # mints and every same-window pane shares — so a second dashboard's reload cannot steal it). One
 # slot, latest wins: two taps before a boot completes should land on the newer notification.
 # `sent` (2026-09-06): the clients a LIVE tap was already handed to while unproven — see
-# _reveal_request; a pong from one of them retires the slot, a redial's ready consumes it.
+# _reveal_request; a pong from one of them retires the slot, a redial's first tab strip consumes it (a
+# redialed socket carries no ready, so _resolve_reconnect stamps it and its strip sender consumes).
 _PENDING_REVEAL = [None]                     # {"sid": ..., "wid": ...[, "sent": [clients]]} or None
 # The roads a shell may name in /reveal's `via`, the log line's first word (the ledger block above _push_ledger has
 # the design): the worker's message to a live window ('sw'), the deep link the page opened on or was navigated to
@@ -45426,8 +45771,12 @@ def _reveal_request(sid, wid, boot=False, via=""):
               the peer is unproven since the last heartbeat). Deliver as before AND keep a copy
               parked, tagged with who it went to: the pong that proves that socket alive retires it
               (_note_ws_inbound — the focus frame is ordered behind the ping it answers); a dead
-              socket never pongs, the pane redials, and its ready consumes the copy instead of
-              finding nothing. A socket with no ping outstanding is proven: nothing parked, so a
+              socket never pongs, the pane redials, and the redial's first tab strip consumes the
+              copy instead of finding nothing: a redialed socket carries no ready (the bundle posted
+              its one ready on the socket that died), so _resolve_reconnect stamps the client when
+              the first strip sender pops the flag, and that sender consumes behind its strip. A tap
+              in the gap between the redial's handshake and that strip parks like any other and is
+              landed by the same strip. A socket with no ping outstanding is proven: nothing parked, so a
               later ready never replays a landed tap — except on the boot road, where the copy is
               kept whatever the ping state (above) and the pane's own answer retires it.
 
@@ -45443,7 +45792,9 @@ def _reveal_request(sid, wid, boot=False, via=""):
         # same-wid chat socket exists from its handshake, but until its bundle posts ready it has no message
         # listener, so a focus sent to it vanishes — and its ready message, counted as an answer by
         # _note_ws_inbound, would retire the parked copy before the ready handler could consume it (the
-        # review find on T312). Such a socket is left alone: the park stands and its ready consumes.
+        # review find on T312). Such a socket is left alone: the park stands and its ready consumes. A
+        # redial (?reconnect=1) never posts a ready: _resolve_reconnect stamps it at its first tab strip,
+        # and that strip's sender consumes the park.
         targets = [c for c in _clients if c["app"] == "chat" and (c.get("wid") or "") == wid and c.get("ready")]
     delivered, sent = False, []
     for c in targets:
@@ -45482,18 +45833,23 @@ def _reveal_proven(client):
         print("[reveal] sid=%s: copy retired — its target answered" % str(p["sid"])[:8], file=sys.stderr)
 
 
-def _consume_pending_reveal(client):
+def _consume_pending_reveal(client, why="the pane's ready"):
     """Called from the WS 'ready' handler: if this is the chat pane the parked reveal was aimed
     at, deliver and clear. Runs AFTER the ready push, so the session tabs this focus names are
     already on the client (same socket, ordered delivery). An empty parked wid matches the first
-    chat pane to arrive — the no-sessionStorage fallback, better than dropping the tap."""
+    chat pane to arrive — the no-sessionStorage fallback, better than dropping the tap.
+    Also called by each tab-strip sender right after a redial's FIRST strip (_resolve_reconnect
+    popped the flag): a redialed socket never carries a ready, so that strip is the event that
+    consumes; the strip is sent first, for the same reason the ready push precedes the arm's
+    consume. `why` names the event on the journal line, so a park's end says which of the two
+    landed it."""
     p = _PENDING_REVEAL[0]
     if not p or client.get("app") != "chat":
         return
     if p["wid"] and (client.get("wid") or "") != p["wid"]:
         return
     _PENDING_REVEAL[0] = None
-    print("[reveal] sid=%s wid=%s: consumed — the pane's ready" % (str(p["sid"])[:8], str(p["wid"] or "")[:8]), file=sys.stderr)
+    print("[reveal] sid=%s wid=%s: consumed — %s" % (str(p["sid"])[:8], str(p["wid"] or "")[:8], why), file=sys.stderr)
     try:
         client["send"](json.dumps(_reveal_msg(p["sid"])))
     except Exception:
@@ -45736,6 +46092,10 @@ def _pusher_cycle_jobs(now, tmux, any_client):
         _interrupt_block_tick(now, tmux)
     except Exception:
         sys.stderr.write("interrupt-block: %s\n" % traceback.format_exc())
+    try:                                  # the tick jobs' evaluation memo, persisted when a completed evaluation
+        _persist_tick_seen()              # moved it (T323 stage 1): the next kernel's first look starts from here
+    except Exception:
+        sys.stderr.write("tick-seen: %s\n" % traceback.format_exc())
     try:                                  # hitting a usage limit auto-engages the retry-pause (before the resume check)
         _auto_pause_on_limit()
     except Exception:
@@ -49291,7 +49651,7 @@ var F={chat:document.getElementById('f-chat'),fleet:document.getElementById('f-f
 // bell's `.on`, the class _LANDING_PUSH_JS paints from the master + this device's subscription and the
 // slash rule keys on, until the next paint event. A tab or a reveal decides which pane shows, nothing else.
 var B=bar.querySelectorAll('button[data-pane]'),KT='romp-mobile-tab';
-function filesCtlM(){try{var st=JSON.parse(localStorage.getItem('romp:settings')||'null');return !(st&&st.filesControl===false);}catch(e){return true;}}   // the gear's Files-control setting (T317): the same read the pane controller makes, which parses after this script
+function filesCtlM(){try{var st=JSON.parse(localStorage.getItem('romp:settings')||'null');return !!(st&&st.showFilesControl===true);}catch(e){return false;}}   // the gear's Files-control setting (T317; off by default since T317b: shown only when the store holds the literal true under the fresh key, never the T317-era filesControl a whole-object save merged in): the same read the pane controller makes, which parses after this script
 function show(p){if(p==='files'&&!filesCtlM())p='chat';   // the Files tab is hidden while its control is off: the chat shows instead
 if(!F[p])return;for(var i=0;i<B.length;i++)if(B[i].getAttribute('data-pane')===p&&B[i].hidden)return;   // a tab the controller hid (its pane is off in the gear's Panes section) is not a place to go
 document.body.setAttribute('data-tab',p);for(var k in F)if(F[k])F[k].classList.toggle('m-on',k===p);   // a pane this shell lacks is skipped, never a TypeError
@@ -49790,13 +50150,16 @@ _LANDING_COLLAPSE_JS = """
   function saveP(){try{localStorage.setItem(PK,JSON.stringify(po));}catch(e){}}
   var LBL={chat:'chat',fleet:'fleet',feed:'feed',timeline:'timeline',files:'files pane'};
   // THE FILES CONTROL'S OWN SETTING (T317, the user 2026-09-10): the gear's "Files control in the dashboard bar"
-  // (romp:settings.filesControl, gear.js; shown unless the store holds the literal false). Off: the rail's Files
+  // (romp:settings.showFilesControl, gear.js; hidden unless the store holds the literal true: OFF by default since T317b,
+  // the user 2026-09-10, who wants the control asked for, not shipped. A FRESH key: the T317-era gear saved its merged-in
+  // filesControl: true on any settings change, so that key cannot tell a chosen on from a merged-in one and is never read).
+  // Off: the rail's Files
   // toggle and the phone's Files tab are hidden (body.no-files-control), an open Files pane closes on the same
   // apply, the pane cannot be brought forward (togglePane refuses 'files': the palette command, a stale relay),
   // and the panes are told the pane is unavailable (avail.files below), so a file link set to open there opens
   // over the pane clicked (ui/webview/file-route.ts). The gear writes the store from the feed iframe, another
   // document, so the storage listener below is the event that re-applies it here.
-  function filesCtl(){try{var st=JSON.parse(localStorage.getItem('romp:settings')||'null');return !(st&&st.filesControl===false);}catch(e){return true;}}
+  function filesCtl(){try{var st=JSON.parse(localStorage.getItem('romp:settings')||'null');return !!(st&&st.showFilesControl===true);}catch(e){return false;}}
   // The pane KEYS, from _PANE_ORDER (the one list of panes), so a pane added there is broadcast below without
   // anyone remembering this block. The panes learn which panes are ON SCREEN from the shell, which holds that
   // state: {romp:'panes',on:{key:bool}} goes to every pane iframe on every apply(), a toggle being the event
@@ -55663,6 +56026,10 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
     reason_err = ""
     be = _sdk_backend or None
     _exit_log("romp-kernel: %s, draining SDK sessions\n" % what)
+    try:
+        _persist_tick_seen(force=True)    # the tick jobs' memo for the next kernel's first look (T323 stage 1)
+    except Exception:
+        pass
     try:
         if be is not None and hasattr(be, "drain"):
             res = be.drain(2.0)
