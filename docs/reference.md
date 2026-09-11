@@ -405,7 +405,10 @@ and under it the list of sessions with their dollars, turns and tokens. The
 list follows the chart's range (one day by hour, seven days by hour, ninety
 days by day): its rows are summed from exactly the buckets the chart draws, so
 the list's total is the chart's total for every range, the header names the
-range, and a session with nothing in the range has no row and no stack. The
+range, and a session with nothing in the range has no row and no stack. An
+attached machine on an older build sends its series without turns or
+key-billed dollars per bucket: its rows show a dash in those columns and a
+note names the machine, never a zero that would read as a count. The
 key-billed dollars come from the sessions whose CLI reported a key source at init, judged
 against the declaration; a login turn's computed cost is dollars nobody pays
 and is left out.

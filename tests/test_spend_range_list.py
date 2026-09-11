@@ -5,7 +5,7 @@ Every stack of /spend/detail's series carries, beside its dollars and tokens per
 dollars per bucket (`turns`, `keyUsd`), so the modal can sum the list's every column from exactly the buckets the
 chart draws. Over the daily range the sums equal the payload's own 90-day session totals (the same ledger read twice
 must agree); the merged, federated series carries the same two arrays, and a peer of an older build, whose stacks
-have neither, reads as zeros there, never as a guess. The client half is executed in ui/webview/spend-range-list.test.ts.
+have neither, keeps them absent (the modal shows a dash and a note names the host), never a zero. The client half is executed in ui/webview/spend-range-list.test.ts.
 
 Synthetic ledger only (tests/test_spend_detail.py's fixture): the notes-api world, fixed clock.
 """
@@ -104,7 +104,7 @@ class StacksCarryEveryColumn(_Ledger):
 
 
 class MergedStacks(_Ledger):
-    def test_the_merge_carries_the_arrays_and_an_older_peer_reads_zeros(self):
+    def test_the_merge_carries_the_arrays_and_an_older_peer_reads_as_a_dash_and_a_note(self):
         local = km._spend_detail_local(now=NOW)
         # a peer of this build, and one of an OLDER build whose stacks carry neither turns nor keyUsd
         peer_new = json.loads(json.dumps(local)); peer_new["host"] = "PEERHOST"
@@ -112,21 +112,32 @@ class MergedStacks(_Ledger):
         for rng in ("days", "hours"):
             for st in peer_old[rng]["stacks"]:
                 st.pop("turns", None); st.pop("keyUsd", None)
-        hosts = [{"host": "TESTHOST", "status": "ok", "tzOffsetMin": local["tzOffsetMin"], "scope": local["scope"]},
-                 {"host": "PEERHOST", "status": "ok", "tzOffsetMin": local["tzOffsetMin"], "scope": local["scope"]},
-                 {"host": "OLDHOST", "status": "ok", "tzOffsetMin": local["tzOffsetMin"], "scope": local["scope"]}]
+        hosts = [{"host": h, "status": "ok", "tzOffsetMin": local["tzOffsetMin"], "scope": local["scope"]}
+                 for h in ("TESTHOST", "PEERHOST", "OLDHOST")]
         merged = km._merge_spend_details([("TESTHOST", local), ("PEERHOST", peer_new), ("OLDHOST", peer_old)], hosts, local)
         days = merged["days"]
         webs = {st["host"]: st for st in days["stacks"] if st.get("name") == "web"}
         self.assertEqual(sorted(webs), ["OLDHOST", "PEERHOST", "TESTHOST"])
         self.assertEqual(sum(webs["TESTHOST"]["turns"]), sum(webs["PEERHOST"]["turns"]))
         self.assertGreater(sum(webs["TESTHOST"]["turns"]), 0)
-        self.assertEqual(sum(webs["OLDHOST"]["turns"]), 0, "an older peer's stacks carry no turns: zeros, never a guess")
-        self.assertEqual(len(webs["OLDHOST"]["keyUsd"]), len(days["keys"]))
-        self.assertEqual(sum(webs["OLDHOST"]["keyUsd"]), 0)
+        self.assertEqual(len(webs["TESTHOST"]["keyUsd"]), len(days["keys"]))
+        # the older peer's stacks carry NO turns and NO key dollars: the modal shows a dash there, never a zero that
+        # would read as a count and undercount the total, and the host row carries the note's flag
+        self.assertNotIn("turns", webs["OLDHOST"])
+        self.assertNotIn("keyUsd", webs["OLDHOST"])
+        by_host = {h["host"]: h for h in merged["hosts"]}
+        self.assertTrue(by_host["OLDHOST"].get("noTurns"))
+        self.assertNotIn("noTurns", by_host["TESTHOST"])
+        self.assertNotIn("noTurns", by_host["PEERHOST"])
+        # the unattributed stack is summed across hosts: with an older peer among them its turns are unknown too
         una = [st for st in days["stacks"] if st["kind"] == "unattributed"][0]
-        self.assertEqual(sum(una["turns"]), 2 * sum(s["turns"] for s in [local["unattributed"]]) + 0,
-                         "two peers of this build contribute unattributed turns; the older one none")
+        self.assertNotIn("turns", una)
+        self.assertGreater(sum(una["usd"]), 0)
+        # without the older peer, every array rides and the unattributed turns are the two peers' sum
+        merged2 = km._merge_spend_details([("TESTHOST", local), ("PEERHOST", peer_new)], hosts[:2], local)
+        una2 = [st for st in merged2["days"]["stacks"] if st["kind"] == "unattributed"][0]
+        self.assertEqual(sum(una2["turns"]), 2 * local["unattributed"]["turns"])
+        self.assertFalse(any(h.get("noTurns") for h in merged2["hosts"]))
 
 
 if __name__ == "__main__":
