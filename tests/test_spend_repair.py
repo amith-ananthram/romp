@@ -14,6 +14,8 @@ from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 ROOT = os.path.dirname(HERE)
+os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()   # hermetic BEFORE any romp code loads (a test below loads bin/romp-spend-rebuild)
+os.environ.pop("ROMP_STATE_DIR", None)
 sys.path.insert(0, os.path.join(ROOT, "cli"))
 import spend_repair as rp  # noqa: E402
 
