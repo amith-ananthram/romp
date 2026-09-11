@@ -239,28 +239,34 @@ class Shell(unittest.TestCase):
                       "c.contains('po-fleet')?'fleet-pane':'chat-pane';},'files-pane');", self.html)
 
     def test_the_files_controls_own_setting_hides_it_in_both_layouts(self):
-        # T317 (the user 2026-09-10): the gear's "Files control in the dashboard bar" (romp:settings.filesControl,
-        # shown unless the store holds the literal false). The shell reads the gear's store key itself, hides the
+        # T317 (the user 2026-09-10): the gear's "Files control in the dashboard bar" (romp:settings.showFilesControl,
+        # hidden unless the store holds the literal true: OFF by default since T317b; a FRESH key, since the T317-era gear's
+        # whole-object save left filesControl: true in any profile that touched a setting). The shell reads the gear's store key itself, hides the
         # rail's toggle and the phone's tab by one body class, closes an open pane on the same apply, refuses to
         # bring the pane forward, tells the panes it is unavailable, and the phone's switcher never shows a hidden
         # tab (a stored romp-mobile-tab, a relay). Executed under node in tests/test_pane_state_broadcast.py.
         _has(self, "body.no-files-control .rail-btn[data-pane=files],body.no-files-control #mtabs button[data-pane=files]{display:none}", self.html)
         js = km._LANDING_COLLAPSE_JS
-        _has(self, "function filesCtl(){try{var st=JSON.parse(localStorage.getItem('romp:settings')||'null');return !(st&&st.filesControl===false);}catch(e){return true;}}", js)
+        _has(self, "function filesCtl(){try{var st=JSON.parse(localStorage.getItem('romp:settings')||'null');return !!(st&&st.showFilesControl===true);}catch(e){return false;}}", js)
+        _has(self, "function filesCtlM(){try{var st=JSON.parse(localStorage.getItem('romp:settings')||'null');return !!(st&&st.showFilesControl===true);}catch(e){return false;}}", km._LANDING_MOBILE_JS)   # the phone's read agrees: only the literal true
+        self.assertNotIn("st.filesControl", js + km._LANDING_MOBILE_JS, "the T317-era key is never read: a whole-object save merged its true into profiles that never touched the box")
         _has(self, "document.body.classList.toggle('no-files-control',!ctl);", js)
         _has(self, "if(k==='files'&&!filesCtl())return;", js)
         _has(self, "return {romp:'panes',on:on,avail:{files:filesCtl()}};", js)
         _has(self, "window.addEventListener('storage',apply);", js)   # the gear writes from another document: this is the event
         mob = km._LANDING_MOBILE_JS
         _has(self, "function show(p){if(p==='files'&&!filesCtlM())p='chat';", mob)
-        # the gear's row, in the panes section beside "File links open in", shown by default; the chat's route reads the word
+        # the gear's row, in the panes section beside "File links open in", UNCHECKED by default (T317b); the chat's route reads the word
         gear = (UI / "gear.js").read_text()
-        _has(self, "<input type=checkbox id=rs-filesctl checked>", gear)
+        _has(self, "<input type=checkbox id=rs-filesctl>", gear)
+        self.assertNotIn("id=rs-filesctl checked", gear, "off by default: the box is not pre-checked")
+        self.assertEqual(gear.count("showFilesControl: false, stripGroupRows"), 2, "the gear's load defaults (the assign and its catch) say off")
+        _has(self, "delete o.filesControl; return o; } catch (e) {", gear)   # load() drops the T317-era key, so the next save leaves it behind
         # the box has a NAME OF ITS OWN in the gear's one var list (review find: a second `fc` shadowed the feed's
         # collapsed box, so the new row was dead and the feed box wrote this setting)
         _has(self, "fsc = document.getElementById('rs-filesctl')", gear)
-        _has(self, "if (fsc) fsc.addEventListener('change', function () { var s = load(); s.filesControl = fsc.checked; save(s); });", gear)
-        _has(self, "if (fsc) fsc.checked = (s.filesControl !== false);", gear)
+        _has(self, "if (fsc) fsc.addEventListener('change', function () { var s = load(); s.showFilesControl = fsc.checked; save(s); });", gear)
+        _has(self, "if (fsc) fsc.checked = (s.showFilesControl === true);", gear)
         self.assertEqual(gear.count("fc = document.getElementById("), 1, "fc is the feed's collapsed box alone")
         self.assertEqual(gear.count("fsc = document.getElementById("), 1)
         # the palette's entry for the pane is not listed while the control is hidden (re-read at every open)
@@ -274,7 +280,7 @@ class Shell(unittest.TestCase):
         _has(self, "fileLinkRoute(settings.fileLinkPane, window.parent !== window, panesOn.files === true, panesAvail.files !== false)", render)
         # the hint in the pane stays true: it speaks of the pane being open or closed, never of the control
         files = (UI / "files.ts").read_text()
-        _has(self, "To open them here while it is closed, set File links open in to The Files pane in the gear.", files)
+        _has(self, "To open them here while it is closed, turn on the Files control in the dashboard bar and set File links open in to The Files pane in the gear.", files)
 
     def test_mobile_tab_and_the_palette_command(self):
         _has(self, "#chat-pane,#fleet-pane,#feed-pane,#files-pane,#tl-pane{display:contents!important}", self.html)

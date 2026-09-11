@@ -73,7 +73,7 @@ function paint(): void {
   if (open) return;
   const title = el("div", "fs-title"); title.textContent = "No file open";
   const hint = el("div", "fs-hint");
-  hint.textContent = "While this pane is open, a file or folder clicked in the chat opens here. To open them here while it is closed, set File links open in to The Files pane in the gear.";
+  hint.textContent = "While this pane is open, a file or folder clicked in the chat opens here. To open them here while it is closed, turn on the Files control in the dashboard bar and set File links open in to The Files pane in the gear.";
   const out: HTMLElement[] = [title, hint];
   if (recent.length) {
     const list = el("div", "fs-recent");

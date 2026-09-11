@@ -130,19 +130,31 @@ test("File links open in defaults to the pane you clicked; the Files pane opt-in
 });
 
 // The Files CONTROL's own setting (T317, the user 2026-09-10): whether the dashboard bar's Files toggle and the
-// phone's Files tab show at all. Shown by default (today's behaviour); only the literal false hides them, so a
-// corrupt entry may cost the preference, never the control. The shell reads the store key itself
-// (kernel.py _LANDING_COLLAPSE_JS filesCtl), so the key and the false-only rule are the contract.
-test("the Files control shows by default; hiding it round-trips, and only the literal false hides it", () => {
-  assert.equal(DEFAULT_SETTINGS.filesControl, true);
+// phone's Files tab show at all. OFF by default (T317b, the user the same day: the control is asked for, not
+// shipped); only the literal true shows them, so a corrupt entry may cost the preference, never surprise the user
+// with a control. The shell reads the store key itself (kernel.py _LANDING_COLLAPSE_JS filesCtl), so the key and
+// the true-only rule are the contract.
+test("the Files control is hidden by default; showing it round-trips, and only the literal true under the fresh key shows it", () => {
+  assert.equal(DEFAULT_SETTINGS.showFilesControl, false);
   delete store["romp:settings"];
-  assert.equal(loadSettings().filesControl, true, "a fresh install shows the control");
-  saveSettings({ filesControl: false });
-  assert.equal(loadSettings().filesControl, false, "hiding it survives a reload (localStorage)");
-  assert.equal(JSON.parse(store["romp:settings"]).filesControl, false, "the key the shell reads, the literal false");
+  assert.equal(loadSettings().showFilesControl, false, "a fresh install hides the control");
+  saveSettings({ showFilesControl: true });
+  assert.equal(loadSettings().showFilesControl, true, "showing it survives a reload (localStorage)");
+  assert.equal(JSON.parse(store["romp:settings"]).showFilesControl, true, "the key the shell reads, the literal true");
+  saveSettings({ showFilesControl: false });
+  assert.equal(loadSettings().showFilesControl, false, "turning it off again round-trips too");
+  assert.equal(JSON.parse(store["romp:settings"]).showFilesControl, false, "on-then-off leaves the literal false");
   store["romp:settings"] = JSON.stringify({ compact: true });
-  assert.equal(loadSettings().filesControl, true, "a store written before the key shows the control");
-  store["romp:settings"] = JSON.stringify({ filesControl: "no" });
-  assert.equal(loadSettings().filesControl, true, "a foreign stored value shows it: only false hides");
+  assert.equal(loadSettings().showFilesControl, false, "a store written before the key hides the control");
+  store["romp:settings"] = JSON.stringify({ showFilesControl: "yes" });
+  assert.equal(loadSettings().showFilesControl, false, "a foreign stored value hides it: only true shows");
+  // the T317-era key: that gear merged its default filesControl: true into the object and saved the whole object on
+  // ANY change, so a profile that touched any setting in that window carries filesControl: true without touching the
+  // Files box. It is never read, and the next save drops it.
+  store["romp:settings"] = JSON.stringify({ compact: true, filesControl: true });
+  assert.equal(loadSettings().showFilesControl, false, "the old key's true is a merged-in default, not an opt-in: hidden");
+  assert.equal("filesControl" in loadSettings(), false, "the old key is dropped from the loaded object");
+  saveSettings({ compact: false });
+  assert.deepEqual(Object.keys(JSON.parse(store["romp:settings"])).filter((k) => /filesControl/i.test(k)), ["showFilesControl"], "the next save leaves the old key behind and writes the fresh one");
   delete store["romp:settings"];
 });
