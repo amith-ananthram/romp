@@ -4,12 +4,18 @@
 // uuids, `headKnown` says the head has been reached (until then no count exists and the page shows none), and a
 // window whose newer side has more (a loadAround deep into history) leaves the client DETACHED: the kernel sends it
 // no delta until it walks forward to the tail (loadNewer, more false) or asks for a full frame.
-export interface Ev { uuid?: string; [k: string]: unknown; }
+export interface Ev { uuid?: string; key?: string; [k: string]: unknown; }
 
-/** The index of `uuid` among `events`, or -1. */
+/** An event's wire KEY: its uuid, or `key` (uuid#n) when it is the second event built from one record (a text and a
+ *  tool call): the uuid stays the record's for deep links, the key is what the anchors and the merge compare. */
+export function keyOf(e: Ev | null | undefined): string | undefined {
+  return e ? (e.key ?? e.uuid) : undefined;
+}
+
+/** The index of the event keyed `uuid` among `events`, or -1. */
 export function indexOfUuid(events: readonly Ev[], uuid: string | null | undefined): number {
   if (!uuid) return -1;
-  for (let i = 0; i < events.length; i++) if (events[i].uuid === uuid) return i;
+  for (let i = 0; i < events.length; i++) if (keyOf(events[i]) === uuid) return i;
   return -1;
 }
 
@@ -24,13 +30,13 @@ export function applyTailAfter(events: Ev[], afterUuid: string | null | undefine
 
 /** A chatHead by uuid: the reply's beforeUuid must be the resident oldest; prepend. null = stale, ignore. */
 export function prependHead(events: Ev[], beforeUuid: string | null | undefined, older: readonly Ev[]): Ev[] | null {
-  if (!events.length || events[0].uuid !== beforeUuid) return null;
+  if (!events.length || keyOf(events[0]) !== beforeUuid) return null;
   return older.length ? older.concat(events) : events.slice();
 }
 
 /** A chatMore by uuid: the reply's afterUuid must be the resident newest; append. null = stale, ignore. */
 export function appendMore(events: Ev[], afterUuid: string | null | undefined, newer: readonly Ev[]): Ev[] | null {
-  if (!events.length || events[events.length - 1].uuid !== afterUuid) return null;
+  if (!events.length || keyOf(events[events.length - 1]) !== afterUuid) return null;
   return newer.length ? events.concat(newer) : events.slice();
 }
 
@@ -39,16 +45,16 @@ export function appendMore(events: Ev[], afterUuid: string | null | undefined, n
  *  overlap (the reader jumped somewhere else; the old run is dropped). Returns the new list and which happened. */
 export function mergeWindow(events: readonly Ev[], window: readonly Ev[]): { events: Ev[]; mode: "merge" | "replace" } {
   const inWin = new Set<string>();
-  for (const e of window) if (e.uuid) inWin.add(e.uuid);
+  for (const e of window) { const k = keyOf(e); if (k) inWin.add(k); }
   let overlap = false;
-  for (const e of events) if (e.uuid && inWin.has(e.uuid)) { overlap = true; break; }
+  for (const e of events) { const k = keyOf(e); if (k && inWin.has(k)) { overlap = true; break; } }
   if (!overlap) return { events: window.slice(), mode: "replace" };
   // the window sits before, inside or after the resident run; keep transcript order: whichever run holds the
   // earliest event goes first. The window's first event resident → the window starts inside the run.
-  const winFirstAt = indexOfUuid(events, window[0]?.uuid);
+  const winFirstAt = indexOfUuid(events, keyOf(window[0]));
   const out: Ev[] = [];
   const seen = new Set<string>();
-  const push = (e: Ev) => { if (e.uuid && seen.has(e.uuid)) return; if (e.uuid) seen.add(e.uuid); out.push(e); };
+  const push = (e: Ev) => { const k = keyOf(e); if (k && seen.has(k)) return; if (k) seen.add(k); out.push(e); };
   if (winFirstAt > 0) { for (let i = 0; i < winFirstAt; i++) push(events[i]); }   // the run's part before the window
   for (const e of window) push(e);
   for (const e of events) push(e);                                                   // the run's part after the window

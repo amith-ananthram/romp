@@ -4491,14 +4491,17 @@ def hydrate(atoms, rompuuid=None, by=None):
         # the file's read stripe is held across the group: two threads hydrating the same atoms (the judges' unit text
         # and the frame's markdown at a boot) would both miss the memo and both read; the second now waits and hits it
         with _READ_STRIPES[hash(path) % len(_READ_STRIPES)], open(path, "rb") as fh:
-            for a in sorted(group, key=lambda x: x["lazy"].get("at") or (0, 0)):
-                u = a.get("uuid")
+            for a in sorted(group, key=lambda x: (x.get("lazy") or {}).get("at") or (0, 0)):
+                lz = a.get("lazy")
+                if lz is None:
+                    filled += 1; continue                 # another thread hydrated it between the filter and here (the feed's
+                u = a.get("uuid")                         #  build and the judges both ask): its body is in place
                 with _ASM_CKPT_LOCK:
                     hit = _HYDRATED.get(u) if u else None
                 if hit is not None:
                     _hydrate_one(a, hit[0]); filled += 1
                     continue
-                at_ln = a["lazy"].get("at")
+                at_ln = lz.get("at")
                 if not at_ln:
                     raise LazyBodyRead("atom %s: the document carries no record location" % a.get("uuid"))
                 at, ln = at_ln

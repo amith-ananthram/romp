@@ -3,7 +3,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { applyTailAfter, prependHead, appendMore, mergeWindow, historyLabel, indexOfUuid } from "./chat-window";
+import { applyTailAfter, prependHead, appendMore, mergeWindow, historyLabel, indexOfUuid, keyOf } from "./chat-window";
 
 const ev = (u: string) => ({ uuid: u, kind: "user", md: u });
 const run = (...u: string[]) => u.map(ev);
@@ -39,6 +39,15 @@ test("a chatWindow replaces a run it does not overlap and merges one it does, in
   assert.equal(indexOfUuid(after.events, "e"), 4);
 });
 
+test("a second event of one record keeps the record's uuid and is anchored by its key", () => {
+  const text = { uuid: "a1", kind: "assistant", md: "running" }, tool = { uuid: "a1", key: "a1#2", kind: "tool", name: "Bash" };
+  assert.equal(keyOf(text), "a1"); assert.equal(keyOf(tool), "a1#2");
+  const list = [ev("u1"), text, tool];
+  assert.equal(indexOfUuid(list, "a1#2"), 2, "the tool event, by its key");
+  assert.deepEqual(uu(applyTailAfter(list, "a1#2", run("r1"))!), ["u1", "a1", "a1", "r1"], "a tail after the tool event keeps both");
+  assert.deepEqual(uu(applyTailAfter(list, "a1", run("x"))!), ["u1", "a1", "x"], "a tail after the text event drops the tool event");
+});
+
 test("the history strip shows no number while the head is unknown", () => {
   assert.equal(historyLabel(false, 250, null), "older history");
   assert.equal(historyLabel(false, 250, 900), "older history", "a total handed with an unknown head is not shown either");
@@ -48,7 +57,7 @@ test("the history strip shows no number while the head is unknown", () => {
 
 test("render.ts speaks proto 2 at ready and routes the four proto-2 frames through this module", () => {
   assert.match(RENDER, /postMessage\(\{ type: "ready", proto: 2 \}\)/, "the ready frame names the protocol");
-  for (const fn of ["indexOfUuid", "prependHead", "appendMore", "mergeWindow", "historyLabel"]) assert.ok(RENDER.includes(fn + "("), fn);   // chatTail truncates by indexOfUuid in place
+  for (const fn of ["indexOfUuid", "prependHead", "appendMore", "mergeWindow", "historyLabel", "keyOf"]) assert.ok(RENDER.includes(fn + "("), fn);   // chatTail truncates by indexOfUuid in place
   assert.ok(RENDER.includes('m.type === "chatWindow"') && RENDER.includes('m.type === "chatMore"'), "the two new frames are dispatched");
   assert.ok(RENDER.includes('type: "loadAround"') && RENDER.includes('type: "loadNewer"'), "and the two new requests are posted");
 });

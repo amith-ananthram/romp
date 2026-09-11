@@ -175,11 +175,22 @@ class UniqueUuids(Harness):
         whole = self.whole()
         uuids = [e.get("uuid") for e in whole]
         self.assertTrue(all(uuids), "every event carries a uuid")
-        self.assertEqual(len(uuids), len(set(uuids)), "unique within the list")
+        keys = [e.get("key") or e.get("uuid") for e in whole]
+        self.assertEqual(len(keys), len(set(keys)), "the wire's keys are unique within the list")
         self.document(); m = self.restored()
         got = self.pages(m["floor"], 16) + _strip(m["events"])
-        uu = [e.get("uuid") for e in got]
-        self.assertEqual(len(uu), len(set(uu)))
+        kk = [e.get("key") or e.get("uuid") for e in got]
+        self.assertEqual(len(kk), len(set(kk)))
+        # a record whose text and tool call are two events keeps its uuid on both (deep links land on the record) and
+        # the second carries the key
+        t0 = NOW - 7200
+        recs = [G.uline(t0, "run it", "u1", None), G.aline(t0 + 10, "running", "a1", "u1", tools=("Bash",), stop="tool_use"),
+                G.trline(t0 + 11, "tu_a1_0", "r1", "a1", content="ok"), G.aline(t0 + 20, "done", "a2", "r1", stop="end_turn")]
+        self.write(recs)
+        whole = self.whole()
+        same = [e for e in whole if e.get("uuid") == "a1"]
+        self.assertEqual(len(same), 2, [e.get("kind") for e in whole])
+        self.assertEqual([e.get("key") for e in same], [None, "a1#2"])
 
 
 class RenderFloor(Harness):

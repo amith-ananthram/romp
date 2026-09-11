@@ -28188,12 +28188,19 @@ def _branch_marker(sid, events):
 _OVERLAY_KINDS = frozenset(("todo", "compacting", "clearing", "reconnecting", "retrying", "queued", "apiError"))   # the live overlay cards
 
 
+def _event_key(ev):
+    """The anchor the uuid-anchored wire keys an event on: its `key` when set (a second event of one record: uuid#n),
+    else its uuid. Unique within a built list (_uniq_event_uuids)."""
+    return ev.get("key") or ev.get("uuid")
+
+
 def _uniq_event_uuids(tail, prefix=()):
-    """Every event of a built list carries a uuid unique WITHIN the list (the uuid-anchored wire's diff and the
-    page merge key on it): a tail event with no uuid is given one from its position in the tail; a tail event
-    whose uuid another event already holds (a record whose text and tool call are two events, an orphan note
-    falling back on a second) gets an ordinal suffix. The sealed prefix is read, never written: its own
-    suffixes were set when it was the tail, so the result is the same list a whole build produces."""
+    """Every event of a built list carries a uuid, and a KEY unique WITHIN the list (the uuid-anchored wire's diff and
+    the page merge key on it): a tail event with no uuid is given one (its overlay kind, else a digest of its content);
+    a tail event whose uuid another event already holds (a record whose text and tool call are two events, an orphan
+    note falling back on a second) keeps the record's uuid, which deep links land on, and gets `key` = uuid#n. The
+    sealed prefix is read, never written: its own keys were set when it was the tail, so the result is the same list
+    a whole build produces."""
     seen = {}
     for ev in prefix:
         u = ev.get("uuid")
@@ -28212,8 +28219,8 @@ def _uniq_event_uuids(tail, prefix=()):
             ev["uuid"] = u
         n = seen.get(u, 0)
         if n:
-            ev["uuid"] = "%s#%d" % (u, n + 1)
-        seen[u] = n + 1
+            ev["key"] = "%s#%d" % (u, n + 1)             # the wire's KEY: the uuid stays the record's (a tool event and its
+        seen[u] = n + 1                                  #  text share one; deep links land on the record by uuid)
 
 
 def _asm_cut_turn(session):
@@ -41865,7 +41872,7 @@ def _chat_history_reply(sid, msg, now):
                 more_after = len(evs) > WIRE_CHUNK
             else:
                 more_after = True
-        base = {"first": out[0].get("uuid"), "last": _last_anchor(out), "detached": bool(more_after)} if out else None
+        base = {"first": _event_key(out[0]), "last": _last_anchor(out), "detached": bool(more_after)} if out else None
         return {"type": "chatWindow", "id": sid, "anchor": anchor, "events": out, "moreBefore": more_before,
                 "moreAfter": more_after, "_base": base}
     if kind == "loadNewer":
@@ -41905,7 +41912,7 @@ def _uuid_positions(evs):
         _UUID_POS.clear()
     pos = {}
     for i, ev in enumerate(evs):
-        u = ev.get("uuid")
+        u = _event_key(ev)
         if u is not None and u not in pos:
             pos[u] = i
     _UUID_POS[id(evs)] = (evs, pos)
@@ -41918,8 +41925,8 @@ def _last_anchor(evs):
     base and sent a full frame). The overlay cards ride every delta's suffix instead."""
     for e in reversed(evs):
         if e.get("kind") not in _OVERLAY_KINDS:
-            return e.get("uuid")
-    return evs[-1].get("uuid") if evs else None
+            return _event_key(e)
+    return _event_key(evs[-1]) if evs else None
 
 
 def _send_chat_proto2(c, m, ms, change_from, led_changed, st, pc):
@@ -41947,7 +41954,7 @@ def _send_chat_proto2(c, m, ms, change_from, led_changed, st, pc):
             else:
                 start = min(change_from, pl + 1) if change_from > 0 else 0   # from the change, or from after the held
             if start > pf:                                #  last record (the overlay cards after it ride the suffix)
-                tail = {"type": "chatTail", "id": sid, "afterUuid": evs[start - 1].get("uuid"),
+                tail = {"type": "chatTail", "id": sid, "afterUuid": _event_key(evs[start - 1]),
                         "events": evs[start:], "status": m.get("status")}
                 if led_changed:
                     tail["ledger"] = m.get("ledger")
@@ -41968,8 +41975,8 @@ def _send_chat_proto2(c, m, ms, change_from, led_changed, st, pc):
     head_known = head_from == 0 and not m.get("floor")
     m_send["headKnown"] = head_known
     m_send["headTotal"] = total if head_known else None
-    m_send["firstUuid"] = evs[head_from].get("uuid") if head_from < total else None
-    m_send["lastUuid"] = evs[-1].get("uuid") if total else None
+    m_send["firstUuid"] = _event_key(evs[head_from]) if head_from < total else None
+    m_send["lastUuid"] = _event_key(evs[-1]) if total else None
     _send_client(c, ("chat", sid), m_send)
     st[sid] = {"first": m_send["firstUuid"], "last": _last_anchor(evs), "detached": False}
     return ms

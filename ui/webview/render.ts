@@ -20,7 +20,7 @@ import { ctxFallbackColor, pickTone, readableRgb } from "./ctx-color";
 import { applyTheme } from "./theme";
 import { applyDenseChrome } from "./dense-chrome";
 import { SessionViews, viewVisible, viewsKey, revealIn, viewTagUnion, viewTags, type TagUnion, type SessionTag } from "./session-views";
-import { applyTailAfter, prependHead, appendMore, mergeWindow, historyLabel, indexOfUuid } from "./chat-window";   // the uuid-anchored wire (T323 stage 4b)
+import { prependHead, appendMore, mergeWindow, historyLabel, indexOfUuid, keyOf } from "./chat-window";   // the uuid-anchored wire (T323 stage 4b)
 import { mintWriteId, ackOutcome, adoptViews, seqOf, capsAdopts, announcedSeq, announcedAfter, createInFlight, rederivePending, lensBlob, applyLensFields, type InflightWrite, type LensFields, type TagEditOp, type ViewsAck } from "./views-writes";
 import { lensVisible, surfaceLens } from "./tag-lens";
 import { openTagMenu, tagMenuButton, syncTagFilter, tagChip } from "./tag-menu";
@@ -15639,7 +15639,7 @@ function upsert(msg: any) {
     // the uuid-anchored wire (T323 stage 4b): the frame says its shape (proto 2); a frame without it is an index frame
     proto: kept && prev ? prev.proto : (msg.proto === 2 ? 2 : undefined),
     headKnown: kept && prev ? prev.headKnown : (msg.proto === 2 ? !!msg.headKnown : undefined),
-    firstUuid: kept && prev ? prev.firstUuid : (msg.proto === 2 ? (msg.firstUuid ?? (events[0] as { uuid?: string } | undefined)?.uuid ?? null) : undefined),
+    firstUuid: kept && prev ? prev.firstUuid : (msg.proto === 2 ? (msg.firstUuid ?? keyOf(events[0] as { uuid?: string; key?: string } | undefined) ?? null) : undefined),
     lastUuid: kept && prev ? prev.lastUuid : (msg.proto === 2 ? (msg.lastUuid ?? null) : undefined),
     detached: kept && prev ? prev.detached : false,
     bgTasks: ("bgTasks" in msg) ? msg.bgTasks : (prev ? prev.bgTasks : undefined),
@@ -15831,7 +15831,7 @@ function chatTail(msg: any) {
     if (at < 0) { requestFullSession(msg.id, "gap"); return; }   // the anchor is not resident: a gap, whatever opened it
     from = at + 1;
     const inc = (msg.events || []) as ChatEvent[];
-    s.lastUuid = inc.length ? ((inc[inc.length - 1] as { uuid?: string }).uuid ?? s.lastUuid) : (kernelEvents[at] as { uuid?: string }).uuid ?? s.lastUuid;
+    s.lastUuid = inc.length ? (keyOf(inc[inc.length - 1] as { uuid?: string; key?: string }) ?? s.lastUuid) : keyOf(kernelEvents[at] as { uuid?: string; key?: string }) ?? s.lastUuid;
   }
   // The kernel's coordinate space ends at ITS OWN events — our injected optimistic bubbles are not in it.
   // Comparing `from` against the inflated length masked a genuine 1-event gap (the repair below never
@@ -15931,7 +15931,7 @@ function chatHead(msg: any) {
     const next = prependHead(s.events as { uuid?: string }[], msg.beforeUuid, older as { uuid?: string }[]);
     if (!next) { forget(msg.id); return; }
     s.events = next as ChatEvent[];
-    s.firstUuid = (s.events[0] as { uuid?: string } | undefined)?.uuid ?? null;
+    s.firstUuid = keyOf(s.events[0] as { uuid?: string; key?: string } | undefined) ?? null;
     if (msg.more === false) { s.headKnown = true; s.headTotal = s.events.reduce((n, e) => n + (isOptimistic(e) || isHeldGroup(e) ? 0 : 1), 0); }
   } else {
     if (before !== (s.headFrom ?? 0)) { forget(msg.id); return; }   // stale / overlapping → ignore
@@ -16042,8 +16042,8 @@ function chatWindow(msg: any) {
   stripOptimistic(s);
   const r = mergeWindow(s.events as { uuid?: string }[], msg.events as { uuid?: string }[]);
   s.events = r.events as ChatEvent[];
-  s.firstUuid = (s.events[0] as { uuid?: string } | undefined)?.uuid ?? null;
-  s.lastUuid = (s.events[s.events.length - 1] as { uuid?: string } | undefined)?.uuid ?? null;
+  s.firstUuid = keyOf(s.events[0] as { uuid?: string; key?: string } | undefined) ?? null;
+  s.lastUuid = keyOf(s.events[s.events.length - 1] as { uuid?: string; key?: string } | undefined) ?? null;
   s.detached = !!msg.moreAfter;                  // an older window: no delta reaches it until it walks back to the tail
   if (msg.moreBefore === false) s.headKnown = true;
   s.headTotal = s.headKnown && !s.detached ? s.events.length : null;   // a count only when the whole is resident
@@ -16064,7 +16064,7 @@ function chatMore(msg: any) {
   const next = appendMore(s.events as { uuid?: string }[], msg.afterUuid, (msg.events || []) as { uuid?: string }[]);
   if (!next) { reconcileOptimistic(s); return; }   // stale: the newest moved on
   s.events = next as ChatEvent[];
-  s.lastUuid = (s.events[s.events.length - 1] as { uuid?: string } | undefined)?.uuid ?? s.lastUuid;
+  s.lastUuid = keyOf(s.events[s.events.length - 1] as { uuid?: string; key?: string } | undefined) ?? s.lastUuid;
   s.detached = !!msg.more;
   if (!s.detached) { if (s.headKnown) s.headTotal = s.events.length; requestFullSession(msg.id, "reattach"); }   // back at the tail: a fresh base for the deltas
   reconcileOptimistic(s);

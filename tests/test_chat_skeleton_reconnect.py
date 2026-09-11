@@ -478,7 +478,7 @@ class SkeletonReconnect(unittest.TestCase):
             self.assertLess(s.index("with _client_lock("), s.index('"skeleton"'), name + ": the lock comes first")
         # the two lock-free helpers are reached only from bodies that hold the lock
         self.assertEqual(owners("_release_skeleton_locked("),
-                         {"_release_skeleton", "_send_chat_locked", "_client_reset_chat_sid"})
+                         {"_release_skeleton", "_send_chat_locked", "_send_chat_proto2", "_client_reset_chat_sid"})   # _send_chat_proto2: reached from _send_chat_locked alone (T323 stage 4b)
         self.assertEqual(owners("_tab_order_frame("), {"_send_tab_order"})
         for name in ("_release_skeleton", "_client_reset_chat_sid", "_send_tab_order"):
             s = inspect.getsource(getattr(km, name))
