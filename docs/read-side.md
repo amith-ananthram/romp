@@ -240,8 +240,17 @@ lose it) from `send()` until the transcript carries the same text. For a message
 into a running turn that record is the `queued_command` attachment the CLI writes
 when it splices the message in at its next tool boundary. On the SDK route no floor
 retires an echo: it retires when its text lands in a record stamped at or after the
-send (a user record or that attachment), or when the CLI dies holding it (`dropped`,
-which the chat shows as never delivered, with restore and dismiss). The chat's own
+send (a user record or that attachment), or it is flagged `dropped` (which the chat
+shows as never delivered, with restore and dismiss) on one of two events: the CLI dies
+holding it, or the transcript OVERTAKES it — a later genuine-human turn lands, in a
+later second, while the send's text has landed nowhere and no queue still owes it
+(the backend's own, or the CLI's queue ledger). The composer's messages travel one
+channel in order, so a later one going through means the CLI skipped this one: lost,
+not waiting (`settle_echoes`, the SDK twin of the tmux settle; before 2026-09-11 a
+CLI that wedged, swallowed a send and carried on left a solid bubble nothing could
+clear). At boot the same evidence turns the re-delivery of an unlanded human send
+into the flag: a message the conversation has moved past is not re-sent behind the
+newer ones. The chat's own
 pending bubble, painted at the press, has no lifetime either: it ends on the same
 events, read from the events after the send (a landing of the text, the kernel's
 never-delivered verdict, or the user's ✕), and a record the CLI wrote from several
