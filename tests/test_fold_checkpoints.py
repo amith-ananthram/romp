@@ -87,7 +87,7 @@ class Base(unittest.TestCase):
         (jd.STATE / "states").mkdir(parents=True, exist_ok=True)
         (jd.STATE / "timeline").mkdir(parents=True, exist_ok=True)
         self.fresh_process()
-        em._CKPT_STATS.update(restored=0, writes=0, swept=0, skippedFolds=0, fallbacks={})
+        em._CKPT_STATS.update(restored=0, writes=0, swept=0, skippedFolds=0, fallbacks={}, restoredFolds={})
 
     def tearDown(self):
         jd._rebind_state(self.saved_state)
@@ -157,8 +157,6 @@ class GenericFold(Base):
         return em.fold_records(cache if cache is not None else self.cache, self.p, list, self._step, on=self.kinds.append, ckpt=name)
 
     def cold(self):
-        with em._JSONL_CACHE_LOCK:
-            em._JSONL_CACHE.pop(self.p, None)
         saved = em._CKPT_DIR_FN
         em._CKPT_DIR_FN = None                                 # a plain whole fold, no checkpoint in play
         try:
@@ -186,7 +184,9 @@ class GenericFold(Base):
             ent = em._JSONL_CACHE[self.p]
         self.assertEqual((ent[5], len(ent[4])), (3, 2), "a TAIL entry: base 3, two records held")
         read = em.read_bytes_report()[self.p]
-        self.assertEqual(read, (os.stat(self.p).st_size - size0) + min(64, size0), "the tail plus the guard, nothing else")
+        size1 = os.stat(self.p).st_size
+        self.assertEqual(read, (size1 - size0) + min(64, size0) + min(64, size1),
+                         "the tail, the guard check before it and the guard captured after it: nothing of the prefix")
         self.assertEqual(em.checkpoint_stats()["restored"], 1)
         self.assertEqual(em.checkpoint_stats()["fallbacks"], {})
         self.assertEqual(self.fold(), [0, 1, 2, 3, 4]); self.assertEqual(self.kinds[-1], "hit")
@@ -198,7 +198,7 @@ class GenericFold(Base):
         self.fold(); em.checkpoint_write(self.p)
         self.fresh_process()
         self.assertEqual(self.fold(), [0, 1]); self.assertEqual(self.kinds[-1], "restore")
-        self.assertEqual(em.read_bytes_report()[self.p], min(64, os.stat(self.p).st_size), "the guard only")
+        self.assertEqual(em.read_bytes_report()[self.p], 2 * min(64, os.stat(self.p).st_size), "the guard checked, then captured again: no content")
         _append(self.p, torn={"n": 2})
         self.assertEqual(self.fold(), [0, 1, 2], "the newline-less record is folded provisionally")
         self.assertEqual(self.cache[self.p][0], 2, "and not into the cursor")
@@ -215,7 +215,8 @@ class GenericFold(Base):
         self.assertEqual(self.kinds[-1], "restore", "the fold state came from the checkpoint after a guard check on disk")
         self.assertEqual(em.checkpoint_stats()["restored"], 1)
         self.assertEqual(em.checkpoint_stats()["fallbacks"], {})
-        self.assertEqual(em.read_bytes_report()[self.p], os.stat(self.p).st_size + min(64, size0), "the whole file (the whole reader's) plus the guard check")
+        self.assertEqual(em.read_bytes_report()[self.p], os.stat(self.p).st_size + min(64, os.stat(self.p).st_size) + min(64, size0),
+                         "the whole file and its guard capture (the whole reader's) plus the restore's guard check")
 
     def test_a_rewrite_under_the_guard_falls_back_loudly_and_equals_cold(self):
         _write(self.p, [{"n": i} for i in range(4)])
@@ -266,6 +267,49 @@ class GenericFold(Base):
             self.assertEqual(em._JSONL_CACHE[self.p][5], 0, "the entry was upgraded to the whole file for it")
         self.assertEqual(self.fold(), [0, 1, 2, 3]); self.assertEqual(self.kinds[-1], "hit", "the restored fold still stands")
 
+    def test_an_evicted_reader_entry_never_lets_a_rewritten_file_pass_as_an_append(self):
+        """Review find (2026-09-11): a from-zero read after an eviction (the reader cache runs at its cap on a busy box) or
+        a failure pop restarted the generation at 0 while the fold's cursor still held (count, 0, state): a file rewritten
+        in place with as many records then read as a hit, one with more as an append of the NEW file's tail onto the OLD
+        state, and the checkpoint written afterwards carried the wrong state under a clean witness. Every from-zero read
+        takes a fresh process-wide generation now."""
+        _write(self.p, [{"n": i} for i in range(3)])
+        self.assertEqual(self.fold(), [0, 1, 2])
+        for rewrite in ([{"n": 7}, {"n": 8}, {"n": 9}], [{"n": 4}, {"n": 5}, {"n": 6}, {"n": 3}]):   # same size, then longer
+            with self.subTest(records=len(rewrite)):
+                with em._JSONL_CACHE_LOCK:
+                    em._JSONL_CACHE.pop(self.p, None)                 # evicted (or popped by a stat failure) under the fold
+                _write(self.p, rewrite)
+                self.assertEqual(self.fold(), [r["n"] for r in rewrite], "the rewritten file is folded from zero, never onto the old state")
+                self.assertEqual(self.kinds[-1], "refold")
+                self.assertTrue(em.checkpoint_write(self.p))
+                self.assertEqual(self.fold(), self.cold())
+                self.fresh_process()
+                self.assertEqual(self.fold(), [r["n"] for r in rewrite], "and the checkpoint written after it is right")
+                self.assertEqual(self.kinds[-1], "restore")
+
+    def test_a_whole_reader_first_then_a_rewritten_file_falls_back_like_the_tail_path(self):
+        """Review find (2026-09-11): the whole-reader-first restore checked the guard alone; the tail path also compared
+        the document's size and mtime. Both verdicts come from one helper now: the same rewrite gets the same reason
+        whichever reader came first, so /perf's fallback count is a witness."""
+        for reason, rewrite in (("guard", [{"n": 100 + i} for i in range(4)] + [{"n": 7}]),          # longer, other prefix
+                                ("rewrite", ([{"n": 5}, {"n": 6}, {"n": 7}], (TS0, TS0)))):         # same size, other mtime
+            with self.subTest(reason=reason):
+                _write(self.p, [{"n": i} for i in range(3)])
+                self.fresh_process(); em._CKPT_STATS["fallbacks"] = {}
+                self.fold(); em.checkpoint_write(self.p)
+                self.fresh_process()
+                if isinstance(rewrite, tuple):
+                    _write(self.p, rewrite[0]); os.utime(self.p, rewrite[1])
+                else:
+                    _write(self.p, rewrite)
+                recs = em._read_jsonl_incremental(self.p)          # the whole reader comes first
+                self.assertEqual(len(recs), len(rewrite[0] if isinstance(rewrite, tuple) else rewrite))
+                got = self.fold()
+                self.assertEqual(em.checkpoint_stats()["fallbacks"], {reason: 1}, reason)
+                self.assertEqual(got, self.cold()); self.assertEqual(self.kinds[-1], "refold")
+                self.assertFalse(em._ckpt_file(self.p).exists(), "the checkpoint that did not verify is gone")
+
     def test_nothing_is_written_when_no_fold_stands_at_the_witness_unless_forced(self):
         _write(self.p, [{"n": 0}])
         em._read_jsonl_incremental(self.p)                        # an entry with no fold on it
@@ -315,7 +359,8 @@ class KernelFolds(Base):
         self.states = str(jd.STATE / "states" / (SID + ".jsonl"))
         self.postal = str(jd.STATE / "timeline" / "messages.jsonl")
         self.queue_leaf = str(self.proj / "queue.jsonl")
-        self.files = (self.leaf, self.agent, self.states, self.postal, self.queue_leaf)
+        self.nudge = str(jd.STATE / "nudge-events.jsonl")
+        self.files = (self.leaf, self.agent, self.states, self.postal, self.queue_leaf, self.nudge)
 
     def leaf_recs(self, tail):
         head = [_user("wire the fixtures", "u1", None, TS0, permissionMode="acceptEdits"),
@@ -359,9 +404,14 @@ class KernelFolds(Base):
                 {"type": "queue-operation", "operation": "enqueue", "content": "third", "timestamp": _iso(TS0 + 3)}]
         return head + rest if tail else head
 
+    def nudge_recs(self, tail):
+        head = [{"gid": SID + ":g1", "t": TS0 + 1}, {"gid": SID + ":g1", "t": TS0 + 2}]
+        rest = [{"gid": SID + ":g2", "t": TS0 + 3}, {"gid": SID + ":g1", "t": TS0 + 4}]
+        return head + rest if tail else head
+
     def recs_of(self, p, tail):
         return {self.leaf: self.leaf_recs, self.agent: self.agent_recs, self.states: self.states_recs,
-                self.postal: self.postal_recs, self.queue_leaf: self.queue_recs}[p](tail)
+                self.postal: self.postal_recs, self.queue_leaf: self.queue_recs, self.nudge: self.nudge_recs}[p](tail)
 
     def answers(self):
         return {
@@ -380,6 +430,9 @@ class KernelFolds(Base):
             "retryingSince": km._fold_records(km._retrying_since_cache, jd.STATE / "states" / (SID + ".jsonl"), lambda: None,
                                               km._retrying_since_step, ckpt="retryingSince"),
             "queueLedger": km._pending_ledger(self.queue_leaf),
+            "wakeTail": km._undelivered_wake_tail(self.queue_leaf),
+            "nudgeTimes": km._nudge_times(),
+            "bgJudge": [dict(t) for t in jd._bg_unresolved(self.leaf, now=TS0 + 100)],
             "postalLog": {k: (dict(v) if isinstance(v, dict) else sorted(v)) for k, v in
                           km._fold_records(km._postal_log_cache, self.postal, km._postal_log_fresh, km._postal_log_step, ckpt="postalLog").items()},
         }
@@ -395,17 +448,22 @@ class KernelFolds(Base):
         for p in self.files:
             self.assertTrue(em.checkpoint_write(p), p)
             names |= set(self.doc(p)["folds"])
-        self.assertEqual(names, {"sessionMeta", "bgRunning", "bgAll", "agentLaunches", "agentGist", "agentLaunchIds", "statesOverlay",
-                                 "stateIntervals", "statesNotes", "machineCut", "queueLedger", "postalLog", "lastState",
-                                 "lastNaturalState", "retryingSince"},
-                         "every kernel fold this test drives left its state in the checkpoint")
+        ALL_NAMES = {"sessionMeta", "bgRunning", "bgAll", "bgJudge", "agentLaunches", "agentGist", "agentLaunchIds", "statesOverlay",
+                     "stateIntervals", "statesNotes", "machineCut", "queueLedger", "wakeTail", "postalLog", "lastState",
+                     "lastNaturalState", "retryingSince", "nudgeTimes"}
+        self.assertEqual(names, ALL_NAMES, "every kernel fold this test drives left its state in the checkpoint")
+        ksrc = open(os.path.join(BIN, "romp-kernel")).read(); jsrc = open(os.path.join(BIN, "romp-judge")).read()
+        import re as _re
+        named = set(_re.findall(r'ckpt="([A-Za-z]+)"', ksrc)) | set(_re.findall(r'name_fold_cache\([^,]+, "([A-Za-z]+)"\)', jsrc))
+        self.assertEqual(named, ALL_NAMES, "every checkpoint name the kernel and the judge give a fold is driven here")
         self.fresh_process()
         for p in self.files:
             full, head = self.recs_of(p, True), self.recs_of(p, False)
             _append(p, *full[len(head):])
         warm = self.answers()
         self.assertEqual(em.checkpoint_stats()["fallbacks"], {})
-        self.assertEqual(em.checkpoint_stats()["restored"], 5, "one restore per file")
+        self.assertEqual(em.checkpoint_stats()["restored"], 6, "one restore per file")
+        self.assertEqual(set(em.checkpoint_stats()["restoredFolds"]), ALL_NAMES, "every fold restored from its recorded state")
         for p in self.files:
             with em._JSONL_CACHE_LOCK:
                 self.assertGreater(em._JSONL_CACHE[p][5], 0, "a tail entry: %s" % p)
@@ -425,6 +483,9 @@ class KernelFolds(Base):
         self.assertEqual(km._last_state(SID), ("waiting", TS0 + 12))
         self.assertEqual(km._last_natural_state(SID), ("retrying", TS0 + 9.5), "the session's own newest state skips rows with `by`")
         self.assertEqual(cold["queueLedger"], ["second", "third"])
+        self.assertEqual([e["text"] for e in cold["wakeTail"][0]], ["second", "third"])
+        self.assertEqual(cold["nudgeTimes"], {SID + ":g1": [TS0 + 1, TS0 + 2, TS0 + 4], SID + ":g2": [TS0 + 3]})
+        self.assertEqual([t["id"] for t in cold["bgJudge"]], ["toolu_bg2"], "the judge's settled gate reads the same pairing")
         self.assertEqual(cold["postalLog"]["ended"], ["m2"])
         self.assertNotIn("m1", cold["postalLog"]["execd"])
 
@@ -453,14 +514,14 @@ class KernelFolds(Base):
             self.assertEqual(km._persist_checkpoints(TS0 + 3), 0)
             _append(self.states, {"t": TS0 + 102, "state": "working"})   # a states row is an event, with no settle
             self.assertEqual(km._persist_checkpoints(TS0 + 4), 1, "the agent file rides the states-log move")
-            self.assertEqual(em.checkpoint_write_dirty(), 1, "exit writes what is left (the queue ledger's file)")
+            self.assertEqual(em.checkpoint_write_dirty(), 2, "exit writes what is left (the queue ledger's file and the nudge log)")
             self.assertEqual(em.checkpoint_dirty(), [])
         finally:
             km._sessions, km._turn_end_key = saved_sessions, saved_turn
 
     def test_perf_carries_the_checkpoint_counters_and_the_kernel_wires_the_three_events(self):
         snap = km._PERF_STATS.snapshot()
-        self.assertEqual(sorted(snap["checkpoints"]), ["dirty", "fallbacks", "readByPath", "readBytes", "restored", "skippedFolds", "swept", "writes"])
+        self.assertEqual(sorted(snap["checkpoints"]), ["dirty", "fallbacks", "readByPath", "readBytes", "restored", "restoredFolds", "skippedFolds", "swept", "writes"])
         src = open(os.path.join(BIN, "romp-kernel")).read()
         self.assertIn("em.checkpoint_write_dirty()       # every fold checkpoint that moved since its last write", src,
                       "exit writes every dirty checkpoint in _drain_and_exit")

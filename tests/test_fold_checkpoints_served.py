@@ -210,11 +210,18 @@ class ExitThenBoot(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        keep = os.environ.get("ROMP_T323S3_KEEP_LOGS")
+        if keep:                                                # a diagnosis aid: the two kernels' logs, kept where asked
+            os.makedirs(keep, exist_ok=True)
+            for f in os.listdir(cls.lab):
+                if f.startswith("kernel-") and f.endswith(".log"):
+                    shutil.copy(os.path.join(cls.lab, f), os.path.join(keep, f))
         shutil.rmtree(cls.lab, ignore_errors=True)
 
     def _boot(self):
         port = _free_port()
-        env = _lab.kernel_env(self.lab, self.claude, self.dist, port, self.token, ROMP_HOST_NAME="TESTHOST")
+        env = _lab.kernel_env(self.lab, self.claude, self.dist, port, self.token, ROMP_HOST_NAME="TESTHOST",
+                              ROMP_READER_TRACE=os.environ.get("ROMP_READER_TRACE", ""))   # a diagnosis aid: one stderr line per read
         log = open(os.path.join(self.lab, "kernel-%d.log" % port), "w")
         k = subprocess.Popen([os.path.join(BIN, "romp-kernel")], stdout=log, stderr=subprocess.STDOUT, env=env)
         for _ in range(200):
@@ -296,17 +303,21 @@ class ExitThenBoot(unittest.TestCase):
             self.assertEqual(perf["fallbacks"], {}, "every checkpoint verified: %s" % perf)
             self.assertGreaterEqual(perf["restored"], len(ALL), "one restore per states log at least: %s" % perf)
             got = by.get(os.path.realpath(self.agent_file), by.get(self.agent_file))
-            self.assertEqual(got, 64, "the agent file was read as a TAIL: the 64 guard bytes only, since nothing was appended "
-                                      "(its size %d; bytes by class in this boot: %s)" % (agent_size, report))
+            self.assertEqual(got, 128, "the agent file was read as a TAIL: its 64 guard bytes checked and captured again, nothing of its "
+                                       "content, since nothing was appended (its size %d; bytes by class in this boot: %s)" % (agent_size, report))
+            self.assertGreaterEqual(perf["restoredFolds"].get("agentGist", 0), 1, "the gist fold resumed from its recorded state: %s" % perf["restoredFolds"])
+            for name in ("statesOverlay", "lastState", "machineCut"):   # the folds the feed and the busy hint run per session
+                self.assertGreaterEqual(perf["restoredFolds"].get(name, 0), len(ALL),
+                                        "the %s fold resumed for every session's states log: %s" % (name, perf["restoredFolds"]))
             # what stays whole is asserted, not hidden: the leaf transcripts and their states logs, which the parse
             # reads (stage 4's), cost their whole size plus the guard check the folds' restore made on each
             for sid, sp in self.states_files.items():
                 got = by.get(os.path.realpath(sp), by.get(sp)) or 0
                 now_size = os.path.getsize(sp)                      # the second kernel appends states rows of its own
                 self.assertGreaterEqual(got, sizes[sid], "%s's states log: whole, the parse's read (bytes by class: %s)" % (sid, report))
-                self.assertLessEqual(got, 2 * now_size + 4 * 64,
-                                     "%s's states log: whole once for the parse, at most once more when the kernel rewrites "
-                                     "the log in place (a healed overlay row moves the guard), plus a few guard reads" % sid)
+                self.assertLessEqual(got, now_size + 8 * 64,
+                                     "%s's states log: the parse's whole read plus guard reads and captures (a tail restore, its "
+                                     "upgrade to the whole file, the whole-reader-first check), never its content twice" % sid)
             for sid, lp in self.leaf_files.items():
                 got = by.get(os.path.realpath(lp), by.get(lp)) or 0
                 self.assertGreaterEqual(got, os.path.getsize(lp), "%s's leaf transcript: whole, the parse's read (stage 4)" % sid)
