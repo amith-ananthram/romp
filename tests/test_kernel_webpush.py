@@ -1900,6 +1900,10 @@ global.fetch = (path, init) => {
   return Promise.resolve(fetchOk ? { ok: true, status: 200 } : { ok: false, status: 400, text: () => Promise.resolve('missing sid') }); };
 global.__rompNotify = (kind, text) => NOTES.push([kind, text]);
 global.__rompShellDiag = (what, data) => DIAG.push([what, data]);   // _LANDING_MOBILE_JS's poster, stubbed: the rows this script files
+// the head script's reader of the gear's Panes section, stubbed: ROMP_TEST_FEED_OFF boots with the Feed pane off in this
+// browser; a driver flips FEED_OFF
+let FEED_OFF = !!process.env.ROMP_TEST_FEED_OFF;
+global.__rompPaneEnabled = (k) => !(k === 'feed' && FEED_OFF);
 """
 _REVEAL_LIB = r"""
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -2138,7 +2142,30 @@ _TABS_DRIVER = _REVEAL_LIB + r"""
 """
 
 
-def _run_reveal(driver, href=None, active=None, endpoint=None, pending=None, no_sw=False, displayed=None, no_getn=False):
+# the Feed pane off in this browser (the gear's Panes section, the user 2026-09-10): a card's landing does not wait on a feed
+# that is never loaded; the /reveal that opened the session in the chat is the whole landing
+_FEED_OFF_DRIVER = _REVEAL_LIB + r"""
+(async () => {
+  const out = { boot: { fetches: FETCHES.slice(), postedAtBoot: POSTED.length } };
+  await settle();
+  winMsg({ romp: 'ready', app: 'feed' });               // a feed's ready (another dashboard's pane cannot post here; a pane enabled later can)
+  out.boot.postedAfterFeedReady = POSTED.slice();
+  winMsg({ romp: 'wsState', app: 'chat', state: 'up' });
+  reset();
+  swMsg({ romp: 'notificationClick', sid: 'S2', host: '', kind: 'card', cardId: 'S2:g4', pid: 'PID-live-0000000001' });
+  await settle();
+  out.live = snap();
+  FEED_OFF = false;                                      // the gear shows the pane again (its iframe loads and reports ready)
+  reset();
+  swMsg({ romp: 'notificationClick', sid: 'S3', host: '', kind: 'card', cardId: 'S3:g1', pid: 'PID-live-0000000003' });
+  await settle();
+  out.backOn = snap();
+  console.log(JSON.stringify(out));
+})();
+"""
+
+
+def _run_reveal(driver, href=None, active=None, endpoint=None, pending=None, no_sw=False, displayed=None, no_getn=False, feed_off=False):
     """node runs the harness + the shell's reveal script + `driver`, booting on `href` (default: the deep link) — see the
     harness's env. `active`: the chat pane's active tab at boot; `endpoint`: this page's push subscription endpoint (none =
     a device that never opted in); `pending`: what the kernel's GET /push/pending answers at boot; `no_sw`: a browser with
@@ -2160,6 +2187,8 @@ def _run_reveal(driver, href=None, active=None, endpoint=None, pending=None, no_
         env["ROMP_TEST_ACTIVE"] = active
     if no_sw:
         env["ROMP_TEST_NO_SW"] = "1"
+    if feed_off:
+        env["ROMP_TEST_FEED_OFF"] = "1"
     with _tf.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
         f.write(_REVEAL_HARNESS + km._LANDING_REVEAL_JS + driver)
         path = f.name
@@ -2249,6 +2278,33 @@ class LandingRevealExecutes(unittest.TestCase):
         self.assertEqual(self.out["earlySwFeedUp"]["fetches"][0], ["/reveal", {"sid": "S0", "wid": "W-test", "via": "sw", "boot": True}], "another pane's socket is not the chat pane's")
         self.assertNotIn("boot", self.out["live"]["fetches"][0][1], "once the chat pane is up, a tap is delivered live")
         self.assertEqual(self.out["afterDrop"]["fetches"][0], ["/reveal", {"sid": "S30", "wid": "W-test", "via": "sw"}], "a later drop does not re-arm the flag")
+
+
+class LandingRevealWithTheFeedPaneOffHere(unittest.TestCase):
+    """The user 2026-09-10: a browser with the Feed pane off in the gear's Panes section has no feed iframe loaded, so
+    a card's scroll has no ready to wait for; latching it would park a card for good. The landing is the /reveal the
+    script already posts, which puts the session in front in the chat. The kernel and the judges are not party to it."""
+    @classmethod
+    def setUpClass(cls):
+        cls.out = _run_reveal(_FEED_OFF_DRIVER, feed_off=True)
+
+    def test_a_cards_deep_link_opens_the_session_and_latches_no_card_for_a_feed_that_is_not_here(self):
+        b = self.out["boot"]
+        self.assertEqual(b["fetches"][0], ["/reveal", {"sid": "S1", "wid": "W-test", "via": "link", "boot": True}], "the session lands in the chat as ever")
+        self.assertEqual(b["postedAtBoot"], 0)
+        self.assertEqual(b["postedAfterFeedReady"], [], "no card was latched: a feed's ready has nothing to flush")
+
+    def test_a_live_card_tap_lands_the_session_and_posts_no_card(self):
+        live = self.out["live"]
+        self.assertEqual(live["fetches"], [["/reveal", {"sid": "S2", "wid": "W-test", "via": "sw"}], ["/push/landed", {"pid": "PID-live-0000000001"}]])
+        self.assertEqual(live["posted"], [], "no revealCard into a pane that is not here")
+        self.assertEqual(live["notes"], [], "and nothing to complain about: the landing succeeded")
+
+    def test_the_pane_back_on_the_card_scroll_returns(self):
+        # the feed reported ready earlier in this page's life (the driver's ready), so the scroll posts at once
+        back = self.out["backOn"]
+        self.assertEqual(back["posted"], [{"romp": "revealCard", "itemId": "S3:g1", "sid": "S3"}])
+        self.assertIn("function revealCard(itemId,sid){if(window.__rompPaneEnabled&&!window.__rompPaneEnabled('feed'))return;", km._LANDING_REVEAL_JS)
 
 
 class LandingRevealReadsTheLinkLater(unittest.TestCase):

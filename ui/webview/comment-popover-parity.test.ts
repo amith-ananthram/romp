@@ -229,7 +229,8 @@ test("the pickers re-read /models on the kernel's models frame — the pick memo
   // the kernel side: one emitter, fired by every writer of the pick memory, to EVERY app that hosts a
   // picker — chat, timeline, and the feed, where the settings gear's judge-tier pickers live
   assert.match(KERNEL, /frame = \{"type": "models", "rev": _models_rev\[0\]\}/);
-  assert.match(KERNEL, /for app in \("chat", "timeline", "feed"\):\s*\n\s*_send_to_app\(app, frame\)/);
+  assert.match(KERNEL, /for app in \("chat", "timeline", "feed", "settings"\):\s*\n\s*_send_to_app\(app, frame\)/,
+    "the models frame reaches the settings page too, since the gear lives there (the optional-panes change)");
   // …and the payload carries the same counter, so a consumer can drop a response older than one applied
   assert.match(KERNEL, /\{"rev": _rev,\s*\n\s*"models": \[/);
   assert.match(KERNEL, /_rev = _models_rev\[0\]\s*\n\s*_learned = _learned_versions\(\)/, "read before the list, never after it");

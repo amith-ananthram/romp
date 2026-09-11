@@ -148,10 +148,11 @@ class PickMemory(unittest.TestCase):
         self.assertEqual(km._model_picks().get("opus"), "claude-opus-4-8")
 
     def _clients(self):
-        """Three fake connected clients — a chat, a timeline and a FEED client (the feed bundle is where the
-        settings gear's pickers live) — on the kernel's live roster; the frames they receive, decoded.
-        Removed again in tearDown-order by the returned callable."""
-        got = {"chat": [], "timeline": [], "feed": []}
+        """Four fake connected clients — a chat, a timeline, a FEED client (VS Code's feed panel hosts the
+        settings gear) and a SETTINGS client (the dashboard's /settings page, where its pickers live) — on
+        the kernel's live roster; the frames they receive, decoded. Removed again in tearDown-order by the
+        returned callable."""
+        got = {"chat": [], "timeline": [], "feed": [], "settings": []}
         fakes = [{"app": app, "wid": "w1", "alive": True,
                   "send": (lambda s, _a=app: got[_a].append(json.loads(s)))} for app in got]
         with km._clients_lock:
@@ -172,7 +173,7 @@ class PickMemory(unittest.TestCase):
         # every picker re-fetches on it.
         got = self._clients()
         km._note_model_pick("claude-opus-4-8")
-        for app in ("chat", "timeline", "feed"):
+        for app in ("chat", "timeline", "feed", "settings"):
             self.assertEqual([f["type"] for f in got[app]], ["models"], app)
             self.assertIsInstance(got[app][0]["rev"], int)
         rev = got["chat"][0]["rev"]
@@ -185,19 +186,22 @@ class PickMemory(unittest.TestCase):
         self.assertEqual(got["chat"][1]["rev"], rev + 1, "a moving counter — a client can tell frames apart")
         self.assertEqual(len(got["timeline"]), 2)
         self.assertEqual(len(got["feed"]), 2)
+        self.assertEqual(len(got["settings"]), 2)
 
-    def test_the_frame_reaches_the_feed_bundle_where_the_settings_gear_lives(self):
-        # the settings gear, whose judge-tier family rows send the cached list's `default`, is part of
-        # the FEED bundle (feed.ts requires gear.js; the web shell's rail gear and VS Code's settings
-        # command both post openSettings into the feed pane). A frame to the chat and timeline apps
+    def test_the_frame_reaches_every_document_that_hosts_the_settings_gear(self):
+        # the settings gear, whose judge-tier family rows send the cached list's `default`, lives on the
+        # dashboard's own /settings page (app settings, ui/webview/settings-page.ts; the user 2026-09-10)
+        # and, for VS Code's feed panel, still in the FEED bundle (feed.ts requires gear.js; VS Code's
+        # settings command posts openSettings into that webview). A frame to the chat and timeline apps
         # alone never reaches the gear where it actually opens, and its first-open cache keeps sending
         # a stale pinned default after another picker un-pinned. Every app that hosts a picker hears it.
         got = self._clients()
         km._note_model_pick("claude-sonnet-4-6")
-        self.assertEqual([f["type"] for f in got["feed"]], ["models"], "the feed client hears the pin")
-        self.assertEqual(got["feed"][0], got["chat"][0], "the same frame every picker host gets")
+        self.assertEqual([f["type"] for f in got["settings"]], ["models"], "the settings page hears the pin")
+        self.assertEqual([f["type"] for f in got["feed"]], ["models"], "so does VS Code's feed panel")
+        self.assertEqual(got["settings"][0], got["chat"][0], "the same frame every picker host gets")
         km._forget_model_pick("sonnet")
-        self.assertEqual([f["type"] for f in got["feed"]], ["models", "models"], "…and the un-pin")
+        self.assertEqual([f["type"] for f in got["settings"]], ["models", "models"], "…and the un-pin")
 
     def test_a_refused_version_is_forgotten_only_while_it_is_still_the_pin(self):
         # the CLI's refusal reaches the kernel through the backend's on_model_refused hook; the family's

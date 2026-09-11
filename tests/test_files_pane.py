@@ -161,10 +161,11 @@ class Plumbing(unittest.TestCase):
         for page in (km._chat_page(), km._feed_page(), km._fleet_page(), km._timeline_page()):
             _has(self, "var NOSTALE=false;", page)
             _lacks(self, "var NOSTALE=true;", page)
-        # the one page that passes it; the other pane pages call the shim exactly as they did
+        # the pages that pass it: this one and the settings page (the gear alone, no pushed view either;
+        # tests/test_settings_page.py); the pane pages call the shim exactly as they did
         shims = re.findall(r'_shim\("(\w+)", v(?:, ([^)]*))?\)', SRC)
-        self.assertEqual([app for app, kw in shims if "no_stale=True" in (kw or "")], ["files"])
-        self.assertEqual(sorted(app for app, kw in shims), ["chat", "feed", "files", "fleet", "timeline"])
+        self.assertEqual([app for app, kw in shims if "no_stale=True" in (kw or "")], ["files", "settings"])
+        self.assertEqual(sorted(app for app, kw in shims), ["chat", "feed", "files", "fleet", "settings", "timeline"])
 
     def test_the_editor_chunk_derives_from_the_pages_own_bundle_tag(self):
         # file-view.ts loads its CodeMirror chunk from a URL rewritten off the page's running bundle
@@ -226,8 +227,9 @@ class Shell(unittest.TestCase):
     def test_every_pane_list_in_the_landing_js_names_it(self):
         _has(self, "'f-files':'files-pane'", km._LANDING_FOCUS_JS)
         _has(self, "var COLS=['f-chat','f-fleet','f-feed','f-files']", km._LANDING_FOCUS_JS)
-        _has(self, "['f-chat','f-fleet','f-feed','f-files','f-timeline'].forEach", km._LANDING_ESC_JS)
-        _has(self, "['f-chat','f-fleet','f-feed','f-files','f-timeline'].forEach", km._LANDING_MOBILE_JS)
+        # the settings iframe (the gear's document, not a pane) rides the two keyboard lists with the panes
+        _has(self, "['f-chat','f-fleet','f-feed','f-files','f-timeline','f-settings'].forEach", km._LANDING_ESC_JS)
+        _has(self, "['f-chat','f-fleet','f-feed','f-files','f-timeline','f-settings'].forEach", km._LANDING_MOBILE_JS)
         # the Log's connection-lost label reads the one map, so the pane's row in _PANE_ORDER is the pin
         _has(self, "var PN=" + json.dumps(dict(km._PANE_ORDER)) + ";", km._LANDING_ERRS_JS)
         self.assertEqual(dict(km._PANE_ORDER).get("files"), "Files")
@@ -239,33 +241,40 @@ class Shell(unittest.TestCase):
                       "c.contains('po-fleet')?'fleet-pane':'chat-pane';},'files-pane');", self.html)
 
     def test_the_files_controls_own_setting_hides_it_in_both_layouts(self):
-        # T317 (the user 2026-09-10): the gear's "Files control in the dashboard bar" (romp:settings.filesControl,
-        # shown unless the store holds the literal false). The shell reads the gear's store key itself, hides the
+        # T317 (the user 2026-09-10): the gear's "Files control in the dashboard bar" (romp:settings.showFilesControl,
+        # hidden unless the store holds the literal true: OFF by default since T317b; a FRESH key, since the T317-era gear's
+        # whole-object save left filesControl: true in any profile that touched a setting). The shell reads the gear's store key itself, hides the
         # rail's toggle and the phone's tab by one body class, closes an open pane on the same apply, refuses to
         # bring the pane forward, tells the panes it is unavailable, and the phone's switcher never shows a hidden
         # tab (a stored romp-mobile-tab, a relay). Executed under node in tests/test_pane_state_broadcast.py.
         _has(self, "body.no-files-control .rail-btn[data-pane=files],body.no-files-control #mtabs button[data-pane=files]{display:none}", self.html)
         js = km._LANDING_COLLAPSE_JS
-        _has(self, "function filesCtl(){try{var st=JSON.parse(localStorage.getItem('romp:settings')||'null');return !(st&&st.filesControl===false);}catch(e){return true;}}", js)
+        _has(self, "function filesCtl(){try{var st=JSON.parse(localStorage.getItem('romp:settings')||'null');return !!(st&&st.showFilesControl===true);}catch(e){return false;}}", js)
+        _has(self, "function filesCtlM(){try{var st=JSON.parse(localStorage.getItem('romp:settings')||'null');return !!(st&&st.showFilesControl===true);}catch(e){return false;}}", km._LANDING_MOBILE_JS)   # the phone's read agrees: only the literal true
+        self.assertNotIn("st.filesControl", js + km._LANDING_MOBILE_JS, "the T317-era key is never read: a whole-object save merged its true into profiles that never touched the box")
         _has(self, "document.body.classList.toggle('no-files-control',!ctl);", js)
         _has(self, "if(k==='files'&&!filesCtl())return;", js)
         _has(self, "return {romp:'panes',on:on,avail:{files:filesCtl()}};", js)
-        _has(self, "window.addEventListener('storage',apply);", js)   # the gear writes from another document: this is the event
+        _has(self, "window.addEventListener('storage',function(e){if(!e||!e.key||e.key===SK)reconcile(true);apply();});", js)   # the gear writes from another document: this is the event (a gear save re-reads the optional panes before the titles refresh)
         mob = km._LANDING_MOBILE_JS
         _has(self, "function show(p){if(p==='files'&&!filesCtlM())p='chat';", mob)
-        # the gear's row, in the panes section beside "File links open in", shown by default; the chat's route reads the word
+        # the gear's row, in the panes section beside "File links open in", UNCHECKED by default (T317b); the chat's route reads the word
         gear = (UI / "gear.js").read_text()
-        _has(self, "<input type=checkbox id=rs-filesctl checked>", gear)
+        _has(self, "<input type=checkbox id=rs-filesctl>", gear)
+        self.assertNotIn("id=rs-filesctl checked", gear, "off by default: the box is not pre-checked")
+        self.assertEqual(gear.count("showFilesControl: false, stripGroupRows"), 2, "the gear's load defaults (the assign and its catch) say off")
+        _has(self, "delete o.filesControl; return o; } catch (e) {", gear)   # load() drops the T317-era key, so the next save leaves it behind
         # the box has a NAME OF ITS OWN in the gear's one var list (review find: a second `fc` shadowed the feed's
         # collapsed box, so the new row was dead and the feed box wrote this setting)
         _has(self, "fsc = document.getElementById('rs-filesctl')", gear)
-        _has(self, "if (fsc) fsc.addEventListener('change', function () { var s = load(); s.filesControl = fsc.checked; save(s); });", gear)
-        _has(self, "if (fsc) fsc.checked = (s.filesControl !== false);", gear)
+        _has(self, "if (fsc) fsc.addEventListener('change', function () { var s = load(); s.showFilesControl = fsc.checked; save(s); });", gear)
+        _has(self, "if (fsc) fsc.checked = (s.showFilesControl === true);", gear)
         self.assertEqual(gear.count("fc = document.getElementById("), 1, "fc is the feed's collapsed box alone")
         self.assertEqual(gear.count("fsc = document.getElementById("), 1)
         # the palette's entry for the pane is not listed while the control is hidden (re-read at every open)
         pal = (UI / "palette-main.ts").read_text()
-        _has(self, 'when: key === "files" ? () => !document.body.classList.contains("no-files-control") : undefined,', pal)
+        _has(self, 'when: key === "files" ? () => !document.body.classList.contains("no-files-control")', pal)
+        _has(self, ': optional.has(key) ? () => loadSettings().panes[key as keyof PaneSet]', pal)   # the optional panes' own predicate (the gear's Panes section) shares the ternary
         _has(self, "filter((c) => !c.hidden && (!c.when || c.when()))", (UI / "palette.ts").read_text())
         # a ?panes= bookmark stays a view: the forced close is never written over the stored set
         _has(self, "if(!ctl&&po.files){po.files=false;if(qp===null)saveP();}", js)
@@ -274,7 +283,7 @@ class Shell(unittest.TestCase):
         _has(self, "fileLinkRoute(settings.fileLinkPane, window.parent !== window, panesOn.files === true, panesAvail.files !== false)", render)
         # the hint in the pane stays true: it speaks of the pane being open or closed, never of the control
         files = (UI / "files.ts").read_text()
-        _has(self, "To open them here while it is closed, set File links open in to The Files pane in the gear.", files)
+        _has(self, "To open them here while it is closed, turn on the Files control in the dashboard bar and set File links open in to The Files pane in the gear.", files)
 
     def test_mobile_tab_and_the_palette_command(self):
         _has(self, "#chat-pane,#fleet-pane,#feed-pane,#files-pane,#tl-pane{display:contents!important}", self.html)
@@ -451,7 +460,9 @@ class BrowseRelay(unittest.TestCase):
     ui/webview/browse-route.test.ts. Synthetic only: placeholder sids, the notes-api demo world, TESTHOST."""
 
     SID = "11111111-2222-3333-4444-555555555555"
-    HEAD = "if(m.romp==='browseFiles'&&m.pane==='pane'){var fb=document.getElementById('f-files');"
+    # …or a browse ask naming no pane while the Feed pane is off in this browser (the gear's Panes section, the user
+    # 2026-09-10): the feed cannot be lifted, so the Files pane's arm takes it (tests/test_pane_state_broadcast.py RelayArms)
+    HEAD = "if(m.romp==='browseFiles'&&(m.pane==='pane'||!feedHere())){var fb=document.getElementById('f-files');"
     FEED = "else if(m.romp==='browseFiles'){var bf=document.getElementById('f-feed');"
     IDENTITY = {"name": "web", "color": {"bg": "#123456", "fg": "#ffffff"}}
 

@@ -101,6 +101,12 @@ _keys = (sys.modules.get("romp_session_backend")
          or load_source("romp_session_backend_keys", _HERE / "session_backend.py"))
 echo_text_key = _keys.echo_text_key
 command_text_key = _keys.command_text_key
+# The event model's AUTHOR rule (author_of, is_interrupt_record), for the boot scan that asks whether a
+# LATER human turn went through after a send (_input_landed_after, 2026-09-11): a transcript record is read
+# there exactly the way the kernel's parse authors its atom, so "a genuine-human turn" means one thing on
+# both sides of the restart. The kernel's own copy when it is loaded (the _cred idiom); standalone, the file
+# under its own name.
+_em = sys.modules.get("romp_event_model") or load_source("romp_event_model_echo", _HERE / "event_model.py")
 echo_keys = _keys.echo_keys                  # both keys of a text, the "either key" rule written once
 
 
@@ -5455,8 +5461,10 @@ class SdkSession:
         """The texts FED to the current client whose ResultMessage has not landed (`_inflight_texts`,
         oldest first); thread-safe. A mid-turn send lives here from the inputs() pop until the turn
         settles: the CLI holds it, queued behind the running turn, to splice at the next tool boundary.
-        The observable twin of `inflight`, for diagnostics and tests; nothing gates on it (prune_live
-        floors no echo, so there is nothing to shield a fed echo from — its docstring)."""
+        The observable twin of `inflight`, for diagnostics and tests, and since 2026-09-11 one of the
+        settle's "still owed" reads (SdkBackend.settle_echoes): an echo whose text is fed and unsettled is
+        waiting on the CLI, never a loss, however the transcript's floor has moved (prune_live itself still
+        floors no echo — its docstring)."""
         with self._lock:
             return list(self._inflight_texts)
 
@@ -8503,6 +8511,110 @@ def _path_bearing(text: str) -> bool:
     """True when `text` carries an image path the CLI's composer paste hook would extract (_IMG_PATH_RE).
     Read by kernel._tmux_echo_settle through sys.modules — the tmux route's floor; keep the name."""
     return bool(_IMG_PATH_RE.search(text or ""))
+
+
+def _records_from_mark(state_dir, sid: str, off, fsid, literals):
+    """The sid's transcript records from an echo's send-time mark to EOF, parsed, for the boot scans
+    (SdkBackend._text_landed, _input_landed_after): the file is the registry's current transcript (lastSid), the
+    start is the mark when it was measured on that file and fits it (else the file's start), lines are
+    streamed and pre-filtered on the record-type `literals` only — never on a text, which JSON
+    escaping can split — and a line that does not parse (a fragment the mark cut) is skipped. Raises
+    when the transcript cannot be read; each caller turns that into its None. Module functions over the
+    backend's state dir, not methods: the boot marker is bound onto bare stubs in tests, and a helper a stub
+    lacks would read as an unreadable transcript."""
+    reg = read_reg(state_dir, sid) or {}
+    cur = str(reg.get("lastSid") or sid)
+    path = transcript_path(reg.get("cwd") or "", cur)
+    start = 0
+    if (isinstance(off, int) and not isinstance(off, bool) and fsid is not None
+            and str(fsid) == cur and 0 <= off <= os.path.getsize(path)):
+        start = off
+    with open(path, "rb") as f:
+        f.seek(start)
+        for raw in f:
+            if not any(lit in raw for lit in literals):
+                continue
+            try:
+                rec = json.loads(raw.decode(errors="replace"))
+            except ValueError:
+                continue
+            if isinstance(rec, dict):
+                yield rec
+
+def _input_landed_after(state_dir, sid: str, t, off=None, fsid=None):
+    """Did a GENUINE HUMAN input land in the sid's transcript STRICTLY AFTER the send stamped `t`? The
+    boot marker's second question about a send whose text never landed (SdkBackend._mark_dropped_echoes): the
+    composer's messages travel one channel in order, so a later one recorded means the CLI took it
+    while this one was owed — this send is not waiting anywhere, and re-feeding it would run it after
+    the conversation has moved on. Three answers, like _text_landed's: True (found), False (readable,
+    none), None (unreadable — no evidence either way). Reads from the echo's mark, since anything
+    that could outrun the send was written after it; a record without a readable stamp cannot prove
+    "later" and is skipped; the human rule is the parse's (_human_input_record). Both record shapes a
+    message lands as are read: the native user record, and the queued_command ATTACHMENT a message fed
+    into a running turn gets as its only record (the parse authors that absorbed atom the same way and
+    it raises the live floor; a scan of user records alone re-fed a send the most common SDK landing had
+    already outrun — the review of the first cut). 2026-09-11."""
+    try:
+        floor = int(t or 0)
+        for rec in _records_from_mark(state_dir, sid, off, fsid, (b'"user"', b'"queued_command"')):
+            if not _human_input_record(rec):
+                continue
+            ts = _record_epoch(rec.get("timestamp"))
+            if ts is None or ts <= floor:
+                continue
+            return True
+        return False
+    except Exception:
+        return None
+
+
+def _human_input_record(rec: dict) -> bool:
+    """Is this transcript record a GENUINE HUMAN input — a message the person sent through the same channel a
+    composer send travels (stream-json on an SDK session) — as the kernel's parse would author it? Read by
+    _input_landed_after (2026-09-11). Two record shapes carry an input: the native USER record, and the
+    queued_command ATTACHMENT a message fed into a running turn is spliced in as (its only record —
+    event_model._absorbed authors it from the prompt with the attachment's own origin stamp). The verdict is
+    the event model's author_of with sdk_human on (an unmarked "sdk" prompt is the composer's), after the
+    same pre-reads the parse applies to a user record, in its order (event_model.atoms): a slash-command
+    WRAPPER is the human's command atom BEFORE any isMeta skip (some CLI versions mark it isMeta); the
+    command's own stdout is an assistant atom, the other wrappers and a Skill's instructions payload are
+    harness noise; an isMeta record (a skill payload, a postal delivery) and a compaction summary are
+    skipped; a tool_result line and the CLI's interrupt record (a STOP event, which _human_turn_floor
+    excludes too) are not messages the CLI took; a whitespace-only content yields no atom at all. Everything
+    the CLI or romp injects on its own — a task notification, a scheduled trigger, a teammate's message, a
+    nudge, relayed mail — reads as not-human here, exactly as it does in the chat. Mirrored rather than
+    shared: the parse's reading is inline in its record walk, so this stays in step with it the way
+    _landed_texts stays in step with the kernel's _atom_user_texts."""
+    typ = rec.get("type")
+    if typ == "attachment":
+        att = rec.get("attachment") or {}
+        if att.get("type") != "queued_command":
+            return False
+        c = att.get("prompt")
+    elif typ == "user":
+        c = (rec.get("message") or {}).get("content")
+    else:
+        return False
+    if isinstance(c, str):
+        blocks = [{"type": "text", "text": c}] if c.strip() else []
+    elif isinstance(c, list):
+        blocks = [b for b in c if isinstance(b, dict)]
+    else:
+        return False
+    if not blocks or any(b.get("type") == "tool_result" for b in blocks):
+        return False
+    text = _em._text_of(blocks)
+    if typ == "user":
+        if _em.COMMAND_NAME_RE.match(text) or (_em.CMD_WRAP_RE.match(text) and _em.COMMAND_NAME_ANY_RE.search(text)):
+            return True                                    # the slash command the person typed, however marked
+        if _em.CMD_WRAP_RE.match(text) or _em.SKILL_CONTENT_RE.match(text) or rec.get("sourceToolUseID"):
+            return False                                   # its stdout, the other wrappers, a skill's payload
+        if rec.get("isMeta") or rec.get("isCompactSummary") or _em.is_interrupt_record(rec):
+            return False
+    if not text.strip():
+        return False
+    return _em.author_of(blocks, rec.get("promptSource") if typ == "user" else None, {}, True,
+                         _em._record_origin(rec)) == "human"
 
 
 def _landed_texts(rec: dict) -> set:
@@ -11890,6 +12002,12 @@ class SdkBackend:
         is not flagged in the first place (2026-09-06). The flag rides the registry mirror
         (_persist_echoes), so it survives further restarts.
 
+        A HUMAN send the transcript has OUTRUN — its text never landed, and a later genuine-human input
+        did (_input_landed_after) — takes the flag path even under refeed (2026-09-11): the composer's
+        messages travel one channel in order, so a later one recorded means the CLI took it while this
+        one was owed; the send is lost, not waiting, and a re-feed would run it after the conversation
+        moved on. The same event settles a live echo at every build (settle_echoes).
+
         `refeed=False` (2026-08-26, honoring _reconcile_stranded's documented policy): the RESUMABLE-
         reconnect caller takes the flag path ONLY — the abandoned client may still be flushing the record
         the redeliver arm's _text_landed scan looks for, so a miss there is not proof of loss, and a
@@ -11938,7 +12056,7 @@ class SdkBackend:
         # romp-authored echoes (nudges) keep the flag path: re-delivering one could double-nudge,
         # and its content is regenerable machinery, not the user's words. A refeed=False caller
         # (the resumable reconnect — docstring above) keeps EVERY echo on the flag path.
-        redeliver, landed = [], set()
+        redeliver, landed, outrun = [], set(), set()
         if refeed:
             for a in sorted(newly, key=lambda x: x.get("t") or 0):
                 if a.get("author") != "human":
@@ -11946,7 +12064,18 @@ class SdkBackend:
                 seen = self._text_landed(sid, a["_echo_text"], a.get("t"),
                                          a.get("_echo_off"), a.get("_echo_fsid"))
                 if seen is False:
-                    redeliver.append(a)
+                    # A send the transcript has OUTRUN is flagged, not re-fed (2026-09-11): a later human
+                    # message landed after it, and the composer's messages travel one channel in order, so
+                    # the CLI took that one while still owing this — the send is not waiting anywhere, and
+                    # a re-feed now would run it AFTER the conversation moved on, minutes or days later,
+                    # unasked (the user 2026-09-11, whose CLI wedged for five minutes and swallowed a send;
+                    # they kept working through it, and a restart would have re-sent the swallowed message
+                    # under the newer ones). Live, sdk_backend.settle_echoes rules on the same event at
+                    # every build; here the transcript is read directly, the way the landing is.
+                    if _input_landed_after(self.state_dir, sid, a.get("t"), a.get("_echo_off"), a.get("_echo_fsid")):
+                        outrun.add(a["_echo_text"])
+                    else:
+                        redeliver.append(a)
                 elif seen:
                     a["_landed"] = True                    # the verdict, for prune_live and the next boot
                     landed.add(a["_echo_text"])
@@ -12007,8 +12136,13 @@ class SdkBackend:
                 self.forget_fed(sid, a.get("uuid"))   # its landing will never come (T252c)
             with self._live_lock:
                 self._touch_live(sid)                  # a flag write outside the lock: still a change to the tail
-            self._log("%s: a send never reached its CLI (the process died holding it) — kept in the chat "
-                      "as never-delivered: %.80r" % (sid[:8], a["_echo_text"]), problem=True)
+            if a["_echo_text"] in outrun:
+                self._log("%s: a send never reached its conversation (the CLI took a later message while "
+                          "still holding it) — kept in the chat as never-delivered, not re-sent: %.80r"
+                          % (sid[:8], a["_echo_text"]), problem=True)
+            else:
+                self._log("%s: a send never reached its CLI (the process died holding it) — kept in the chat "
+                          "as never-delivered: %.80r" % (sid[:8], a["_echo_text"]), problem=True)
         self._persist_echoes(sid)
         self._wake_push()
 
@@ -12047,32 +12181,17 @@ class SdkBackend:
         one) as never landed. A mark taken while the CLI was mid-write leaves a line fragment first; it
         fails to parse and is skipped like any other non-record line."""
         try:
-            reg = read_reg(self.state_dir, sid) or {}
-            cur = str(reg.get("lastSid") or sid)
-            path = transcript_path(reg.get("cwd") or "", cur)
             # the plain key and, for a slash send, its words (echo_keys): the send's own record is the
             # CLI's wrapper, which _landed_texts reads as "/name args" the way the kernel's prune does
             want = set(echo_keys(text))
             floor = int(t or 0)
-            start = 0
-            if (isinstance(off, int) and not isinstance(off, bool) and fsid is not None
-                    and str(fsid) == cur and 0 <= off <= os.path.getsize(path)):
-                start = off
-            with open(path, "rb") as f:
-                f.seek(start)
-                for raw in f:
-                    if b'"user"' not in raw and b'"queued_command"' not in raw:
-                        continue
-                    try:
-                        rec = json.loads(raw.decode(errors="replace"))
-                    except ValueError:
-                        continue
-                    if not isinstance(rec, dict) or not (want & _landed_texts(rec)):
-                        continue
-                    ts = _record_epoch(rec.get("timestamp"))
-                    if floor and ts is not None and ts < floor:
-                        continue                       # an earlier record wearing the same words
-                    return True
+            for rec in _records_from_mark(self.state_dir, sid, off, fsid, (b'"user"', b'"queued_command"')):
+                if not (want & _landed_texts(rec)):
+                    continue
+                ts = _record_epoch(rec.get("timestamp"))
+                if floor and ts is not None and ts < floor:
+                    continue                           # an earlier record wearing the same words
+                return True
             return False
         except Exception:
             return None
@@ -13716,7 +13835,8 @@ class SdkBackend:
         THE RULE: every site that adds, replaces, pops, flags or REWORDS an atom in `_live` calls this,
         once per call that changed something: _stash_live, _forward (its eviction included), unqueue (the
         cancelled copy's echo), edit_queued (the echo's new words), dismiss_echo, prune_live,
-        retire_live_work, and the two flag writes _mark_dropped_echoes makes outside the lock (each takes
+        retire_live_work, settle_echoes (the overtaken flags, one bump per call that flagged), and the two
+        flag writes _mark_dropped_echoes makes outside the lock (each takes
         the lock for its bump). tests/test_live_tail_rev.py pins the set by source, so a new queue or echo
         mutator that touches `_live` fails that census until it bumps. Only a CHANGE bumps: a prune that
         retired nothing, a settle over echoes already marked, a queue miss and every read leave the
@@ -13829,6 +13949,79 @@ class SdkBackend:
             self._note_live_tail_race("prune_live")
         if echo_removed:
             self._persist_echoes(sid)   # keep the restart mirror in step (empty once everything landed)
+
+    def settle_echoes(self, sid: str, human_floor, still_queued=()) -> None:
+        """Mark every OVERTAKEN input echo `dropped` — the SDK twin of the kernel's _tmux_echo_settle, and
+        the LIVE half of the loss rule _mark_dropped_echoes applies at boot (2026-09-11). An echo is
+        overtaken when the transcript holds a genuine-human turn stamped STRICTLY LATER than its send
+        (`human_floor`, the kernel's _human_turn_floor; strictly and in whole seconds, so a send made in
+        the same second as another turn's record keeps its pending treatment) while its own text has
+        landed nowhere: the composer's
+        messages travel one channel in order, so the later one going through means the CLI took it while
+        still owing this one — a send that will never land, however alive the process holding it looked.
+        Until this rule an SDK echo was flagged only when its holder DIED (a spawn, a boot, a reconnect):
+        a CLI that wedged for five minutes, swallowed a send and then carried on (the user 2026-09-11)
+        left the echo painted as an ordinary sent bubble that resurfaced above every newer message, with
+        no way to clear it — dismiss_echo takes DROPPED echoes only, by design.
+
+        MARKING, never pruning: a dropped send's echo is the only visible record of the loss and stays
+        until the user dismisses it (prune_live's contract). Self-correcting like the boot flag: should
+        the text land after all, prune_live retires the echo, flag and all.
+
+        STANDS DOWN for a send still OWED somewhere: the backend's own queue (pending_queued_meta — the
+        copies by identity, so the lost first of two identical sends is not hidden by its queued twin);
+        the CLI's queue ledger (`still_queued`, the transcript's queue-operation fold the kernel hands
+        over, unfiltered so a queued nudge counts as waiting too); and the texts FED to the current client
+        whose turn has not settled (SdkSession.fed_texts): a message fed into a running turn is the CLI's
+        to record at its next boundary, and until the ResultMessage the order the floor stands in for is
+        still being written — the moments between the feed and the CLI's ledger record, and between its
+        dequeue and its user record, where the text is owed by nothing on disk (the review of the first
+        cut). The floor is a per-session clock: an OLDER queued sibling delivering stamps its record after
+        a younger send that is still genuinely waiting, overtaken but not lost — the queues outrank the
+        floor, and once they release the text the next build rules normally. Already-dropped and
+        already-landed echoes are left alone, so a quiet tail costs one pass and no write."""
+        # Whole seconds: an echo is stamped to the second (send: int(time.time())), a record to the
+        # millisecond, so a float compare read a record written in the SAME second as the send — the
+        # previous message's, landing as the user pressed enter twice in one second — as later than it,
+        # and flagged a send the CLI was taking. A later turn is a later second.
+        floor = int(float(human_floor or 0))
+        if not floor:
+            return
+        with self._live_lock:
+            d = self._live.get(sid)
+            if not d:
+                return
+            cands = [a for a in list(d.values())
+                     if a.get("_echo_text") and not a.get("command") and not a.get("dropped")
+                     and not a.get("_landed") and floor > int(float(a.get("t") or 0))]
+        if not cands:
+            return
+        own = self.pending_queued_meta(sid)
+        if own is None:
+            own = self.pending_queued(sid)             # identities untrusted: by text, the side that never flags a waiting send
+        owed = {echo_text_key(m.get("md") if isinstance(m, dict) else m) for m in (still_queued or [])}
+        with self._lock:
+            s = self.sessions.get(sid)
+        if s is not None and hasattr(s, "fed_texts"):
+            owed |= {echo_text_key(t) for t in s.fed_texts() if isinstance(t, str)}   # fed, its turn not yet settled
+        owed.discard("")
+        flagged = []
+        for a in cands:
+            if _echo_queued_in(a, own) or any(k in owed for k in echo_keys(a["_echo_text"])):
+                continue                               # still owed somewhere → waiting, not lost
+            a["dropped"] = True
+            flagged.append(a)
+        if not flagged:
+            return
+        with self._live_lock:
+            self._touch_live(sid)                      # the flag writes above: one change to the tail
+        for a in flagged:
+            self.forget_fed(sid, a.get("uuid"))        # its landing will never come (T252c)
+            self._log("%s: a send never reached its conversation (the CLI took a later message while still "
+                      "holding it) — kept in the chat as never-delivered: %.80r"
+                      % (sid[:8], a["_echo_text"]), problem=True)
+        self._persist_echoes(sid)                      # the flag rides the mirror across a restart
+        self._wake_push()
 
     def retire_live_work(self, sid: str) -> None:
         """Drop the sid's live-tail WORK atoms (stream messages — not input echoes, not command feedback)

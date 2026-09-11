@@ -188,7 +188,7 @@ class SdkLiveTailRevision(unittest.TestCase):
         flag-writing lines in _mark_dropped_echoes are each followed by one, and _stash_live and _forward are
         the only sites that stash into _live, so a new mutator fails here until it is classified."""
         for name in ("_stash_live", "_forward", "unqueue", "edit_queued", "dismiss_echo", "prune_live",
-                     "retire_live_work", "_mark_dropped_echoes"):
+                     "retire_live_work", "_mark_dropped_echoes", "settle_echoes"):
             src = inspect.getsource(getattr(sb.SdkBackend, name))
             self.assertIn("self._touch_live(", src, "%s changes the tail without advancing its revision" % name)
         mde = inspect.getsource(sb.SdkBackend._mark_dropped_echoes)

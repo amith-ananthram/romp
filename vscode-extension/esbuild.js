@@ -46,7 +46,8 @@ const webview = {
     "../ui/webview/timeline-main.ts",    // VS Code timeline view: boot glue + ui/romp-timeline-view.js inlined
     "../ui/webview/timeline-pane.css",   // timeline wrapper styles — the kernel reads the same file live
     "../ui/webview/strip.css",           // the romp strip (VS Code-only bottom rail stand-in)
-    "../ui/webview/gear.css",            // the settings modal (linked by the kernel feed page + VS Code chat/feed)
+    "../ui/webview/gear.css",            // the settings modal (linked by the kernel settings page + VS Code chat/feed)
+    "../ui/webview/settings-page.ts",    // the kernel's /settings page: the gear on a page of its own (the shell's hidden #f-settings iframe)
     "../ui/webview/federation.ts",   // multi-kernel manager: loaded after the shim on chat/feed/fleet pages
     "../ui/webview/age-color-global.ts",   // window.__rompAgeColor for the kernel's inline shell scripts (bell panel)
     "../ui/webview/api-health-global.ts",   // window.__rompApiHealthMerge: the API-health merge + reading rules for the shell's rail (T301)

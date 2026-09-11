@@ -29,6 +29,13 @@ def test_feed_page_versions_its_bundle():
     assert "/dist/feed.css?v=" in html
 
 
+def test_settings_page_versions_its_bundle():
+    html = km._settings_page()
+    assert "/dist/settings-page.js?v=" in html
+    assert "/dist/gear.css?v=" in html
+    assert "/dist/feed.css?v=" in html
+
+
 def test_chat_page_versions_its_bundle():
     html = km._chat_page()
     assert "/dist/render.js?v=" in html
