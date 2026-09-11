@@ -1893,8 +1893,9 @@ def _codex_effort(effort, tier):
     return "low" if tier == "index" else None
 
 def _judge_env(tier, auth="login", model=None):
-    """The subprocess env for ONE judge call. Drops the TMUX vars (so the child isn't taken for a live
-    pane) and trips the Stop-hook recursion guard. For the INDEX tier it also disables extended thinking
+    """The subprocess env for ONE judge call. Drops the TMUX vars (a $TMUX inherited from the manager's own
+    terminal would have the child's CLI take itself for a pane of that multiplexer; the judge runs headless)
+    and trips the Stop-hook recursion guard. For the INDEX tier it also disables extended thinking
     (MAX_THINKING_TOKENS=0), on EVERY model (2026-09-01; unconditional since the PR #880 review): the
     captioner + archiver do mechanical one-shot summarization, where the default thinking is pure waste —
     a Haiku probe showed a ~385-token thinking block emitted before a ~15-token caption (722 -> 24 output
@@ -5980,7 +5981,8 @@ def reconcile_rewound_goals(fsid, path, now):
     "eclipsed" is kept content (a machine spur's abandonment, T209) and "broken"/unknown prove nothing — and a dead branch INSIDE a pre-/clear episode file, which
     the whole-graph walk can only ever call "clear", is caught by its own file's walk, exactly the
     incident scan's dead-episode-vs-dead-branch discriminator. This is the only cover for the
-    rewinds romp never sees: CLI-native Esc-Esc in a tmux terminal, the SDK forkAt resume, a cut the
+    rewinds romp never sees: a CLI-native Esc-Esc in a terminal session (the tmux backend's, until its
+    removal 2026-09-11), the SDK forkAt resume, a cut the
     gesture path could not resolve, and a crash between arm and take — every one applies
     --resume-session-at with no sweep, and 28 live orphans existed when this shipped (one still
     being actively judged a day after its conversation stopped existing). Cards ARCHIVE
@@ -8041,7 +8043,8 @@ def _sdk_last_sid(sid):
     """The CURRENT transcript fsid of an SDK session when it has FORKED away from its anchor (`/clear`
     mints a new fsid under the same romp sid), else None. Read from the SDK backend's own registry —
     the designed, authoritative record (SdkSession updates lastSid from the CLI's init message), the
-    SDK twin of the tmux fork's custom-title association (an SDK transcript never carries a title)."""
+    SDK twin of the custom-title association discover reads for a terminal-launched fork (an SDK
+    transcript never carries a title)."""
     p = SDKDIR / (sid + ".json")
     try:
         mt = p.stat().st_mtime
@@ -8252,13 +8255,14 @@ def _codex_rows(cutoff, seen):
     """Discovery rows for Codex sessions — (fsid=STABLE SID, materialized path, anchor sid, name),
     read from the Codex backend's registry (plans/codex-backend.md). The names/ loop above skips
     these naturally (no <sid>.jsonl under the Claude roots); this is the ONE extra fact the read
-    side needs. Dead sessions keep discovering like dead tmux/SDK ones do — history stays browsable;
+    side needs. Dead sessions keep discovering like dead SDK ones do — history stays browsable;
     the WINDOW cutoff is what ages them out. No forks: a Codex thread id is stable across resumes.
 
     The identity slot is the STABLE SID, never the app-server thread id: liveness
     (CodexBackend.live_sessions) keys on the SID, so a TID here meant live Codex rows never joined
     the alive set, the picker offered a not-running TID row, and reviving it shelled
-    `romp resume <TID>` through the tmux path — the TID rides only in the transcript PATH, which
+    `romp resume <TID>` through the terminal launcher of the time (the tmux backend, removed
+    2026-09-11) — the TID rides only in the transcript PATH, which
     is the one place it means anything to a reader (the v1.3.13 audit's P1, executed)."""
     try:
         reg = json.loads((CODEXDIR / "registry.json").read_text())
@@ -8412,7 +8416,7 @@ def discover(now, window=None, forks=True):
 def _discover_impl(now, window=None, forks=True):
     """[(fsid, path, anchor_sid, name)] for every transcript of a romp session touched within
     `window` (default WINDOW): the session's anchor transcript plus any same-customTitle fork in its
-    project dir. File-based (names/), no tmux — works for headless sessions too.
+    project dir. File-based (names/), no liveness probe — works for dead and headless sessions too.
 
     Perf (the user 2026-07-03: cold-kernel startup is slow): this WAS a pathlib walk — `proj.iterdir()`
     re-listed each project dir ONCE PER SESSION that lives in it, and `.suffix`/`.stem`/`.stat()` re-parsed +
@@ -8682,7 +8686,8 @@ def _bg_scan(path):
 def _bg_unresolved(path, now=None):
     """The transcript's still-RUNNING background launches (em._scan_bg_tasks pairing), folded append-incrementally.
     The DURABLE awaited-work source: the pairing lives in the transcript, so unlike any live backend
-    snapshot it survives a kernel restart and covers tmux CLIs whose tasks outlive the kernel.
+    snapshot it survives a kernel restart (and covered the terminal CLIs whose tasks outlived the kernel,
+    until the tmux backend's removal 2026-09-11).
     `now`: the pass's clock when a gated tier hands it in (one clock for the stage's expiry view, the
     planner key's expiry term and the gate's not-before, so none of them can disagree at the crossing);
     the wall clock otherwise."""
@@ -8767,8 +8772,9 @@ def _cli_epoch(sid):
     (2026-08-13): max(reg spawnedAt, the recorded death marker's t), None when neither exists (the
     pre-marker world, byte-for-byte today's SDK behavior). A task launched before the epoch died with
     its CLI — its <task-notification> can never arrive — and keying the gate on the recorded death
-    EVENT is what finally gives a dead tmux session's still-'running' launches an end: the RC7
-    unretirable hold. max() stays correct across every cycle: an SDK revival's fresh CLI stamps reg
+    EVENT is what finally gives a dead session's still-'running' launches an end when no reg names its
+    CLI: the RC7 unretirable hold (seen on the tmux backend, removed 2026-09-11). max() stays correct
+    across every cycle: an SDK revival's fresh CLI stamps reg
     spawnedAt above the old marker; a re-stamped marker (death after revival) lifts the floor to the
     second death. (The kernel's copy delegates here.)"""
     sp = None
@@ -15050,7 +15056,7 @@ def _live_prompt_since(fsid):
     Memoized on the states file's (ino, mtime_ns, size) since 2026-09: the scan read every session's whole
     states log on every distiller pass, 31 ms of the tier's 135 ms idle pass on a 31-session state copy
     against under 1 ms of stats. The key is exact for this file's writers: every one APPENDS a row (the
-    tmux and SDK status hooks, the kernel's picker watcher and its interrupt idle row all open it
+    SDK backend's state writer, the kernel's picker watcher and its interrupt idle row all open it
     "a"), so no two versions share a size; the one write an identity memo cannot see, a
     rewrite in place of equal size within one mtime tick, is a pattern nothing uses on this file (the
     evidence gate's value inputs are read by value because their fixtures did). Stat before read: a row

@@ -66,9 +66,9 @@ def _peer_body(mid, text):
 
 
 def _TM():
-    """One live tmux entry, every key the feed and timeline builders read."""
+    """One live session row, every key the feed and timeline builders read."""
     return {"state": "ready", "color": "#888888", "since": NOW - 60, "model": "", "effort": "",
-            "context": None, "backend": "tmux"}
+            "context": None, "backend": "sdk"}
 
 
 def _store(sid, text, **node):
@@ -149,7 +149,7 @@ class FeedBoundary(_World):
         self._write(B, _store(B, "the healthy session's goal", origin={"peer": A, "goalId": A + ":g1"}))
         self.sessions = [{"sid": A, "name": "web", "path": "/nonexistent/%s.jsonl" % A, "anchor": 0, "mtime": 0},
                          {"sid": B, "name": "api", "path": "/nonexistent/%s.jsonl" % B, "anchor": 0, "mtime": 0}]
-        for p in (mock.patch.object(km, "_alive_sessions", lambda now, tmux: list(self.sessions)),
+        for p in (mock.patch.object(km, "_alive_sessions", lambda now, live_map: list(self.sessions)),
                   mock.patch.object(km, "_warm_fleet_bg", lambda now: None)):
             p.start()
             self.addCleanup(p.stop)
@@ -237,11 +237,11 @@ class PushBoundary(_World):
         sent = []
         with mock.patch.object(km, "_alive_sessions", lambda now, tm: list(sessions)), \
                 mock.patch.object(km, "_warm_fleet_bg", lambda now: None), \
-                mock.patch.object(km, "_tmux_sessions", lambda: dict(tmux)), \
+                mock.patch.object(km, "_live_map", lambda: dict(tmux)), \
                 mock.patch.object(km, "_chat_tab_sessions", lambda now, tm: []), \
                 mock.patch.object(km, "_send_client", lambda c, key, msg, pre=None, sig=None: sent.append((key, msg))), \
                 _fault_on(self.a_file):
-            km._push([{"app": "feed", "alive": True}], tmux=tmux)
+            km._push([{"app": "feed", "alive": True}], live_map=tmux)
         keys = [k[0] for k, _ in sent]
         self.assertIn("feed", keys, "a feed payload reached the client despite one session's fault: %r" % keys)
         payload = next(m for k, m in sent if k[0] == "feed")
@@ -268,7 +268,7 @@ class InterruptLiftBoundary(_World):
         st["closedTurns"] = []
         self._write(A, st)
         km._write_auto_nudge({"enabled": True, "nudged": {}, "intrBlocked": {}})
-        for p in (mock.patch.object(km, "_alive_sessions", lambda now, tmux: [{"sid": A, "path": self.tpath}]),
+        for p in (mock.patch.object(km, "_alive_sessions", lambda now, live_map: [{"sid": A, "path": self.tpath}]),
                   mock.patch.object(km, "_push_all", lambda *a, **k: None),
                   mock.patch.object(jd, "CLOSER_ON", False)):
             p.start()
@@ -559,9 +559,9 @@ class GestureRefusal(_World):
         sessions = [{"sid": A, "name": "web", "path": "/nonexistent/%s.jsonl" % A, "anchor": 0, "mtime": 0},
                     {"sid": B, "name": "api", "path": "/nonexistent/%s.jsonl" % B, "anchor": 0, "mtime": 0}]
         self.tmux = {A: _TM(), B: _TM()}
-        for p in (mock.patch.object(km, "_alive_sessions", lambda now, tmux: list(sessions)),
+        for p in (mock.patch.object(km, "_alive_sessions", lambda now, live_map: list(sessions)),
                   mock.patch.object(km, "_warm_fleet_bg", lambda now: None),
-                  mock.patch.object(km, "_tmux_sessions", lambda: dict(self.tmux))):   # the handler's own build
+                  mock.patch.object(km, "_live_map", lambda: dict(self.tmux))):   # the handler's own build
             p.start()
             self.addCleanup(p.stop)
 

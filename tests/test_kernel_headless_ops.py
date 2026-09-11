@@ -41,7 +41,7 @@ km._limit_hold = lambda sid: None
 # The tmux PROMPT HOLD (_hold_drain: a tmux-shaped delivery holds the sid for a moment, tested in
 # tests/test_kernel_parked_ops_liveness.py) is a separate axis: off here, so back-to-back
 # _apply_pending_ops calls stand for successive cycles.
-km._TMUX_PROMPT_HOLD_S = 0.0
+km._PROMPT_HOLD_S = 0.0
 
 
 class PendingOpsPersistence(unittest.TestCase):

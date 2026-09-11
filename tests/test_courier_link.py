@@ -159,18 +159,14 @@ class DormantHandoffConverts(unittest.TestCase):
         d = jd.STATE / "states"
         d.mkdir(parents=True, exist_ok=True)
         (d / (SENDER + ".jsonl")).write_text(json.dumps({"state": "idle", "t": T + 50}) + "\n")
-        # the names-registry launch record: what marks a reg-less sid as one the owner scan can
-        # answer for — without it the corroborator reads the sid as transcript-derived and stands down
+        # the names-registry launch record: what marks a reg-less sid as dead HISTORY (a session the
+        # kernel once launched that no backend holds a record of) — without it the corroborator reads
+        # the sid as transcript-derived and stands down. No SDK reg and no Codex record exist under
+        # this private root, so the corroboration answers true and the sweep files the block.
         jd.NAMES.mkdir(parents=True, exist_ok=True)
         (jd.NAMES / SENDER).write_text("web\t~/notes-api\t#3355aa\t#ffffff\n")
         km._PREV_ALIVE = None
         self.nudged = {}
-        # hermetic liveness (the corroboration the sweep runs since the deadwait-probe change): the
-        # owner scan answers WITHOUT this synthetic sid, so the death is corroborated — the world
-        # these tests assert. Same fixture as test_dead_wait_block.py; without it the corroborator
-        # returns None (reg-less sid, no owner answer) and the sweep rightly stands down.
-        km._TMUX.available = lambda: True
-        km._TMUX.alive_sids = lambda t=3: set()
         self.addCleanup(self._assert_no_shared_sid_leftovers)   # runs AFTER tearDown: the run-wide root is as it was
 
     @staticmethod
@@ -194,8 +190,6 @@ class DormantHandoffConverts(unittest.TestCase):
                          "the sender's journal row or the nudge record reached the run-wide root")
 
     def tearDown(self):
-        for nm in ("available", "alive_sids"):
-            km._TMUX.__dict__.pop(nm, None)   # instance attrs shadow the class methods; drop them
         jd._rebind_state(self._state)                # the private root goes with the tempdir
         self._td.cleanup()
 

@@ -73,14 +73,14 @@ class AbcContract(unittest.TestCase):
 
     def test_control_setters_document_their_per_backend_mechanics(self):
         # set_model, set_effort and set_fast land DIFFERENTLY on the two backends — the SDK switches
-        # model live over its control request but RECONNECTS for effort; tmux types the CLI's own
-        # command into the pane and accepts /model's confirmation — and the contract is where a reader
+        # model live over its control request but RECONNECTS for effort; Codex persists the value on
+        # its registry row and applies it at the next turn — and the contract is where a reader
         # learns that, so each carries a docstring naming its mechanism. One distinctive word per
-        # method keeps the pin honest without freezing the prose.
+        # method keeps the pin honest without freezing the prose (or its case: the prose may shout it).
         for m, word in (("set_model", "control"), ("set_effort", "reconnect"), ("set_fast", "connect")):
             doc = getattr(sb.SessionBackend, m).__doc__ or ""
             self.assertTrue(doc.strip(), "SessionBackend.%s carries a docstring" % m)
-            self.assertIn(word, doc, "SessionBackend.%s's docstring names its mechanism (%r)" % (m, word))
+            self.assertIn(word, doc.lower(), "SessionBackend.%s's docstring names its mechanism (%r)" % (m, word))
 
 
 # quoted-literal markers — a raw `["tmux"` subprocess list, a tmux SUBCOMMAND string arg, or a tmux @-var
@@ -108,40 +108,49 @@ def _scan_tmux(text, skip_span=None):
     return out
 
 
-class NoRawTmuxOutsideTmuxBackend(unittest.TestCase):
-    """The leak guard (the user 2026-06-26): raw tmux lives ONLY in bin/romp-kernel's TmuxBackend class; the
-    higher layers (build_*, the _drive dispatch, GET /sessions, the postal bus) speak the SessionBackend API.
-    A future tmux call shelled outside the class fails CI instead of silently re-coupling the kernel to tmux."""
+class NoRawTmuxAnywhere(unittest.TestCase):
+    """The leak guard, inverted (the user 2026-06-26 wanted raw tmux confined to one class; since the tmux
+    backend's removal on 2026-09-11 there is no such class): NO kernel module and no bin/ Python entry point
+    holds a raw tmux marker. A tmux call written anywhere fails CI instead of silently re-coupling romp to a
+    backend it no longer has. Quoted literals only (_TMUX_MARKERS), so history in comments and docstrings
+    is not flagged."""
 
-    KERNEL = os.path.join(BIN, "romp-kernel")
+    KERNEL_DIR = os.path.join(os.path.dirname(BIN), "kernel")
 
-    def _span(self, lines):
-        start = next(i for i, l in enumerate(lines) if l.startswith("class TmuxBackend("))
-        end = next((i for i in range(start + 1, len(lines))
-                    if lines[i] and lines[i][0] not in " \t#)"), len(lines))
-        return start, end
+    def _sources(self):
+        out = [os.path.join(self.KERNEL_DIR, f) for f in sorted(os.listdir(self.KERNEL_DIR)) if f.endswith(".py")]
+        out += [os.path.join(os.path.dirname(BIN), "cli", f)
+                for f in sorted(os.listdir(os.path.join(os.path.dirname(BIN), "cli"))) if f.endswith(".py")]
+        return out
 
-    def test_no_raw_tmux_outside_the_class(self):
-        lines = open(self.KERNEL, encoding="utf-8").read().split("\n")
-        leaks = _scan_tmux("\n".join(lines), skip_span=self._span(lines))
-        self.assertEqual(leaks, [], "raw tmux leaked outside TmuxBackend:\n"
-                         + "\n".join("  L%d [%s]: %s" % x for x in leaks))
+    def test_no_raw_tmux_in_any_kernel_or_cli_module(self):
+        leaks = []
+        for path in self._sources():
+            for lineno, desc, line in _scan_tmux(open(path, encoding="utf-8").read()):
+                leaks.append("  %s:%d [%s]: %s" % (os.path.basename(path), lineno, desc, line))
+        self.assertEqual(leaks, [], "raw tmux in a kernel module:\n" + "\n".join(leaks))
 
-    def test_the_class_actually_owns_the_raw_tmux(self):
-        # so the span exclusion above isn't vacuously passing — the raw tmux really IS in the class
-        lines = open(self.KERNEL, encoding="utf-8").read().split("\n")
-        start, end = self._span(lines)
-        body = "\n".join(lines[start:end])
-        self.assertIn('["tmux"]', body, "TmuxBackend holds the raw tmux subprocess primitives")
-        self.assertIn('"send-keys"', body)
-        self.assertIn('"list-sessions"', body)
+    def test_the_backend_class_and_its_module_are_gone(self):
+        src = open(os.path.join(BIN, "romp-kernel"), encoding="utf-8").read()
+        self.assertNotIn("class TmuxBackend(", src)
+        self.assertNotIn("_TMUX = ", src)
+        self.assertFalse(os.path.exists(os.path.join(self.KERNEL_DIR, "tmux_socket.py")))
+        self.assertFalse(os.path.exists(os.path.join(self.KERNEL_DIR, "askparse.py")))
+
+    def test_an_unowned_sid_routes_to_a_refusing_backend(self):
+        # Sessions.backend_for used to fall to the tmux backend, whose send accepted anything; the unowned
+        # route refuses by name (decision (c) of the removal)
+        src = open(os.path.join(BIN, "romp-kernel"), encoding="utf-8").read()
+        self.assertIn("class _UnownedBackend(sb.SessionBackend):", src)
+        self.assertIn("return _UNOWNED", src)
 
 
 class PostalIsFullyTmuxFree(unittest.TestCase):
-    """P3 complete: the postal bus (a SEPARATE process) reaches tmux ONLY through the kernel's session API —
-    session enumeration, the working-note, mail delivery/wake, the resume-picker check, and the status-bar
-    mail/peer/message chrome all go over HTTP. So bin/romp-postal shells NO tmux at all; a regression fails CI
-    instead of silently re-coupling the bus to tmux. (the user 2026-06-26.)"""
+    """P3 complete: the postal bus (a SEPARATE process) reaches every session ONLY through the kernel's
+    session API — session enumeration, the working-note and mail delivery/wake go over HTTP. So
+    bin/romp-postal shells NO tmux at all; a regression fails CI instead of silently re-coupling the bus to a
+    backend. (the user 2026-06-26.) The status-bar chrome and picker-check routes it once called left with
+    the tmux backend (2026-09-11) and must not come back."""
 
     POSTAL = os.path.join(BIN, "romp-postal-service")
 
@@ -158,9 +167,10 @@ class PostalIsFullyTmuxFree(unittest.TestCase):
 
     def test_the_bus_reaches_the_kernel_for_every_session_op(self):
         src = open(self.POSTAL, encoding="utf-8").read()
-        for ep in ('"/sessions"', '"/working"', '"/deliver"', '"/picker-check"',
-                   '"/mail-badge"', '"/deliver-chrome"', '"/reconcile-peers"'):
+        for ep in ('"/sessions"', '"/working"', '"/deliver"'):
             self.assertIn(ep, src, "the bus reaches the kernel endpoint %s" % ep)
+        for ep in ('"/picker-check"', '"/mail-badge"', '"/deliver-chrome"', '"/reconcile-peers"'):
+            self.assertNotIn(ep, src, "a retired status-bar route is back in the bus: %s" % ep)
 
 
 if __name__ == "__main__":

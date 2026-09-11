@@ -36,7 +36,6 @@ sb = load_source("romp_sdk_backend_slash_echo", os.path.join(BIN, "romp_sdk_back
 em = km.em
 
 SID = "3b5d7f9a-2c4e-4a6b-8d0f-1e3a5c7b9d2f"   # private synthetic sid (goal-store fixtures rule)
-TMUX_SID = "4c6e8a0b-3d5f-4b7c-9e1a-2f4b6d8c0e3a"
 T0 = 1_800_000_000
 NOW = T0 + 3600
 
@@ -330,30 +329,6 @@ class LandingCarriesTheCopysId(unittest.TestCase):
         self._fed("deploy staging now", qid="echo:plain")
         self.assertEqual(self.w.s.qids_for_landing("u2", ["deploy  staging now"], T0 + 100), [None])
         self.assertEqual(self.w.s.qids_for_landing("u3", ["deploy staging now"], T0 + 100), ["echo:plain"])
-
-
-class TmuxEchoAgrees(unittest.TestCase):
-    """The tmux route's echo prune reads the same kernel-built texts."""
-
-    def tearDown(self):
-        km._tmux_echo.pop(TMUX_SID, None)
-
-    def _tx_texts(self, disp):
-        # the texts build_session hands the prune, from the command atom the event model reads the wrapper as
-        atom = {"type": "user", "uuid": "u2", "session_id": TMUX_SID, "t": T0 + 100, "author": "human",
-                "command": "/deploy", "message": {"role": "user", "content": [{"type": "text", "text": disp}]}}
-        return set(km._atom_user_texts(atom))
-
-    def test_the_parsed_command_atom_retires_the_typed_echo(self):
-        km._tmux_echo_add(TMUX_SID, TYPED)
-        self.assertEqual(len(km._tmux_echo_atoms(TMUX_SID)), 1)
-        km._tmux_echo_prune(TMUX_SID, set(), self._tx_texts("/deploy staging now"))
-        self.assertEqual(km._tmux_echo_atoms(TMUX_SID), [], "the command atom's text lands the typed echo")
-
-    def test_another_commands_atom_keeps_it(self):
-        km._tmux_echo_add(TMUX_SID, TYPED)
-        km._tmux_echo_prune(TMUX_SID, set(), self._tx_texts("/deploy production now"))
-        self.assertEqual(len(km._tmux_echo_atoms(TMUX_SID)), 1)
 
 
 if __name__ == "__main__":

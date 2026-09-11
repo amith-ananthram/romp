@@ -184,7 +184,7 @@ class BgTasks(unittest.TestCase):
         # the CLI's task lifecycle stream is the AUTHORITATIVE liveness source (the user 2026-07-11): a
         # scan row survives only while its tool_use id is in the live set, so a killed/finished task drops
         # the instant its terminal event lands — and live=[] (no tasks) empties the box even if the
-        # transcript still reads 'running'. live=None (tmux / backend mid-restart) keeps the scan verdict.
+        # transcript still reads 'running'. live=None (a backend mid-restart, no snapshot) keeps the scan verdict.
         path = _write([_launch(), _launch(tid="tu_watch", desc="power watcher")])
         try:
             live_one = [{"desc": "Restart server after test", "type": "local_bash",
@@ -195,7 +195,7 @@ class BgTasks(unittest.TestCase):
             self.assertEqual(km._bg_tasks(path, live=[])["count"], 0,
                              "an EMPTY live set is authoritative: nothing is running")
             self.assertEqual(km._bg_tasks(path, live=None)["count"], 2,
-                             "no live info (tmux / no snapshot) → the transcript scan stands")
+                             "no live info (no snapshot) → the transcript scan stands")
         finally:
             os.unlink(path)
 
@@ -328,14 +328,14 @@ class DispatchGist(unittest.TestCase):
         ack["toolUseResult"] = {"isAsync": True, "status": "async_launched", "taskType": "local_agent",
                                 "outputFile": "/tmp/agent-a1.output"}
         path = _write([use, ack])
-        saved = (km._tmux_sessions, km._sdk_spawned_at)
-        km._tmux_sessions = lambda: {"11111111-2222-3333-4444-555555555555": {"name": "web"}}
+        saved = (km._live_map, km._sdk_spawned_at)
+        km._live_map = lambda: {"11111111-2222-3333-4444-555555555555": {"name": "web"}}
         km._sdk_spawned_at = lambda s: None
         try:
             res = km._bg_tasks(path)
             row = km._bg_live_norm("11111111-2222-3333-4444-555555555555", path)[0]
         finally:
-            km._tmux_sessions, km._sdk_spawned_at = saved
+            km._live_map, km._sdk_spawned_at = saved
             os.unlink(path)
         self.assertEqual(res["count"], 1, "the ack must not duplicate the launch row")
         self.assertEqual(res["tasks"][0]["summary"], "Audit the sampler")
@@ -378,40 +378,40 @@ class DispatchGist(unittest.TestCase):
 
     def test_the_acks_task_type_rides_the_scan_row(self):
         # the lifecycle set's type already threads through _bg_live_norm; the transcript scan carried
-        # no type at all, so a placed-unstamped agent on the scan path (tmux) read as furniture
+        # no type at all, so a placed-unstamped agent on the scan path read as furniture
         sid = "11111111-2222-3333-4444-555555555555"
         use, ack = _workflow_launch()
         bare = _agent_launch(tid="tu_agent1")
         bare["toolUseResult"] = {"isAsync": True, "status": "async_launched"}
         path = _write([use, ack, _agent_tool_use(tid="tu_agent1"), bare])
-        saved = (km._tmux_sessions, km._sdk_spawned_at)
-        km._tmux_sessions = lambda: {sid: {"name": "web"}}   # live CLI, no lifecycle set → scan source
+        saved = (km._live_map, km._sdk_spawned_at)
+        km._live_map = lambda: {sid: {"name": "web"}}   # live CLI, no lifecycle set → scan source
         km._sdk_spawned_at = lambda s: None
         try:
             rows = {r["desc"]: r["type"] for r in km._bg_live_norm(sid, path)}
         finally:
-            km._tmux_sessions, km._sdk_spawned_at = saved
+            km._live_map, km._sdk_spawned_at = saved
             os.unlink(path)
         self.assertEqual(rows["Sweep the notes-api routes for slow spots"], "local_workflow")
         self.assertEqual(rows["Map the parser"], "local_agent")
 
 
 class DurableAwaitingSource(unittest.TestCase):
-    """_session_awaiting source 0.75: for a LIVE CLI with no lifecycle set (tmux — the CLI outlives kernel
+    """_session_awaiting source 0.75: for a LIVE CLI with no lifecycle set (the CLI outlives kernel
     restarts and has no SDK task stream), the transcript's own launch↔notification pairing keeps awaiting
     across kernel restarts. An SDK snapshot's bgTasks key (even empty) stays authoritative; a dormant
     session never reaches the source."""
     SID = "11111111-2222-3333-4444-555555555555"
 
     def _patched(self, live_map, spawned=None):
-        saved = (km._tmux_sessions, km._sdk_spawned_at, km._states_awaiting_overlay)
-        km._tmux_sessions = lambda: live_map
+        saved = (km._live_map, km._sdk_spawned_at, km._states_awaiting_overlay)
+        km._live_map = lambda: live_map
         km._sdk_spawned_at = lambda sid: spawned
         km._states_awaiting_overlay = lambda sid: None
         return saved
 
     def _restore(self, saved):
-        km._tmux_sessions, km._sdk_spawned_at, km._states_awaiting_overlay = saved
+        km._live_map, km._sdk_spawned_at, km._states_awaiting_overlay = saved
 
     def test_pending_agent_and_shell_dispatches_are_two_rows_of_two_kinds(self):
         # dispatched agents/workflows are AGENT rows even through the task stream; a shell launch is a
@@ -505,16 +505,16 @@ class OneRowPerAgentAcrossTheHookAndTheStream(unittest.TestCase):
     A1, A2 = "a1111111111111111", "a2222222222222222"
 
     def setUp(self):
-        self._saved = (km._tmux_sessions, km._sdk_spawned_at, km._states_awaiting_overlay, km._bg_pending)
+        self._saved = (km._live_map, km._sdk_spawned_at, km._states_awaiting_overlay, km._bg_pending)
         km._sdk_spawned_at = lambda sid: None
         km._states_awaiting_overlay = lambda sid: None
         km._bg_pending = lambda sid, path, tasks: tasks     # nothing placed yet: every live row is pending
 
     def tearDown(self):
-        km._tmux_sessions, km._sdk_spawned_at, km._states_awaiting_overlay, km._bg_pending = self._saved
+        km._live_map, km._sdk_spawned_at, km._states_awaiting_overlay, km._bg_pending = self._saved
 
     def _snap(self, subs, tasks):
-        km._tmux_sessions = lambda: {self.SID: {"subagents": subs, "bgTasks": tasks}}
+        km._live_map = lambda: {self.SID: {"subagents": subs, "bgTasks": tasks}}
 
     def test_a_placed_launch_still_joins_its_hook_row(self):
         # the ordinary idle-awaiting steady state: the judge has PLACED the launch turn, so the launch is
@@ -642,10 +642,10 @@ class OneRowPerAgentAcrossTheHookAndTheStream(unittest.TestCase):
         self.assertTrue(all(it.get("stoppable") for it in aw["items"]), "every lifecycle-set row is stoppable")
 
     def test_the_transcript_scan_path_carries_the_acks_agent_id(self):
-        # source 0.75 (a live CLI with no lifecycle set — tmux): the async ack names the agent; the row
+        # source 0.75 (a live CLI with no lifecycle set): the async ack names the agent; the row
         # must carry it so the same join works there
         path = _write([_agent_tool_use(tid="tu_agent1", desc="Map the parser"), _agent_launch(tid="tu_agent1")])
-        km._tmux_sessions = lambda: {self.SID: {"name": "web"}}
+        km._live_map = lambda: {self.SID: {"name": "web"}}
         try:
             rows = km._bg_live_norm(self.SID, path)
         finally:
@@ -687,13 +687,13 @@ class AgentTasksAreNeverServices(unittest.TestCase):
         self.assertEqual(awaited, [t], "the closer affirmed this thread's wait")
 
     def test_norm_threads_the_type_through_both_sources(self):
-        saved = km._tmux_sessions
-        km._tmux_sessions = lambda: {self.SID: {"bgTasks": [
+        saved = km._live_map
+        km._live_map = lambda: {self.SID: {"bgTasks": [
             {"toolUseId": "t4", "desc": "an agent", "since": 5, "type": "local_agent"}]}}
         try:
             rows = km._bg_live_norm(self.SID, None)
         finally:
-            km._tmux_sessions = saved
+            km._live_map = saved
         self.assertEqual(rows[0]["type"], "local_agent", "the lifecycle set's type survives normalization")
 
 
@@ -705,8 +705,8 @@ class AwaitedTaskIdsMirrorTheDescs(unittest.TestCase):
     SID = "11111111-2222-3333-4444-555555555555"
 
     def test_ids_track_the_awaited_split_and_skip_services(self):
-        saved = (km._tmux_sessions, km._bg_placed_tops, km._session_stamped_tops)
-        km._tmux_sessions = lambda: {self.SID: {"bgTasks": [
+        saved = (km._live_map, km._bg_placed_tops, km._session_stamped_tops)
+        km._live_map = lambda: {self.SID: {"bgTasks": [
             {"toolUseId": "t1", "desc": "suite run", "since": 5, "type": "local_shell"},
             {"toolUseId": "t2", "desc": "mkdocs serve", "since": 6, "type": "local_shell"},
         ]}}
@@ -716,7 +716,7 @@ class AwaitedTaskIdsMirrorTheDescs(unittest.TestCase):
             ids = km._awaiting_task_ids(self.SID, "/p")
             descs = km._awaiting_task_descs(self.SID, "/p")
         finally:
-            km._tmux_sessions, km._bg_placed_tops, km._session_stamped_tops = saved
+            km._live_map, km._bg_placed_tops, km._session_stamped_tops = saved
         self.assertEqual(ids, ["t1"], "pending t1 is awaited; the placed-unstamped service t2 is not")
         self.assertEqual(descs, ["suite run"], "ids and descriptions describe the same awaited set")
 

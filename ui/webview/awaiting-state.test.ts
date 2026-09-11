@@ -149,7 +149,7 @@ test("awaited things show even while WORKING, and kernel watches feed the box (t
   // awaitingWhy — that arm made the box read "Awaiting" under a Working chip and left every other
   // in-flight row to the legacy list; awaitingWhy now means idle-and-waiting on every surface
   assert.doesNotMatch(KERNEL, /if not _aw and open_now:/);
-  assert.match(KERNEL, /_aw_items = _awaiting_items_payload\(_aw, sid, sess\["path"\], tmux\)/);   // under the build's own snapshot — no fresh liveness read on the working path
+  assert.match(KERNEL, /_aw_items = _awaiting_items_payload\(_aw, sid, sess\["path"\], live_map\)/);   // under the build's own snapshot — no fresh liveness read on the working path
   assert.match(KERNEL, /"awaitingItems": _aw_items,/);
   assert.match(KERNEL, /"working" if open_now else\n/);   // the state formula's ordering is intact
 });

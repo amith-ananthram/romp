@@ -6,7 +6,7 @@ never read awaiting, the auto-nudge fired on a genuinely-waiting session, and th
 hard-blocked its card with "it needs your direction". Two guards here:
 
   * the MERGE itself carries bgTasks through — tested through the REAL Sessions.live() with a fake
-    backend, exactly the seam the earlier _tmux_sessions-stubbing tests bypassed;
+    backend, exactly the seam the earlier _live_map-stubbing tests bypassed;
   * _mark_nudge_failed never converts a nudge into a block while the session is AWAITING — its reply
     ("waiting on the experiment") DID explain itself.
 
@@ -46,32 +46,30 @@ class _FakeSdkBackend:
 
 class MergeCarriesBgTasks(unittest.TestCase):
     def test_the_real_merge_carries_bgTasks_and_subagents_through(self):
-        # through the REAL Sessions.live(), not a _tmux_sessions stub — the seam the bug lived in
+        # through the REAL Sessions.live(), not a _live_map stub — the seam the bug lived in
         snap = {"state": "waiting", "since": "1", "model": "Fable 5", "effort": "xhigh",
                 "modelPending": False, "effortPending": False, "retryCount": 0, "retryInfo": None,
                 "ctx": 10, "mode": "auto", "subagents": [], "bgTasks": [dict(TIMER)]}
-        saved_sdk, saved_tmux = km._sdk, km.Sessions._TMUX_LIVE if hasattr(km.Sessions, "_TMUX_LIVE") else None
+        saved_sdk, saved_codex = km._sdk, km._codex
         fake = _FakeSdkBackend(snap)
         km._sdk = lambda: fake
-        tmux_saved = km._TMUX.live_sessions
-        km._TMUX.live_sessions = staticmethod(lambda: {})
+        km._codex = lambda: None          # no Codex backend on this box: the merge is the SDK rows alone
         try:
             out = km.Sessions.live()
         finally:
-            km._sdk = saved_sdk
-            km._TMUX.live_sessions = tmux_saved
+            km._sdk, km._codex = saved_sdk, saved_codex
         self.assertIn(SID, out)
         self.assertEqual([t["desc"] for t in out[SID]["bgTasks"]],
                          ["20-minute timer for campaign-start check"],
                          "the merged map carries the live bg-task set — the awaiting/nudge gates read it here")
         self.assertEqual(out[SID]["subagents"], [])
         # ...and _session_awaiting source 0.5 fires off exactly that merged map
-        saved_sessions = km._tmux_sessions
-        km._tmux_sessions = lambda: out
+        saved_sessions = km._live_map
+        km._live_map = lambda: out
         try:
             why = km._session_awaiting(SID, "/nonexistent", True)
         finally:
-            km._tmux_sessions = saved_sessions
+            km._live_map = saved_sessions
         self.assertEqual(why, {"kind": "task", "since": 1,   # the dispatch stamp → the chips' elapsed readout (the user 2026-08-23)
                                "why": "waiting on a background command: 20-minute timer for campaign-start check",   # "command" since slice 2 (2026-09-05)
                                "count": 1,

@@ -129,7 +129,7 @@ class DeferredPushEndToEnd(unittest.TestCase):
 
     def test_push_that_cannot_inject_keeps_the_message_id(self):
         mid = pm.deliver(TO, "api", FROM, "staging is green, promoting", kind="coordinate")
-        agent = {"id": TO, "state": "working", "backend": "tmux"}
+        agent = {"id": TO, "state": "working", "backend": "sdk"}
 
         for _ in range(3):                       # three deferred pushes in a row
             self.assertFalse(pm._push(TO, agent), "not injected → push reports False")

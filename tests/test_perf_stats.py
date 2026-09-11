@@ -507,17 +507,17 @@ class PusherRecords(unittest.TestCase):
         self.td = tempfile.TemporaryDirectory()
         names = Path(self.td.name) / "names"
         names.mkdir()
-        self.saved = (km.NAMES, km._tmux_sessions, km._pusher_cycle_jobs, list(km._built_feed),
+        self.saved = (km.NAMES, km._live_map, km._pusher_cycle_jobs, list(km._built_feed),
                       list(km._built_timeline), km.build_feed, km.build_timeline, km._needs_you_count,
                       km._feed_notifications, km._badge_push, km._views_dirty[0])
         self.saved_jobs = {nm: getattr(km, nm) for nm in self.JOBS}
         km.NAMES = names
-        km._tmux_sessions = lambda: {}
+        km._live_map = lambda: {}
         self.addCleanup(self._restore)
         self.addCleanup(self.td.cleanup)
 
     def _restore(self):
-        (km.NAMES, km._tmux_sessions, km._pusher_cycle_jobs, bf, bt, km.build_feed, km.build_timeline,
+        (km.NAMES, km._live_map, km._pusher_cycle_jobs, bf, bt, km.build_feed, km.build_timeline,
          km._needs_you_count, km._feed_notifications, km._badge_push, vd) = self.saved
         km._built_feed[:] = bf
         km._built_timeline[:] = bt
@@ -532,7 +532,7 @@ class PusherRecords(unittest.TestCase):
         # IDLE CYCLES (2026-09-09): the loop re-enters after a fixed 0.5 s backstop whether or not anything
         # changed; the idle share is what a cadence change is judged on. A cycle whose jobs set no wake,
         # sent no client payload and saved no goal store counts as idle, with its wall and CPU.
-        km._pusher_cycle_jobs = lambda now, tmux, any_client: time.sleep(0.003)
+        km._pusher_cycle_jobs = lambda now, live_map, any_client: time.sleep(0.003)
         before = self._pusher()
         km._pusher_cycle()
         after = self._pusher()
@@ -542,7 +542,7 @@ class PusherRecords(unittest.TestCase):
         self.assertEqual(after["cycles"], before["cycles"] + 1, "an idle cycle is still a cycle")
 
     def test_a_cycle_that_sends_a_payload_is_not_idle(self):
-        km._pusher_cycle_jobs = lambda now, tmux, any_client: km._PERF_STATS.send(("chat", "s1"), "full", 10)
+        km._pusher_cycle_jobs = lambda now, live_map, any_client: km._PERF_STATS.send(("chat", "s1"), "full", 10)
         before = self._pusher()
         km._pusher_cycle()
         after = self._pusher()
@@ -552,7 +552,7 @@ class PusherRecords(unittest.TestCase):
     def test_a_deduped_frame_does_not_break_an_idle_cycle(self):
         # with a dashboard connected the push builds and compares the per-cycle chat frames every cycle; a
         # frame the client already holds is reported as "deduped" and is not a payload that went out
-        km._pusher_cycle_jobs = lambda now, tmux, any_client: km._PERF_STATS.send(("chat", "taborder"), "deduped", 10)
+        km._pusher_cycle_jobs = lambda now, live_map, any_client: km._PERF_STATS.send(("chat", "taborder"), "deduped", 10)
         before = self._pusher()
         km._pusher_cycle()
         after = self._pusher()
@@ -560,23 +560,23 @@ class PusherRecords(unittest.TestCase):
         self.assertEqual(after["sends"], before["sends"], "a deduped frame is not a send")
 
     def test_a_cycle_that_sets_the_wake_is_not_idle(self):
-        km._pusher_cycle_jobs = lambda now, tmux, any_client: km._pusher_wake.set()
+        km._pusher_cycle_jobs = lambda now, live_map, any_client: km._pusher_wake.set()
         before = self._pusher()
         km._pusher_cycle()
         km._pusher_wake.clear()
         self.assertEqual(self._pusher()["idle_cycles"], before["idle_cycles"])
 
     def test_a_cycle_that_saves_a_goal_store_is_not_idle(self):
-        km._pusher_cycle_jobs = lambda now, tmux, any_client: km.jd._goal_io_bump("saves")
+        km._pusher_cycle_jobs = lambda now, live_map, any_client: km.jd._goal_io_bump("saves")
         before = self._pusher()
         km._pusher_cycle()
         self.assertEqual(self._pusher()["idle_cycles"], before["idle_cycles"])
-        km._pusher_cycle_jobs = lambda now, tmux, any_client: km.jd._goal_io_bump("writes")
+        km._pusher_cycle_jobs = lambda now, live_map, any_client: km.jd._goal_io_bump("writes")
         km._pusher_cycle()
         self.assertEqual(self._pusher()["idle_cycles"], before["idle_cycles"])
 
     def test_a_cycle_is_counted_and_timed(self):
-        km._pusher_cycle_jobs = lambda now, tmux, any_client: time.sleep(0.005)
+        km._pusher_cycle_jobs = lambda now, live_map, any_client: time.sleep(0.005)
         before = self._pusher()
         km._pusher_cycle()
         after = self._pusher()
@@ -585,14 +585,14 @@ class PusherRecords(unittest.TestCase):
         self.assertEqual(after["ring_n"], min(before["ring_n"] + 1, km._PerfStats.RING))
 
     def test_a_cycle_records_its_threads_cpu_not_its_waits(self):
-        km._pusher_cycle_jobs = lambda now, tmux, any_client: time.sleep(0.020)   # a wait, no CPU
+        km._pusher_cycle_jobs = lambda now, live_map, any_client: time.sleep(0.020)   # a wait, no CPU
         before = self._pusher()
         km._pusher_cycle()
         after = self._pusher()
         self.assertGreaterEqual(after["cycle_ms_last"], 20.0)
         self.assertLess(after["cycle_cpu_ms_sum"] - before["cycle_cpu_ms_sum"], 15.0,
                         "a sleeping cycle adds far less CPU than wall")
-        km._pusher_cycle_jobs = lambda now, tmux, any_client: _burn_cpu(0.005)     # CPU, no wait
+        km._pusher_cycle_jobs = lambda now, live_map, any_client: _burn_cpu(0.005)     # CPU, no wait
         before = self._pusher()
         km._pusher_cycle()
         after = self._pusher()
@@ -600,7 +600,7 @@ class PusherRecords(unittest.TestCase):
                                 "a spinning cycle's CPU lands in cycle_cpu_ms_sum")
 
     def test_a_raising_cycle_is_still_counted(self):
-        km._pusher_cycle_jobs = lambda now, tmux, any_client: (_ for _ in ()).throw(RuntimeError("job died"))
+        km._pusher_cycle_jobs = lambda now, live_map, any_client: (_ for _ in ()).throw(RuntimeError("job died"))
         before = self._pusher()["cycles"]
         with self.assertRaises(RuntimeError):
             km._pusher_cycle()
@@ -611,7 +611,7 @@ class PusherRecords(unittest.TestCase):
         # _push_all call, `jobs` the rest of the function, so push >= 5 and 0 <= jobs < push
         for nm in self.JOBS:
             setattr(km, nm, lambda *a, **k: None)
-        km._push_all = lambda tmux=None: time.sleep(0.005)
+        km._push_all = lambda live_map=None: time.sleep(0.005)
         before = km._PERF_STATS.snapshot()["stages_ms"]
         km._pusher_cycle_jobs(int(time.time()), {}, True)
         after = km._PERF_STATS.snapshot()["stages_ms"]
@@ -654,8 +654,8 @@ class PusherRecords(unittest.TestCase):
         self.assertEqual(km._VIEW_STATS["tlServe"], served + 1)
 
     def test_feed_and_timeline_builds_count_cached_and_rebuilt(self):
-        km.build_feed = lambda now, tmux: {"working": [], "items": []}
-        km.build_timeline = lambda now, tmux, **kw: {"turns": [], "judging": [], "messages": [], "now": now}
+        km.build_feed = lambda now, live_map: {"working": [], "items": []}
+        km.build_timeline = lambda now, live_map, **kw: {"turns": [], "judging": [], "messages": [], "now": now}
         km._needs_you_count = lambda feed: 0
         km._feed_notifications = lambda feed: []
         km._badge_push = lambda n: None
@@ -733,7 +733,7 @@ class PushStages(unittest.TestCase):
     the first push and as cached on the second (same transcript, background tab), and the timeline
     client's bars go out in the send stage."""
 
-    STUBS = ("NAMES", "_tmux_sessions", "_live_names", "_chat_tab_sessions", "build_session",
+    STUBS = ("NAMES", "_live_map", "_live_names", "_chat_tab_sessions", "build_session",
              "_cached_feed", "_cached_timeline", "build_timeline", "_fleet_view_sig", "_comments_frame",
              "_retry_parked_creates")
 
@@ -750,17 +750,17 @@ class PushStages(unittest.TestCase):
         km.NAMES = names
         km.jd.STATE = Path(self.tmp) / "state"
         km.jd.STATE.mkdir(parents=True, exist_ok=True)
-        km._tmux_sessions = lambda: {}
+        km._live_map = lambda: {}
         km._live_names = lambda tm: {"web": SID}
-        km._chat_tab_sessions = lambda now, tmux: [{"sid": SID, "name": "web", "path": str(self.transcript),
+        km._chat_tab_sessions = lambda now, live_map: [{"sid": SID, "name": "web", "path": str(self.transcript),
                                                     "anchor": SID}]
         km.build_session = self._build_session
-        km._cached_feed = lambda now, tmux, sig, connect=False: self._slow({"working": [], "awaiting": [], "now": now})
-        km._cached_timeline = lambda now, tmux, sig, connect=False: self._slow(
+        km._cached_feed = lambda now, live_map, sig, connect=False: self._slow({"working": [], "awaiting": [], "now": now})
+        km._cached_timeline = lambda now, live_map, sig, connect=False: self._slow(
             {"turns": {}, "judging": [], "messages": [], "now": now})
-        km.build_timeline = lambda now, tmux, **kw: {"lanes": [], "now": now}
-        km._fleet_view_sig = lambda now, tmux: {"probe": 1}
-        km._comments_frame = lambda sid, tmux: None
+        km.build_timeline = lambda now, live_map, **kw: {"lanes": [], "now": now}
+        km._fleet_view_sig = lambda now, live_map: {"probe": 1}
+        km._comments_frame = lambda sid, live_map: None
         km._retry_parked_creates = lambda: None
         km._built_chat.clear(); km._prev_chat_events.clear(); km._prev_chat_ledger.clear()
         self.builds = 0
@@ -783,7 +783,7 @@ class PushStages(unittest.TestCase):
         time.sleep(0.005)
         return value
 
-    def _build_session(self, sid, now, tmux):
+    def _build_session(self, sid, now, live_map):
         self.builds += 1
         return self._slow({"type": "session", "id": sid, "name": "web", "events": [{"uuid": "e1", "type": "user"}],
                            "ledger": None, "status": {"state": "waiting"}, "color": None})

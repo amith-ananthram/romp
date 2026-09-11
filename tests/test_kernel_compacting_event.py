@@ -24,14 +24,13 @@ class CompactingEvent(unittest.TestCase):
     def setUp(self):
         self.src = inspect.getsource(km.build_session)
 
-    def test_compacting_signal_is_hoisted_from_the_busy_check(self):
-        # the corroborated compacting signal is computed once and reused (not the raw tmux state);
+    def test_compacting_signal_is_hoisted_and_computed_once(self):
+        # the corroborated compacting signal is computed once and reused (not the raw live-map state);
         # the path_override arm is the read-only episode render, where nothing is live by definition
         self.assertIn(
             '_compacting(sid, (tm0 or {}).get("state", ""), parsed, now, (tm0 or {}).get("since"))',
             self.src)
-        self.assertIn('busy = not path_override and (_session_working(parsed["turns"]) or compacting_now)',
-                      self.src)
+        self.assertEqual(self.src.count("compacting_now = "), 1, "computed once, then reused")
 
     def test_a_compacting_event_is_emitted_while_compacting(self):
         self.assertIn('if compacting_now:', self.src)

@@ -1328,10 +1328,10 @@ class CommentOps(CommentBase):
         self._saved_sessions = km._sessions
         self._saved_reveal = km._reveal_chat_for
         self._saved_push_now = km._push_session_now
-        self._saved_tmux = km._tmux_sessions
+        self._saved_tmux = km._live_map
         km.Sessions.backend_for = staticmethod(lambda sid: self.be)
         km._sdk_ready = lambda: True
-        km._tmux_sessions = lambda: {}   # the create/promote doors' live snapshot (names reserved atomically) — never the box's tmux
+        km._live_map = lambda: {}   # the create/promote doors' live snapshot (names reserved atomically) — never the box's tmux
         p = self._write(PARENT, self._parent_records())
         km._sessions = lambda now, window=None, forks=True: [
             {"sid": PARENT, "name": "parent", "path": str(p), "mtime": self.now}]
@@ -1344,7 +1344,7 @@ class CommentOps(CommentBase):
         km._sessions = self._saved_sessions
         km._reveal_chat_for = self._saved_reveal
         km._push_session_now = self._saved_push_now
-        km._tmux_sessions = self._saved_tmux
+        km._live_map = self._saved_tmux
         self._clear_defaults()   # the module shares one hermetic STATE — never leak across tests
         super().tearDown()
 
@@ -1853,10 +1853,10 @@ class ForkCommentRoutes(CommentBase):
         res = km._fork_comment_request({"name": "no-such-session", "text": self.OPENER})
         self.assertEqual(res["_status"], 404)
         self.assertIn("no session named", res["error"])
-        km.Sessions.backend_for = staticmethod(lambda sid: object())   # tmux: no fork machinery
+        km.Sessions.backend_for = staticmethod(lambda sid: object())   # a backend with no fork machinery (the unowned route's shape)
         res = km._fork_comment_request({"id": PARENT, "text": self.OPENER})
         self.assertNotIn("_status", res)
-        self.assertIn("tmux", res["error"])
+        self.assertIn("another backend", res["error"])
 
     def test_fork_comment_holds_the_postal_isolation_gate(self):
         saved_shaped, saved_iso = km._postal_shaped, km._postal_isolated

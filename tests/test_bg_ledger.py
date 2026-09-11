@@ -204,11 +204,11 @@ class KernelSeamEnrichesTheStream(unittest.TestCase):
         cls.km = load_source("romp_kernel_ledger", os.path.join(BIN, "romp-kernel"))
 
     def setUp(self):
-        self.km._tmux_sessions_saved = self.km._tmux_sessions
+        self.km._tmux_sessions_saved = self.km._live_map
         (self.km.jd.STATE / "sdk").mkdir(parents=True, exist_ok=True)
 
     def tearDown(self):
-        self.km._tmux_sessions = self.km._tmux_sessions_saved
+        self.km._live_map = self.km._tmux_sessions_saved
         try:
             (self.km.jd.STATE / "sdk" / (SID + ".json")).unlink()
         except OSError:
@@ -217,7 +217,7 @@ class KernelSeamEnrichesTheStream(unittest.TestCase):
     def _wire(self, bg_tasks, ledger):
         (self.km.jd.STATE / "sdk" / (SID + ".json")).write_text(
             json.dumps({"sid": SID, "name": "web", "alive": True, "bgLedger": ledger}))
-        self.km._tmux_sessions = lambda: {SID: {"bgTasks": bg_tasks}}   # the PRODUCTION shape:
+        self.km._live_map = lambda: {SID: {"bgTasks": bg_tasks}}   # the PRODUCTION shape:
         #                                    Sessions.live() sets bgTasks unconditionally on SDK rows
 
     def test_a_streamed_monitor_expires_at_its_recorded_deadline_exactly(self):

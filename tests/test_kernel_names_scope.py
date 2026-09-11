@@ -96,11 +96,11 @@ class CyclePublishesNamesScope(unittest.TestCase):
         names = Path(self.td.name) / "names"
         names.mkdir()
         (names / SID).write_text("web\t/work/web\t#112233\t#ffffff\n")
-        self.saved = (km.NAMES, km._tmux_sessions, km._pusher_cycle_jobs)
+        self.saved = (km.NAMES, km._live_map, km._pusher_cycle_jobs)
         km.NAMES = names
-        km._tmux_sessions = lambda: {}
+        km._live_map = lambda: {}
         self.addCleanup(lambda: (setattr(km, "NAMES", self.saved[0]),
-                                 setattr(km, "_tmux_sessions", self.saved[1]),
+                                 setattr(km, "_live_map", self.saved[1]),
                                  setattr(km, "_pusher_cycle_jobs", self.saved[2])))
         self.addCleanup(self.td.cleanup)
 

@@ -76,14 +76,14 @@ class DownRoute(unittest.TestCase):
         self.port = self.srv.server_address[1]
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
         self._saved_be = km._sdk_backend
-        self._saved_tmux = km._tmux_sessions
-        km._tmux_sessions = lambda *a, **k: {}     # no tmux server in a test
+        self._saved_tmux = km._live_map
+        km._live_map = lambda *a, **k: {}     # no tmux server in a test
         self.be = _FakeBackend()
         km._sdk_backend = self.be
 
     def tearDown(self):
         km._sdk_backend = self._saved_be
-        km._tmux_sessions = self._saved_tmux
+        km._live_map = self._saved_tmux
         self.srv.shutdown()
         self.srv.server_close()
 

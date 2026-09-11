@@ -112,14 +112,14 @@ class RestartNoticeSegments(unittest.TestCase):
         names = td / "names"
         names.mkdir()
         (names / SID).write_text("web\t%s\t#abcdef\n" % str(cdir))
-        self.saved = (jd.STATE, jd.PROJECTS, km.NAMES, km._tmux_sessions, km._GLOBAL_CLAUDE_MD, jd.gist_llm)
+        self.saved = (jd.STATE, jd.PROJECTS, km.NAMES, km._live_map, km._GLOBAL_CLAUDE_MD, jd.gist_llm)
         jd.gist_llm = lambda p: ""
         km._autonudge_cache.clear()
         km._GLOBAL_CLAUDE_MD = td / "no-global-claude.md"
         jd._rebind_state(td)          # STATE and every dir derived from it (names, captions, archive, goals…), the house way
         jd.PROJECTS = proj
         km.NAMES = names
-        km._tmux_sessions = lambda: {SID: {"state": "idle", "since": NOW - 100, "model": "",
+        km._live_map = lambda: {SID: {"state": "idle", "since": NOW - 100, "model": "",
                                            "effort": "", "context": None, "compactPct": None,
                                            "color": None}}
         jd.GOALDIR.mkdir(parents=True, exist_ok=True)
@@ -128,7 +128,7 @@ class RestartNoticeSegments(unittest.TestCase):
         self.segs = [sg for turn in s["turns"] for sg in jd._segs(turn, st0)]
 
     def tearDown(self):
-        state, jd.PROJECTS, km.NAMES, km._tmux_sessions, km._GLOBAL_CLAUDE_MD, jd.gist_llm = self.saved
+        state, jd.PROJECTS, km.NAMES, km._live_map, km._GLOBAL_CLAUDE_MD, jd.gist_llm = self.saved
         jd._rebind_state(state)
         km._autonudge_cache.clear()
         self.td.cleanup()

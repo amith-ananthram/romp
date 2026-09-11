@@ -75,18 +75,18 @@ class _Feed(unittest.TestCase):
         self.tpath.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
         names = td / "names"; names.mkdir()
         (names / SID).write_text("web\t%s\t#abcdef\n" % str(cdir))
-        self.saved = (jd.NAMES, jd.PROJECTS, jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR, jd.STATE, km.NAMES, km._tmux_sessions)
+        self.saved = (jd.NAMES, jd.PROJECTS, jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR, jd.STATE, km.NAMES, km._live_map)
         jd.NAMES, jd.PROJECTS = names, proj
         jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR = td / "captions", td / "archive", td / "goals"
         jd.STATE = td
         km.NAMES = names
-        km._tmux_sessions = lambda: {SID: {"state": "idle", "since": NOW - 100, "model": "", "effort": "",
+        km._live_map = lambda: {SID: {"state": "idle", "since": NOW - 100, "model": "", "effort": "",
                                            "context": None, "compactPct": None, "color": None}}
         jd.GOALDIR.mkdir(parents=True)
         km._bgall_cache.clear()
 
     def tearDown(self):
-        (jd.NAMES, jd.PROJECTS, jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR, jd.STATE, km.NAMES, km._tmux_sessions) = self.saved
+        (jd.NAMES, jd.PROJECTS, jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR, jd.STATE, km.NAMES, km._live_map) = self.saved
         self.td.cleanup()
 
     def _store(self, nodes, status=None, last=None):
@@ -260,7 +260,7 @@ class HealOlderStores(_Feed):
         ask, wf = SID + ":g1", SID + ":g2"
         self._store({ask: self._node(ask, "Add retries to the notes-api client", promptUuid="u1", askAnchor="human"),
                      wf: self._node(wf, "Lens review of the retry diff", t=T0 + 500, promptUuid="a2", askAnchor="machine")}, last=ask)
-        km._tmux_sessions = lambda: {SID: {"state": "permission", "since": NOW - 10, "model": "", "effort": "",
+        km._live_map = lambda: {SID: {"state": "permission", "since": NOW - 10, "model": "", "effort": "",
                                            "context": None, "compactPct": None, "color": None}}
         feed, err = self._feed()
         asks = {a["itemId"]: a for a in feed["asks"] if a["sid"] == SID}
@@ -281,7 +281,7 @@ class HealOlderStores(_Feed):
         self._store({ask: self._node(ask, "Add retries to the notes-api client", promptUuid="u1", askAnchor="human", cleared=True),
                      wf: self._node(wf, "Lens review of the retry diff", t=T0 + 500, promptUuid="a2", askAnchor="machine")},
                     status={ask: "cleared"}, last=wf)
-        km._tmux_sessions = lambda: {SID: {"state": "permission", "since": NOW - 10, "model": "", "effort": "",
+        km._live_map = lambda: {SID: {"state": "permission", "since": NOW - 10, "model": "", "effort": "",
                                            "context": None, "compactPct": None, "color": None}}
         feed, err = self._feed()
         asks = {a["itemId"]: a for a in feed["asks"] if a["sid"] == SID}
@@ -296,7 +296,7 @@ class HealOlderStores(_Feed):
         self._store({ask: self._node(ask, "Add retries to the notes-api client", promptUuid="u1", askAnchor="human"),
                      step: self._node(step, "Wrote the retry loop", parent=ask, t=T0 + 100),
                      wf: self._node(wf, "Lens review of the retry diff", t=T0 + 500, promptUuid="a2", askAnchor="machine")}, last=step)
-        km._tmux_sessions = lambda: {SID: {"state": "permission", "since": NOW - 10, "model": "", "effort": "",
+        km._live_map = lambda: {SID: {"state": "permission", "since": NOW - 10, "model": "", "effort": "",
                                            "context": None, "compactPct": None, "color": None}}
         feed, err = self._feed()
         asks = {a["itemId"]: a for a in feed["asks"] if a["sid"] == SID}
@@ -311,7 +311,7 @@ class HealOlderStores(_Feed):
         self._store({ask: self._node(ask, "Add retries to the notes-api client", promptUuid="u1", askAnchor="human"),
                      wf: self._node(wf, "Lens review of the retry diff", t=T0 + 500, promptUuid="a2", askAnchor="machine", nodeComplete=True)},
                     status={wf: "completed"}, last=wf)
-        km._tmux_sessions = lambda: {SID: {"state": "permission", "since": NOW - 10, "model": "", "effort": "",
+        km._live_map = lambda: {SID: {"state": "permission", "since": NOW - 10, "model": "", "effort": "",
                                            "context": None, "compactPct": None, "color": None}}
         feed, err = self._feed()
         asks = {a["itemId"]: a for a in feed["asks"] if a["sid"] == SID}
@@ -339,7 +339,7 @@ class HealOlderStores(_Feed):
                      H: self._node(H, "delegated: check the diff", parent=W, t=T0 + 600, handoff={"peer": "22222222-3333-4444-5555-666666666666", "msgId": "m1"}),
                      G: self._node(G, "Lens pass two", parent=W, t=T0 + 650, agentTask={"status": "open"})},
                     status={A: "completed"}, last=W)
-        km._tmux_sessions = lambda: {SID: {"state": "permission", "since": NOW - 10, "model": "", "effort": "",
+        km._live_map = lambda: {SID: {"state": "permission", "since": NOW - 10, "model": "", "effort": "",
                                            "context": None, "compactPct": None, "color": None}}
         feed, err = self._feed()
         asks = {a["itemId"]: a for a in feed["asks"] if a["sid"] == SID}

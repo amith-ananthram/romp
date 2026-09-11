@@ -1,7 +1,7 @@
 """Feed + timeline are EXPENSIVE to build (re-segment every session ~2.7s) and were rebuilt on EVERY push,
 so a reload/idle tick paid the full cost (the user 2026-06-25, who found reload/startup still very slow). They're
 now cached, keyed on a fleet fingerprint that busts on any transcript/states/postal change, a judge pass, a
-live tmux badge change, a colormap/session-flags change, or a 5s time bucket (so age labels keep advancing).
+live badge change, a colormap/session-flags change, or a 5s time bucket (so age labels keep advancing).
 """
 import os
 import time
@@ -22,22 +22,22 @@ km = load_source("romp_kernel", os.path.join(BIN, "romp-kernel"))
 
 class FleetCacheTest(unittest.TestCase):
     def test_sig_is_stable_when_nothing_changes(self):
-        now, tmux = int(time.time()), km._tmux_sessions()
-        self.assertEqual(km._fleet_view_sig(now, tmux), km._fleet_view_sig(now, tmux))
+        now, live_map = int(time.time()), km._live_map()
+        self.assertEqual(km._fleet_view_sig(now, live_map), km._fleet_view_sig(now, live_map))
 
     def test_sig_busts_on_a_judge_pass(self):
-        now, tmux = int(time.time()), km._tmux_sessions()
-        a = km._fleet_view_sig(now, tmux)
+        now, live_map = int(time.time()), km._live_map()
+        a = km._fleet_view_sig(now, live_map)
         km._judge_gen[0] += 1
         try:
-            self.assertNotEqual(a, km._fleet_view_sig(now, tmux), "a judge pass must rebuild the views")
+            self.assertNotEqual(a, km._fleet_view_sig(now, live_map), "a judge pass must rebuild the views")
         finally:
             km._judge_gen[0] -= 1
 
     def test_time_bucket_advances_so_age_labels_refresh(self):
-        tmux = km._tmux_sessions()
-        self.assertEqual(km._fleet_view_sig(0, tmux), km._fleet_view_sig(4, tmux), "same 5s bucket → cache hit")
-        self.assertNotEqual(km._fleet_view_sig(0, tmux), km._fleet_view_sig(5, tmux), "next 5s bucket → refresh")
+        live_map = km._live_map()
+        self.assertEqual(km._fleet_view_sig(0, live_map), km._fleet_view_sig(4, live_map), "same 5s bucket → cache hit")
+        self.assertNotEqual(km._fleet_view_sig(0, live_map), km._fleet_view_sig(5, live_map), "next 5s bucket → refresh")
 
     def test_cached_feed_and_timeline_reuse_on_a_matching_sig(self):
         feed_save = list(km._built_feed)
@@ -84,7 +84,7 @@ class FleetCacheTest(unittest.TestCase):
         feed_save = list(km._built_feed)
         dirty_save = km._views_dirty[0]
         real_build = km.build_feed
-        def build_with_midflight_reply(now, tmux):
+        def build_with_midflight_reply(now, live_map):
             time.sleep(0.005)                         # a real build runs ~1s; keep the mark measurably
             km._mark_views_dirty()                    # past the start stamp, then: the reply lands while
             return {"type": "feed", "cards": []}      # this build is mid-read. fresh dict → `is` tells builds apart
@@ -93,7 +93,7 @@ class FleetCacheTest(unittest.TestCase):
             km._built_feed[:] = [None, None, 0.0, 0.0]
             km.build_feed = build_with_midflight_reply
             f1 = km._cached_feed(int(time.time()), {}, ("SIG",))
-            km.build_feed = lambda now, tmux: {"type": "feed", "cards": []}
+            km.build_feed = lambda now, live_map: {"type": "feed", "cards": []}
             f2 = km._cached_feed(int(time.time()), {}, ("SIG",))
             self.assertIsNot(f2, f1, "a mark set during the build postdates its start → must rebuild")
             f3 = km._cached_feed(int(time.time()), {}, ("SIG",))

@@ -51,18 +51,18 @@ class WorkingNoteFreshness(unittest.TestCase):
         self.assertNotIn("—", line, "no working-note → no note separator at all")
 
     def test_missing_state_does_not_flag(self):
-        # a remote agent (or a session whose @claude-state isn't set) carries no state → don't guess stale
+        # a remote agent (or a session the kernel lists with no state yet) carries no state → don't guess stale
         line = self._line({"name": "remote", "id": "r", "branch": "main", "working": "api.ts", "state": ""})
         self.assertIn("api.ts", line)
         self.assertNotIn(STALE, line, "unknown state must not be reported as stale")
 
     def test_local_agents_maps_the_kernel_session_fields(self):
-        # local_agents now consumes the kernel's unified GET /sessions rows (no tmux shell); each row's
-        # state / working / dir carry straight into the agent row used for working-note freshness.
+        # local_agents consumes the kernel's unified GET /sessions rows; each row's state / working / dir
+        # carry straight into the agent row used for working-note freshness, whatever the backend.
         saved = pm._kernel_sessions
         try:
             pm._kernel_sessions = lambda threads=False: [
-                {"id": "sid-1", "name": "bugs", "state": "working", "dir": "/dir", "working": "feed.ts", "backend": "tmux"},
+                {"id": "sid-1", "name": "bugs", "state": "working", "dir": "/dir", "working": "feed.ts", "backend": "codex"},
                 {"id": "sid-2", "name": "ui", "state": "idle", "dir": "/dir", "working": "render.ts", "backend": "sdk"}]
             agents = {a["name"]: a for a in pm.local_agents()}
         finally:

@@ -74,7 +74,9 @@ def _lock_free_for_another_thread():
 
 
 class _FakeBackend:
-    """A tmux-shaped backend: it cannot forward its own sends, so a send parks while the turn is open."""
+    """A backend that cannot forward its own sends (no shipped backend is one since the tmux backend's
+    removal; _forwards_sends reads a fake without the capability as False), so a send parks while the turn
+    is open."""
 
     def __init__(self):
         self.calls = []
@@ -115,9 +117,9 @@ class _FakeBackend:
         return 0
 
 
-def _tmux_row(state):
+def _live_row(state):
     return {"state": state, "since": int(time.time()) - 5, "model": "", "effort": "", "context": None,
-            "compactPct": None, "color": None, "mode": "", "backend": "tmux"}
+            "compactPct": None, "color": None, "mode": "", "backend": "sdk"}
 
 
 class _Drain(unittest.TestCase):
@@ -126,10 +128,9 @@ class _Drain(unittest.TestCase):
         self._patches = [
             mock.patch.object(km.Sessions, "backend_for", staticmethod(lambda sid: self.be)),
             mock.patch.object(km, "_compacting_now", lambda sid, **k: False),
-            mock.patch.object(km, "_optimistic_echo", lambda *a, **k: None),
             mock.patch.object(km, "_mark_compacting", lambda sid: None),
             mock.patch.object(km, "_names_snapshot", lambda: {}),
-            mock.patch.object(km, "_tmux_sessions", lambda: {SID: _tmux_row("waiting")}),
+            mock.patch.object(km, "_live_map", lambda: {SID: _live_row("waiting")}),
         ] + [mock.patch.object(km, name, lambda *a, **k: None) for name in _OTHER_JOBS]
         for p in self._patches:
             p.start()
@@ -147,7 +148,6 @@ class _Drain(unittest.TestCase):
         km._moving.clear()
         km._move_askers.clear()
         km._drain_hold.clear()
-        km._refresh_parse_failures.clear()
         km._inflight_ops.clear()
         try:
             os.unlink(km._PENDING_OPS_FILE)
@@ -577,7 +577,7 @@ class OneLockAroundEveryMutation(_Drain):
         self.assertEqual(km._pending_ops.get(SID), [("send", "second", "human")])
 
     def test_a_handlers_queue_check_and_park_share_the_lock_but_its_gates_and_handover_do_not(self):
-        # the expensive gates (they fork tmux / call the backend's busy()) run outside the lock; the
+        # the expensive gates (they sweep discover / call the backend's busy()) run outside the lock; the
         # queue-presence check and the park are one locked step; the handover runs outside it again
         owned = {"gate": [], "park": [], "handover": []}
         real_wn, real_park_locked = km._working_now, km._park_op_locked

@@ -1150,16 +1150,13 @@ class InProcessChecks(unittest.TestCase):
         self.assertEqual(env["ROMP_MODEL_CATALOG"], "off")
         self.assertEqual(env["ROMP_CLI_SCOPE"], "0")
         self.assertEqual(env["ROMP_CLAUDE_BIN"], "/bin/false")
-        self.assertEqual(env["ROMP_TMUX_AVAILABLE"], "0")
         self.assertEqual(env["ROMP_KERNEL_NO_OPEN"], "1")
         self.assertEqual(env["CLAUDE_CONFIG_DIR"], claude)
-        self.assertTrue(env["TMUX_TMPDIR"].startswith(private + os.sep) and os.path.isdir(env["TMUX_TMPDIR"])
-                        and os.listdir(env["TMUX_TMPDIR"]) == [], "tmux is pointed at an existing, empty, private socket directory")
         self.assertTrue(env["ROMP_SERVICE_ENV_FILE"].startswith(private + os.sep) and not os.path.exists(env["ROMP_SERVICE_ENV_FILE"]))
         self.assertEqual(env["ROMP_SERVICE_ENV"], env["ROMP_SERVICE_ENV_FILE"])
         for c in ("unset ANTHROPIC_API_KEY", "unset ANTHROPIC_BASE_URL", "unset ROMP_MANAGER_PID", "unset TMUX", "unset ROMP_STATE_DIR",
-                  "set ROMP_MANAGER_PORT", "set ROMP_MODEL_CATALOG", "set ROMP_CLI_SCOPE", "set ROMP_CLAUDE_BIN", "set ROMP_TMUX_AVAILABLE",
-                  "set TMUX_TMPDIR", "set ROMP_SERVICE_ENV_FILE", "set ROMP_STATE_DIR", "set XDG_STATE_HOME", "set CLAUDE_CONFIG_DIR"):
+                  "set ROMP_MANAGER_PORT", "set ROMP_MODEL_CATALOG", "set ROMP_CLI_SCOPE", "set ROMP_CLAUDE_BIN",
+                  "set ROMP_SERVICE_ENV_FILE", "set ROMP_STATE_DIR", "set XDG_STATE_HOME", "set CLAUDE_CONFIG_DIR"):
             self.assertIn(c, changes)
 
     def test_the_key_source_list_is_the_kernels_own(self):

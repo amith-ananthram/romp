@@ -436,13 +436,8 @@ class InterruptTickRetires(unittest.TestCase):
         km._interrupt_block_tick(NOW, self.tmux)
         self.assertIn(live_key, km._states_overlay_cache, "a second tick keeps the alive entry")
         self.assertEqual(km._states_overlay_report()["evict"], s1["evict"], "nothing to drop: no count")
-        # an EMPTY alive set (every session gone; not headless) retires the last entry too
-        saved = km._has_tmux
-        km._has_tmux = lambda: True
-        try:
-            km._interrupt_block_tick(NOW, {})
-        finally:
-            km._has_tmux = saved
+        # an EMPTY alive set (every session gone) retires the last entry too: an empty map is authoritative
+        km._interrupt_block_tick(NOW, {})
         self.assertEqual(km._states_overlay_cache, {}, "the live session left: its entry goes")
         self.assertEqual(km._states_overlay_report()["entries"], 0)
 

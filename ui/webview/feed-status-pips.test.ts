@@ -23,8 +23,8 @@ const STYLES = here("styles.css");
 const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");
 
 test("the kernel publishes the unreadable-state list, and no ready list", () => {
-  assert.ok(KERNEL.includes("def _state_unknown_names(alive, tmux, working, awaiting):"));
-  assert.ok(KERNEL.includes('"stateUnknown": _state_unknown_names(alive, tmux, working, awaiting)'));
+  assert.ok(KERNEL.includes("def _state_unknown_names(alive, live_map, working, awaiting):"));
+  assert.ok(KERNEL.includes('"stateUnknown": _state_unknown_names(alive, live_map, working, awaiting)'));
   const feedSrc = KERNEL.slice(KERNEL.indexOf("def build_feed"), KERNEL.indexOf("def _push_feed"));
   assert.ok(!/"ready":\s*ready/.test(feedSrc), "a quiet session is not enumerated — blank already says it");
 });

@@ -146,7 +146,7 @@ def _free_port():
 # (kernel.py's _ensure_postal_bus), or on a machine with none started a detached bus nothing stops. From the runner a
 # lab kernel takes PATH (bin/romp-kernel runs under `env python3`) and HOME, the XDG_* names (kernel/credentials.py
 # resolves the service.env default under XDG_CONFIG_HOME) and, of what tests/conftest.py sets for every child of the
-# run, TMPDIR and TMUX_TMPDIR, the private roots its temp files and its tmux server live under, GIT_CONFIG_GLOBAL and
+# run, TMPDIR and TMUX_TMPDIR, the private roots conftest gives the run's temp files, GIT_CONFIG_GLOBAL and
 # GIT_CONFIG_NOSYSTEM, which keep the kernel's boot-time git (the build sha, the release-tag probe) off the
 # developer's git configuration, and the four ROMP_ names of its floor the lab does not set itself:
 # ROMP_SERVICE_ENV_FILE and ROMP_SERVICE_ENV (no real service.env), ROMP_CLAUDE_BIN (no real claude CLI) and

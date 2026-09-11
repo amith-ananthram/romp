@@ -47,14 +47,14 @@ class RenameRoute(unittest.TestCase):
             def rename(self, sid, name):
                 renames.append((sid, name))
                 return True
-        self._saved = (km.Sessions.backend_for, km._tmux_sessions, km._live_names, km._mark_views_dirty)
+        self._saved = (km.Sessions.backend_for, km._live_map, km._live_names, km._mark_views_dirty)
         km.Sessions.backend_for = staticmethod(lambda sid: BE())
-        km._tmux_sessions = lambda: {}
+        km._live_map = lambda: {}
         km._live_names = lambda tm: {"web": SID}
         km._mark_views_dirty = lambda: None
 
     def tearDown(self):
-        (km.Sessions.backend_for, km._tmux_sessions, km._live_names, km._mark_views_dirty) = self._saved
+        (km.Sessions.backend_for, km._live_map, km._live_names, km._mark_views_dirty) = self._saved
 
     def _post(self, body):
         req = urllib.request.Request(
@@ -102,7 +102,7 @@ class NonObjectBodies(unittest.TestCase):
     naming absolute paths. Now every one of them answers 400 in the route family's JSON shape, naming
     what arrived, and acts on nothing."""
     ROUTES = ("/new", "/fork", "/rename", "/move", "/color", "/watch-pr", "/watch", "/tag", "/group",
-              "/update-dismiss", "/working", "/deliver", "/picker-check", "/walk-root", "/redial")
+              "/update-dismiss", "/working", "/deliver", "/walk-root", "/redial")
 
     @classmethod
     def setUpClass(cls):

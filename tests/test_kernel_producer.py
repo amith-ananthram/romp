@@ -32,9 +32,9 @@ class ProducerPolicy(unittest.TestCase):
 
     def test_both_tiers_share_the_same_live_session_guard(self):
         body = self._producer_body()
-        # index + triage appends sit inside one `if _tmux_sessions():` block (same guard for both)
-        guard = re.search(r"if _tmux_sessions\(\) and not _retry_paused_on\(\):\n(.*?)\n            for t in tiers:", body, re.S)
-        self.assertTrue(guard, "the two tiers are guarded by a single _tmux_sessions() and not _retry_paused_on() check")
+        # index + triage appends sit inside one `if _live_map():` block (same guard for both)
+        guard = re.search(r"if _live_map\(\) and not _retry_paused_on\(\):\n(.*?)\n            for t in tiers:", body, re.S)
+        self.assertTrue(guard, "the two tiers are guarded by a single _live_map() and not _retry_paused_on() check")
         block = guard.group(1)
         self.assertIn('name="index"', block)
         self.assertIn('name="triage"', block)

@@ -3,8 +3,9 @@
 
 The user 2026-07-14: a new-session spawn sometimes fails and the modal hung on the 30s backstop, so the
 cue got an abort. The webview knows only the session NAME, so the kernel resolves it to a live session and
-ends it — a slow-but-successful open must not leave an orphan tab. If the session hasn't materialized yet,
-the name is armed in _cancel_pending so the in-flight threaded tmux spawn is reaped the moment it lands.
+ends it — a slow-but-successful open must not leave an orphan tab. A name no live session answers to has
+nothing to reap: both backends create inline, so a session exists by the time its cue can be cancelled
+(the pending-spawn set that reaped a threaded spawn on arrival went with the tmux backend, 2026-09-11).
 A remote cue ("host:name") is dismissed client-side only; the local kernel reaps nothing.
 
 HISTORY GUARD (the user 2026-07-16, the staged-demo teardowns): names are not identities — same-named
@@ -55,17 +56,15 @@ class CancelCreateTest(unittest.TestCase):
         patch("_send_to_app", lambda app, m: self.sent.append((app, m)))
         patch("_push_soon", lambda: None)
         patch("_push_all", lambda: None)
-        patch("_tmux_sessions", lambda: self._live)
-        patch("_live_names", lambda tmux: {NAME: SID} if SID in (tmux or {}) else {})
+        patch("_live_map", lambda: self._live)
+        patch("_live_names", lambda live_map: {NAME: SID} if SID in (live_map or {}) else {})
         self._saved_bf = km.Sessions.backend_for
         km.Sessions.backend_for = staticmethod(lambda sid: self.be)
-        km._cancel_pending.clear()
 
     def tearDown(self):
         for nm, v in self._saved.items():
             setattr(km, nm, v)
         km.Sessions.backend_for = self._saved_bf
-        km._cancel_pending.clear()
 
     def _cancel(self, name):
         # Drive the real WS handler: _dispatch_ws starts with `if _drive(...)` which returns False for
@@ -78,29 +77,18 @@ class CancelCreateTest(unittest.TestCase):
         self.assertEqual(self.be.killed, [SID], "the live pending session is killed on its backend")
         self.assertTrue(any(m.get("type") == "closed" and m.get("id") == SID for _a, m in self.sent),
                         "the live view is told to prune it (no tab-hide state anymore — the kill is the event)")
-        self.assertNotIn(NAME, km._cancel_pending, "a resolved cancel never arms the pending set")
 
-    def test_not_yet_live_arms_then_reaped_on_arrival(self):
-        self._live = {}                                        # spawn still in flight — no session yet
+    def test_a_name_no_live_session_answers_to_reaps_nothing(self):
+        self._live = {}                                        # no session of that name is running
         self._cancel(NAME)
-        self.assertEqual(self.be.killed, [], "nothing to kill yet")
-        self.assertIn(NAME, km._cancel_pending, "armed so the arriving spawn is reaped")
-        self._live = {SID: {}}                                 # ...the spawn lands
-        km._reap_if_cancelled(NAME)
-        self.assertEqual(self.be.killed, [SID], "reaped on arrival")
-        self.assertNotIn(NAME, km._cancel_pending, "and cleared from the pending set")
-
-    def test_reap_is_a_noop_for_an_uncancelled_name(self):
-        self._live = {SID: {}}
-        km._reap_if_cancelled(NAME)                            # a normal (uncancelled) spawn lands
-        self.assertEqual(self.be.killed, [], "an uncancelled arrival is left alone")
+        self.assertEqual(self.be.killed, [], "nothing to kill")
+        self.assertEqual(self.sent, [], "and nothing to prune: the cue dismisses client-side")
 
     def test_remote_cue_is_not_reaped_locally(self):
         self._live = {SID: {}}
         self._cancel("TESTHOST:" + NAME)                          # host-prefixed cue
         self.assertEqual(self.be.killed, [], "a remote spawn is not torn down by the local kernel")
-        self.assertNotIn(NAME, km._cancel_pending)
-        self.assertNotIn("TESTHOST:" + NAME, km._cancel_pending)
+        self.assertEqual(self.sent, [], "and the local live view is left alone")
 
     # ── the history guard (the user 2026-07-16) ──
 

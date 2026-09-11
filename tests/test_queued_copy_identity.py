@@ -19,9 +19,6 @@ queue:
   until it reaches the backend, where send() mints one. The kernel takes a client's id only in its own echo form
   and only when the session does not already hold it (a queued copy, a live echo, a parked op); otherwise it mints
   as before. A cancel that names the id removes exactly that copy (tests/test_queued_copy_press_id.py).
-  tmux — the CLI's queue-operation records carry timestamps but no ids: each copy carries its enqueue stamp and NO
-  id (an id only the ledger copy wore would make the chat reject the tmux echo as another send's); nothing pairs the
-  landed record (the kernel does not see the CLI take it), so the chat reads this route by text.
 
 SYNTHETIC fixtures only: a private synthetic sid, the notes-api demo world, hostname-free.
 """
@@ -95,7 +92,7 @@ class _World:
         names = root / "names"; names.mkdir()
         (names / SID).write_text("web\t%s\t#abcdef\n" % str(self.cwd))
         self.saved = (km.jd.NAMES, km.jd.PROJECTS, km.jd.CAPDIR, km.jd.ARCHDIR, km.jd.GOALDIR, km.jd.STATE,
-                      km.NAMES, km._tmux_sessions, km._GLOBAL_CLAUDE_MD)
+                      km.NAMES, km._live_map, km._GLOBAL_CLAUDE_MD)
         km.jd.NAMES, km.jd.PROJECTS = names, proj
         km.jd.CAPDIR, km.jd.ARCHDIR, km.jd.GOALDIR = root / "captions", root / "archive", root / "goals"
         km.jd.STATE = root
@@ -104,7 +101,7 @@ class _World:
         self.now = int(time.time())
         self.tm = {SID: {"state": "working", "since": self.now - 100, "model": "", "effort": "",
                          "context": None, "compactPct": None, "color": None}}
-        km._tmux_sessions = lambda: self.tm
+        km._live_map = lambda: self.tm
         km._chat_fold.clear(); km._parse_cache.clear()
         km._PATH_LINK_CACHE.clear(); km._SPACE_PATH_CACHE.clear()
         km._postal_index_memo[0] = None
@@ -117,7 +114,7 @@ class _World:
     def close(self):
         self._park.set()
         (km.jd.NAMES, km.jd.PROJECTS, km.jd.CAPDIR, km.jd.ARCHDIR, km.jd.GOALDIR, km.jd.STATE,
-         km.NAMES, km._tmux_sessions, km._GLOBAL_CLAUDE_MD) = self.saved
+         km.NAMES, km._live_map, km._GLOBAL_CLAUDE_MD) = self.saved
         km._sdk = self.saved_sdk
         km._chat_fold.clear(); km._parse_cache.clear()
         os.environ.pop("CLAUDE_CONFIG_DIR", None)
@@ -366,8 +363,8 @@ class TheChatCarriesTheIds(unittest.TestCase):
         self.assertEqual([(x["md"], x.get("qid")) for x in q[0]["texts"]], [("A", None), ("B", None)])
 
     def test_a_stamp_without_an_id_rides_the_queued_copy_too(self):
-        # the tmux route's copies carry an enqueue stamp and no id (TheTmuxQueueCarriesStamps): the group ships the
-        # stamp on its own — it rode only beside an id (third review)
+        # a copy without an id (an older mirror's restore, one the backend queued itself) still carries its enqueue
+        # stamp: the group ships the stamp on its own — it rode only beside an id (third review)
         self.w.write(RUNNING)
         self.w.s.enqueue("stamped only")
         self.w.be.pending_queued_meta = lambda sid: [{"md": "stamped only", "qid": None, "qts": 1_700_000_000_000}]
@@ -492,25 +489,6 @@ class TheSdkQueueTakesTheClientsId(unittest.TestCase):
         finally:
             self.w.be.pending_queued_meta, self.w.be.live_atoms = real_meta, real_atoms
         self.assertEqual(km._client_qid(msg, SID, self.w.be), fresh, "the same id is taken once both reads answer")
-
-
-class TheTmuxQueueCarriesStamps(unittest.TestCase):
-    def test_each_copy_carries_its_enqueue_stamp_and_no_id_since_nothing_on_this_route_could_share_one(self):
-        td = tempfile.TemporaryDirectory()
-        p = Path(td.name) / "t.jsonl"
-        recs = [{"type": "queue-operation", "operation": "enqueue", "content": "one", "timestamp": iso(T0 + 5)},
-                {"type": "queue-operation", "operation": "enqueue", "content": "two", "timestamp": iso(T0 + 9)},
-                {"type": "queue-operation", "operation": "dequeue", "timestamp": iso(T0 + 12)}]
-        p.write_text("".join(json.dumps(r) + "\n" for r in recs))
-        km._queued_parse_cache.clear()
-        self.assertEqual(km._pending_queued(str(p)), ["two"])
-        meta = km._pending_queued_meta(str(p))
-        self.assertEqual([m["md"] for m in meta], ["two"])
-        self.assertEqual(meta[0]["qts"], (T0 + 9) * 1000)
-        # no id: the tmux echo is minted before the CLI writes its enqueue record and the landing carries nothing,
-        # so an id only the ledger copy wore would make the chat reject the echo as another send's (review)
-        self.assertIsNone(meta[0]["qid"])
-        td.cleanup()
 
 
 class IdentitySurvivesTheKernelsDeath(unittest.TestCase):

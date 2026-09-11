@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The kernel's per-push transcript/states readers fold appends instead of re-reading whole files
-(issue 903): _pending_queued and _undelivered_wake_tail (queue ledgers over the transcript),
+(issue 903): _pending_ledger and _undelivered_wake_tail (queue ledgers over the transcript),
 _last_machine_cut and the five durable-note readers (states/<sid>.jsonl), all through _fold_records
 over em._read_jsonl_incremental's cached record list.
 
@@ -92,33 +92,33 @@ class _Fold(unittest.TestCase):
             folded()                                       # warm the fold cache again for the next step
 
 
-class PendingQueued(_Fold):
+class PendingLedger(_Fold):
     SEQ = [user("hello"), qop("enqueue", "first"), qop("enqueue", "second"), asst("working"),
            qop("dequeue"), qop("enqueue", "third"), qop("remove"), qop("remove"), qop("enqueue", "fourth"),
            user("[Request interrupted by user]"), qop("enqueue", "fifth"), qop("dequeue")]
 
     def test_folded_equals_whole_file_at_every_append(self):
-        self.differential(self.tpath, self.SEQ, lambda: km._pending_queued(str(self.tpath)), "_pending_queued")
-        self.assertEqual(km._pending_queued(str(self.tpath)), ["fifth"])
+        self.differential(self.tpath, self.SEQ, lambda: km._pending_ledger(str(self.tpath)), "_pending_ledger")
+        self.assertEqual(km._pending_ledger(str(self.tpath)), ["fifth"])
 
     def test_content_addressed_remove_and_popAll(self):
         recs = [qop("enqueue", "a"), qop("enqueue", "b"), qop("enqueue", "c"), qop("remove", "b"),
                 qop("enqueue", "d"), qop("popAll"), qop("enqueue", "e"), qop("remove", "zzz")]
-        self.differential(self.tpath, recs, lambda: km._pending_queued(str(self.tpath)), "remove/popAll")
-        self.assertEqual(km._pending_queued(str(self.tpath)), [], "a remove naming nothing pending takes the oldest")
+        self.differential(self.tpath, recs, lambda: km._pending_ledger(str(self.tpath)), "remove/popAll")
+        self.assertEqual(km._pending_ledger(str(self.tpath)), [], "a remove naming nothing pending takes the oldest")
         self.append(self.tpath, [qop("enqueue", "f"), qop("enqueue", "g"), qop("remove", "g")])
-        self.assertEqual(km._pending_queued(str(self.tpath)), ["f"], "a content-addressed remove takes that entry only")
+        self.assertEqual(km._pending_ledger(str(self.tpath)), ["f"], "a content-addressed remove takes that entry only")
 
     def test_a_rewrite_refolds_from_zero(self):
         self.append(self.tpath, self.SEQ)
-        self.assertEqual(km._pending_queued(str(self.tpath)), ["fifth"])
+        self.assertEqual(km._pending_ledger(str(self.tpath)), ["fifth"])
         self.rewrite(self.tpath, self.SEQ[:3])            # a rewind: the file is a different prefix now
-        self.assertEqual(km._pending_queued(str(self.tpath)), ["first", "second"])
+        self.assertEqual(km._pending_ledger(str(self.tpath)), ["first", "second"])
         _clear_folds()
-        self.assertEqual(km._pending_queued(str(self.tpath)), ["first", "second"])
+        self.assertEqual(km._pending_ledger(str(self.tpath)), ["first", "second"])
 
     def test_missing_file_is_empty(self):
-        self.assertEqual(km._pending_queued(str(self.tpath) + ".nope"), [])
+        self.assertEqual(km._pending_ledger(str(self.tpath) + ".nope"), [])
 
 
 class WakeTail(_Fold):

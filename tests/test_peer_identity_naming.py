@@ -48,7 +48,7 @@ class _Base(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
         td = Path(self.td.name)
-        self._saved = (km.jd.STATE, km.jd.GOALDIR, km.NAMES, km._tmux_sessions,
+        self._saved = (km.jd.STATE, km.jd.GOALDIR, km.NAMES, km._live_map,
                        km._states_awaiting_overlay)
         km.jd.STATE = td
         km.jd.GOALDIR = td / "goals"
@@ -60,10 +60,10 @@ class _Base(unittest.TestCase):
         (km.NAMES / PEER).write_text("web\t/tmp/notes-api\t#1EA1EB\twhite\n")
         km._SESSION_STAMP_CACHE.clear()
         km._states_awaiting_overlay = lambda sid: None
-        km._tmux_sessions = lambda: {SID: {"state": "", "since": None, "subagents": [], "bgTasks": []}}
+        km._live_map = lambda: {SID: {"state": "", "since": None, "subagents": [], "bgTasks": []}}
 
     def tearDown(self):
-        (km.jd.STATE, km.jd.GOALDIR, km.NAMES, km._tmux_sessions,
+        (km.jd.STATE, km.jd.GOALDIR, km.NAMES, km._live_map,
          km._states_awaiting_overlay) = self._saved
         km._SESSION_STAMP_CACHE.clear()
         self.td.cleanup()

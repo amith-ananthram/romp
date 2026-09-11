@@ -62,9 +62,9 @@ def _aline(t, text, uuid, parent):
 
 
 def _tm():
-    """One live tmux entry, every key the chat builder reads."""
+    """One live session row, every key the chat builder reads."""
     return {"state": "ready", "color": "#888888", "since": NOW - 60, "model": "", "effort": "",
-            "context": None, "compactPct": None, "backend": "tmux"}
+            "context": None, "compactPct": None, "backend": "sdk"}
 
 
 _IDENT = ("t@TESTHOST", "t")                    # the fixture's synthetic author
@@ -352,14 +352,14 @@ class PushCycle(unittest.TestCase):
             return real_fault(path, exc)
         with mock.patch.object(km, "_git_file_fault", reported), \
                 mock.patch.object(km, "_sessions", lambda now, window=None, forks=True: list(sessions)), \
-                mock.patch.object(km, "_tmux_sessions", lambda: dict(tmux)), \
+                mock.patch.object(km, "_live_map", lambda: dict(tmux)), \
                 mock.patch.object(km, "_chat_tab_sessions", lambda now, tm: list(sessions)), \
                 mock.patch.object(km, "build_feed", lambda *a, **k: {"working": [], "asks": []}), \
                 mock.patch.object(km, "build_timeline", lambda *a, **k: None), \
                 mock.patch.object(km, "_send_client",
                                   lambda c, key, msg, pre=None, sig=None: sent.append((key, msg))), \
                 _stderr() as err:
-            km._push([{"app": "chat", "alive": True}], tmux=tmux)
+            km._push([{"app": "chat", "alive": True}], live_map=tmux)
         return sent, err.getvalue()
 
     @staticmethod

@@ -3,12 +3,10 @@
 
 Since #904 the drain runs inside the pusher loop, every 0.5 s. An account limit parks every session's
 input for hours, and the drain then re-read usage.json (with its colormap ramps) and the retry-pause file
-once PER HELD SESSION per cycle, and re-parsed a held tmux session's moved transcript for a busy() verdict
+once PER HELD SESSION per cycle, and re-parsed a held session's moved transcript for a busy() verdict
 nothing read — 46 ms of a 0.5 s cycle on a seventeen-session board, measured on a replay. Now usage and
-the pause are read once per drain and ride the cycle's scope for _limit_hold; each sid's gates run cheapest
-first; and the parked-parse refresh runs only for a sid the holds let through — plus, first, for a sid whose
-until-busy hold is about to read busy(). Synthetic sids; a fake backend; the limit-queue test's fixture
-shape."""
+the pause are read once per drain and ride the cycle's scope for _limit_hold, and each sid's gates run
+cheapest first. Synthetic sids; a fake backend; the limit-queue test's fixture shape."""
 import inspect
 import os
 import tempfile
@@ -34,7 +32,6 @@ SIDS = ["11111111-2222-3333-4444-aaaaaaaaaa%02d" % i for i in range(1, 6)]
 
 
 class _FakeBackend:
-    corroborates_with_transcript = False
     def __init__(self): self.sent = []
     def send(self, sid, text, **kw): self.sent.append((sid, text)); return True
     def owns(self, sid): return True
@@ -49,14 +46,13 @@ class DrainHoists(unittest.TestCase):
         jd.STATE = Path(self.td.name)
         self.be = _FakeBackend()
         self._saved = {n: getattr(km, n) for n in
-                       ("_compacting_now", "_working_now", "_push_all", "_optimistic_echo", "_mark_views_dirty",
+                       ("_compacting_now", "_working_now", "_push_all", "_mark_views_dirty",
                         "_mark_compacting", "_mark_model_pending", "_path_of", "_usage", "_retry_paused_on",
-                        "_retry_pause_reason", "_refresh_parked_parse", "_deliver_send_batch")}
+                        "_retry_pause_reason", "_deliver_send_batch")}
         self._saved_backend = km.Sessions.backend_for
         km._compacting_now = lambda sid: False
         km._working_now = lambda sid: False
         km._push_all = lambda *a, **k: None
-        km._optimistic_echo = lambda sid, text, author="human": None
         km._mark_views_dirty = lambda *a, **k: None
         km._mark_compacting = lambda sid: None
         km._mark_model_pending = lambda sid, v: None
@@ -71,8 +67,6 @@ class DrainHoists(unittest.TestCase):
         self.pause_calls = []
         km._retry_paused_on = lambda: (self.pause_calls.append(1), False)[1]
         km._retry_pause_reason = lambda: ""
-        self.refreshed = []
-        km._refresh_parked_parse = lambda sid, now: self.refreshed.append(sid)
         self.delivered = []                                       # what the (stubbed) send batch was handed
         km._deliver_send_batch = lambda be, sid, ops: (self.delivered.append((sid, [o[1] for o in ops])), ops.clear(), True)[2]
         km._pending_ops.clear(); km._drain_hold.clear(); km._moving.clear()
@@ -92,7 +86,6 @@ class DrainHoists(unittest.TestCase):
         self.assertEqual(len(self.usage_calls), 1, "one usage.json reading for the whole drain")
         self.assertEqual(len(self.pause_calls), 1, "one retry-pause reading for the whole drain")
         self.assertEqual(sorted(km._pending_ops), sorted(SIDS), "every session stays held")
-        self.assertEqual(self.refreshed, [], "a held session's transcript is not re-parsed for a verdict nothing reads")
         self.assertEqual(self.delivered, [])
         self.assertIs(getattr(km._live_scope, "usage", km._UNSET), km._UNSET, "the drain clears its scope on the way out")
         self.assertIsNone(getattr(km._live_scope, "spend_pause", None))
@@ -128,16 +121,6 @@ class DrainHoists(unittest.TestCase):
         km._apply_pending_ops(1000)
         self.assertEqual(self.delivered, [(SIDS[0], ["go"])], "the drain fires it, as the per-sid read always did")
 
-    def test_c_the_parse_refresh_runs_only_for_a_session_the_holds_let_through(self):
-        self.capped = False
-        km._pending_ops[SIDS[0]] = [("send", "go")]
-        km._pending_ops[SIDS[1]] = [("send", "later")]
-        km._moving.add(SIDS[1])                                   # a move in flight: skipped before any read
-        km._apply_pending_ops(1000)
-        self.assertEqual(self.refreshed, [SIDS[0]], "the refresh ran for the deliverable sid only")
-        self.assertEqual(self.delivered, [(SIDS[0], ["go"])], "…and its send was delivered")
-        self.assertNotIn(SIDS[0], km._pending_ops)
-
     def test_d_the_drain_still_answers_a_bare_call(self):
         km._pending_ops[SIDS[0]] = [("send", "go")]
         km._apply_pending_ops()                                   # tests and older callers pass nothing
@@ -152,60 +135,36 @@ class DrainHoists(unittest.TestCase):
         self.assertIn("_live_scope.usage = _usage()", drain)
         self.assertIn("_live_scope.usage = _UNSET", drain, "the scope is cleared even when the loop raises")
         held = drain.index("_limit_hold(sid)")
-        refresh = drain.index("_refresh_parked_parse(sid, now)", held)
-        self.assertLess(held, refresh, "the account hold is checked before the parse")
-        self.assertLess(refresh, drain.index("_compacting_now(sid) or _working_now(sid)"),
-                        "…and the parse before the gates that read it")
-        self.assertLess(drain.index("_refresh_parked_parse(sid, now)"), drain.index("_drain_hold_open(sid, hold)"),
-                        "an until-busy hold's busy() read sees a current parse")
+        self.assertLess(held, drain.index("_compacting_now(sid) or _working_now(sid)"),
+                        "the account hold is checked before the gates that read the transcript")
 
     def test_f_the_scope_is_cleared_when_the_loop_raises(self):
         km._pending_ops[SIDS[0]] = [("send", "go")]
-        def boom(sid, now): raise RuntimeError("parse refresh blew up")
-        km._refresh_parked_parse = boom
+        def boom(sid): raise RuntimeError("the working gate blew up")
+        km._working_now = boom
         with self.assertRaises(RuntimeError):
             km._apply_pending_ops(1000)
         self.assertIs(getattr(km._live_scope, "usage", km._UNSET), km._UNSET)
         self.assertIsNone(getattr(km._live_scope, "spend_pause", None))
         self.assertIsNone(km._limit_hold(SIDS[0]), "…so the next fresh caller reads usage.json, not a stale scope")
 
-    def test_g_an_until_busy_hold_reads_busy_against_a_current_parse(self):
-        # the hold keyed on the tmux row's flip reads busy(), which a tmux backend corroborates against the
-        # cached parse; before 2026-09-05 the whole-set pre-pass kept that cache current, so the drain must
-        # refresh such a sid BEFORE the hold's read — once, not again below (review find 2026-09-05)
-        km._pending_ops[SIDS[0]] = [("send", "behind the hold")]
-        km._drain_hold[SIDS[0]] = (time.monotonic() + 1000, True)   # until_busy, fallback far away
-        km._pending_ops[SIDS[1]] = [("send", "behind a clock")]
-        km._drain_hold[SIDS[1]] = (time.monotonic() + 1000, False)  # a clock hold reads nothing
-        km._apply_pending_ops(1000)
-        self.assertEqual(self.refreshed, [SIDS[0]], "refreshed once, for the busy-reading hold only")
-        self.assertEqual(sorted(km._pending_ops), sorted(SIDS[:2]), "both still held (busy() read False, deadlines far)")
-        self.assertEqual(self.delivered, [])
-        # the same sid with a hold whose window has closed on the clock: refreshed once for the read, once more
-        # below would be a second parse of an unmoved file — the refresh is idempotent by its cache check, and
-        # here the stub just counts: the drain calls it for the hold's read and again ahead of the gates
-        km._drain_hold[SIDS[0]] = (time.monotonic() - 1, True)
-        self.be.busy = lambda sid: False
-        self.refreshed.clear()
-        km._apply_pending_ops(1000)
-        self.assertNotIn(SIDS[0], km._pending_ops, "the fallback deadline passed: delivered")
-        self.assertEqual(self.refreshed, [SIDS[0], SIDS[0]])
-
-    def test_h_the_refresh_and_the_gates_run_outside_the_queue_lock_and_a_yielded_cycle_reads_nothing(self):
-        # the lock guards the queue's reads and pops only; a transcript parse (seconds on a large file) must
-        # never run under it — a first rebase of this change put the refresh inside a locked walk and every
-        # handler's park and cancel stalled behind it (rebase review find 2026-09-05)
+    def test_h_the_gates_run_outside_the_queue_lock_and_a_yielded_cycle_reads_nothing(self):
+        # the lock guards the queue's reads and pops only; the gates (the working read off a transcript parse,
+        # a backend's busy() under its own lock) must never run under it — a first rebase of this change put
+        # a per-sid read inside a locked walk and every handler's park and cancel stalled behind it (rebase
+        # review find 2026-09-05)
         owned = []
-        km._refresh_parked_parse = lambda sid, now: owned.append((sid, km._pending_ops_lock._is_owned()))
+        km._working_now = lambda sid: (owned.append(("gate", sid, km._pending_ops_lock._is_owned())), False)[1]
+        self.be.busy = lambda sid: (owned.append(("busy", sid, km._pending_ops_lock._is_owned())), False)[1]
         km._pending_ops[SIDS[0]] = [("send", "go")]                       # a deliverable sid
         km._pending_ops[SIDS[1]] = [("send", "behind the hold")]
         km._drain_hold[SIDS[1]] = (time.monotonic() + 1000, True)          # an until-busy hold: its busy() read
         km._apply_pending_ops(1000)
-        self.assertEqual(sorted(owned), sorted([(SIDS[0], False), (SIDS[1], False)]),
-                         "both refreshes ran, neither with the lock held")
+        self.assertEqual(sorted(owned), sorted([("gate", SIDS[0], False), ("busy", SIDS[1], False)]),
+                         "the gate and the hold's busy() read both ran, neither with the lock held")
         self.assertFalse(km._pending_ops_lock._is_owned(), "…and the lock is not held on the way out")
         # a handler (another thread — the lock is re-entrant) holding the lock: the drain yields the cycle
-        # before it reads anything — no usage read, no parse, no scope left behind
+        # before it reads anything — no usage read, no gate, no scope left behind
         owned.clear(); self.usage_calls.clear()
         km._pending_ops.pop(SIDS[1], None); km._drain_hold.pop(SIDS[1], None)
         km._pending_ops[SIDS[0]] = [("send", "again")]
@@ -221,7 +180,7 @@ class DrainHoists(unittest.TestCase):
             self.assertIn(SIDS[0], km._pending_ops, "the walk yielded to the handler")
         finally:
             release.set(); th.join(5)
-        self.assertEqual(owned, [], "a yielded cycle parses nothing")
+        self.assertEqual(owned, [], "a yielded cycle reads no gate")
         self.assertEqual(self.usage_calls, [], "…and reads no usage")
         self.assertIs(getattr(km._live_scope, "usage", km._UNSET), km._UNSET)
 

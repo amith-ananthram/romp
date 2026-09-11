@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """The live-tail revision. Both backends keep an in-memory tail the chat merges ahead of the transcript
-(the SDK backend's `_live`, the kernel's `_tmux_echo` store), and the chat-build signature keys a tab on
-that tail without hashing its atoms per cycle. Each backend therefore counts: a per-sid revision that
-advances on every change to the tail and only then (the SDK backend's _touch_live, the kernel's
-_tmux_echo_bump). The tests here pin the two halves of that contract: every writer bumps (an add, a
+(the SDK backend's `_live`, the Codex backend's per-session list), and the chat-build signature keys a tab on
+that tail without hashing its atoms per cycle. A backend with a counter keeps a per-sid revision that
+advances on every change to the tail and only then (the SDK backend's _touch_live). The tests here pin
+the two halves of that contract: every writer bumps (an add, a
 replace, a pop, a flag write, a reworded echo, including the flag writes _mark_dropped_echoes makes
 outside the live-tail lock), and a call that changed nothing (a read, a prune that retired nothing, a
 settle over echoes already marked, a queue miss) leaves the revision alone; plus the kernel's dispatcher,
@@ -225,68 +225,21 @@ class SdkLiveTailRevision(unittest.TestCase):
         BE._live.clear()
 
 
-class TmuxEchoRevision(unittest.TestCase):
-    def setUp(self):
-        km._tmux_echo.pop(SID, None)
-        km._tmux_echo_rev.pop(SID, None)
-
-    tearDown = setUp
-
-    def rev(self):
-        return km._TMUX.live_rev(SID)
-
-    def test_add_prune_settle_and_dismiss_each_bump_and_no_ops_do_not(self):
-        self.assertEqual(self.rev(), 0)
-        km._tmux_echo_add(SID, "a typed line")
-        self.assertEqual(self.rev(), 1)
-        km._tmux_echo_add(SID, "a second one")
-        self.assertEqual(self.rev(), 2)
-        km._tmux_echo_atoms(SID)
-        self.assertEqual(self.rev(), 2, "a read is not a change")
-        km._tmux_echo_prune(SID, set(), set())
-        self.assertEqual(self.rev(), 2, "a prune that retires nothing is not a change")
-        km._tmux_echo_prune(SID, set(), {ek("a typed line")})
-        self.assertEqual(self.rev(), 3, "the echo landed by text")
-        self.assertEqual([a["_echo_text"] for a in km._tmux_echo_atoms(SID)], ["a second one"])
-        t = km._tmux_echo_atoms(SID)[0]["t"]
-        km._tmux_echo_settle(SID, human_floor=t - 1)
-        self.assertEqual(self.rev(), 3, "not overtaken: nothing marked")
-        km._tmux_echo_settle(SID, human_floor=t + 5, still_queued=("a second one",))
-        self.assertEqual(self.rev(), 3, "still owed by the queue ledger: the settle stands down, no change")
-        km._tmux_echo_settle(SID, human_floor=t + 5)
-        self.assertEqual(self.rev(), 4, "the `dropped` mark is a change")
-        self.assertTrue(km._tmux_echo_atoms(SID)[0].get("dropped"))
-        km._tmux_echo_settle(SID, human_floor=t + 5)
-        self.assertEqual(self.rev(), 4, "already marked: a second settle changes nothing")
-        self.assertEqual(km._TMUX.dismiss_echo(SID, t=t), "a second one")
-        self.assertEqual(self.rev(), 5)
-        self.assertIsNone(km._TMUX.dismiss_echo(SID, t=t), "a miss (already gone)")
-        self.assertEqual(self.rev(), 5)
-        self.assertNotIn(SID, km._tmux_echo, "the sid entry went with its last echo")
-        self.assertEqual(self.rev(), 5, "...and its revision stays readable")
-
-    def test_every_writer_site_bumps_by_source(self):
-        for fn in (km._tmux_echo_add, km._tmux_echo_prune, km._tmux_echo_settle, km._TMUX.dismiss_echo):
-            self.assertIn("_tmux_echo_bump(", inspect.getsource(fn), fn.__name__)
-        self.assertNotIn("_tmux_echo_bump(", inspect.getsource(km._tmux_echo_atoms), "a read")
-
-
 class SessionsLiveRevDispatch(unittest.TestCase):
     def setUp(self):
-        self._saved = km._sdk
-        km._tmux_echo.pop(SID, None)
-        km._tmux_echo_rev.pop(SID, None)
+        self._saved = (km._sdk, km._codex)
 
     def tearDown(self):
-        km._sdk = self._saved
-        km._tmux_echo.pop(SID, None)
-        km._tmux_echo_rev.pop(SID, None)
+        km._sdk, km._codex = self._saved
 
-    def test_a_tmux_sid_reads_the_echo_store_revision(self):
+    def test_an_unowned_sid_answers_with_its_empty_tail(self):
+        # no backend owns the sid → the unowned route, which keeps no counter and no tail: the dispatcher
+        # answers with the serialized empty tail, stable across reads
         km._sdk = lambda: None
-        self.assertEqual(km.Sessions.live_rev(SID), 0)
-        km._tmux_echo_add(SID, "hello")
-        self.assertEqual(km.Sessions.live_rev(SID), 1)
+        km._codex = lambda: None
+        self.assertIs(km.Sessions.backend_for(SID), km._UNOWNED)
+        self.assertEqual(km.Sessions.live_rev(SID), json.dumps([]))
+        self.assertEqual(km.Sessions.live_rev(SID), json.dumps([]), "stable: nothing can move an empty tail")
 
     def test_an_sdk_sid_reads_the_backend_counter(self):
         be = _backend()
@@ -294,9 +247,7 @@ class SessionsLiveRevDispatch(unittest.TestCase):
         km._sdk = lambda: be
         self.assertEqual(km.Sessions.live_rev(SID), 0)
         be._stash_live(SID, "e1", _echo("e1", "typed", 1))
-        self.assertEqual(km.Sessions.live_rev(SID), 1)
-        km._tmux_echo_add(SID, "a stray tmux echo under the same sid")
-        self.assertEqual(km.Sessions.live_rev(SID), 1, "dispatch by the owning backend, not a union")
+        self.assertEqual(km.Sessions.live_rev(SID), 1, "dispatch by the owning backend")
 
     def test_a_backend_without_a_counter_answers_with_the_tail_itself(self):
         atoms = [{"uuid": "c1", "t": 1, "message": {"content": [{"type": "text", "text": "hi"}]}}]

@@ -125,7 +125,7 @@ class ThreadRowsRoute(unittest.TestCase):
         km._sdk_ready = lambda: True
         km._create_sdk_session = lambda nm, cwd, **kw: (created.append(nm), ("99999999-0000-0000-0000-000000000000", {}))[1]
         km._apply_new_session_prefs = lambda sid, b: (prefs.append((sid, b.get("model"))), {"model": b.get("model")})[1]
-        km._live_names = lambda tmux: {}
+        km._live_names = lambda live_map: {}
         _mk_thread(PARENT, TSID, name="web-comment-1")
         try:
             out = self._post("/new", {"name": "web-comment-1", "dir": "/tmp", "model": "claude-fable-5-1"})
@@ -144,7 +144,7 @@ class ThreadRowsRoute(unittest.TestCase):
         saved = (km._sdk_ready, km._create_sdk_session, km._live_names)
         km._sdk_ready = lambda: True
         km._create_sdk_session = lambda nm, cwd, **kw: (created.append(nm), ("99999999-0000-0000-0000-000000000000", {}))[1]
-        km._live_names = lambda tmux: {}
+        km._live_names = lambda live_map: {}
         try:
             out = self._post("/new", {"name": "brand-new", "dir": "/tmp"})
         finally:
@@ -160,7 +160,7 @@ class ThreadRowsRoute(unittest.TestCase):
         saved = (km._sdk_ready, km._create_sdk_session, km._live_names)
         km._sdk_ready = lambda: True
         km._create_sdk_session = lambda nm, cwd, **kw: (created.append(nm), ("99999999-0000-0000-0000-000000000000", {}))[1]
-        km._live_names = lambda tmux: {}
+        km._live_names = lambda live_map: {}
         _mk_thread(PARENT, TSID, name=None, reg_name="thread-" + TSID[:8])
         try:
             for nm in ("thread-" + TSID[:8], TSID[:8]):
@@ -179,7 +179,7 @@ class ThreadRowsRoute(unittest.TestCase):
         saved = (km._sdk_ready, km._create_sdk_session, km._live_names)
         km._sdk_ready = lambda: True
         km._create_sdk_session = lambda nm, cwd, **kw: (created.append(nm), ("99999999-0000-0000-0000-000000000000", {}))[1]
-        km._live_names = lambda tmux: {}
+        km._live_names = lambda live_map: {}
         _mk_thread(PARENT, TSID, name="web-comment-1", alive=False)
         try:
             out = self._post("/new", {"name": "web-comment-1", "dir": "/tmp"})
@@ -194,7 +194,7 @@ class ThreadRowsRoute(unittest.TestCase):
         saved = (km._sdk_ready, km._create_sdk_session, km._live_names)
         km._sdk_ready = lambda: True
         km._create_sdk_session = lambda nm, cwd, **kw: (created.append(nm), ("99999999-0000-0000-0000-000000000000", {}))[1]
-        km._live_names = lambda tmux: {}
+        km._live_names = lambda live_map: {}
         _mk_thread(PARENT, TSID, name="web-comment-1", status="promoted")
         try:
             self._post("/new", {"name": "web-comment-1", "dir": "/tmp"})
@@ -209,7 +209,7 @@ class ThreadRowsRoute(unittest.TestCase):
         saved = (km._sdk_ready, km._create_sdk_session, km._live_names, km._thread_names)
         km._sdk_ready = lambda: True
         km._create_sdk_session = lambda nm, cwd, **kw: (created.append(nm), ("99999999-0000-0000-0000-000000000000", {}))[1]
-        km._live_names = lambda tmux: {}
+        km._live_names = lambda live_map: {}
         km._thread_names = lambda: None
         try:
             with self.assertRaises(urllib.error.HTTPError) as cm:
@@ -221,7 +221,7 @@ class ThreadRowsRoute(unittest.TestCase):
 
     def test_fork_and_rename_refuse_a_threads_name(self):
         saved = km._live_names
-        km._live_names = lambda tmux: {PARENT_NAME: PARENT}
+        km._live_names = lambda live_map: {PARENT_NAME: PARENT}
         _mk_thread(PARENT, TSID, name="web-comment-1")
         try:
             out = self._post("/fork", {"parent": PARENT_NAME, "name": "web-comment-1"})
@@ -238,7 +238,7 @@ class ThreadRowsRoute(unittest.TestCase):
         import inspect
         src = inspect.getsource(km.Handler._dispatch_ws)
         self.assertLess(src.index("elif _thread_name_refusal(nm, _thread_names())"),
-                        src.index('elif msg.get("backend") == "sdk":'),
+                        src.index('elif msg.get("backend") in (None, "", "sdk"):'),
                         "the create dialog refuses a thread's name BEFORE the sdk create arm")
         ws = inspect.getsource(km._drive) if hasattr(km, "_drive") else ""
         src2 = ws or inspect.getsource(km.Handler._dispatch_ws)

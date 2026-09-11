@@ -112,14 +112,14 @@ class InterruptingChip(unittest.TestCase):
         km._interrupt_clicked.clear()
 
     def test_stamp_reads_interrupting_before_the_stop_lands(self):
-        # tmux path (no SDK flag in the snapshot): stop sent, no stop record yet → interrupting
+        # no backend flag in the snapshot: stop sent, no stop record yet → interrupting
         km._interrupt_clicked[SID] = NOW - 2
         self.assertTrue(km._interrupting(SID, {"turns": [{"atoms": []}]}, NOW, None),
                         "stop sent, no stop record yet → interrupting")
 
     def test_a_closed_tail_without_a_stop_record_stays_interrupting(self):
         # THE FIX (the user 2026-07-07): the open/closed state of the turn is no longer consulted at all —
-        # only the stop RECORD (or the cap) settles a tmux interrupt. A tail that momentarily reads closed
+        # only the stop RECORD (or the cap) settles the interrupt. A tail that momentarily reads closed
         # mid-settle must NOT drop the chip to 'working' (the flicker they reported).
         km._interrupt_clicked[SID] = NOW - 2
         self.assertTrue(km._interrupting(SID, {"turns": [{"atoms": []}]}, NOW, None),
@@ -438,13 +438,22 @@ class AutoNudgeInterruptGate(unittest.TestCase):
         return g
 
     def _stub(self):
+        """The nudge goes out through the owning backend (Sessions.backend_for(sid).send): a fake that
+        records each (sid, body) stands in, with an empty queue so the in-flight guard reads nothing."""
         sent = []
-        saved = km._tmux_send, jd.optimistic_followup
-        km._tmux_send = lambda name, body, **kw: sent.append((name, body))
+        saved = km.Sessions.backend_for, jd.optimistic_followup
+
+        class _Be:
+            def owns(self, sid): return True
+            def busy(self, sid): return False
+            def pending_queued(self, sid): return []
+            def send(self, sid, body): sent.append((sid, body)); return True
+        be = _Be()
+        km.Sessions.backend_for = staticmethod(lambda sid: be)
         jd.optimistic_followup = lambda sid, gid: True
 
         def restore():
-            km._tmux_send, jd.optimistic_followup = saved
+            km.Sessions.backend_for, jd.optimistic_followup = staticmethod(saved[0]), saved[1]
         return sent, restore
 
     def test_control_a_normally_ended_stall_still_nudges(self):
