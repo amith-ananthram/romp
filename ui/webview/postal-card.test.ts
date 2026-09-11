@@ -55,10 +55,10 @@ test("the kind is coloured text in the meta slot, never a chip, at prose weight,
 test("the incoming card wears the peer's hue at its ground's own lightness, in both themes; the sent card does not", () => {
   // the user 2026-09-11, who missed the tint T302 had removed the day before on their own side-by-side ruling. A hue at
   // the ground's lightness, not a mix: a mix lifts the ground and the dimmest kind word fell under the ramp's 4.5:1 floor
-  assert.match(CSS, /\.turn-postal-service\.postal-service-in \.notice:not\(\.notice-slim\) \{\n  background: oklch\(from var\(--notice-rail, var\(--box-bg\)\) var\(--postal-wash-l\) var\(--postal-wash-c\) h\); \}/,
-               "one declaration: the rail's hue (the peer's colour) at the ground's lightness and a gentle chroma");
+  assert.match(CSS, /\.turn-postal-service\.postal-service-in \.notice:not\(\.notice-slim\) \{\n  background: oklch\(from var\(--notice-rail, var\(--box-bg\)\) var\(--postal-wash-l, 0\.263\) var\(--postal-wash-c, 0\.03\) h\); \}/,
+               "one declaration: the rail's hue (the peer's colour) at the ground's lightness and a gentle chroma, each token with a fallback");
   assert.match(CSS, /\n  --postal-wash-l: 0\.263;  --postal-wash-c: 0\.03;/, "the dark ground's lightness and the chroma, beside the kind tokens");
-  assert.match(CSS, /\n  --postal-wash-l: 0\.919;/, "the light ground's lightness, in the light block");
+  assert.match(CSS, /\n  --postal-wash-l: 0\.919;  --postal-wash-c: 0\.045;/, "the light ground's lightness and a stronger chroma for the cream's warm hue, in the light block");
   assert.doesNotMatch(CSS, /theme-light[^{}]*postal-service-in[^{}]*\{[^}]*background/, "no theme takes it back");
   assert.doesNotMatch(CSS, /postal-service-out[^{}]*\{[^}]*oklch\(from var\(--notice-rail/, "the sent card is untinted");
   assert.match(fn("renderPostalService"), /rail: ev\.color \? ev\.color\.bg : undefined/, "the rail is the peer's colour, so the hue is the peer's");
