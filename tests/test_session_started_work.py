@@ -60,12 +60,16 @@ def tresult(t, uuid, parent, tool_use_id, text="Workflow launched in background.
 PLACE_ASK = '{"ops":[{"why":"the user asked for retries","do":"mint","text":"Add retries to the notes-api client"}]}'
 # the planner's realistic reply for an ENDED segment planned in one work-run: the ask's placement first, the
 # step under it, then the review as what the prompt calls a distinct deliverable
-REVIEW_AS_TOP = ('{"ops":[{"why":"the user asked for retries","do":"mint","text":"Add retries to the notes-api client"},'
+REVIEW_AS_TOP = ('{"ops":[{"why":"the user asked for retries","do":"mint","kind":"ask","text":"Add retries to the notes-api client"},'
                  '{"why":"progress on the retries","do":"sub","ref":1,"text":"Wrote the retry loop"},'
-                 '{"why":"a distinct review deliverable","do":"mint","text":"Adversarial review of the retry diff"}]}')
+                 '{"why":"a distinct review deliverable","do":"mint","kind":"process","text":"Adversarial review of the retry diff"}]}')
+# the same reply with NO labels: the words fill them in (exactly one ask, the one nearest the user's message)
+REVIEW_UNLABELED = ('{"ops":[{"why":"the user asked for retries","do":"mint","text":"Add retries to the notes-api client"},'
+                    '{"why":"progress on the retries","do":"sub","ref":1,"text":"Wrote the retry loop"},'
+                    '{"why":"a distinct review deliverable","do":"mint","text":"Adversarial review of the retry diff"}]}')
 # ...and for a segment whose ask the prompt-run already placed (the live case): the step and the review only
 REVIEW_LATER = ('{"ops":[{"why":"progress on the retries","do":"sub","under":1,"text":"Wrote the retry loop"},'
-                '{"why":"a distinct review deliverable","do":"mint","text":"Adversarial review of the retry diff"}]}')
+                '{"why":"a distinct review deliverable","do":"mint","kind":"process","text":"Adversarial review of the retry diff"}]}')
 
 
 SKIP = '{"ops":[{"why":"skip","do":"skip"}]}'
@@ -171,68 +175,115 @@ class WorkflowMidGoal(_Harness):
         self.assertEqual(rev["parentId"], tops[0]["id"])
         self.assertEqual(rev["born"]["via"], "workflow")
 
-    def test_in_a_human_segment_a_mint_matching_no_launch_keeps_its_card(self):
-        # the manager's second ruling: in a human-triggered segment only a mint that matches a launch (its words in
-        # the mint's text or why) is the session's process; a mint like no launch may be a second thing the user
-        # asked for, so it stays a card (the trigger-less rule below still demotes everything)
-        calls, store = self._run(self._records(script=WF_UNRELATED), [("adversarial review workflow", REVIEW_AS_TOP), (ASK[:40], PLACE_ASK)])
-        self.assertEqual(sorted(nd["text"] for nd in self._tops(store)),
-                         ["Add retries to the notes-api client", "Adversarial review of the retry diff"])
-        self.assertIsNone(self._by_text(store, "Adversarial review").get("born"))
+    def test_labels_are_trusted_a_process_mint_nests_even_with_no_launch_and_an_ask_stays(self):
+        # the planner knows: a review round it labelled process nests under the ask (via work: no launch in the
+        # segment), and a second deliverable labelled ask keeps its card
+        records = [
+            uline(T0, ASK, "u1"),
+            aline(T0 + 60, "Wrote the retry loop and reviewed it myself; also compared the two libraries.", "a1", "u1"),
+        ]
+        reply = ('{"ops":[{"why":"the user asked for retries","do":"mint","kind":"ask","text":"Add retries to the notes-api client"},'
+                 '{"why":"my own review round","do":"mint","kind":"process","text":"Self-review of the retry loop"},'
+                 '{"why":"a write-up the user asked to read","do":"mint","kind":"ask","text":"Compare the two retry libraries"}]}')
+        calls, store = self._run(records, [("reviewed it myself", reply)])
+        self.assertEqual(sorted(nd["text"] for nd in self._tops(store)), ["Add retries to the notes-api client", "Compare the two retry libraries"])
+        rev = self._by_text(store, "Self-review")
+        self.assertEqual(rev["parentId"], self._by_text(store, "Add retries")["id"])
+        self.assertEqual(rev["born"]["via"], "work")
+        self.assertEqual(rev["born"]["why"], "my own review round", "no launch: the planner's own why")
 
-    def test_the_asks_own_mint_is_chosen_by_its_words_not_its_position(self):
-        # a review-first reply: the mint nearest the user's words is the ask and keeps the card; the review nests
-        swapped = ('{"ops":[{"why":"a distinct review deliverable","do":"mint","text":"Adversarial review of the retry diff"},'
-                   '{"why":"the user asked for retries","do":"mint","text":"Add retries to the notes-api client"},'
+    def test_unlabelled_mints_with_a_launch_keep_exactly_one_the_nearest_the_users_words(self):
+        calls, store = self._run(self._records(), [("adversarial review workflow", REVIEW_UNLABELED), (ASK[:40], PLACE_ASK)])
+        tops = self._tops(store)
+        self.assertEqual([nd["text"] for nd in tops], ["Add retries to the notes-api client"])
+        rev = self._by_text(store, "Adversarial review")
+        self.assertEqual(rev["parentId"], tops[0]["id"])
+        self.assertEqual(rev["born"]["via"], "workflow")
+
+    def test_the_crown_reads_the_text_never_the_why_or_the_position(self):
+        # review first, and its why names the project's nouns; the ask's text is nearest the user's words
+        swapped = ('{"ops":[{"why":"the retries for the notes-api client the user wanted","do":"mint","text":"Adversarial review of the retry diff"},'
+                   '{"why":"a distinct deliverable","do":"mint","text":"Add retries to the notes-api client"},'
                    '{"why":"progress on the retries","do":"sub","ref":2,"text":"Wrote the retry loop"}]}')
         calls, store = self._run(self._records(), [("adversarial review workflow", swapped), (ASK[:40], PLACE_ASK)])
         tops = self._tops(store)
         self.assertEqual([nd["text"] for nd in tops], ["Add retries to the notes-api client"])
         rev = self._by_text(store, "Adversarial review")
         self.assertEqual(rev["parentId"], tops[0]["id"])
-        self.assertEqual(rev["born"]["via"], "workflow")
-        step = self._by_text(store, "Wrote the retry loop")
-        self.assertEqual(step["parentId"], tops[0]["id"], "the same-reply ref followed the ask's remapped position")
+        self.assertEqual(self._by_text(store, "Wrote the retry loop")["parentId"], tops[0]["id"], "the same-reply ref followed the ask")
 
-    def test_the_planners_ask_mark_alone_decides_against_a_better_worded_rival(self):
-        # the marked title shares NO word with the user's message; the rival mint repeats the user's words and would
-        # win on overlap; the review-first order would once have crowned the review. The mark alone decides.
-        marked = ('{"ops":[{"why":"a distinct review deliverable","do":"mint","text":"Adversarial review of the retry diff"},'
-                  '{"why":"what was asked","do":"mint","text":"Add retries to the notes-api client"},'
-                  '{"why":"the shape the user wants","do":"mint","ask":true,"text":"Harden outbound calls against dropped packets"}]}')
-        calls, store = self._run(self._records(), [("adversarial review workflow", marked), (ASK[:40], PLACE_ASK)])
-        tops = sorted(nd["text"] for nd in self._tops(store))
-        self.assertIn("Harden outbound calls against dropped packets", tops, "the mark crowns the paraphrase")
-        self.assertIn("Add retries to the notes-api client", tops, "the rival, nearer the user's words than any launch, stays a card too")
+    def test_a_process_label_on_the_placed_path_nests_and_an_ask_label_there_keeps_its_card(self):
+        # the live case: the prompt run placed the message; the work run's mints carry labels, and both are honoured
+        open_recs = self._records()[:3]
+        reply = ('{"ops":[{"why":"progress","do":"sub","under":1,"text":"Wrote the retry loop"},'
+                 '{"why":"the review round","do":"mint","kind":"process","text":"Adversarial review of the retry diff"},'
+                 '{"why":"the user also asked to read this","do":"mint","kind":"ask","text":"Compare the two retry libraries"}]}')
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            tpath = td / (SID + ".jsonl")
+            saved = (jd.GOALDIR, jd.PCACHE, jd.plan_llm, jd.opener_llm, jd._group_store)
+            jd.GOALDIR, jd.PCACHE = td / "goals", td / "pcache"
+            def fake(text, *a, **k):
+                if "adversarial review workflow" in text:
+                    return reply
+                return PLACE_ASK if ASK[:40] in text else SKIP
+            jd.plan_llm = jd.opener_llm = fake
+            jd._group_store = lambda *a, **k: None
+            try:
+                tpath.write_text("\n".join(json.dumps(r) for r in open_recs) + "\n")
+                jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear()
+                jd._plan_session(SID, str(tpath), NOW)
+                tpath.write_text("\n".join(json.dumps(r) for r in self._records()) + "\n")
+                jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear()
+                jd._plan_session(SID, str(tpath), NOW)
+                store = jd.load_goals(SID)
+            finally:
+                (jd.GOALDIR, jd.PCACHE, jd.plan_llm, jd.opener_llm, jd._group_store) = saved
+        self.assertEqual(sorted(nd["text"] for nd in self._tops(store)), ["Add retries to the notes-api client", "Compare the two retry libraries"])
         rev = self._by_text(store, "Adversarial review")
-        self.assertEqual(rev["parentId"], self._by_text(store, "Harden outbound")["id"], "the review nests under the marked ask")
+        self.assertEqual(rev["parentId"], self._by_text(store, "Add retries")["id"])
+        self.assertIsNone(self._by_text(store, "Compare the two").get("born"))
 
-    def test_a_short_approval_still_keeps_a_top_and_the_mark_beats_a_launch_word_in_its_why(self):
-        # "yes, go ahead": every mint shares no word with the message. The marked mint's why shares a word with the
-        # launch; before this fold the filter excluded it, no ask was crowned, every mint demoted, and with no open
-        # top the user's approved deliverable never reached the board
-        recs = [
-            uline(T0, "yes, go ahead", "u1"),
-            aline(T0 + 60, "Going ahead with the retry loop.", "a1", "u1", stop="tool_use", launch=("Workflow", {"script": WF_SCRIPT})),
-            tresult(T0 + 61, "u2", "a1", "toolu_a1"),
-            aline(T0 + 400, "Wrote the retry loop and launched an adversarial review workflow over the diff.", "a2", "u2"),
+    def test_unlabelled_mints_that_all_read_like_the_launch_nest_when_a_top_exists(self):
+        # two unlabelled mints, both fitting the launch's words better than the user's short approval; the ask was
+        # placed by the prompt run, so both nest under it: nothing is crowned by position
+        records = [
+            uline(T0, ASK, "u0"),
+            aline(T0 + 30, "Wrote the retry loop.", "a0", "u0"),
+            uline(T0 + 900, "yes, go ahead", "u1", "a0"),
+            aline(T0 + 960, "Going ahead.", "a1", "u1", stop="tool_use", launch=("Workflow", {"script": WF_SCRIPT})),
+            tresult(T0 + 961, "u2", "a1", "toolu_a1"),
+            aline(T0 + 1400, "Launched an adversarial review workflow over the retry diff and its lens reviewers.", "a2", "u2"),
         ]
-        marked = ('{"ops":[{"why":"a distinct review deliverable","do":"mint","text":"Adversarial review of the retry diff"},'
-                  '{"why":"the retry diff the user approved","do":"mint","ask":true,"text":"Harden outbound calls against dropped packets"}]}')
-        calls, store = self._run(recs, [("adversarial review workflow", marked)])
-        tops = [nd["text"] for nd in self._tops(store)]
-        self.assertEqual(tops, ["Harden outbound calls against dropped packets"], "the marked deliverable reaches the board")
-        self.assertEqual(self._by_text(store, "Adversarial review")["parentId"], self._tops(store)[0]["id"])
-        # ...and with no mark at all, a human segment still keeps one top (the first mint, when no words help)
-        unmarked = ('{"ops":[{"why":"a distinct review deliverable","do":"mint","text":"Adversarial review of the retry diff"},'
-                    '{"why":"the approved work","do":"mint","text":"Harden outbound calls against dropped packets"}]}')
-        calls, store = self._run(recs, [("adversarial review workflow", unmarked)])
-        self.assertEqual(len(self._tops(store)), 1, "never nothing for a human segment")
+        two = ('{"ops":[{"why":"a","do":"mint","text":"Lens reviewers over the diff"},'
+               '{"why":"b","do":"mint","text":"Adversarial review of the retry diff"}]}')
+        calls, store = self._run(records, [("adversarial review workflow", two), (ASK[:40], PLACE_ASK)])
+        tops = self._tops(store)
+        self.assertEqual([nd["text"] for nd in tops], ["Add retries to the notes-api client"], "the open ask hosts; nothing is crowned")
+        for frag in ("Lens reviewers", "Adversarial review"):
+            self.assertEqual(self._by_text(store, frag)["parentId"], tops[0]["id"], frag)
 
-    def test_the_parser_carries_the_ask_mark_and_the_prompt_asks_for_it(self):
-        ops = jd._parse_plan('{"ops":[{"why":"w","do":"mint","ask":true,"text":"Add retries"},{"why":"w","do":"mint","text":"Other"}]}', 0)
-        self.assertEqual([o.get("ask") for o in ops], [True, None])
-        self.assertIn('Put "ask": true on the one mint that is the deliverable the user\'s own message asked for', jd.PLAN_SYS)
+    def test_with_no_top_at_all_the_mint_least_like_the_launch_keeps_the_card(self):
+        # the last resort: no label, every mint shares a word with the launch, no top to nest under; the message must
+        # place somewhere, so the least launch-like mint keeps the card (never the first by position)
+        store = {"rompUuid": SID, "seq": 0, "placements": {}, "nodes": {}}
+        seg = {"id": "s1", "trigger": "u1", "atoms": [
+            {"type": "user", "uuid": "u1", "author": "human", "message": {"content": [{"type": "text", "text": "yes, go ahead"}]}},
+            {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "w1", "name": "Workflow", "input": {"script": WF_SCRIPT}}]}}]}
+        ops = [{"do": "mint", "why": "a", "text": "Lens reviewers over the retry diff"},
+               {"do": "mint", "why": "b", "text": "Harden the outbound retry calls"}]
+        got = jd._demote_session_mints(ops, seg, store, [], None, True)
+        self.assertEqual([o["do"] for o in got], ["mint", "sub"])
+        self.assertEqual(got[0]["text"], "Harden the outbound retry calls")
+        self.assertEqual(got[1]["ref"], 1)
+
+    def test_the_parser_carries_the_label_and_the_earlier_mark_and_the_prompt_asks_for_it(self):
+        ops = jd._parse_plan('{"ops":[{"why":"w","do":"mint","kind":"ask","text":"Add retries"},{"why":"w","do":"mint","kind":"process","text":"Review"},'
+                             '{"why":"w","do":"mint","ask":true,"text":"Old mark"},{"why":"w","do":"mint","kind":"other","text":"Junk"}]}', 0)
+        self.assertEqual([o.get("kind") for o in ops], ["ask", "process", "ask", None])
+        self.assertIn('Every mint carries "kind": "ask" (a deliverable the user\'s message asked for, e.g. "Add retries to the client") or '
+                      '"kind": "process" (work the session started for itself: a review round, an audit, a workflow or agent it launched, '
+                      'e.g. "Adversarial review of the retry diff").', jd.PLAN_SYS)
 
     def test_a_two_ask_message_with_a_launch_keeps_both_asks_and_nests_the_review(self):
         records = [
@@ -241,9 +292,9 @@ class WorkflowMidGoal(_Harness):
             tresult(T0 + 61, "u2", "a1", "toolu_a1"),
             aline(T0 + 400, "Wrote the retry loop, the comparison, and launched an adversarial review workflow over the diff.", "a2", "u2"),
         ]
-        three = ('{"ops":[{"why":"the user asked for retries","do":"mint","text":"Add retries to the notes-api client"},'
-                 '{"why":"a write-up the user asked to read","do":"mint","text":"Compare the two retry libraries"},'
-                 '{"why":"a distinct review deliverable","do":"mint","text":"Adversarial review of the retry diff"}]}')
+        three = ('{"ops":[{"why":"the user asked for retries","do":"mint","kind":"ask","text":"Add retries to the notes-api client"},'
+                 '{"why":"a write-up the user asked to read","do":"mint","kind":"ask","text":"Compare the two retry libraries"},'
+                 '{"why":"the review round","do":"mint","kind":"process","text":"Adversarial review of the retry diff"}]}')
         calls, store = self._run(records, [("adversarial review workflow", three)])
         self.assertEqual(sorted(nd["text"] for nd in self._tops(store)),
                          ["Add retries to the notes-api client", "Compare the two retry libraries"], "two asks, two cards")
@@ -360,6 +411,12 @@ class TriggerlessSegments(unittest.TestCase):
         self.assertEqual(got[2]["ref"], 1)
         self.assertEqual(got[3]["under"], 1, "a menu-targeted sub is untouched")
 
+    def test_a_label_cannot_make_a_trigger_less_mint_an_ask(self):
+        store = self._store()
+        seg = {"id": "s1", "trigger": None, "atoms": [], "seamOf": {"top": SID + ":g2", "text": "..."}}
+        ops = jd._demote_session_mints([dict(self.MINT, kind="ask")], seg, store, self._menu(store), None, False)
+        self.assertEqual(ops[0]["do"], "sub", "no human asked: the label does not stand")
+
     def test_a_scheduled_prompt_is_the_users_and_its_mints_are_never_demoted(self):
         store = self._store()
         seg = {"id": "s1", "trigger": "c1", "atoms": [
@@ -411,6 +468,13 @@ class LaunchReader(unittest.TestCase):
         seg = {"atoms": [{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Workflow", "input": {"script": script}}]}}]}
         self.assertEqual(jd._seg_launches(seg)[0]["desc"], "Lens reviewers over the retry diff")
         self.assertEqual(jd._wf_meta("const x = 1"), {}, "no meta literal: nothing")
+
+    def test_a_nested_object_before_the_description_does_not_end_the_meta_scan(self):
+        script = ("export const meta = { name: 'guard', phases: [{ title: 'Scan', detail: 'grep' }], description: 'Nightly guard review' }\n"
+                  "const S = { type: 'object', description: 'a schema field' }")
+        self.assertEqual(jd._wf_meta(script).get("description"), "Nightly guard review")
+        self.assertEqual(jd.em._launch_desc("Workflow", {"script": script}), "Nightly guard review", "the event model reads the same literal")
+        self.assertEqual(jd.em._launch_desc("Workflow", {"script": "export const meta = { name: 'only-name' }\nconst S = { description: 'schema words' }"}), "only-name")
 
     def test_reads_background_launches_only_with_the_event_models_criterion(self):
         seg = {"atoms": [

@@ -289,6 +289,35 @@ class HealOlderStores(_Feed):
         self.assertEqual(asks[wf]["column"], "needs_input")
         self.assertIn("matched a background workflow", asks[wf]["sessionStarted"]["why"])
 
+    def test_a_floor_that_resolves_to_the_ask_leaves_the_machine_top_nested(self):
+        # the session is stopped on a permission prompt whose focus is UNDER the ask: the floor resolves to the ask,
+        # so the machine top stays a row in the ask's tree (a broader keep on the session's state would pop it out)
+        ask, step, wf = SID + ":g1", SID + ":g3", SID + ":g2"
+        self._store({ask: self._node(ask, "Add retries to the notes-api client", promptUuid="u1", askAnchor="human"),
+                     step: self._node(step, "Wrote the retry loop", parent=ask, t=T0 + 100),
+                     wf: self._node(wf, "Lens review of the retry diff", t=T0 + 500, promptUuid="a2", askAnchor="machine")}, last=step)
+        km._tmux_sessions = lambda: {SID: {"state": "permission", "since": NOW - 10, "model": "", "effort": "",
+                                           "context": None, "compactPct": None, "color": None}}
+        feed, err = self._feed()
+        asks = {a["itemId"]: a for a in feed["asks"] if a["sid"] == SID}
+        self.assertEqual(set(asks), {ask}, "the floor is the ask's; the machine top stays nested")
+        self.assertEqual(asks[ask]["column"], "needs_input")
+        self.assertIn(wf, {r["id"] for r in asks[ask]["tree"]})
+
+    def test_a_needs_input_state_whose_floor_does_not_set_leaves_the_nesting_alone(self):
+        # the focus top is the machine top but its exported status is completed, so the permission floor does not
+        # set on it: no floor resolves there, and the top stays nested (a keep on the session state alone would not)
+        ask, wf = SID + ":g1", SID + ":g2"
+        self._store({ask: self._node(ask, "Add retries to the notes-api client", promptUuid="u1", askAnchor="human"),
+                     wf: self._node(wf, "Lens review of the retry diff", t=T0 + 500, promptUuid="a2", askAnchor="machine", nodeComplete=True)},
+                    status={wf: "completed"}, last=wf)
+        km._tmux_sessions = lambda: {SID: {"state": "permission", "since": NOW - 10, "model": "", "effort": "",
+                                           "context": None, "compactPct": None, "color": None}}
+        feed, err = self._feed()
+        asks = {a["itemId"]: a for a in feed["asks"] if a["sid"] == SID}
+        self.assertEqual(set(asks), {ask})
+        self.assertIn(wf, {r["id"] for r in asks[ask]["tree"]})
+
     def test_the_launch_match_reads_the_dispatch_not_the_completion_summary(self):
         # the run completes and its notification's summary overwrites the task's summary; the heal still matches on
         # the words the dispatch carried at launch (launchDesc), so the why and the parent do not change when a run ends

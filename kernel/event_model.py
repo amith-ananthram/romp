@@ -221,20 +221,38 @@ def _result_text(content):
 
 
 _WF_META_DESC_RE = re.compile(r"\b(description|name)\s*:\s*(['\"])(.*?)\2", re.S)
-_WF_META_LITERAL_RE = re.compile(r"export\s+const\s+meta\s*=\s*\{(.*?)\}", re.S)   # the meta object only, never a schema field
+
+
+def _meta_literal(script):
+    """The text inside a Workflow script's FIRST `export const meta = {...}` literal, matched by brace depth (a
+    nested object or array inside meta never ends the scan early); '' when none."""
+    src = str(script or "")[:8000]
+    m = re.search(r"export\s+const\s+meta\s*=\s*\{", src)
+    if not m:
+        return ""
+    depth, i = 1, m.end()
+    while i < len(src) and depth:
+        c = src[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+        i += 1
+    return src[m.end():i - 1] if depth == 0 else src[m.end():]
 
 
 def _launch_desc(name, inp):
     """The dispatch's OWN words at launch time: an Agent/Task's description, a Workflow's meta description
-    (else its meta name) read off the script, else ''. Kept on the task row as `launchDesc` and never
-    overwritten by the completion notification, whose summary replaces `summary` when the run ends (T319: the
-    feed matches a session-started goal to the launch that produced it on these words)."""
+    (else its meta name) read off the script's meta literal alone (never a schema field's or a prompt's quoted
+    description later in the script), else ''. Kept on the task row as `launchDesc` and never overwritten by
+    the completion notification, whose summary replaces `summary` when the run ends (T319: the feed matches a
+    session-started goal to the launch that produced it on these words)."""
     inp = inp if isinstance(inp, dict) else {}
     d = str(inp.get("description") or "").strip()
     if not d and name == "Workflow":
-        lit = _WF_META_LITERAL_RE.search(str(inp.get("script") or "")[:6000])   # the FIRST meta literal: a later quoted
-        meta = {m.group(1): m.group(3) for m in _WF_META_DESC_RE.finditer(lit.group(1))} if lit else {}   # description is a
-        d = str(meta.get("description") or meta.get("name") or "").strip()                                 # schema field's
+        lit = _meta_literal(inp.get("script"))
+        meta = {m.group(1): m.group(3) for m in _WF_META_DESC_RE.finditer(lit)} if lit else {}
+        d = str(meta.get("description") or meta.get("name") or "").strip()
         if not d and inp.get("scriptPath"):
             d = os.path.splitext(os.path.basename(str(inp["scriptPath"])))[0]
     return " ".join(d.split())[:200]

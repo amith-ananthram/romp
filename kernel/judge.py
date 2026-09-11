@@ -3583,8 +3583,10 @@ PLAN_SYS = (
     "diagnosing, a follow-up it volunteers) is not an ask, so block the goal that surfaced the offer, "
     "with the offer as the why, and mint nothing. It earns a card of its own once the user says go. "
     "The session's own background workflows, review rounds and agents are its process, not deliverables: "
-    "file them as steps under the goal they serve, never as a new top-level goal. Put \"ask\": true on the one "
-    "mint that is the deliverable the user's own message asked for, never on work the session started.\n"
+    "file them as steps under the goal they serve, never as a new top-level goal. Every mint carries "
+    "\"kind\": \"ask\" (a deliverable the user's message asked for, e.g. \"Add retries to the client\") or "
+    "\"kind\": \"process\" (work the session started for itself: a review round, an audit, a workflow or agent it "
+    "launched, e.g. \"Adversarial review of the retry diff\").\n"
     '- {\"why\",\"do\":\"sub\",\"under\":<n>,\"text\":\"<step ≤10 words>\"}: a step or progress under '
     "card #n, where #n must be a **top-level card** (a flush-left line in <open-goals>; the indented "
     "sub-goals are context and done/block targets, not filing spots — where inside the card the step "
@@ -3807,8 +3809,11 @@ def _parse_plan(raw, menu_len, allow_extend=False):
         elif do == "mint":
             if _has_alpha(text):
                 op = {"do": "mint", "why": why, "text": text}
-                if o.get("ask") is True:
-                    op["ask"] = True                   # the planner's mark: this mint is the user's own ask (T319)
+                kind = str(o.get("kind") or "").strip().lower()
+                if kind in ("ask", "process"):
+                    op["kind"] = kind                  # the planner's label: the user's deliverable, or the session's own process (T319)
+                elif o.get("ask") is True:
+                    op["kind"] = "ask"                 # the earlier mark's spelling
                 ops.append(op)
         elif do == "sub":
             n, r = _int(o, "under"), _int(o, "ref")
@@ -6330,13 +6335,32 @@ _WF_META_RE = re.compile(r"\b(name|description)\s*:\s*(['\"])(.*?)\2", re.S)
 _WF_META_LITERAL_RE = re.compile(r"export\s+const\s+meta\s*=\s*\{(.*?)\}", re.S)   # the meta object only, never a schema field
 
 
-def _wf_meta(script):
-    """{name, description} read off a Workflow script's `export const meta = {...}` literal (the FIRST one), {} when
-    none: a later quoted description (a schema field's, an agent prompt's) is never the run's own words."""
-    m = _WF_META_LITERAL_RE.search(str(script or "")[:6000])
+def _meta_literal(script):
+    """The text inside a Workflow script's FIRST `export const meta = {...}` literal, matched by brace depth (a
+    nested object or array inside meta, phases: [{...}], never ends the scan early); '' when none."""
+    src = str(script or "")[:8000]
+    m = re.search(r"export\s+const\s+meta\s*=\s*\{", src)
     if not m:
+        return ""
+    depth, i = 1, m.end()
+    while i < len(src) and depth:
+        c = src[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+        i += 1
+    return src[m.end():i - 1] if depth == 0 else src[m.end():]
+
+
+def _wf_meta(script):
+    """{name, description} read off a Workflow script's meta literal (the FIRST one, by brace depth), {} when none:
+    a quoted description elsewhere in the script (a schema field's, an agent prompt's) is never the run's own
+    words."""
+    lit = _meta_literal(script)
+    if not lit:
         return {}
-    return {mm.group(1): mm.group(3) for mm in _WF_META_RE.finditer(m.group(1))}
+    return {mm.group(1): mm.group(3) for mm in _WF_META_RE.finditer(lit)}
 
 
 def _seg_launches(seg):
@@ -6417,30 +6441,31 @@ def _seg_trigger_author(seg):
 def _demote_session_mints(ops, seg, store, menu, p_target, human):
     """The origin rule at minting time (T319, the user 2026-09-10: a card appears only for work that traces to
     something they asked for; the sessions' own process, a Workflow run, a review round, an agent, never
-    stands as a top-level card). EVENT FIRST, TEXT SECOND (the manager's amendment):
-    - a segment whose trigger is not a human ask (a seam tail a notification woke, an autonomous stretch, a
-      sender-less delivery): EVERY top mint demotes to a step under the goal the turn ran in (the seam's own
-      top, the segment's prompt-run placement, its standing placement, else the open top nearest in words to
-      the work, ties the newest); with nothing to nest under it files nothing, the bookkeeping floor's shape;
-    - a human-triggered segment that started background work (_seg_launches, the event model's own criterion):
-      the ask's own mint keeps its card, chosen by its WORDS against the user's message (never by position: the
-      planner's op order is unspecified), and of the other mints only those nearer a launch's words (in the
-      mint's text or its why) than the user's own demote under the ask; a second deliverable the user asked for
-      in the same message stays a top. With a placement already (the prompt run placed the message) the launch-matching
-      mints nest under it.
-    - a scheduled or programmatic prompt (trigger author "sdk") traces to the user's earlier setup: its mints are
-      never demoted or dropped.
-    Word overlap otherwise only picks WHICH launch supplies the step's one-line why and, when the turn ran in no
-    goal and several are open, which open goal is the parent. Demoted steps carry born {kind: session, via:
-    workflow|agent|work, why, parentText}; a dropped mint takes the ops chained onto it and surviving refs are
-    remapped (a demoted mint still creates a node, so positions hold)."""
-    if not any(o.get("do") == "mint" for o in ops):
+    stands as a top-level card). The PLANNER labels every mint `kind`: "ask" (a deliverable the user's message
+    asked for) or "process" (work the session started for itself), and this rule TRUSTS the labels (the fourth
+    review round: four rounds of word-overlap edge cases ended by asking the model, which knows):
+    - kind ask keeps its card, on both paths (an unplaced human segment and one whose prompt run already placed
+      the message);
+    - kind process nests as a step under the ask's top: the goal the turn ran in (the seam's own top, the
+      segment's placement), else this reply's ask, else the open top nearest in words to the launch or the step,
+      else nothing (files nothing; the chained ops go with it); born.via is the matching launch's kind when one
+      exists (workflow | agent, its words the why), else "work" with the planner's own why;
+    - a segment whose trigger is not a human ask (a seam tail, an autonomous stretch) treats every mint as process
+      whatever its label; a scheduled or programmatic prompt (trigger author "sdk") traces to the user's earlier
+      setup and is left untouched.
+    A MISSING label is filled by the words, and only then: in a human segment with no background launch a mint is
+    an ask; with a launch it is process, except exactly ONE unlabelled mint, the one nearest the user's own words
+    (its text against the message, never its why, never its position), which is an ask, and only among the mints
+    no launch's words fit better; when every unlabelled mint reads like a launch and a top exists to nest under,
+    all of them nest; when none exists (the message must place somewhere), the one least like a launch keeps the
+    card. Demoted steps carry born {kind: session, via, why, parentText}; a dropped mint takes the ops chained
+    onto it and surviving refs are remapped (a demoted mint still creates a node, so positions hold)."""
+    mints = [o for o in ops if o.get("do") == "mint"]
+    if not mints:
         return ops
     if _seg_trigger_author(seg) == "sdk":
         return ops                                     # a scheduled firing is the user's, set up earlier
     launches = _seg_launches(seg)
-    if human and not launches:
-        return ops
     nodes = store.get("nodes", {})
     parent = None
     seam_top = (seg.get("seamOf") or {}).get("top") if isinstance(seg.get("seamOf"), dict) else None
@@ -6450,28 +6475,45 @@ def _demote_session_mints(ops, seg, store, menu, p_target, human):
             break
     open_tops = [m["id"] for m in menu if m.get("id") in nodes and nodes[m["id"]].get("parentId") is None
                  and not nodes[m["id"]].get("nodeComplete") and not nodes[m["id"]].get("cleared")]
-    def launch_match(o):
-        return max([_overlap(l["desc"], o.get("text")) for l in launches] + [_overlap(l["desc"], o.get("why")) for l in launches] + [0.0])
+    def launch_match(o):                               # the launch's words in the mint's TEXT only
+        return max([_overlap(l["desc"], o.get("text")) for l in launches] + [0.0])
     prompt = _prompt_text(seg.get("atoms") or []) if human else ""
-    def prompt_match(o):
-        return max(_overlap(prompt, o.get("text")), _overlap(prompt, o.get("why"))) if prompt else 0.0
-    mints = [o for o in ops if o.get("do") == "mint"]
+    def prompt_match(o):                               # the user's words in the mint's TEXT only, never its why
+        return _overlap(prompt, o.get("text")) if prompt else 0.0
+    # the label of every mint: the planner's, else filled by the words
+    kind = {}
+    for o in mints:
+        k = str(o.get("kind") or "").strip().lower()
+        kind[id(o)] = k if k in ("ask", "process") else None
+    if not human:
+        for o in mints:
+            kind[id(o)] = "process"                    # the trigger is the event: no label can make this an ask
+    else:
+        unlabeled = [o for o in mints if kind[id(o)] is None]
+        if unlabeled and not launches:
+            for o in unlabeled:
+                kind[id(o)] = "ask"                    # no background work started: the words are the user's
+        elif unlabeled:
+            for o in unlabeled:
+                kind[id(o)] = "process"
+            if not any(kind[id(o)] == "ask" for o in mints):
+                fits_user = [o for o in unlabeled if launch_match(o) <= prompt_match(o)]
+                if fits_user:
+                    crown = max(fits_user, key=lambda o: prompt_match(o))
+                    kind[id(crown)] = "ask"
+                elif parent is None and not open_tops:  # nothing to nest under: the message must place somewhere
+                    crown = min(unlabeled, key=lambda o: launch_match(o))
+                    kind[id(crown)] = "ask"
+    if all(kind[id(o)] == "ask" for o in mints):
+        return ops
+    asks = [o for o in mints if kind[id(o)] == "ask"]
     ask_op = None
-    if human and parent is None:
-        # the ask's own placement, ALWAYS one for a human segment (the user's message never files nothing here):
-        # the mint the planner MARKED as the user's ask, before any word test (a short approval like "yes, go
-        # ahead" shares no word with any mint, and the mark is the planner's own knowledge); else the mint nearest
-        # the user's words among those no launch fits better (that one is the session's process, whatever its
-        # position); else the mint nearest the user's words at all; else the first mint.
-        marked = [o for o in mints if o.get("ask") is True]
-        if marked:
-            ask_op = marked[0]
-        else:
-            pool = [o for o in mints if launch_match(o) <= prompt_match(o)] or mints
-            ask_op = max(pool, key=lambda o: (prompt_match(o), -mints.index(o)))
-    # `ref` indexes the reply's CREATED nodes (mints and subs) in the reply's own order. The ask's mint is processed
-    # FIRST so a demoted mint can nest under it wherever the planner listed it; every op keeps its original created
-    # position for ref resolution (orig -> new), and a dropped mint takes the ops chained onto it.
+    if asks and parent is None:
+        # the reply's own ask hosts its process steps: the ask nearest the user's words, processed FIRST so a step
+        # can reference it wherever the planner listed it
+        ask_op = max(asks, key=lambda o: prompt_match(o))
+    # `ref` indexes the reply's CREATED nodes (mints and subs) in the reply's own order. Every op keeps its
+    # original created position for ref resolution (orig -> new); a dropped mint takes the ops chained onto it.
     orig = {}
     for o in ops:
         if o.get("do") in ("mint", "sub"):
@@ -6498,15 +6540,16 @@ def _demote_session_mints(ops, seg, store, menu, p_target, human):
                 continue                               # a verdict aimed at a dropped node
             out.append(remap(o))
             continue
-        keep = o is ask_op or (human and (launch_match(o) <= 0.0 or prompt_match(o) >= launch_match(o)))
-        if keep:                                       # the user's own ask, or a deliverable nearer their words than any launch's
+        if kind[id(o)] == "ask":
             created_new += 1; newpos[orig[id(o)]] = created_new
             if o is ask_op:
                 ask_ref, ask_text = created_new, str(o.get("text") or "")
             out.append(o)
             continue
         text = str(o.get("text") or "")
-        launch = max(launches, key=lambda l: max(_overlap(l["desc"], text), _overlap(l["desc"], o.get("why")))) if launches else None
+        launch = max(launches, key=lambda l: _overlap(l["desc"], text)) if launches else None
+        if launch is not None and _overlap(launch["desc"], text) <= 0.0:
+            launch = launches[0] if len(launches) == 1 else None   # one launch in the segment: the step is its work
         via = launch["via"] if launch else "work"
         why = ("started a background %s (%s)" % (via, launch["desc"]) if launch and launch["desc"]
                else str(o.get("why") or "the session started this on its own"))

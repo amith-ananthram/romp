@@ -35235,6 +35235,7 @@ def build_feed(now, tmux=None):
                 f = nodes[f]["parentId"]
             if f in nodes and status.get(f) not in ("completed", "cleared"):
                 jauth_top = f
+        _unnested = False
         for _f in (perm_top, api_top, jauth_top):    # T319: a floor that RESOLVES to a healed top un-nests exactly that top:
             _h = healed.get(_f) if _f else None      #   it keeps its card (the floor keys the card on it) and its face; the
             if _h and _h[0] and _f in children.get(_h[0], []):   #   host's other rows are untouched
@@ -35242,6 +35243,10 @@ def build_feed(now, tmux=None):
                 children.setdefault(None, []).append(_f)
                 healed[_f] = (None, _h[1])
                 heal_total -= 1
+                _unnested = True
+        if _unnested:                                # the derivations below read the tree the card SHOWS (item 8 of the
+            agent_open = _agent_open_set(nodes, children)   #   fourth review): recomputed over the un-nested layout
+            parked_rows = _parked_rows(nodes, children)
         plain_user_t = _last_plain_user_turn_t(ps["turns"]) if ps else 0   # re-check: a plain reply after a soft block de-urgents it
         had_working = False                          # does this session show ANY working card? → drives the provisional placeholder
         had_awaiting = False                         # …and does any of them read AWAITING? → the session's await-green dot (below)
