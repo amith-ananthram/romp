@@ -11,8 +11,8 @@ const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "
 const TL = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "romp-timeline-view.js"), "utf8");
 
 test("chat: 'retrying' is a ChipState with an 'API retrying…' label, an amber chip, and a tab ring", () => {
-  assert.match(RENDER, /type ChipState =[^;]*\| "retrying"/);
-  assert.match(RENDER, /retrying: "API retrying…"/);
+  assert.match(fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "status-chip.ts"), "utf8"), /type ChipState =[^;]*\| "retrying"/);   // the union lives in status-chip.ts since T322b
+  assert.match(fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "status-chip.ts"), "utf8"), /retrying: "API retrying…"/);   // CHIP_LABEL lives in status-chip.ts since T322b
   // the state → class rule lives in tab-state.ts since tab groups (2026-09-04); render.ts wears its result
   const S = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "tab-state.ts"), "utf8");
   assert.match(S, /if \(st === "retrying"\) return "tab-retrying";/);

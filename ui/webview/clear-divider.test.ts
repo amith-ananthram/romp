@@ -55,7 +55,7 @@ test("the pre-clear history lazy-loads once per boundary and renders through the
 test("renderClearing is the loader-dots in-progress element, and the chip family knows 'clearing'", () => {
   // 2026-09-08: a slim live SESSION notice with the loader dots in its glyph slot (the romp severity: accent)
   assert.match(RENDER, /function renderClearing\(\): HTMLElement \{[\s\S]{0,200}?notice\(\{ src: "session", glyph: noticeLiveGlyph\(metaDots\(\)\), sev: "romp", gist: "Clearing conversation…", live: true,/);
-  assert.match(RENDER, /"clearing" \| "blocked"|clearing: "Clearing"/);   // ChipState + CHIP_LABEL entries
+  assert.match(fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "status-chip.ts"), "utf8"), /"clearing" \| "blocked"|clearing: "Clearing"/);   // ChipState + CHIP_LABEL entries (status-chip.ts since T322b)
   assert.match(RENDER, /⟳ Clearing conversation…/);                       // statusline line, like compacting's
   assert.match(TL, /label: 'Clearing'/);                                  // timeline lane badge
 });

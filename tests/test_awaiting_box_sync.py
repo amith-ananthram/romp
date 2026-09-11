@@ -65,7 +65,10 @@ class SourcePins(unittest.TestCase):
     def test_the_chip_and_the_gist_agree_in_number_from_one_count(self):
         # since slice 2 (plans/subagent-transcripts.md, 2026-09-05) the ONE rule is awaitWord: the kernel's
         # kind + count + the awaited ROWS word the chip and the gist alike ("agent", "3 agents", "4" for mixed)
-        self.assertIn("const chipWord = awaitWord(s.status.awaitingKind, s.status.awaitingCount, chipItems);", RENDER)
+        # the bar's chip is the SHARED status chip since T322b (ui/webview/status-chip.ts, which the tag overview's rows
+        # build from too): the bar asks the module for the button form, and the module's one awaitWord call words it
+        self.assertIn('const chip = statusChip(chipWords(s.status), "button") as HTMLButtonElement;', RENDER)
+        self.assertIn("const word = awaitWord(st.awaitingKind, st.awaitingCount, items);", open(os.path.join(ROOT, "ui", "webview", "status-chip.ts")).read())
         self.assertIn("const word = awaitWord(s.status.awaitingKind, s.status.awaitingCount, items);", RENDER)   # `s` narrowed by the one renderer's gate (2026-09-06)
 
 

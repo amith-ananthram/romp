@@ -40,7 +40,7 @@ test("every surface renders the prefix through the shared treatment", () => {
   // bare uuid), rendered through the same .host-prefix treatment (the user 2026-07-26)
   assert.match(FEED, /peer\.replaceChildren\(\.\.\.hostPartsNodes\(it\.origin\.peerHost, it\.origin\.peer\)\)/);
   const HP = read("host-prefix.ts");
-  assert.match(HP, /export function hostPartsNodes\(host: string \| null \| undefined, name: string\): Node\[\]/);
+  assert.match(HP, /export function hostPartsNodes\(host: string \| null \| undefined, name: string,\s*\n\s*doc: Pick<Document, "createElement" \| "createTextNode"> = document\): Node\[\]/, "builds in the document it is handed (T322b: a fake's chip carries a fake's name node); the page's by default");
   // fleet: the prefix stays OUT of the search highlight (metadata never highlights)
   assert.match(FLEET, /function nameInto\(elm: HTMLElement, name: string, sid: string, q: string\)/);
   assert.match(FLEET, /nameInto\(tnm, s\.name, s\.sid, curSearch\)/);
