@@ -1,6 +1,9 @@
 # The Codex session backend
 
-*History (2026-09-11): the terminal (tmux) backend this plan contrasts its control channel with was removed from romp on that date (issue #1398; the migration note is in `docs/reference.md`). The tmux passages below describe the state at the time of writing and are kept as history.*
+*History (2026-09-11): the terminal (tmux) backend this plan rejects a TUI-driving alternative in
+the spirit of was removed from romp on that date (issue #1398; the migration note is in
+`docs/reference.md`). The tmux passages below describe the state at the time of writing and are kept
+as history.*
 
 A third `SessionBackend` that drives **OpenAI Codex** sessions, so Codex agents
 sit on the same board as Claude sessions — same lanes, cards, chat, judges, and
