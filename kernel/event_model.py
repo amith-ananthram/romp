@@ -648,7 +648,7 @@ _JSONL_CACHE_MAX = 1024           # bounds MEMORY only (384 → 1024 on 2026-09-
 # recently used entries go first, one at a time, under the same LRU order the count uses, so a hot leaf survives a
 # cold flood of subagent files exactly as before. A single entry larger than the whole budget still inserts: a leaf is
 # never refused, the budget then holds that one entry. Counters under /perf recordCache.
-# The default is a QUARTER of the machine's memory, never under 4 GiB (2026-09-11, the day the budget shipped at 1 GiB):
+# The default is HALF of the machine's memory (the user's direction, 2026-09-11: use the memory we have), never under 4 GiB (2026-09-11, the day the budget shipped at 1 GiB):
 # the working set of a devbox running 50 sessions is their live leaves, read by every build in every pusher cycle, and
 # a budget below it does not save memory, it thrashes: 18 entries filled the 1 GiB, every build re-read whole
 # transcripts (14.9 GB read in the first 3.5 minutes, 724 evictions, one pusher cycle of 132 s, chat builds of 3 s
@@ -656,11 +656,11 @@ _JSONL_CACHE_MAX = 1024           # bounds MEMORY only (384 → 1024 on 2026-09-
 # (subagent transcripts) leaves through drop_after="quiescent" folds instead; the budget is the backstop, not the
 # mechanism. ROMP_RECORD_CACHE_BUDGET_MB still sets it outright.
 RECORD_CACHE_BUDGET_FLOOR_BYTES = 4 * 1024 ** 3
-RECORD_CACHE_BUDGET_FRACTION = 0.25
+RECORD_CACHE_BUDGET_FRACTION = 0.5
 
 
 def _record_cache_default_budget_bytes(meminfo_text=None):
-    """A quarter of MemTotal (from /proc/meminfo, or the text given), floored at 4 GiB; the floor alone when the file
+    """Half of MemTotal (from /proc/meminfo, or the text given), floored at 4 GiB; the floor alone when the file
     is unreadable (macOS, a container without procfs)."""
     try:
         text = meminfo_text if meminfo_text is not None else open("/proc/meminfo", encoding="utf-8").read()

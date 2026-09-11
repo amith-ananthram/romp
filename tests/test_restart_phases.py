@@ -3,6 +3,7 @@
 (or a backstop); the producer's first pass waits, bounded, for the boot's attaches; the fold checkpoints are written
 periodically for a session whose leaf moves with no settle evidence; the exit's cut row carries its phase timings and
 the exit's assembly-document writes are bounded. Hermetic: a temp state root, no kernel, no sessions."""
+import io
 import json
 import os
 import pathlib
@@ -161,8 +162,9 @@ class ExitPhases(unittest.TestCase):
         self.assertIn("if time.monotonic() - _asm_t0 > EXIT_ASM_BUDGET_S:", tail, "the assembly-document writes are bounded on the exit path")
         self.assertIn("em.checkpoint_write_dirty(budget_s=EXIT_CKPT_WRITE_BUDGET_S)", tail, "and so are the fold checkpoint writes (the 1:19 PM exit met the SIGKILL)")
         self.assertIn("if time.monotonic() - _prime_t0 > EXIT_PRIME_BUDGET_S:", tail)
-        self.assertLess(km.EXIT_PRIME_BUDGET_S + km.EXIT_CKPT_WRITE_BUDGET_S + km.EXIT_ASM_BUDGET_S + 2.0, 5.0,
-                        "the exit's budgets and the 2 s SDK drain fit under the manager's 5 s grace")
+        self.assertLess(km.EXIT_PRIME_BUDGET_S + km.EXIT_CKPT_WRITE_BUDGET_S + km.EXIT_ASM_BUDGET_S + km.EXIT_DRAIN_BUDGET_S, km.EXIT_GRACE_S,
+                        "the exit's four budgets fit under the manager's grace")
+        self.assertIn("res = be.drain(EXIT_DRAIN_BUDGET_S)", tail, "the SDK drain takes its share of the grace")
         self.assertIn('_phases["ckptS"]', tail); self.assertIn('_phases["drainS"]', tail)
         self.assertIn("audit_reason=reason, phases=_phases)", tail, "the phases reach the cut row")
         self.assertIn("boot_phase=_mark_boot,", src, "the backend's milestones land in the kernel's boot marks")
@@ -205,6 +207,43 @@ class AttachTimedOutNamesTheAttaches(unittest.TestCase):
         self.assertEqual(be._boot_attach_unsettled, {"22222222-0000-0000-0000-000000000002"})
         settled(); settled()
         self.assertEqual(be._boot_attach_unsettled, set(), "fires once; the sid leaves the set at the hello")
+
+
+class ExitBudgetsScaleWithTheGrace(unittest.TestCase):
+    def test_the_shares_follow_the_manager_grace(self):
+        # the constants are read at load; recompute the shares the way the module does for two grace values
+        for grace_ms, share in (("5000", 4.5), ("8000", 7.5)):
+            self.assertAlmostEqual(0.10 * share + 0.35 * share + 0.20 * share + 0.35 * share, share, places=6)
+        src = open(km.__file__).read()
+        self.assertIn('EXIT_GRACE_S = float(os.environ.get("ROMP_SHUTDOWN_GRACE_MS", "5000")) / 1000.0', src, "the kernel assumes 5 s unless the manager says otherwise")
+        self.assertIn("_EXIT_SHARE_S = max(1.0, EXIT_GRACE_S - 0.5)", src)
+        mgr = open(os.path.join(BIN, "romp-manager")).read()
+        self.assertIn("ROMP_SHUTDOWN_GRACE_MS: String(SHUTDOWN_GRACE_MS)", mgr, "the manager passes the grace it enforces to the kernel it spawns")
+
+
+class BootHealthFirstCycle(unittest.TestCase):
+    def setUp(self):
+        km._BOOT_HEALTH_DONE[0] = False
+        self.addCleanup(lambda: km._BOOT_HEALTH_DONE.__setitem__(0, False))
+
+    def test_a_slow_first_cycle_writes_a_flagged_row_and_a_loud_line_once(self):
+        rows, err = [], io.StringIO()
+        with mock.patch.object(km, "_append_restart_cut", rows.append), mock.patch.object(km.sys, "stderr", err):
+            row = km._boot_health_first_cycle(42.0)
+            self.assertIsNone(km._boot_health_first_cycle(0.1), "the second cycle is not the boot's first")
+        self.assertEqual((row["bootHealth"], row["firstCycleS"], row["slow"]), (True, 42.0, True))
+        self.assertEqual(len(rows), 1)
+        self.assertIn("boot health: the first pusher cycle took 42.0 s", err.getvalue())
+
+    def test_a_fast_first_cycle_is_recorded_quietly(self):
+        rows, err = [], io.StringIO()
+        with mock.patch.object(km, "_append_restart_cut", rows.append), mock.patch.object(km.sys, "stderr", err):
+            row = km._boot_health_first_cycle(0.08)
+        self.assertEqual((row["slow"], len(rows), err.getvalue()), (False, 1, ""))
+
+    def test_the_pusher_calls_it_after_its_cycle_accounting(self):
+        src = open(km.__file__).read()
+        self.assertLess(src.index("_PERF_STATS.cycle(time.monotonic() - _t_cycle"), src.index("_boot_health_first_cycle(time.monotonic() - _t_cycle)"))
 
 
 if __name__ == "__main__":
