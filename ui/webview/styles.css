@@ -1352,7 +1352,7 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 /* the resting placeholder names the session (the user 2026-09-09): an overlay over the empty box, the name bold in
    the session's identity colour (its tab label's); the native placeholder beneath it goes transparent while it
    shows, and stays for assistive tech. Positioned and sized by render.ts syncComposerPh from the box's own metrics. */
-#composer-ph { position: absolute; pointer-events: none; color: var(--dim); white-space: pre; overflow: hidden; text-overflow: ellipsis; box-sizing: border-box; z-index: 1; }
+#composer-ph { position: absolute; pointer-events: none; color: var(--dim); white-space: pre; overflow: hidden; text-overflow: ellipsis; box-sizing: border-box; z-index: 1; --host-fade: 0.75; }   /* the host prefix at the midpoint its name sits at (T341; the rule is .name-faded .host-prefix below) */
 #composer-ph .composer-ph-name { font-weight: 600; }
 #composer-input.ph-on::placeholder { color: transparent; }
 /* A box grown past the height cap scrolls — and the scrollbar's TRACK paints square into the rounded
@@ -3360,8 +3360,16 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
 /* ...but it must FADE with the name it precedes. Because the rule above is a declaration on the child,
    the at-rest tab's inline faded color can't inherit into it, so a remote session's "host:" stayed bright
    while its name dimmed (the user 2026-07-22). renderTabs adds .name-faded whenever it applies the faded
-   name color, and drops it on hover, so the two always move together. */
-.tab-label.name-faded .host-prefix { opacity: 0.5; }
+   name color, and drops it on hover, so the two always move together. The composer's name overlay wears the
+   class too (#composer-ph, T335): its name is painted faded, so its host fades by this same rule; one
+   selector for both carriers. The STRENGTH is a variable with the strip's value as its
+   default (T341, the user 2026-09-11): the overlay's name is painted halfway between its identity colour and
+   the at-rest fade (render.ts PH_NAME_FADE), so its host sits at the matching midpoint, 0.75, set on
+   #composer-ph alone; the tab label keeps 0.5. One rule, two strengths, never a second rule. The compound
+   second selector keeps the fade WINNING over the stale-link cue below (.host-prefix.off, opacity 0.75) by
+   specificity, as the scoped rule did before: an at-rest label on a down host fades with its name, and the
+   cue's italic and dotted underline still show. A state rule wins the cascade by construction, never by order. */
+.name-faded .host-prefix, .name-faded .host-prefix.off { opacity: var(--host-fade, 0.5); }
 /* DISCONNECTED host (the user 2026-07-29): its sessions keep their tabs, lanes and cards — dropping them
    would lose the thread — but the "host:" token says the link is down, so nobody reads a frozen transcript
    thinking it is live. Struck + dimmed, the strike on the HOST only: a struck WHOLE name already means a

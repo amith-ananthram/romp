@@ -1,5 +1,9 @@
 # Subagent transcripts: open any agent's whole conversation from the dashboard
 
+*History (2026-09-11): the terminal (tmux) backend this plan names among the session kinds was
+removed from romp on that date (issue #1398; the migration note is in `docs/reference.md`). The tmux
+passages below describe the state at the time of writing and are kept as history.*
+
 **Status: slice 1 IN FLIGHT** (branch `subagent-transcripts`, PR #935, 2026-09-05; lands with that PR's
 merge commit; a second cut the same day flattened the Agent head's fold — see "The head's fold").
 **Slice 2 BUILT** the same day on branch `awaiting-rows`, stacked on #935 — the Awaiting box lists what a

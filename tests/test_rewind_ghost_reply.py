@@ -172,10 +172,10 @@ class BuildSessionNeverResurrectsARolledBackReply(unittest.TestCase):
             mod.NAMES, mod.PROJECTS = names, proj
             mod.CAPDIR, mod.ARCHDIR, mod.GOALDIR = td / "captions", td / "archive", td / "goals"
             mod.STATE, mod.STATESDIR = td, td / "states"
-        self.saved_km = (km.NAMES, km._tmux_sessions, km._GLOBAL_CLAUDE_MD)
+        self.saved_km = (km.NAMES, km._live_map, km._GLOBAL_CLAUDE_MD)
         km.NAMES = names
         km._GLOBAL_CLAUDE_MD = td / "no-global-claude.md"
-        km._tmux_sessions = lambda: {SID: {"state": "idle", "since": NOW - 100, "model": "",
+        km._live_map = lambda: {SID: {"state": "idle", "since": NOW - 100, "model": "",
                                            "effort": "", "context": None, "compactPct": None,
                                            "color": None}}
         km._parse_cache.clear()
@@ -184,7 +184,7 @@ class BuildSessionNeverResurrectsARolledBackReply(unittest.TestCase):
         for mod, *vals in self.saved:
             (mod.NAMES, mod.PROJECTS, mod.CAPDIR, mod.ARCHDIR,
              mod.GOALDIR, mod.STATE, mod.STATESDIR) = vals
-        (km.NAMES, km._tmux_sessions, km._GLOBAL_CLAUDE_MD) = self.saved_km
+        (km.NAMES, km._live_map, km._GLOBAL_CLAUDE_MD) = self.saved_km
         km._parse_cache.clear()
         self.td.cleanup()
 

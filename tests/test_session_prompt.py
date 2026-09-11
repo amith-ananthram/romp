@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""The romp harness prompt (claude/romp-session-prompt.md) is appended to EVERY session's system prompt
-(tmux via --append-system-prompt, SDK via the designed system_prompt field). It must keep its EXPLICIT
+"""The romp harness prompt (claude/romp-session-prompt.md) is appended to every Claude Code session's
+system prompt through the Agent SDK's designed system_prompt field (kernel/sdk_backend.py; the removed
+terminal backend passed it with --append-system-prompt until 2026-09-11). It must keep its EXPLICIT
 done/not-done reporting instruction, so a session never reports — and the closer never marks — partial
 work as complete (the user 2026-06-26: things were getting marked completed that weren't). These pin the
 load-bearing intent so a future "make it lighter" edit can't quietly drop it."""

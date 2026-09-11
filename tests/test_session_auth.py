@@ -1100,7 +1100,7 @@ class DrivePlumbing(unittest.TestCase):
         self.assertEqual(src.count('auth=(a if a in ("login", "key") else "")'), 2,
                          "the WS op and POST /new both pass it")
 
-    def test_the_abc_names_the_control_and_tmux_refuses(self):
+    def test_the_abc_names_the_control_and_the_default_refuses(self):
         sbc = open(os.path.join(os.path.dirname(HERE), "kernel", "session_backend.py")).read()
         self.assertIn("def set_auth(self, sid: str, value: str) -> bool:", sbc)
         self.assertIn("return False", sbc.split("def set_auth", 1)[1][:900])

@@ -58,7 +58,7 @@ class BgTasksStale(unittest.TestCase):
 
     def test_no_spawned_at_keeps_everything(self):
         self.assertEqual(km._bg_tasks(self.path)["count"], 2,
-                         "tmux / never-spawned sessions are unfiltered")
+                         "never-spawned sessions are unfiltered")
 
     def test_tasks_predating_the_live_cli_are_dropped(self):
         cutoff = self._epoch("2026-06-10T07:00:00Z")
@@ -80,12 +80,12 @@ class BgTasksStale(unittest.TestCase):
         self.assertIsNone(km._sdk_spawned_at(SID))
 
     def test_build_session_wires_spawned_at(self):
-        # spawned_at stays the tmux/no-snapshot fallback; an SDK session's box is gated by the backend's
+        # spawned_at stays the no-snapshot fallback; an SDK session's box is gated by the backend's
         # LIVE task-lifecycle set (the user 2026-07-11) — both ride the same call. The live gate reads
-        # the CALLER's snapshot, never a fresh _tmux_sessions() (the 2026-08-10 pusher CPU fix).
+        # the CALLER's snapshot, never a fresh _live_map() (the 2026-08-10 pusher CPU fix).
         src = open(os.path.join(BIN, "romp-kernel")).read()
         self.assertIn('_bg_tasks(sess["path"], _sdk_spawned_at(sid),', src)
-        self.assertIn('live=(tmux.get(str(sid)) or {}).get("bgTasks")', src)
+        self.assertIn('live=(live_map.get(str(sid)) or {}).get("bgTasks")', src)
 
 
 if __name__ == "__main__":

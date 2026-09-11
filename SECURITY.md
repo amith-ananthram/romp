@@ -86,9 +86,7 @@ UID can read.
   path component under the mail and outbox roots (`_safe_id`), so a crafted
   reference like `../../etc` is rejected before any path join.
 - **No shell interpolation:** subprocess calls use argv lists (no `shell=True`);
-  untrusted message text reaching a tmux pane goes through bracketed paste, not
-  key interpretation; remote `ssh` targets are validated and argv-guarded with
-  `--`.
+  remote `ssh` targets are validated and argv-guarded with `--`.
 - **Output sanitization:** model output and message content rendered in the
   dashboard/webview pass through DOMPurify; the VS Code webview runs under a
   strict nonce CSP with `localResourceRoots` limited to the extension's assets.

@@ -31,7 +31,7 @@ class TabsFirst(unittest.TestCase):
         # 2026-09-07: the frame itself moved into _tab_order_frame — the ONE builder (T258: it carries the
         # affirmed-live sids; and a reconnecting client's skeleton list) — so the pusher hands its order + meta
         # + liveness to _send_tab_order, which builds the frame per client
-        self.assertIn('_send_tab_order(c, tab_order, tab_meta, tmux)', src,
+        self.assertIn('_send_tab_order(c, tab_order, tab_meta, live_map)', src,
                       "and ships it as the tabs field alongside the sid order, through the one strip builder")
         self.assertIn('fr = {"type": "tabOrder", "order": list(order), "tabs": tabs, "selfHost": _self_host(),\n'
                       '          **_views_payload(), "live": sorted({str(x) for x in live})}',
@@ -55,20 +55,20 @@ class TabsFirst(unittest.TestCase):
         text = open(KPATH).read()
         self.assertEqual(text.count('_send_client(c, ("taborder",), _tab_order_frame(tab_order, tab_meta, live, c))'), 1)
         self.assertEqual(text.count("_tab_order_frame(tab_order, tab_meta, live, c)"), 1, "the builder's one caller: _send_tab_order")
-        self.assertEqual(text.count("_send_tab_order(c, tab_order, tab_meta, tmux)"), 3)
+        self.assertEqual(text.count("_send_tab_order(c, tab_order, tab_meta, live_map)"), 3)
         self.assertEqual(text.count('{"type": "tabOrder"'), 1, "the literal lives in _tab_order_frame alone")
-        self.assertIn("_send_tab_order(c, tab_order, tab_meta, tmux)", inspect.getsource(km._push_session_now))
-        self.assertIn("_send_tab_order(c, tab_order, tab_meta, tmux)", inspect.getsource(km._confirm_close_now))
+        self.assertIn("_send_tab_order(c, tab_order, tab_meta, live_map)", inspect.getsource(km._push_session_now))
+        self.assertIn("_send_tab_order(c, tab_order, tab_meta, live_map)", inspect.getsource(km._confirm_close_now))
 
     def _ready(self, app):
         """One `ready` from a renderer of `app`, the connect push stubbed as a marker: the types of the frames
         the handler put on the socket, in order, and the client's dedup slots afterwards. The slots read the
         same frames a second way: a strip sent through _send_client records its ("taborder",) key there."""
         # the liveness reads a strip built at ready would make: pinned, so should such a strip return, these
-        # tests fail the same way with or without tmux on this machine
-        saved = (km._tmux_sessions, km._alive_sessions)
-        km._tmux_sessions = lambda: {}
-        km._alive_sessions = lambda now, tmux: []
+        # tests fail the same way whatever this machine runs
+        saved = (km._live_map, km._alive_sessions)
+        km._live_map = lambda: {}
+        km._alive_sessions = lambda now, live_map: []
         try:
             sent = []
             h = object.__new__(km.Handler)
@@ -76,7 +76,7 @@ class TabsFirst(unittest.TestCase):
             client = {"app": app, "wid": "w1", "alive": True, "send": lambda s: sent.append(json.loads(s))}
             km.Handler._dispatch_ws(h, {"type": "ready"}, client)
         finally:
-            km._tmux_sessions, km._alive_sessions = saved
+            km._live_map, km._alive_sessions = saved
         return [m["type"] for m in sent], client.get("sent", {})
 
     def test_connect_ready_handler_sends_no_tab_order_of_its_own(self):

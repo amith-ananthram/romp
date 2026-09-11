@@ -1,9 +1,9 @@
-// romp-manager's tmux server start environment (2026-09-08): romp holds no API key and runs no secret-manager
-// CLI, so the manager hands `tmux start-server` its environment UNCHANGED (withoutOpCredentials is a plain copy;
-// the provider-gated scrub is retired with the providers). What guards the panes instead is the refusal to start
-// at all while the environment carries a retired provider variable: every pane the server creates inherits the
-// SERVER's globals, and a `romp new -t` session's `exec claude` would read a leftover ANTHROPIC_API_KEY from there
-// while the kernel alone refused to boot. Synthetic values throughout.
+// romp-manager's environment gate (2026-09-08): romp holds no API key and runs no secret-manager CLI, so the
+// manager hands every kernel it spawns its environment as it stands (specEnv copies it; the provider-gated
+// scrub is retired with the providers). What guards the kernels and their sessions instead is the refusal to
+// start at all while the environment carries a retired provider variable: the manager is the door service.env
+// comes in through, and a leftover ANTHROPIC_API_KEY there would reach every kernel, which alone refuses to
+// boot on it. Synthetic values throughout.
 // Run: node --test tests/manager-*.test.js
 'use strict';
 const { test } = require('node:test');
@@ -14,15 +14,13 @@ const path = require('node:path');
 
 process.env.ROMP_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'romp-mgr-op-env-'));
 const mgr = require(path.join(__dirname, '..', 'bin', 'romp-manager'));
-const { withoutOpCredentials, retiredCredentialNames, retiredCredentialMessage } = mgr;
+const { retiredCredentialNames, retiredCredentialMessage } = mgr;
 
 const ENV = { PATH: '/usr/bin', HOME: '/nonexistent', ANTHROPIC_AUTH_TOKEN: 'synthetic-bearer', ROMP_EXPECTED_AUTH: 'key' };
 
-test('the tmux start environment is a plain copy: nothing scrubbed, nothing mutated', () => {
-  const out = withoutOpCredentials(ENV);
-  assert.deepEqual(out, ENV);
-  assert.notStrictEqual(out, ENV, 'a copy, so a caller cannot mutate the manager environment through it');
+test('the manager scrubs nothing and reads no provider file: the retired helpers are gone', () => {
   assert.equal(mgr.serviceEnvHasRef, undefined, 'the provider-file reader is retired with the providers');
+  assert.equal(mgr.withoutOpCredentials, undefined, 'the scrub that became a plain copy went with the last process it fed');
 });
 
 test('a retired provider variable in the environment is named, never valued, and refuses the start', () => {
@@ -53,11 +51,11 @@ test('the 1Password CLI names are refused like the provider variables, and the m
   assert.doesNotMatch(msg, /synthetic-/, 'names only');
 });
 
-test('startManager refuses before the tmux server starts (source pin: the check is its first statement)', () => {
+test('startManager refuses before it opens the control port (source pin: the check precedes every start)', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'bin', 'romp-manager'), 'utf8');
   const body = src.slice(src.indexOf('function startManager() {'));
   const check = body.indexOf('retiredCredentialNames(process.env)');
-  const tmux = body.indexOf('startTmuxServer();');
-  assert.ok(check > 0 && tmux > 0 && check < tmux, 'the refusal runs before startTmuxServer()');
-  assert.ok(body.slice(check, tmux).includes('process.exit(1)'), 'and it exits rather than warns');
+  const server = body.indexOf('http.createServer(');
+  assert.ok(check > 0 && server > 0 && check < server, 'the refusal runs before the control server is created');
+  assert.ok(body.slice(check, server).includes('process.exit(1)'), 'and it exits rather than warns');
 });

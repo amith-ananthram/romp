@@ -38,7 +38,7 @@ test("the panel reads the SDK's designed control requests through the kernel", (
   assert.ok(KERNEL.includes('"mcpAction"'), "routes by session id like every session op (ID_OPS)");
   // disconnected-CLI says so explicitly rather than returning a misleading empty list
   assert.ok(ABC.includes("def mcp_status(self, sid: str):"));
-  assert.ok(ABC.includes("use /mcp there"));
+  assert.ok(ABC.includes("no running backend owns this one"));
 });
 
 test("every action refetches — the panel never shows an optimistic row", () => {

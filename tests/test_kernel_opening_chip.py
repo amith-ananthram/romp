@@ -2,8 +2,8 @@
 """The opening chip's deciding event is per-backend, and it covers ONLY a spawn in flight.
 
 A session whose transcript doesn't exist yet reads "opening" (2026-08-05: a just-spawned tab said
-"Working" over a clock with no honest base). For tmux the transcript's first record is the only
-observable, so the file IS the event. For an SDK session it isn't: a fresh SDK session writes NO
+"Working" over a clock with no honest base). Once the transcript's first record was the only
+observable, so the file was the event. For an SDK session it isn't: a fresh SDK session writes NO
 transcript until its first turn, so keying the chip on the file left a fully-up, idle session wearing
 the animated opening dots until the user's first message — indefinitely (the user 2026-08-08, who read
 minutes of dots as creation still running). The SDK backend knows the earlier designed event — the
@@ -57,7 +57,7 @@ class OpeningChipDecidingEvent(unittest.TestCase):
         # real ~/.claude/projects, and the fixture transcript is never found (chip stuck "opening").
         self.saved = [(m, k, getattr(m, k)) for m in (jd, km.jd)
                       for k in ("NAMES", "PROJECTS", "CAPDIR", "ARCHDIR", "GOALDIR", "STATE")]
-        self.saved += [(km, "NAMES", km.NAMES), (km, "_tmux_sessions", km._tmux_sessions),
+        self.saved += [(km, "NAMES", km.NAMES), (km, "_live_map", km._live_map),
                        (km, "_GLOBAL_CLAUDE_MD", km._GLOBAL_CLAUDE_MD)]
         for m in (jd, km.jd):
             m.NAMES, m.PROJECTS = names, proj
@@ -67,7 +67,7 @@ class OpeningChipDecidingEvent(unittest.TestCase):
         km._GLOBAL_CLAUDE_MD = td / "no-global-claude.md"
         self.tm = {"state": "waiting", "since": NOW - 5, "model": "Opus 5", "effort": "xhigh",
                    "context": None, "compactPct": None, "color": None, "backend": "sdk"}
-        km._tmux_sessions = lambda: {SID: dict(self.tm)}
+        km._live_map = lambda: {SID: dict(self.tm)}
 
     def tearDown(self):
         for m, k, v in self.saved:
@@ -118,7 +118,7 @@ class OpeningChipDecidingEvent(unittest.TestCase):
                          "connected + idle = ready to take a message; the dots would be a lie")
 
     def test_the_transcripts_first_record_still_ends_opening(self):
-        # the tmux path (no `connected` signal): the file landing remains the deciding event. A
+        # no `connected` signal yet: the file landing still ends the opening on its own. A
         # COMPLETED turn, so the chip settles to ready rather than working (an open turn).
         def iso(t):
             return datetime.fromtimestamp(t, timezone.utc).isoformat().replace("+00:00", "Z")

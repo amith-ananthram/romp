@@ -70,7 +70,7 @@ class _Base(unittest.TestCase):
         km._SESSION_STAMP_CACHE.clear(); km._autonudge_cache.clear()
         self.fb = _FakeBackend()
         km.Sessions.backend_for = lambda sid: self.fb
-        km._alive_sessions = lambda now, tmux: [{"sid": SID, "path": "/nonexistent.jsonl"}]
+        km._alive_sessions = lambda now, live: [{"sid": SID, "path": "/nonexistent.jsonl"}]
         km._wait_for_graph = lambda now, sids: {}
         km._session_flag = lambda sid, flag: False
         km._compacting_now = lambda sid: False

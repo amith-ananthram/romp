@@ -53,11 +53,11 @@ class OwnedYieldAwaiting(unittest.TestCase):
         km.jd.GOALDIR.mkdir(parents=True)
         self.path = str(td / (SID + ".jsonl"))
         Path(self.path).write_text("")
-        self.saved = {k: getattr(km, k) for k in ("_bg_live_norm", "_bg_placed_tops", "_tmux_sessions")}
+        self.saved = {k: getattr(km, k) for k in ("_bg_live_norm", "_bg_placed_tops", "_live_map")}
         # one live background task, attributed by the judge to TOP's subtree
         km._bg_live_norm = lambda sid, path: [{"tid": "t1", "desc": DESC, "t": DISPATCH, "type": ""}]
         km._bg_placed_tops = lambda sid, path, tids: {"t1": TOP}
-        km._tmux_sessions = lambda: {SID: {"state": "waiting", "since": DISPATCH, "model": "",
+        km._live_map = lambda: {SID: {"state": "waiting", "since": DISPATCH, "model": "",
                                            "effort": "", "context": None, "compactPct": None,
                                            "color": None}}
         km._SESSION_STAMP_CACHE.clear()

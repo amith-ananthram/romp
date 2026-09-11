@@ -462,7 +462,7 @@ class _InterruptTickRig(unittest.TestCase):
                  "_push_all")
         self.saved = {n: getattr(km, n) for n in names}
         self.saved_parsed = jd.parsed_session
-        km._alive_sessions = lambda now, tmux: [{"sid": SID, "path": "/nonexistent.jsonl"}]
+        km._alive_sessions = lambda now, live: [{"sid": SID, "path": "/nonexistent.jsonl"}]
         km._session_flag = lambda sid, flag: False
         km._compacting_now = lambda sid, **k: False   # the tick hands in the row's path and live meta
         km._api_error = lambda path: None

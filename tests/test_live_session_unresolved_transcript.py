@@ -2,9 +2,9 @@
 2026-09-08). _alive_sessions resolves each live sid through discover(), which scans project dirs for
 <sid>.jsonl; a file moved aside leaves discover with no entry, so the live session dropped off the chat tab
 list and the pane tore its tab down (T236 omission). A transient read failure is not a state change: a
-session whose tmux lane is live stays listed with a names/-derived stub, said once per episode. Behavioural
-pins driving the real _alive_sessions / _chat_tab_sessions with a scripted names registry and a vanishing
-transcript; synthetic ids only.
+session that is live in the kernel's live map stays listed with a names/-derived stub, said once per episode.
+Behavioural pins driving the real _alive_sessions / _chat_tab_sessions with a scripted names registry and a
+vanishing transcript; synthetic ids only.
 """
 import io
 import os
@@ -51,8 +51,8 @@ class _World(unittest.TestCase):
         self.tx.write_text('{"type":"user","uuid":"11111111-2222-4333-8444-0000000258a1","parentUuid":null,'
                            '"timestamp":"2026-09-01T00:00:00.000Z","sessionId":"%s",'
                            '"message":{"role":"user","content":"hi"}}\n' % SID)
-        self.tmux = {SID: {"state": "waiting", "since": NOW - 60, "model": "", "effort": "",
-                           "context": None, "backend": "tmux", "color": "#3fa7c9"}}
+        self.live_map = {SID: {"state": "waiting", "since": NOW - 60, "model": "", "effort": "",
+                               "context": None, "backend": "sdk", "color": "#3fa7c9"}}
         if hasattr(km, "_UNRESOLVED_LIVE_NOTED"):
             km._UNRESOLVED_LIVE_NOTED.discard(SID)   # tolerate a pre-fix kernel so the premise test is a real red-first
         # discover caches on a namespace fingerprint; clear it so the vanish is seen
@@ -71,7 +71,7 @@ class _World(unittest.TestCase):
 
     def _alive_sids(self):
         jd._discover_cache.clear()
-        return {s["sid"] for s in km._alive_sessions(NOW, self.tmux)}
+        return {s["sid"] for s in km._alive_sessions(NOW, self.live_map)}
 
     def test_present_while_the_transcript_is_readable(self):
         self.assertIn(SID, self._alive_sids(), "premise: a live session with its transcript is listed")
@@ -82,7 +82,7 @@ class _World(unittest.TestCase):
         self.tx.rename(moved)
         err = io.StringIO()
         with mock.patch.object(sys, "stderr", err):
-            alive = km._alive_sessions(NOW, self.tmux)
+            alive = km._alive_sessions(NOW, self.live_map)
         sids = {s["sid"] for s in alive}
         self.assertIn(SID, sids, "a LIVE session whose transcript vanished for a cycle stays in the tab list")
         row = next(s for s in alive if s["sid"] == SID)
@@ -97,9 +97,9 @@ class _World(unittest.TestCase):
         moved = self.tx.with_suffix(".jsonl.away"); self.tx.rename(moved)
         err = io.StringIO()
         with mock.patch.object(sys, "stderr", err):
-            km._alive_sessions(NOW, self.tmux)
+            km._alive_sessions(NOW, self.live_map)
             jd._discover_cache.clear()
-            km._alive_sessions(NOW, self.tmux)
+            km._alive_sessions(NOW, self.live_map)
         self.assertEqual(err.getvalue().count("could not be resolved"), 1, "one line per episode, not per cycle")
         moved.rename(self.tx); jd._discover_cache.clear()
         self.assertIn(SID, self._alive_sids(), "resolved again once the file is back")
@@ -109,7 +109,7 @@ class _World(unittest.TestCase):
         moved = self.tx.with_suffix(".jsonl.away"); self.tx.rename(moved)
         jd._discover_cache.clear()
         with mock.patch.object(sys, "stderr", io.StringIO()):
-            tabs = km._chat_tab_sessions(NOW, self.tmux)
+            tabs = km._chat_tab_sessions(NOW, self.live_map)
         self.assertIn(SID, {s["sid"] for s in tabs}, "the tabOrder push (built from this) never omits a live session")
         moved.rename(self.tx)
 
@@ -117,7 +117,7 @@ class _World(unittest.TestCase):
         moved = self.tx.with_suffix(".jsonl.away"); self.tx.rename(moved)
         jd._discover_cache.clear()
         with mock.patch.object(sys, "stderr", io.StringIO()):
-            alive = km._alive_sessions(NOW, {})   # tmux says nothing is live
+            alive = km._alive_sessions(NOW, {})   # the live map says nothing is live
         self.assertNotIn(SID, {s["sid"] for s in alive}, "a read failure only KEEPS a live session; a dead one still drops")
         moved.rename(self.tx)
 
@@ -126,7 +126,7 @@ class _World(unittest.TestCase):
         moved = self.tx.with_suffix(".jsonl.away"); self.tx.rename(moved)
         jd._discover_cache.clear()
         with mock.patch.object(km, "_sdk", lambda: None), mock.patch.object(sys, "stderr", io.StringIO()):
-            alive = km._alive_sessions(NOW, self.tmux)
+            alive = km._alive_sessions(NOW, self.live_map)
         self.assertNotIn(SID, {s["sid"] for s in alive}, "nothing to stub from → never invented")
         moved.rename(self.tx)
 

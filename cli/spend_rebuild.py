@@ -60,7 +60,7 @@ def claude_dir():
 def _registry(state):
     """{sid: {name, keyed, threadOf, ids}} from the SDK backend's per-session registry files. The registry
     keeps a dead session's file, so this is every SDK session the kernel ever ran — the ledger's universe
-    (tmux-backend sessions never reach spend.json and have no file here)."""
+    (a Codex session bills no Claude account, never reaches spend.json and has no file here)."""
     out = {}
     for p in sorted(glob.glob(str(state / "sdk" / "*.json"))):
         try:

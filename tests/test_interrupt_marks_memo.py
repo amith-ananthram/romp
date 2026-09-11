@@ -201,7 +201,7 @@ class _MemoHarness(unittest.TestCase):
         (jd.GOALDIR / (SID + ".json")).write_text(json.dumps(
             {"rompUuid": SID, "seq": 1, "lastNode": g["id"], "closedTurns": [], "nodes": {g["id"]: g},
              "placements": {}, "status": {g["id"]: "working"}}))
-        self.tmux = {SID: {"state": "idle", "since": NOW - 100, "model": "", "effort": "",
+        self.live = {SID: {"state": "idle", "since": NOW - 100, "model": "", "effort": "",
                            "context": None, "compactPct": None, "color": None}}
 
     def _reset(self):
@@ -320,45 +320,40 @@ class MemoHitsAndMisses(_MemoHarness):
 class MemoAcrossTheCycle(_MemoHarness):
     def test_the_tick_and_build_feed_hit_on_the_second_cycle(self):
         km._parse(str(self.tpath), SID, NOW)                       # warm the display cache (_warm_fleet_bg)
-        km._interrupt_block_tick(NOW, self.tmux)
-        km.build_feed(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
+        km.build_feed(NOW, self.live)
         self.assertEqual(sorted(k for k in km._intr_marks_memo if k[0] == SID),
                          [(SID, "display"), (SID, "judge")], "one entry per family after a cycle")
         s0 = self._stats()
-        km._interrupt_block_tick(NOW, self.tmux)
-        km.build_feed(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
+        km.build_feed(NOW, self.live)
         s1 = self._stats()
         self.assertEqual(s1["miss"], s0["miss"], "the second cycle recomputes nothing")
         self.assertGreaterEqual(s1["hit"] - s0["hit"], 2, "the tick hit and build_feed hit")
 
     def test_the_families_do_not_evict_each_other(self):
         km._parse(str(self.tpath), SID, NOW)
-        km._interrupt_block_tick(NOW, self.tmux)
-        km.build_feed(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
+        km.build_feed(NOW, self.live)
         judge = km._intr_marks_memo[(SID, "judge")]
         disp = km._intr_marks_memo[(SID, "display")]
         self.assertIs(judge[0], disp[0], "ONE parse object since stage 2 (the kernel and the judges share the store); still one slot per family")
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         self.assertIs(km._intr_marks_memo[(SID, "display")], disp, "the tick left the display slot alone")
-        km.build_feed(NOW, self.tmux)
+        km.build_feed(NOW, self.live)
         self.assertIs(km._intr_marks_memo[(SID, "judge")], judge, "build_feed left the judge slot alone")
 
     def test_a_sid_leaving_the_alive_set_loses_its_entries(self):
         km._parse(str(self.tpath), SID, NOW)
-        km._interrupt_block_tick(NOW, self.tmux)
-        km.build_feed(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
+        km.build_feed(NOW, self.live)
         dead = ("11111111-2222-3333-4444-888888888888", "judge")
         km._intr_marks_memo[dead] = ([], (0.0, ""), (0, 0))
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         self.assertNotIn(dead, km._intr_marks_memo, "a sid outside the alive set is swept")
         self.assertIn((SID, "judge"), km._intr_marks_memo, "…the alive one stays")
         s0 = self._stats()
-        saved = km._has_tmux
-        km._has_tmux = lambda: True                     # an empty map is a genuine zero, not headless
-        try:
-            km._interrupt_block_tick(NOW, {})
-        finally:
-            km._has_tmux = saved
+        km._interrupt_block_tick(NOW, {})               # an empty live map is authoritative: nobody is alive
         self.assertEqual([k for k in km._intr_marks_memo if k[0] == SID], [],
                          "the session left the alive set: both of its entries are released")
         self.assertEqual(self._stats()["evict"], s0["evict"] + 2)
@@ -366,13 +361,13 @@ class MemoAcrossTheCycle(_MemoHarness):
     def test_the_nudge_tick_reads_the_judge_entry_without_a_scan(self):
         # the third per-cycle caller: the nudge tick's interrupt gate reads the judge parse through the memo, so after
         # the interrupt tick has filled the (sid, "judge") entry the nudge tick text-scans no atom
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         self.assertIn((SID, "judge"), km._intr_marks_memo)
-        row = next(r for r in km._alive_sessions(NOW, self.tmux) if r["sid"] == SID)
+        row = next(r for r in km._alive_sessions(NOW, self.live) if r["sid"] == SID)
         s0 = self._stats()
         c = _Counter(km.em, "is_interrupt_record")
         try:
-            verdict = km._auto_nudge_session(row, NOW, self.tmux, {}, {}, alive_ids={SID})
+            verdict = km._auto_nudge_session(row, NOW, self.live, {}, {}, alive_ids={SID})
         finally:
             c.close()
         self.assertEqual(verdict, "user-interrupt", "the gate ruled on the interrupt")

@@ -248,7 +248,7 @@ class _FeedHarness(unittest.TestCase):
         km._machine_cut_cache.clear()
         km._pending_ops.clear()
         km._write_auto_nudge({"enabled": True, "nudged": {}, "intrBlocked": {}})
-        self.tmux = {SID: {"state": "idle", "since": NOW - 100, "model": "", "effort": "",
+        self.live = {SID: {"state": "idle", "since": NOW - 100, "model": "", "effort": "",
                            "context": None, "compactPct": None, "color": None}}
 
     def tearDown(self):
@@ -298,18 +298,31 @@ class _FeedHarness(unittest.TestCase):
         return g
 
     def _stub_send(self):
+        # the nudge hands its body to the session's backend (Sessions.backend_for(sid).send); a fake
+        # backend records what was sent, refusing every other op like the unowned route it extends
         sent = []
-        saved = km._tmux_send, jd.optimistic_followup
-        km._tmux_send = lambda name, body, **kw: sent.append((name, body))
+
+        class _Recording(km._UnownedBackend):
+            def owns(self, sid):
+                return True
+
+            def send(self, sid, text):
+                sent.append((sid, text))
+                return True
+
+        fake = _Recording()
+        saved = km.Sessions.backend_for, jd.optimistic_followup
+        km.Sessions.backend_for = staticmethod(lambda sid: fake)
         jd.optimistic_followup = lambda sid, gid: True
 
         def restore():
-            km._tmux_send, jd.optimistic_followup = saved
+            km.Sessions.backend_for = staticmethod(saved[0])
+            jd.optimistic_followup = saved[1]
         return sent, restore
 
     def _card(self, item_id=None):
         km._parse(str(self.tpath), SID, NOW)                       # warm the cache (stands in for _warm_fleet_bg)
-        return next(a for a in km.build_feed(NOW, self.tmux)["asks"]
+        return next(a for a in km.build_feed(NOW, self.live)["asks"]
                     if a["itemId"] == (item_id or SID + ":gw"))
 
 
@@ -325,7 +338,7 @@ class MachineCutFeedAndNudge(_FeedHarness):
         g = self._goal()
         sent, restore = self._stub_send()
         try:
-            km._auto_nudge_tick(NOW, self.tmux)
+            km._auto_nudge_tick(NOW, self.live)
             self.assertEqual(len(sent), 1, "a restart-cut, re-stalled goal is nudged to continue — not left silent")
             self.assertIn("romp-goal-id: " + g, sent[0][1])
         finally:
@@ -340,7 +353,7 @@ class MachineCutFeedAndNudge(_FeedHarness):
     def test_restart_cut_card_stays_in_working_not_blocked(self):
         self._machine_cut(sb.BOOT_RESUME_NUDGE)
         self._goal()
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         self.assertEqual(jd.load_goals(SID)["status"][SID + ":gw"], "working",
                          "a machine cut is continued, never blocked-on-you")
         self.assertEqual(self._card()["column"], "working")
@@ -348,7 +361,7 @@ class MachineCutFeedAndNudge(_FeedHarness):
     def test_crash_cut_is_also_continued_not_blocked(self):
         self._machine_cut(sb.CRASH_RESUME_NUDGE)
         self._goal()
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         self.assertEqual(jd.load_goals(SID)["status"][SID + ":gw"], "working")
         self.assertFalse(self._card().get("interrupted"))
 
@@ -361,7 +374,7 @@ class MachineCutFeedAndNudge(_FeedHarness):
                           wedge="<task-notification>the restart killed a background task"
                                 "</task-notification>")
         self._goal()
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         self.assertEqual(jd.load_goals(SID)["status"][SID + ":gw"], "working",
                          "a machine cut is continued even when a notification wedges before the notice")
         self.assertFalse(self._card().get("interrupted"))
@@ -373,7 +386,7 @@ class MachineCutFeedAndNudge(_FeedHarness):
         km._set_auto_nudge(False)                       # the toggle must not gate the needs-you flip
         self._genuine_stop()
         self._goal()
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         self.assertEqual(jd.load_goals(SID)["status"][SID + ":gw"], "blocked",
                          "a user-stopped session needs the user → Blocked, not sitting in Working")
 
@@ -381,7 +394,7 @@ class MachineCutFeedAndNudge(_FeedHarness):
         km._set_auto_nudge(False)
         self._genuine_stop()
         self._goal()
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         card = self._card()
         self.assertEqual(card["column"], "needs_input", "the interrupted card comes to the user's attention")
         self.assertTrue(card.get("interrupted"), "and says WHY it's here — the user stopped it mid-turn")
@@ -390,13 +403,13 @@ class MachineCutFeedAndNudge(_FeedHarness):
         km._set_auto_nudge(False)
         self._genuine_stop()
         self._goal()
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         self.assertEqual(jd.load_goals(SID)["status"][SID + ":gw"], "blocked")
         # the user speaks → a fresh turn opens; the block WE placed lifts
         with open(self.tpath, "a") as f:
             f.write(json.dumps(uline(T0 + 200, "keep going with plan B", "u3", "u2")) + "\n")
         km._parse_cache.clear()
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         self.assertEqual(jd.load_goals(SID)["status"][SID + ":gw"], "working",
                          "the user re-engaged → our interrupt block lifts")
 
@@ -418,7 +431,7 @@ class StaleInterruptMarker(_FeedHarness):
         km._set_auto_nudge(False)
         self._genuine_stop()
         g1 = self._goal()
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         self.assertEqual(jd.load_goals(SID)["status"][g1], "blocked")
         self.assertEqual(km._intr_blocked(SID), g1)
         # the judges move on from newer turns: the stopped goal is lifted and completed, and a second
@@ -440,7 +453,7 @@ class StaleInterruptMarker(_FeedHarness):
             f.write(json.dumps(aline(T0 + 220, "wrapped that up; the build is green", "a2", "u3",
                                      "end_turn")) + "\n")
         km._parse_cache.clear()
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         st = jd.load_goals(SID)
         self.assertEqual(st["status"][g2], "blocked",
                          "the marker was verified stale → the LIVE focus goal re-blocks on the user")
@@ -453,7 +466,7 @@ class StaleInterruptMarker(_FeedHarness):
         km._set_auto_nudge(False)
         self._genuine_stop()
         g1 = self._goal()
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         # a judge lifts OUR block off newer evidence — rows the bare stop's stamp cannot outrank
         st = jd.load_goals(SID)
         jd.record_verdict(st, st["nodes"][g1], "unblocker", "unblock", T0 + 70,
@@ -461,7 +474,7 @@ class StaleInterruptMarker(_FeedHarness):
         jd.rollup_status(st, False)
         jd.save_goals(SID, st)
         rows = len(jd.load_goals(SID)["nodes"][g1]["log"])
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         st = jd.load_goals(SID)
         self.assertEqual(st["status"][g1], "working",
                          "the judges ruled on a newer world — the re-block stands down")
@@ -472,7 +485,7 @@ class StaleInterruptMarker(_FeedHarness):
             f.write(json.dumps(uline(T0 + 200, self.INJECTED, "u3", "u2")) + "\n")
             f.write(json.dumps(aline(T0 + 220, "wrapped that up", "a2", "u3", "end_turn")) + "\n")
         km._parse_cache.clear()
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         self.assertEqual(jd.load_goals(SID)["status"][g1], "blocked",
                          "re-surfaced the moment the stop is the newest information again")
 
@@ -649,7 +662,7 @@ class MachineCutBeforeItsNoticeLands(_FeedHarness):
     def test_the_focus_card_is_not_blocked_on_the_user(self):
         self._cut_awaiting_its_notice()
         g = self._goal()
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         self.assertEqual(jd.load_goals(SID)["status"][g], "working",
                          "romp cut this turn and is resuming it — the user is owed nothing")
 
@@ -658,7 +671,7 @@ class MachineCutBeforeItsNoticeLands(_FeedHarness):
         # log claiming they stopped a session they never touched
         self._cut_awaiting_its_notice()
         g = self._goal()
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         log = jd.load_goals(SID)["nodes"][g].get("log") or []
         self.assertEqual([r for r in log if r.get("src") == "interrupt"], [],
                          "no interrupt verdict may be written for a cut romp itself caused")
@@ -667,7 +680,7 @@ class MachineCutBeforeItsNoticeLands(_FeedHarness):
     def test_the_card_stays_in_working(self):
         self._cut_awaiting_its_notice()
         self._goal()
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         card = self._card()
         self.assertEqual(card["column"], "working")
         self.assertFalse(card.get("interrupted"), "and wears no 'you stopped this' badge")
@@ -675,7 +688,7 @@ class MachineCutBeforeItsNoticeLands(_FeedHarness):
     def test_a_crash_cut_awaiting_its_notice_is_also_continued(self):
         self._cut_awaiting_its_notice("crash")
         g = self._goal()
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         self.assertEqual(jd.load_goals(SID)["status"][g], "working")
 
     def test_auto_nudge_still_fires_so_a_real_re_stall_is_caught(self):
@@ -690,7 +703,7 @@ class MachineCutBeforeItsNoticeLands(_FeedHarness):
         # still reach the user. If this ever goes green-by-default the mechanism has stopped discriminating.
         self._genuine_stop()
         g = self._goal()
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         self.assertEqual(jd.load_goals(SID)["status"][g], "blocked",
                          "a real Esc with no machine-cut stamp still needs the user")
 
@@ -706,7 +719,7 @@ class MachineCutBeforeItsNoticeLands(_FeedHarness):
         self.tpath.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
         sb.append_machine_cut(jd.STATE, SID, "restart", T0 + 62)
         g = self._goal()
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         self.assertEqual(jd.load_goals(SID)["status"][g], "blocked",
                          "the user stopped the RESUMED turn — that one is theirs and belongs in needs-you")
 

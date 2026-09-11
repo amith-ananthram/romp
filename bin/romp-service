@@ -71,7 +71,7 @@ SERVICE_ENV_FILE="${ROMP_SERVICE_ENV_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/rom
 # The instance-scoping env: the variables that say WHICH romp this service supervises.
 # A second OS user on one machine (a kernel handed to another person) shares the machine's
 # PORT space, so their manager/kernel/bus have to be renumbered; the rest of the profile
-# (state root, Claude config dir, tmux socket) is the same set romp-manager's specEnv hands
+# (state root, Claude config dir) is the same set romp-manager's specEnv hands
 # an aux kernel. The installing shell has them set; the unit did NOT, so a supervised manager
 # came up on the defaults while every foreground `romp` command used the overrides — the
 # manager's control port then collides with the primary user's and the service dies at login,
@@ -84,7 +84,10 @@ SERVICE_ENV_FILE="${ROMP_SERVICE_ENV_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/rom
 # up on the default, romp-serve stamped that default back over the inherited ROMP_KERNEL_PORT,
 # and a second OS user's kernel bound the primary's port while their CLI kept printing the
 # renumbered one. Exactly the failure the paragraph above describes, one variable further along.
-_INSTANCE_VARS=(ROMP_SERVE_PORT ROMP_KERNEL_PORT ROMP_POSTAL_PORT ROMP_MANAGER_PORT ROMP_STATE_DIR CLAUDE_CONFIG_DIR ROMP_TMUX_SOCKET)
+# ROMP_TMUX_SOCKET was in this set while romp had a tmux session backend. A unit or plist written by an
+# install from that time still carries its Environment= line (or dict entry); nothing reads the variable
+# any more, so the line is inert until the next `romp-service install` regenerates the file.
+_INSTANCE_VARS=(ROMP_SERVE_PORT ROMP_KERNEL_PORT ROMP_POSTAL_PORT ROMP_MANAGER_PORT ROMP_STATE_DIR CLAUDE_CONFIG_DIR)
 
 # The SET ones, formatted for the platform: $1 = plist (EnvironmentVariables dict pairs) or
 # unit (systemd Environment= lines). Each line is newline-TERMINATED; the callers decide what

@@ -49,9 +49,6 @@ test("every mode wears a tagline, and 'Accept edits' reads 'Accept' everywhere (
   // the rename holds everywhere the mode name renders: the chip/badge…
   assert.match(RENDER, /case "acceptedits": return "Accept";/);
   assert.ok(!RENDER.includes('"Accept edits"'), "no surface still says the two-word label");
-  // …and the kernel's cycle refusal (its terminal leg, until the backend's removal lands) names the same four modes with the same word
-  const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");
-  assert.match(KERNEL, /shift\+tab cycle — Normal, Accept, Auto, Plan\./);
 });
 
 test("no width blowout: every new tagline is no longer than the accepted bypass line (T117 fit rule)", () => {

@@ -41,19 +41,19 @@ class StateUnknownIsTheUnREADABLEOnes(unittest.TestCase):
         self.addCleanup(lambda: setattr(km, "_session_flag", self._flag))
 
     def test_a_session_with_no_live_row_is_unknown(self):
-        tmux = {ALIVE[0]["sid"]: {}, ALIVE[1]["sid"]: {}}     # 'tests' has no row at all
-        self.assertEqual(km._state_unknown_names(ALIVE, tmux, [], []), ["tests"])
+        live_map = {ALIVE[0]["sid"]: {}, ALIVE[1]["sid"]: {}}     # 'tests' has no row at all
+        self.assertEqual(km._state_unknown_names(ALIVE, live_map, [], []), ["tests"])
 
     def test_a_readable_idle_session_is_NOT_unknown(self):
         # the whole point: a session we CAN read and that is quiet gets no pip, so it must not
         # appear here — otherwise every idle session would wear the gray ring
-        tmux = {s["sid"]: {} for s in ALIVE}
-        self.assertEqual(km._state_unknown_names(ALIVE, tmux, [], []), [])
+        live_map = {s["sid"]: {} for s in ALIVE}
+        self.assertEqual(km._state_unknown_names(ALIVE, live_map, [], []), [])
 
     def test_working_and_awaiting_are_never_unknown(self):
         # their state was read by definition; they already have their own dots
-        tmux = {}                                             # no live rows at all
-        out = km._state_unknown_names(ALIVE, tmux, ["web"], ["api"])
+        live_map = {}                                         # no live rows at all
+        out = km._state_unknown_names(ALIVE, live_map, ["web"], ["api"])
         self.assertEqual(out, ["tests"], "only the session with neither a dot nor a readable state")
 
     def test_hidden_sessions_are_in_no_list(self):
@@ -64,7 +64,7 @@ class StateUnknownIsTheUnREADABLEOnes(unittest.TestCase):
     def test_build_feed_ships_the_list(self):
         import inspect
         src = inspect.getsource(km.build_feed)
-        self.assertIn('"stateUnknown": _state_unknown_names(alive, tmux, working, awaiting)', src)
+        self.assertIn('"stateUnknown": _state_unknown_names(alive, live_map, working, awaiting)', src)
 
     def test_no_ready_list_is_published(self):
         # a healthy idle session is deliberately NOT enumerated: blank means quiet, so there is

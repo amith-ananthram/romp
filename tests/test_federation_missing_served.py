@@ -52,12 +52,12 @@ def _free_port():
 def lab_kernel_env(lab, claude, dist, port, token):
     """The lab kernel's environment: kernel_env's list of names, never a copy of the runner's (a shell on a machine
     running romp carries the live kernel's exports, and the list carries none of the retired key names or 1Password
-    names the kernel refuses to boot with either), plus this lab's tmux socket, named after its port. With the list
-    comes the postal trio kernel_env gives every lab kernel (ROMP_POSTAL_CLIENT_ONLY=1, its own ROMP_POSTAL_PORT,
-    ROMP_POSTAL_PEERS=0), a bus of its own that is never started: without it this kernel's boot-time ensure started a
-    detached bus on the machine's FIXED port, which outlived the kernel and held the shared bus port after a restart
-    (2026-09-10); tests/test_hermetic_kernel_postal.py guards every spawn site for it."""
-    return _lab.kernel_env(lab, claude, dist, port, token, ROMP_TMUX_SOCKET="romp-fedmissing-%d" % port)
+    names the kernel refuses to boot with either). With the list comes the postal trio kernel_env gives every lab
+    kernel (ROMP_POSTAL_CLIENT_ONLY=1, its own ROMP_POSTAL_PORT, ROMP_POSTAL_PEERS=0), a bus of its own that is never
+    started: without it this kernel's boot-time ensure started a detached bus on the machine's FIXED port, which
+    outlived the kernel and held the shared bus port after a restart (2026-09-10);
+    tests/test_hermetic_kernel_postal.py guards every spawn site for it."""
+    return _lab.kernel_env(lab, claude, dist, port, token)
 
 
 def _transcript(sid, cwd, pairs):
@@ -310,7 +310,6 @@ class ServedFederationMissing(unittest.TestCase):
             except (ProcessLookupError, PermissionError):
                 pass
             k.wait()
-        subprocess.run(["tmux", "-L", getattr(cls, "env", {}).get("ROMP_TMUX_SOCKET", ""), "kill-server"], capture_output=True)
         shutil.rmtree(getattr(cls, "lab", ""), ignore_errors=True)
 
     def _r(self):
@@ -448,11 +447,11 @@ class FedMissingLabKernelEnv(unittest.TestCase):
     LIVE = {"ROMP_MANAGER_PID": "4242", "ROMP_SERVE_HOST": "0.0.0.0",
             "ROMP_SID": "cccccccc-1111-2222-3333-444444444444", "ROMP_SESSION_NAME": "web",
             "ROMP_STATE_DIR": os.path.join(LAB, "live"), "ROMP_EXPECTED_AUTH": "key", "RUNNER_SECRET_PROBE": "abc"}
-    # what the lab itself puts in: its roots, the serve seams, its tmux socket, and a postal bus of its own
+    # what the lab itself puts in: its roots, the serve seams, and a postal bus of its own
     OWN = {"XDG_STATE_HOME": os.path.join(LAB, "xdg"), "CLAUDE_CONFIG_DIR": os.path.join(LAB, "claude"),
            "ROMP_MANAGER_PORT": "1", "ROMP_KERNEL_NO_OPEN": "1", "ROMP_SERVE_TOKEN": "testtok",
            "ROMP_KERNEL_PORT": "4321", "ROMP_DIST_DIR": os.path.join(LAB, "dist"), "ROMP_MODEL_CATALOG": "off",
-           "ROMP_TMUX_SOCKET": "romp-fedmissing-4321", "ROMP_POSTAL_PEERS": "0", "ROMP_POSTAL_CLIENT_ONLY": "1"}
+           "ROMP_POSTAL_PEERS": "0", "ROMP_POSTAL_CLIENT_ONLY": "1"}
     # the port a kernel with no ROMP_POSTAL_PORT of its own dials: the machine's bus
     MACHINE_BUS_PORT = "25302"
 

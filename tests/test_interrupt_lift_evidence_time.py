@@ -220,7 +220,7 @@ class _TickFixture(unittest.TestCase):
         km._autonudge_cache.clear()
         km._pending_ops.clear()
         km._write_auto_nudge({"enabled": True, "nudged": {}, "intrBlocked": {}})
-        self.tmux = {SID: {"state": "idle", "since": NOW - 100, "model": "", "effort": "",
+        self.live = {SID: {"state": "idle", "since": NOW - 100, "model": "", "effort": "",
                            "context": None, "compactPct": None, "color": None}}
         recs = [uline(NOW - 3600, "wire up the reconnect banner", "u1"),
                 aline(NOW - 3580, "on it", "a1", "u1", "tool_use"),
@@ -253,19 +253,19 @@ class EndToEndThroughTheTick(_TickFixture):
     silent Working card should have been."""
 
     def test_the_lift_records_the_reengagement_turns_trigger(self):
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         self.assertEqual(jd.load_goals(SID)["status"][GID], "blocked")
         self._reengage()
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         nd = jd.load_goals(SID)["nodes"][GID]
         self.assertEqual(jd.load_goals(SID)["status"][GID], "working")
         self.assertEqual(_row(nd, "unblock")["ev_t"], RESUME_T,
                          "the message's own turn trigger — the stamp the judges will use for it too")
 
     def test_the_verdict_on_the_reengaged_turn_puts_the_card_back_in_needs_you(self):
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         self._reengage()
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         st = jd.load_goals(SID)                       # the judges audit that turn once it ends
         self.assertTrue(jd.record_verdict(st, st["nodes"][GID], "closer", "block", RESUME_T,
                                           why="which host for prod?"))
@@ -276,13 +276,13 @@ class EndToEndThroughTheTick(_TickFixture):
 
     def test_a_machine_cut_lift_is_stamped_the_same_way(self):
         # the audited shape: romp's own resume notice is the re-engagement, and the tick lifts on it
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         with open(self.tpath, "a") as f:
             f.write(json.dumps(uline(RESUME_T, sb.BOOT_RESUME_NUDGE, "u3", "u2")) + "\n")
             f.write(json.dumps(aline(RESUME_T + 40, "picked it up; which host for prod?",
                                      "a2", "u3", "end_turn")) + "\n")
         km._parse_cache.clear()
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         nd = jd.load_goals(SID)["nodes"][GID]
         self.assertEqual(_row(nd, "unblock")["ev_t"], RESUME_T)
         st = jd.load_goals(SID)
@@ -317,25 +317,25 @@ class TheTickPushesNothingInline(_TickFixture):
 
     def test_the_block_marks_the_views_dirty_wakes_the_pusher_and_pushes_nothing_inline(self):
         floor = time.time()
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         self.assertEqual(jd.load_goals(SID)["status"][GID], "blocked")
         self.assertEqual(self.pushes, [], "no inline push from the tick")
         self.assertTrue(km._pusher_wake.is_set(), "the writer woke the pusher; its next cycle carries the flip")
         self.assertGreater(km._views_dirty[0], floor, "…and marked the views dirty, so that cycle rebuilds")
 
     def test_the_lift_does_the_same(self):
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         km._pusher_wake.clear()
         self._reengage()
         floor = time.time()
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         self.assertEqual(jd.load_goals(SID)["status"][GID], "working")
         self.assertEqual(self.pushes, [])
         self.assertTrue(km._pusher_wake.is_set())
         self.assertGreater(km._views_dirty[0], floor)
 
     def test_a_stand_down_lift_moves_nothing(self):
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         st = jd.load_goals(SID)                          # a judge now owns the block: the diary's last block
         self.assertTrue(jd.record_verdict(st, st["nodes"][GID], "closer", "block", RESUME_T,
                                           why="which host for prod?"))
@@ -345,7 +345,7 @@ class TheTickPushesNothingInline(_TickFixture):
         self._reengage()
         km._pusher_wake.clear()
         floor = km._views_dirty[0]
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         self.assertIsNone(km._intr_blocked(SID), "the marker is retired")
         self.assertEqual(jd.load_goals(SID)["status"][GID], "blocked", "…and the judge's block stands")
         self.assertEqual(self.pushes, [], "nothing new to show: no push")

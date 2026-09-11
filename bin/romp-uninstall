@@ -76,11 +76,13 @@ pkill -f "$ROMP_DIR/bin/romp-kernel"  2>/dev/null || true
 
 # ── 2. ~/.claude wiring ────────────────────────────────────────────────
 echo "==> ~/.claude hook + skill symlinks"
-# romp-summarize.sh left the repo 2026-09-11 (the tmux backend's dead leaves). It stays in this list
-# and in OURS below for one release, so an install from before that is uninstalled without an
-# upgrade in between is still cleaned up. Drop it from both with the next release.
-for h in romp-summarize.sh romp-postal-drain.sh romp-postal-ensure.sh \
-         romp-postal-revive.sh romp-postal-context.sh romp-wake.sh tmux-status.sh; do
+# romp-summarize.sh and tmux-status.sh left the repo 2026-09-11 with the tmux backend (the announcer,
+# and the hook that painted the tmux status bar; the SDK backend records a session's state itself, so
+# no hook replaced it). Both retired names stay in this list and in OURS below for one release, so an
+# install from before that is uninstalled without an upgrade in between is still cleaned up. Drop
+# them from both with the next release.
+for h in romp-summarize.sh tmux-status.sh romp-postal-drain.sh romp-postal-ensure.sh \
+         romp-postal-revive.sh romp-postal-context.sh romp-wake.sh; do
     rm -f "$HOME/.claude/hooks/$h"
 done
 rm -f "$HOME/.claude/skills/romp" "$HOME/.claude/skills/romp-postal"
@@ -95,8 +97,8 @@ python3 - <<'PYEOF'
 import json, os
 
 SETTINGS = os.path.expanduser("~/.claude/settings.json")
-OURS = {"tmux-status.sh", "romp-summarize.sh", "romp-postal-drain.sh", "romp-postal-ensure.sh",
-        "romp-postal-revive.sh", "romp-postal-context.sh", "romp-wake.sh"}
+OURS = {"tmux-status.sh", "romp-summarize.sh", "romp-postal-drain.sh",
+        "romp-postal-ensure.sh", "romp-postal-revive.sh", "romp-postal-context.sh", "romp-wake.sh"}
 
 try:
     with open(SETTINGS) as f:

@@ -854,7 +854,6 @@ class WsFlagsMustBeBooleans(unittest.TestCase):
             ("setFileEditing", "enabled", {}, km._file_editing_on, warn),
             ("setThinkingSummaries", "enabled", {}, km._thinking_summaries_on, warn),
             ("setConserve", "enabled", {}, km._conserve_on, warn),
-            ("setTmuxBackend", "enabled", {}, lambda: km.jd._state_str("tmux-backend", "off") == "on", warn),   # T288
             ("setJudgeFast", "enabled", {}, lambda: km.jd._state_str("judge-fast", "off") == "on", warn),   # Fast mode, the triage tier's box
             ("setDistillFast", "enabled", {}, lambda: km.jd._state_str("distill-fast", "off") == "on", warn),   # T300: a box per tier
             ("setIndexFast", "enabled", {}, lambda: km.jd._state_str("index-fast", "off") == "on", warn),

@@ -66,7 +66,7 @@ class PredictWorkingFanOut(unittest.TestCase):
         km._send_to_app = lambda app, m: self.frames.append((app, m))
         km._name_of = lambda sid: "web"   # these tests drive ops on a session this kernel HAS; _drive refuses one it doesn't (2026-07-29)
         km.Sessions.backend_for = lambda sid: self.be
-        km._send_or_park = lambda *a, **k: None
+        km._send_or_park = lambda *a, **k: False   # handed over now (None is the REFUSED value since 2026-09-08)
         km.jd.optimistic_followup = lambda *a, **k: False
         # the last-built feed payload: the pre-answer map of which card the live floor sits on
         km._built_feed[:] = [None, {"type": "feed", "asks": [

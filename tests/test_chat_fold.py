@@ -78,7 +78,7 @@ class Sess:
         names = td / "names"; names.mkdir()
         (names / SID).write_text("web\t%s\t#abcdef\n" % str(self.cdir))
         self.saved = [(m.jd.NAMES, m.jd.PROJECTS, m.jd.CAPDIR, m.jd.ARCHDIR, m.jd.GOALDIR, m.jd.STATE,
-                       m.NAMES, m._tmux_sessions, m._GLOBAL_CLAUDE_MD, m._msg_summaries) for m in MODS]
+                       m.NAMES, m._live_map, m._GLOBAL_CLAUDE_MD, m._msg_summaries) for m in MODS]
         self.now = int(__import__("time").time())        # discovery keys on the real clock
         self.t = self.now - 3 * 86400
         state = "working" if working else "idle"
@@ -90,7 +90,7 @@ class Sess:
             m.jd.STATE = td
             m.NAMES = names
             m._GLOBAL_CLAUDE_MD = td / "no-global-claude.md"
-            m._tmux_sessions = lambda: self.tm
+            m._live_map = lambda: self.tm
             m._chat_fold.clear()
             m._parse_cache.clear()
             m._PATH_LINK_CACHE.clear()                  # keyed (sid, uuid): fixtures reuse both across tests
@@ -103,7 +103,7 @@ class Sess:
     def close(self):
         for m, sv in zip(MODS, self.saved):
             (m.jd.NAMES, m.jd.PROJECTS, m.jd.CAPDIR, m.jd.ARCHDIR, m.jd.GOALDIR, m.jd.STATE,
-             m.NAMES, m._tmux_sessions, m._GLOBAL_CLAUDE_MD, m._msg_summaries) = sv
+             m.NAMES, m._live_map, m._GLOBAL_CLAUDE_MD, m._msg_summaries) = sv
             m._chat_fold.clear()
         self.td.cleanup()
 

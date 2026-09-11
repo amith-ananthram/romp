@@ -49,7 +49,7 @@ class SpendModalServed(unittest.TestCase):
         self.node_path = np
         self.td = tempfile.TemporaryDirectory()
         state = Path(self.td.name)
-        self._saved = (km.jd.STATE, km.NAMES, km._live_names, km._tmux_sessions, km._self_host,
+        self._saved = (km.jd.STATE, km.NAMES, km._live_names, km._live_map, km._self_host,
                        km._claude_account, km._auth_key_present)
         km.jd.STATE = state
         km.NAMES = state / "names"
@@ -58,7 +58,7 @@ class SpendModalServed(unittest.TestCase):
         (km.NAMES / API).write_text("api\t/tmp/notes-api\t#54B204\t#ffffff\n")
         (km.NAMES / TESTS).write_text("tests\t/tmp/notes-api\t#4EA8A9\t#ffffff\n")
         km._live_names = lambda tm: {"web": WEB, "api": API}
-        km._tmux_sessions = lambda: []
+        km._live_map = lambda: []
         km._self_host = lambda: "TESTHOST"
         km._claude_account = lambda: ""
         km._auth_key_present = lambda: True
@@ -130,7 +130,7 @@ class SpendModalServed(unittest.TestCase):
             self.srv.shutdown()
             self.srv.server_close()
         if hasattr(self, "_saved"):
-            (km.jd.STATE, km.NAMES, km._live_names, km._tmux_sessions, km._self_host,
+            (km.jd.STATE, km.NAMES, km._live_names, km._live_map, km._self_host,
              km._claude_account, km._auth_key_present) = self._saved
             km._remotes.clear()
             km._remotes.update(getattr(self, "_saved_remotes", {}))

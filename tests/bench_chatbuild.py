@@ -96,7 +96,7 @@ jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR = td / "captions", td / "archive", td / "goals
 jd.STATE = td
 km.NAMES = names
 km._GLOBAL_CLAUDE_MD = td / "no-global-claude.md"
-km._tmux_sessions = lambda: {SID: {"state": "working", "since": NOW - 100, "model": "", "effort": "",
+km._live_map = lambda: {SID: {"state": "working", "since": NOW - 100, "model": "", "effort": "",
                                    "context": None, "compactPct": None, "color": None}}
 g = Gen()
 with open(tpath, "w") as f:

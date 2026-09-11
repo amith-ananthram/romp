@@ -5,7 +5,7 @@
 # ended (Stop), a prompt landed (UserPromptSubmit), or a compaction ended
 # (PostCompact) — and pokes the kernel's POST /tick so the judge producer runs a
 # pass NOW instead of waiting out its 3 s backstop, and the pusher's parked-op
-# drain runs now instead of on its 0.5 s one. A tmux /compact ends at
+# drain runs now instead of on its 0.5 s one. A /compact ends at
 # PostCompact: the poke wakes the drain, and the op queued behind the compact
 # fires once the compaction is corroborated in the transcript (the boundary
 # record). Without this the feed lags a completed turn by a backstop.
