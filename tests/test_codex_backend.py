@@ -11,6 +11,7 @@ import contextlib
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import tempfile
@@ -1235,6 +1236,102 @@ for i in range(20):
         self.assertIn("codex login", err["text"])
         self.assertFalse(err["limit"])
         self.assertFalse(be.available())
+
+    def test_a_handshake_that_never_answers_is_ended_and_named(self):
+        # A codex that starts, holds stdout open and never writes its first frame (a start-up stalled on a hung
+        # mount, a stub that sleeps) left _get_client in the SDK's untimed wait with _client_lock HELD: every
+        # Codex creation, resume, send and /models read queued behind it, the tab whose receive loop made the
+        # call read no more ops, and nothing was logged or recorded (2026-09-11). The handshake now runs under
+        # a clock whose expiry ends the child, the one event the SDK's wait answers to, and names the reason.
+        # The reason then stands for at least the clock: a re-probe costs the whole clock again, lock held, so
+        # the ordinary backoff (cap 5s) would have re-run it almost continuously while the fault lasted.
+        class SilentClient(FakeClient):
+            """Every account_read parks until the next close(): the shape of a live child that never answers,
+            however often it is probed. (The injected path has no start/initialize; account_read is the
+            handshake call both paths share.)"""
+
+            def __init__(self):
+                super().__init__()
+                self.gate = threading.Event()
+
+            def account_read(self, *a, **k):
+                self._rec("account_read")
+                self.gate = gate = threading.Event()
+                gate.wait()
+                raise RuntimeError("Codex process closed stdout.")   # what the SDK's wait raises after close()
+
+            def close(self):
+                super().close()
+                self.gate.set()
+        saved = getattr(cb, "HANDSHAKE_TIMEOUT_S", None)
+        cb.HANDSHAKE_TIMEOUT_S = 0.3                     # the clock under test
+        self.addCleanup(setattr, cb, "HANDSHAKE_TIMEOUT_S", saved)
+        fake = SilentClient()
+        self.addCleanup(lambda: fake.gate.set())         # without the clock the probe parks forever; let it out
+        logs = []
+        be = cb.CodexBackend(tempfile.mkdtemp(), client_factory=lambda: fake, log=logs.append)
+        out = []
+        probe = threading.Thread(target=lambda: out.append(be.available()), name="probe", daemon=True)
+        probe.start()
+        probe.join(5)
+        self.assertFalse(probe.is_alive(), "available() must return once the handshake clock runs out")
+        self.assertEqual(out, [False])
+        self.assertTrue(fake.called("close"), "the clock ends the child; that is what unblocks the SDK's wait")
+        self.assertIn("did not answer", be._client_err or "")
+        recorded = [m for m in logs if "did not answer" in m]
+        self.assertTrue(recorded, logs)
+        delay = float(re.search(r"retry in ([\d.]+)s", recorded[0]).group(1))
+        self.assertGreaterEqual(delay, cb.HANDSHAKE_TIMEOUT_S,
+                                "a probe that costs the whole clock is not re-run before the clock: %s" % recorded[0])
+        sid = be.spawn("web", "/TESTDIR")                 # the session exists, visibly broken, with the reason
+        self.assertIn("did not answer", be.launch_error(sid)["text"])
+
+    def test_a_handshake_ended_by_its_clock_names_the_reason_not_the_transport(self):
+        # On a real client the parked call is initialize() inside bring_up: the clock's close() ends the child,
+        # the SDK's reader fails its waiter with the transport's text ("Codex process closed stdout. stderr_tail=
+        # ...") and that RAISES out of the handshake, the branch the injected path above never reaches (its
+        # account_read error is swallowed by the login check). The user reads the plain reason, not the
+        # transport's text and a stderr tail; the transport error stays attached as the cause.
+        class EndedClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.ended = threading.Event()
+
+            def close(self):
+                super().close()
+                self.ended.set()
+        fake = EndedClient()
+        transport = RuntimeError("Codex process closed stdout. stderr_tail=")   # the SDK's TransportClosedError shape
+
+        def bring_up():                                   # start + initialize on a real client: parks until the close
+            fake.ended.wait()
+            raise transport
+        saved = getattr(cb, "HANDSHAKE_TIMEOUT_S", None)
+        cb.HANDSHAKE_TIMEOUT_S = 0.3
+        self.addCleanup(setattr, cb, "HANDSHAKE_TIMEOUT_S", saved)
+        self.addCleanup(fake.ended.set)
+        be, _, _ = build(factory=lambda: fake)
+        with self.assertRaises(RuntimeError) as cm:
+            be._handshake(fake, bring_up)
+        self.assertIsInstance(cm.exception, cb._HandshakeTimeout)   # the class the record floors the retry on
+        self.assertIn("did not answer", str(cm.exception))
+        self.assertNotIn("stderr_tail", str(cm.exception))
+        self.assertIs(cm.exception.__cause__, transport)
+        self.assertTrue(fake.called("close"), "the clock ended the child")
+        self.assertEqual(fake.called("account_read"), [], "the login check never ran: the raise came first")
+
+    def test_a_handshake_that_settles_first_dismisses_its_clock(self):
+        # The other side of the gate: a good handshake cancels its clock, so no clock fires after it settled to
+        # close the installed client. The clock's thread ending is the event; a live one could still fire.
+        saved = getattr(cb, "HANDSHAKE_TIMEOUT_S", None)
+        cb.HANDSHAKE_TIMEOUT_S = 0.2
+        self.addCleanup(setattr, cb, "HANDSHAKE_TIMEOUT_S", saved)
+        be, fake, _ = build()
+        self.assertTrue(be.available())
+        self.assertTrue(until(lambda: not any(t.name == "codex-handshake-clock" for t in threading.enumerate())),
+                        "a settled handshake dismisses its clock")
+        self.assertEqual(fake.called("close"), [], "a clock dismissed by the handshake never ends the client")
+        self.assertIs(be._client, fake)
 
     def test_claude_only_knobs_refuse(self):
         be, _, _ = build()
