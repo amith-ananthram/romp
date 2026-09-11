@@ -110,13 +110,16 @@ test("render.ts: the badge sits right of the name and the gauge, is in the strip
   assert.match(RENDER, /window\.addEventListener\("storage", \(e\) => \{ if \(e\.key === KEYS_EVENT\) renderTabs\(\); \}\);\n\s*window\.addEventListener\(KEYS_EVENT, \(\) => renderTabs\(\)\);/);
 });
 
-test("render.ts: the tab menu asks the shell to record a hot key, and removes one through the shared store", () => {
-  const i = RENDER.indexOf('l.textContent = cur ? "Change hot key…" : "Hot key…"');
+test("render.ts: the tab menu's one row asks the shell to record a hot key; a bound one reads Update and the recorder removes too", () => {
+  const i = RENDER.indexOf('l.textContent = cur ? "Update hot key…" : "Hot key…"');
   assert.ok(i > 0);
   const block = RENDER.slice(RENDER.lastIndexOf("if (inRompShell()", i), RENDER.indexOf("// Colors join Rename", i));
   assert.match(block, /typeof \(window\.parent as any\)\.__rompHotkeyConfigure === "function"/, "shell-hosted only: the shell owns the recorder");
   assert.match(block, /window\.parent\.postMessage\(\{ romp: "hotkeyConfigure", sid: id, name: s\?\.name \|\| "" \}, "\*"\)/);
-  assert.match(block, /saveOverride\(hotkeyCommandId\(id\), ""\)/, "Remove = an unbind in the bindings store");
+  // one row (the user 2026-09-11): no separate Remove row — the recorder it opens re-records or removes (Backspace, or
+  // its Remove button, shortcuts-modal.ts: the same unbind in the bindings store)
+  assert.doesNotMatch(block, /Remove hot key/);
+  assert.match(block, /sb\.textContent = cur \? "now " \+ miniChord\(cur, IS_MAC\) \+ " — press a new combination, or remove it" : "press a key combination that switches to this tab";/);
   assert.match(block, /ctxIcon\("key", false\)/);
   assert.ok(i > RENDER.indexOf('l.textContent = "Open in new split"'), "after Open in new split, with the session controls");
   assert.match(RENDER, /kind === "key"\n\s*\? '<rect x="1.5" y="4" width="13" height="8" rx="1.5"\/><line x1="4.5" y1="9.5" x2="11.5" y2="9.5"\/>'/);

@@ -40,6 +40,9 @@ test("a conflict is named and resolved explicitly — reassign unbinds the loser
 
 test("Backspace unbinds, Reset returns the default, the chips read the EFFECTIVE binding", () => {
   assert.match(MODAL, /if \(e\.key === "Backspace" \|\| e\.key === "Delete"\) \{ commit\(recId, ""\); return; \}/);
+  // a bound command's listening row offers the same unbind as a button (the user 2026-09-11: the tab menu's one
+  // "Update hot key…" row covers changing and removing)
+  assert.match(MODAL, /if \(effectiveChord\(c\.id, c\.chord, overrides, mac\)\) \{\s*const rm = doc\.createElement\("button"\);[\s\S]{0,200}?rm\.textContent = "Remove";\s*rm\.addEventListener\("click", \(e\) => \{ e\.stopPropagation\(\); commit\(c\.id, ""\); \}\);/);
   assert.match(MODAL, /saveOverride\(c\.id, null\); render\(\);/);
   assert.match(MODAL, /const eff = effectiveChord\(c\.id, c\.chord, overrides, mac\);/);
   assert.match(MODAL, /textContent = "not bound";/);

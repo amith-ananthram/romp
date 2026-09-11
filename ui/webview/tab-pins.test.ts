@@ -96,10 +96,17 @@ test("render.ts: pinned tabs are put back at their slots after EVERY rewrite of 
   assert.match(RENDER, /function syncTabPinsWithStrip\(\): void \{\n\s*const kept = prunePins\(loadTabPins\(localStorage\), order\);\n\s*if \(kept\) writeTabPins\(localStorage, kept\);/);
 });
 
-test("render.ts: a pinned tab is not draggable, wears the fold, and is in the strip's signature", () => {
+test("render.ts: a pinned tab is not draggable, wears the pushpin after its hot key, and is in the strip's signature", () => {
   assert.match(RENDER, /const pins = loadTabPins\(localStorage\);[^\n]*\n(?:[^\n]*\n)?\s*const stripSig = JSON\.stringify\(\[/, "read once per render, before the signature");
   assert.match(RENDER, /tabChord\(id, keyOverrides, IS_MAC\), pins\.has\(id\)\]/, "an input the strip paints is in its signature");
-  assert.match(RENDER, /const pinned = pins\.has\(id\);\n\s*if \(pinned\) \{ tab\.classList\.add\("pinned"\); const fold = el\("span", "tab-fold"\); fold\.title = "Pinned — it stays where it is"; tab\.appendChild\(fold\); \}/);
+  assert.match(RENDER, /const pinned = pins\.has\(id\);\n\s*if \(pinned\) tab\.classList\.add\("pinned"\);/);
+  // the glyph (the user 2026-09-11, replacing the folded corner): the menu's pushpin, after the hot key, named for a screen reader
+  const glyph = RENDER.indexOf('if (pinned) { const pn = el("span", "tab-pin"); pn.innerHTML = pinSvg(11); pn.title = "Pinned — it stays where it is"; pn.setAttribute("role", "img"); pn.setAttribute("aria-label", pn.title); tab.appendChild(pn); }');
+  assert.ok(glyph > 0, "the pin glyph is appended");
+  assert.ok(glyph > RENDER.indexOf('if (hk) { const k = el("span", "tab-key");'), "…after the hot key badge");
+  assert.match(RENDER, /^const PIN_PATHS = '<path d="M6\.2 2\.5 H9\.8 L9\.3 6\.4 L11\.4 8\.4 V9\.4 H4\.6 V8\.4 L6\.7 6\.4 Z"\/><line x1="8" y1="9\.4" x2="8" y2="13\.5"\/>';/m, "one drawing");
+  assert.match(RENDER, /^function pinSvg\(size: number\): string \{/m);
+  assert.doesNotMatch(RENDER, /tab-fold/, "the folded corner is gone");
   assert.match(RENDER, /tab\.draggable = !s\.sub && !pinned(?: && !fedMissing)?;/, "the pinned tab does not start a drag (nor any tab on a page without its manager — main, 2026-09-10)");
 });
 
@@ -112,12 +119,13 @@ test("render.ts: the tab menu pins AT the tab's slot and unpins, with the sub-li
   assert.match(block, /sb\.textContent = on \? "it can be dragged again" : "it keeps this slot whatever else moves — drags flow around it";/);
   assert.match(block, /pin\.addEventListener\("click", \(ev\) => \{ ev\.stopPropagation\(\); dismissTabMenu\(\); setTabPinned\(localStorage, id, !on, order\.indexOf\(id\)\); \}\);/,
     "the click SETS the state the row showed, at the slot the tab has now");
-  assert.ok(i > RENDER.indexOf('l.textContent = "Open in new split"') && i < RENDER.indexOf('l.textContent = cur ? "Change hot key…" : "Hot key…"'),
+  assert.ok(i > RENDER.indexOf('l.textContent = "Open in new split"') && i < RENDER.indexOf('l.textContent = cur ? "Update hot key…" : "Hot key…"'),
     "between Open in new split and Hot key…, with the session controls");
-  assert.match(RENDER, /kind === "pin"\n\s*\? '<path d="M3 2 H9\.5 L13 5\.5 V14 H3 Z"\/><path d="M9\.5 2 V5\.5 H13"\/>'/, "a page with a folded corner");
+  assert.match(RENDER, /kind === "pin"\n\s*\? PIN_PATHS/, "the menu's Pin row draws the same pushpin the pinned tab wears");
 });
 
-test("styles.css: the fold is the tab's top-right corner turned over — the strip's background above the diagonal, the flap below it", () => {
-  assert.match(CSS, /\.tab-fold \{ position: absolute; top: -1px; right: -1px; width: 10px; height: 10px; pointer-events: none;\n\s*background: linear-gradient\(to bottom left, var\(--bg\) 50%, currentColor 50%\); opacity: 0\.55; \}/);
-  assert.match(CSS, /\.tab\.pinned \{ padding-right: 10px; \}/, "room for the flap so the ✕ never sits under it");
+test("styles.css: the pushpin sits in the tab's run, dim like the keycap, brighter with the tab; no fold rules remain", () => {
+  assert.match(CSS, /\.tab-pin \{ flex: 0 0 auto; display: inline-flex; color: var\(--dim\); \}/);
+  assert.match(CSS, /\.tab\.active \.tab-pin, \.tab:hover \.tab-pin \{ color: var\(--fg\); \}/);
+  assert.doesNotMatch(CSS, /tab-fold|\.tab\.pinned \{ padding-right/, "the corner flap and its padding are gone");
 });

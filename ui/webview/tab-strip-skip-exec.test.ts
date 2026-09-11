@@ -24,7 +24,7 @@ const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview"
 class FakeEl {
   tag: string; className: string; children: FakeEl[] = []; parent: FakeEl | null = null;
   dataset: Record<string, string> = {}; styleProps: Record<string, string> = {}; attrs: Record<string, string> = {};
-  listeners: Record<string, Function[]> = {}; textContent = ""; title = ""; tabIndex = -1; draggable = false;
+  listeners: Record<string, Function[]> = {}; textContent = ""; title = ""; tabIndex = -1; draggable = false; innerHTML = "";   // innerHTML: the pinned tab's pushpin is set as markup (2026-09-11)
   wipes = 0;   // replaceChildren() calls: the strip's rebuild count when this is #tabs
   style: any; classList: any;
   constructor(tag: string, cls = "") {
@@ -63,7 +63,7 @@ type Hooks = {
   aftermaths: [number, number][]; rowPaints: number; tagSyncs: number; placeholders: number;
   groupsRaw: string | null;   // the stored tab-groups blob the plan reads (localStorage's, in the page)
   overrides: Record<string, string>;   // the bindings store (romp:keys) the badge reads: command id → chord
-  pins: Map<string, number>;           // the pinned set (romp:tabpins, sid → slot): a pinned tab wears the fold and does not drag
+  pins: Map<string, number>;           // the pinned set (romp:tabpins, sid → slot): a pinned tab wears the pushpin and does not drag
   tabChord: typeof tabChord; miniChord: typeof miniChord; chordTitle: typeof chordTitle;
   phone: boolean;             // the phone layout: the plan is the flat strip there
   heads: HeadCall[];          // every group header the paint minted, in order
@@ -138,6 +138,7 @@ function lift(): (hooks: Hooks) => Api {
     const loadOverrides = () => H.overrides; const IS_MAC = false;
     const tabChord = H.tabChord, miniChord = H.miniChord, chordTitle = H.chordTitle;
     const loadTabPins = () => H.pins;   // the pinned set (2026-09-10), read once per render
+    const pinSvg = (size) => '<svg data-pin="' + size + '"></svg>';   // the pushpin drawing the pinned tab wears (2026-09-11): a stand-in, its size recorded
     const localStorage = null;          // the store handle the paint passes to loadTabPins; the knob above answers instead
     const showTabTip = (tab, s) => { H.tips.push(s); }; const toggleLedgerCollapsed = () => {}; const showTabMenu = () => {}; const openPicker = () => {};
     const tagMenuButton = () => el("span", "tag-btn"); const openTagMenu = () => {}; const postLens = () => {}; const vscodeApi = null;
@@ -447,22 +448,26 @@ test("the all-hidden blank lands on the skip path when the active view appears b
   assert.equal(av.el.style.display, "", "restored once anything is visible");
 });
 
-test("a pinned tab wears the fold, the pinned class and no draggable flag; the others drag as before", () => {
+test("a pinned tab wears the pushpin after its hot key, the pinned class and no draggable flag; the others drag as before", () => {
   const { H, api } = world();
   const tab = (id: string) => H.bar.tabs().find((t) => t.dataset.id === id)!;
   api.renderTabs();
   assert.equal(tab("a").draggable, true); assert.equal(tab("a").has("pinned"), false);
-  assert.equal(tab("a").children.filter((c) => c.has("tab-fold")).length, 0, "no pin, no fold");
+  assert.equal(tab("a").children.filter((c) => c.has("tab-pin")).length, 0, "no pin, no glyph");
   H.pins = new Map([["a", 0]]);
+  H.overrides = { "session.hotkey.a": "Alt+Shift+K" };   // a hot key too: the pin sits AFTER the badge
   api.renderTabs();
   assert.equal(tab("a").has("pinned"), true);
   assert.equal(tab("a").draggable, false, "a pinned tab starts no drag");
-  const fold = tab("a").children.filter((c) => c.has("tab-fold"));
-  assert.equal(fold.length, 1);
-  assert.equal(fold[0].title, "Pinned — it stays where it is");
+  const pin = tab("a").children.filter((c) => c.has("tab-pin"));
+  assert.equal(pin.length, 1);
+  assert.equal(pin[0].title, "Pinned — it stays where it is");
+  assert.equal(pin[0].innerHTML, '<svg data-pin="11"></svg>', "the menu's pushpin, at the tab's size");
+  const kids = tab("a").children.map((c) => c.className);
+  assert.ok(kids.findIndex((k) => k.includes("tab-pin")) > kids.findIndex((k) => k.includes("tab-key")), "after the hot key badge: " + kids.join(","));
   assert.equal(tab("b").draggable, true, "the other tab is untouched"); assert.equal(tab("b").has("pinned"), false);
-  H.pins = new Map();
+  H.pins = new Map(); H.overrides = {};
   api.renderTabs();
   assert.equal(tab("a").has("pinned"), false); assert.equal(tab("a").draggable, true);
-  assert.equal(tab("a").children.filter((c) => c.has("tab-fold")).length, 0, "unpinned: the fold goes");
+  assert.equal(tab("a").children.filter((c) => c.has("tab-pin")).length, 0, "unpinned: the glyph goes");
 });

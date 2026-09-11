@@ -247,24 +247,27 @@ out.hk.badgeAAfter = await badgeOf("f-chat-2", cfg.sidA);
 out.hk.keysStore = (await stores()).keys;
 await waitFn(() => document.activeElement && document.activeElement.id === "f-chat" && document.getElementById("f-chat").contentDocument.activeElement.id === "composer-input", null, "the focus never came back to the asking pane's composer");
 out.hk.afterRecord = await whereFocus("f-chat");
-// Remove hot key (from column 2, where A is not even the active tab): the "" write reaches the shell, which drops the
-// command, the set entry and the override — and both columns' badges go
-await pickTabMenu("f-chat-2", cfg.sidA, "Remove hot key");
+// Remove (from column 2, where A is not even the active tab): the one "Update hot key…" row opens the recorder, whose
+// Remove button makes the "" write; the shell drops the command, the set entry and the override — and both columns' badges go
+out.hk.updateMenu = await pickTabMenu("f-chat-2", cfg.sidA, "Update hot key…");
+await dialogShown();
+await page.evaluate(() => { const b = Array.from(document.querySelectorAll("#rkeys-list .rkeys-row.recording .rkeys-act")).find((x) => x.textContent === "Remove"); if (!b) throw new Error("no Remove button on the bound row"); b.click(); });
+await dialogGone("the recorder never closed on Remove");
 await waitFn(([sid]) => { const has = (fid) => { const t = document.getElementById(fid).contentDocument.querySelector('#tabs .tab[data-id="' + sid + '"]'); return !!(t && t.querySelector(".tab-key")); };
   return !has("f-chat") && !has("f-chat-2") && !(sid in JSON.parse(localStorage.getItem("romp:tabkeys") || "{}")); }, [cfg.sidA], "Remove never took A's badge and set entry away");
 out.hk.removed = { badgeCol1: await badgeOf("f-chat", cfg.sidA), badgeCol2: await badgeOf("f-chat-2", cfg.sidA), ...(await stores()), dialogRows: await hotkeyRows() };
 // Esc on a re-recording keeps what was there: B's chord and its command stay, and the focus comes back
-await pickTabMenu("f-chat", cfg.sidB, "Change hot key…");
+await pickTabMenu("f-chat", cfg.sidB, "Update hot key…");
 await dialogShown();
 await page.keyboard.press("Escape");
 await dialogGone("Esc never closed the solo recorder");
 await waitFn(() => document.activeElement && document.activeElement.id === "f-chat" && document.getElementById("f-chat").contentDocument.activeElement.id === "composer-input", null, "the focus never came back after Esc");
 out.hk.cancelled = { afterCancel: await whereFocus("f-chat"), badgeB: await badgeOf("f-chat", cfg.sidB), ...(await stores()), dialogRows: await hotkeyRows() };   // the focus first: listing the dialog's rows opens (and closes) it
 
-// ---- 2d. pin a tab (the user 2026-09-10): B's tab, pinned from its menu in column 1, wears the fold and is not draggable —
+// ---- 2d. pin a tab (the user 2026-09-10): B's tab, pinned from its menu in column 1, wears the pushpin and is not draggable —
 // in every column, since the pinned set is this browser's; Unpin from column 2's menu takes it back ----
 const pinState = (fid, sid) => page.evaluate(([fid, sid]) => { const t = document.getElementById(fid).contentDocument.querySelector('#tabs .tab[data-id="' + sid + '"]');
-  return t ? { pinned: t.classList.contains("pinned"), draggable: t.draggable, fold: !!t.querySelector(".tab-fold") } : null; }, [fid, sid]);
+  return t ? { pinned: t.classList.contains("pinned"), draggable: t.draggable, pin: !!t.querySelector(".tab-pin svg") } : null; }, [fid, sid]);
 const pinnedIn = (fids, sid, want) => waitFn(([fids, sid, want]) => fids.every((fid) => { const t = document.getElementById(fid).contentDocument.querySelector('#tabs .tab[data-id="' + sid + '"]');
   return !!t && t.classList.contains("pinned") === want; }), [fids, sid, want], "B's tab never showed pinned=" + want + " in both columns");
 const stripOrder = (fid) => page.evaluate((fid) => Array.from(document.getElementById(fid).contentDocument.querySelectorAll("#tabs .tab[data-id]")).map((t) => t.dataset.id), fid);
@@ -658,6 +661,8 @@ class ServedChatSplit(unittest.TestCase):
         self.assertNotIn(SID_A, rm["tabkeys"], "Remove takes the session out of the set: %r" % rm["tabkeys"])
         self.assertNotIn("session.hotkey." + SID_A, rm["keys"], "…and its override out of the store (no dead \"\" entry): %r" % rm["keys"])
         self.assertEqual(rm["dialogRows"], ["Switch to api"], "…and its row out of the dialog; B's stays")
+        self.assertIn("Update hot key…", h["updateMenu"], "a bound tab's menu offers one row for both changing and removing: %r" % h["updateMenu"])
+        self.assertNotIn("Remove hot key", h["updateMenu"]); self.assertNotIn("Change hot key…", h["updateMenu"])
         c = h["cancelled"]
         self.assertEqual(c["badgeB"]["text"], "\u2325\u21e7K", "Esc on a re-recording keeps the chord")
         self.assertIn(SID_B, c["tabkeys"]); self.assertEqual(c["keys"]["session.hotkey." + SID_B], "Alt+Shift+K"); self.assertEqual(c["dialogRows"], ["Switch to api"])
@@ -682,8 +687,8 @@ class ServedChatSplit(unittest.TestCase):
         # the user 2026-09-10: pin a tab so it stays where it is, shown as a folded corner; per browser, so every column agrees
         p = self._r()["pin"]
         for c in (p["col1"], p["col2"]):
-            self.assertEqual(c, {"pinned": True, "draggable": False, "fold": True}, "pinned from column 1's menu, shown in both columns: %r" % p)
-        self.assertEqual(p["a"], {"pinned": False, "draggable": True, "fold": False}, "the other tab is untouched")
+            self.assertEqual(c, {"pinned": True, "draggable": False, "pin": True}, "pinned from column 1's menu, shown in both columns: %r" % p)
+        self.assertEqual(p["a"], {"pinned": False, "draggable": True, "pin": False}, "the other tab is untouched")
         before = p["orderBefore"]["col1"]
         self.assertEqual(sorted(before), sorted([SID_A, SID_B])); self.assertEqual(p["orderBefore"]["col2"], before, "both columns start on the kernel's order")
         self.assertEqual(p["store"], {SID_B: before.index(SID_B)}, "pinned AT its slot")
@@ -693,7 +698,7 @@ class ServedChatSplit(unittest.TestCase):
         self.assertEqual(p["orderHeld"]["col2"], before, "…and so did column 2's")
         self.assertIn("Unpin tab", p["menu"]); self.assertNotIn("Pin tab", p["menu"])
         for c in (p["after"]["col1"], p["after"]["col2"]):
-            self.assertEqual(c, {"pinned": False, "draggable": True, "fold": False}, "unpinned from column 2's menu, gone in both: %r" % p["after"])
+            self.assertEqual(c, {"pinned": False, "draggable": True, "pin": False}, "unpinned from column 2's menu, gone in both: %r" % p["after"])
         self.assertEqual(p["after"]["store"], {})
         self.assertEqual(p["orderReleased"], {"col1": rev, "col2": rev}, "unpinned, the same rewrite moves the tab: the pin was what held it")
 

@@ -6220,7 +6220,7 @@ function renderTabs() {
     // its slot (reorderTo holds it). It says so with a folded top-right corner — the strip's background above the
     // diagonal, the flap below, painted by CSS on one absolutely placed child (tab-pins.ts owns the set).
     const pinned = pins.has(id);
-    if (pinned) { tab.classList.add("pinned"); const fold = el("span", "tab-fold"); fold.title = "Pinned — it stays where it is"; tab.appendChild(fold); }
+    if (pinned) tab.classList.add("pinned");   // the glyph itself sits after the hot key, below
     // drag-to-reorder (synced with the timeline via the shared session-order file). A subagent viewer
     // stays put: it is client-only, and a reorder would post its id into the kernel's order.
     tab.draggable = !s.sub && !pinned && !fedMissing;   // …nor a pinned tab (2026-09-10), nor any tab on a page without its manager (fedMissing)
@@ -6254,6 +6254,9 @@ function renderTabs() {
     // menu, bound in the shared bindings store, fired by the shell's dispatcher; the full spelling is the tooltip
     const hk = tabChord(id, keyOverrides, IS_MAC);
     if (hk) { const k = el("span", "tab-key"); k.textContent = miniChord(hk, IS_MAC); k.title = chordTitle(hk, IS_MAC); k.setAttribute("aria-label", k.title); tab.appendChild(k); }   // the glyphs read aloud as the full spelling
+    // The pin (the user 2026-09-11, replacing the folded corner): the tab menu's own pushpin after the name, the gauge and the
+    // hot key, dim like the keycap and brighter with the tab — the tab wears the icon the user clicked to pin it
+    if (pinned) { const pn = el("span", "tab-pin"); pn.innerHTML = pinSvg(11); pn.title = "Pinned — it stays where it is"; pn.setAttribute("role", "img"); pn.setAttribute("aria-label", pn.title); tab.appendChild(pn); }
     // Rich hover tooltip (custom DOM — a native title can't colour/bold): backend in its own colour, the
     // full dir path, and mode/model/effort/context each on a line (the user 2026-06-23). See showTabTip.
     if (!s.sub) {   // the rich tip reads a real session's dir/branch/model; a viewer has none of them
@@ -6487,6 +6490,12 @@ function setSessionColor(id: string, bg: string) {
 
 // Small inline-SVG icon for the tab menu's toggle items (trusted constant markup; `off` slashes + dims it,
 // matching the timeline lane toggles). 16-unit viewBox; currentColor so .ctx-icon/.off set the tint.
+// The pushpin (the user 2026-09-11, replacing the folded corner): a flat head, a body tapering to the plate, the needle. ONE
+// drawing for the tab menu's Pin row and the pinned tab itself, so the tab wears the icon the user clicked.
+const PIN_PATHS = '<path d="M6.2 2.5 H9.8 L9.3 6.4 L11.4 8.4 V9.4 H4.6 V8.4 L6.7 6.4 Z"/><line x1="8" y1="9.4" x2="8" y2="13.5"/>';
+function pinSvg(size: number): string {
+  return '<svg viewBox="0 0 16 16" width="' + size + '" height="' + size + '" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">' + PIN_PATHS + "</svg>";
+}
 function ctxIcon(kind: "feed" | "mail" | "bell" | "bill" | "folder" | "tag" | "pencil" | "split" | "key" | "pin", off: boolean): HTMLElement {
   const span = el("span", "ctx-icon" + (off ? " off" : ""));
   const slash = off ? '<line x1="1.6" y1="14.4" x2="14.4" y2="1.6"/>' : "";
@@ -6505,7 +6514,7 @@ function ctxIcon(kind: "feed" | "mail" | "bell" | "bill" | "folder" | "tag" | "p
         : kind === "key"
           ? '<rect x="1.5" y="4" width="13" height="8" rx="1.5"/><line x1="4.5" y1="9.5" x2="11.5" y2="9.5"/>'  // a keycap (the tab's hot key)
         : kind === "pin"
-          ? '<path d="M3 2 H9.5 L13 5.5 V14 H3 Z"/><path d="M9.5 2 V5.5 H13"/>'  // a page with a folded corner (pin the tab)
+          ? PIN_PATHS                                                             // the pushpin (pin the tab; the pinned tab wears the same)
         : kind === "pencil"
           ? '<path d="M3 13 L3.6 10.4 L10.8 3.2 A1.3 1.3 0 0 1 12.8 5.2 L5.6 12.4 Z"/><line x1="9.8" y1="4.2" x2="11.8" y2="6.2"/>'  // pencil (rename)
           : '<path d="M8 2 C5.9 2.2 4.7 3.8 4.7 5.8 L4.7 8 L3.4 9.9 L12.6 9.9 L11.3 8 L11.3 5.8 C11.3 3.8 10.1 2.2 8 2 Z"/><path d="M6.6 11.6 A1.5 1.5 0 0 0 9.4 11.6"/>';  // bell (system notifications)
@@ -6590,15 +6599,16 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
   }
   // Hot key (the user 2026-09-10): a key combination that switches to this tab, recorded in the shell's
   // shortcuts dialog (it owns the recorder and the conflict check) — this pane only asks. The chord shows
-  // minified on the tab; while one is bound a second row removes it (an unbind in the shared store).
+  // minified on the tab. ONE row (the user 2026-09-11): while a chord is bound it reads "Update hot key…", and the
+  // recorder it opens both re-records and removes (Backspace, or its Remove button — an unbind in the shared store).
   if (inRompShell() && typeof (window.parent as any).__rompHotkeyConfigure === "function") {
     const cur = tabChord(id, loadOverrides(), IS_MAC);
     const hot = el("div", "ctx-item ctx-item-toggle");
     hot.appendChild(ctxIcon("key", false));
     const bodyEl = el("span", "ctx-item-body");
-    const l = el("span", "ctx-item-label"); l.textContent = cur ? "Change hot key…" : "Hot key…"; bodyEl.appendChild(l);
+    const l = el("span", "ctx-item-label"); l.textContent = cur ? "Update hot key…" : "Hot key…"; bodyEl.appendChild(l);
     const sb = el("span", "ctx-item-sub");
-    sb.textContent = cur ? "now " + miniChord(cur, IS_MAC) + " — press a new combination to switch to this tab" : "press a key combination that switches to this tab";
+    sb.textContent = cur ? "now " + miniChord(cur, IS_MAC) + " — press a new combination, or remove it" : "press a key combination that switches to this tab";
     bodyEl.appendChild(sb);
     hot.appendChild(bodyEl);
     hot.addEventListener("click", (ev) => {
@@ -6606,16 +6616,6 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
       try { window.parent.postMessage({ romp: "hotkeyConfigure", sid: id, name: s?.name || "" }, "*"); } catch (e) { /* no shell to ask */ }
     });
     menu.appendChild(hot);
-    if (cur) {
-      const rm = el("div", "ctx-item ctx-item-toggle");
-      rm.appendChild(ctxIcon("key", true));
-      const b2 = el("span", "ctx-item-body");
-      const l2 = el("span", "ctx-item-label"); l2.textContent = "Remove hot key"; b2.appendChild(l2);
-      const s2 = el("span", "ctx-item-sub"); s2.textContent = miniChord(cur, IS_MAC) + " stops switching to this tab"; b2.appendChild(s2);
-      rm.appendChild(b2);
-      rm.addEventListener("click", (ev) => { ev.stopPropagation(); dismissTabMenu(); saveOverride(hotkeyCommandId(id), ""); });   // KEYS_EVENT repaints the strip
-      menu.appendChild(rm);
-    }
   }
   // Colors join Rename in the AESTHETIC section (the user 2026-08-24, the final by-kind grouping:
   // [Rename + colors] / [feed, mail, bell, billing, Tags] / [Browse]). The swatch row itself is

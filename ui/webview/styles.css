@@ -566,14 +566,11 @@ body.tabbar-resizing { cursor: ns-resize; user-select: none; }
    0.7em of the tab compounded to ~8px, the smallest text on the surface) */
 .tab-key { flex: 0 0 auto; font: 600 calc(0.82em / 0.92) ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--dim); border: 1px solid var(--box-border);
   border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; line-height: 1.5; letter-spacing: 0.02em; }
-/* a PINNED tab (the user 2026-09-10): it stays where it is — not draggable, other drags flow around its slot — and
-   says so with a folded top-right corner: one absolutely placed child paints the strip's background above the
-   diagonal (the corner "cut away", covering the tab's own border and radius there) and the turned-over flap below
-   it in the tab's text colour, faint, so the dog-ear reads on every state colour without a new hue. The tab keeps
-   a little more right padding so the ✕ never sits under the flap. Visual only: the mechanics are render.ts's */
-.tab.pinned { padding-right: 10px; }
-.tab-fold { position: absolute; top: -1px; right: -1px; width: 10px; height: 10px; pointer-events: none;
-  background: linear-gradient(to bottom left, var(--bg) 50%, currentColor 50%); opacity: 0.55; }
+/* a PINNED tab (the user 2026-09-10; the glyph 2026-09-11, replacing the folded corner): it stays where it is — not
+   draggable, other drags flow around its slot — and says so with the tab menu's own pushpin after the name, the gauge
+   and the hot key, dim like the keycap and brighter with the tab. Visual only: the mechanics are render.ts's */
+.tab-pin { flex: 0 0 auto; display: inline-flex; color: var(--dim); }
+.tab.active .tab-pin, .tab:hover .tab-pin { color: var(--fg); }
 /* compacting → a tiny animated compaction bar before the name (this state gets no tab outline, so the bar
    is the cue). A teal fill whose right edge slides left and loops — the same compression motion as the
    statusline ctx-scan bar, miniaturised — so it reads as a transient process, not a status colour (the user

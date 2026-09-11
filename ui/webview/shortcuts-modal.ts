@@ -240,6 +240,16 @@ export function initShortcutsModal(mac: boolean, doc: Document = document): Shor
           hint.textContent = "press a key combination… (Backspace removes, Esc cancels)";
         }
         row.appendChild(hint);
+        // a BOUND command's listening row offers Remove beside the hint (the user 2026-09-11: the tab menu's one
+        // "Update hot key…" row covers changing and removing) — the same unbind Backspace makes, as a button
+        if (effectiveChord(c.id, c.chord, overrides, mac)) {
+          const rm = doc.createElement("button");
+          rm.type = "button";
+          rm.className = "rkeys-act";
+          rm.textContent = "Remove";
+          rm.addEventListener("click", (e) => { e.stopPropagation(); commit(c.id, ""); });
+          row.appendChild(rm);
+        }
       } else {
         const eff = effectiveChord(c.id, c.chord, overrides, mac);
         if (eff) {
