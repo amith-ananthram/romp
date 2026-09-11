@@ -143,6 +143,13 @@ class RestartOverACheckpointedSession(unittest.TestCase):
         with open(logp, errors="replace") as f:
             return "\n" + "\n".join(l.rstrip() for l in f if leaf in l and (l.startswith("reader:") or l.startswith("chain:")))
 
+    def _log_tail(self, logp, n=40):
+        """The kernel log's last lines, reader-trace lines aside (those are the leaf trace's), for a failure message that has
+        to say what the kernel was doing on a runner nobody can log into."""
+        with open(logp, errors="replace") as f:
+            lines = [l.rstrip() for l in f if not l.startswith("reader:")]
+        return "\n" + "\n".join(lines[-n:])
+
     def _stop(self, k):
         k.send_signal(signal.SIGTERM)
         k.wait(timeout=30)
@@ -191,7 +198,9 @@ class RestartOverACheckpointedSession(unittest.TestCase):
             self.assertGreater(len(frame.get("events") or []), 0, "the frame carries events")
             self.assertLess(dt2, 10.0, "the first frame of the restored kernel came in %.1fs: hydration seeks to each record's offset; a scan "
                                        "from byte zero per atom measured 5.5 s on a 2000-turn fixture and grows with its square, so it "
-                                       "would take over 20 s on this %d-record one" % (dt2, sum(1 for _ in open(self.leaf))))
+                                       "would take over 20 s on this %d-record one; asmIndex=%s hydratedBy=%s; the kernel's last lines:%s"
+                                       % (dt2, sum(1 for _ in open(self.leaf)), perf.get("asmIndex"), asm.get("hydratedBy"),
+                                          self._log_tail(log2)))
             n_lazy = sum(1 for row in doc["atoms"] if row.get("lz") is not None)   # the atoms with a body to read (not a boundary)
             self.assertGreater(asm["hydratedAtoms"], 0, "the frame hydrated the pre-cut atoms it rendered")
             self.assertEqual(asm["hydratedAtoms"], n_lazy, "each pre-cut atom with a body read once, at its offset, whoever asked first: %s"
