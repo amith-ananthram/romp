@@ -612,7 +612,7 @@ test("pinned: the wiring the lifted slices cannot reach: showActive's branch, th
   assert.match(SHOW, /if \(ta\) \{ ta\.disabled = true; ta\.placeholder = "Pick a session above to write to it"; \}/);
   assert.match(SHOW, /hideSnapshot\(\);\s*\n\s*const s = activeId \? liveSession\(activeId\) : null;/, "a transcript showing: the view hidden, its place written back");
   const loading = SHOW.slice(SHOW.indexOf("if (activeId && (tabMeta.has(activeId) || hostOf(activeId))) {"), SHOW.indexOf("} else if (!empty) {"));
-  assert.match(loading, /if \(ta\) \{ ta\.disabled = false; ta\.placeholder = composerRestingPlaceholder\(\); \}/, "a pick that lands on a still-loading tab takes the box back from the view's disabled state");
+  assert.match(loading, /if \(ta\) \{ ta\.disabled = false; setComposerAskMode\(\); \}/, "a pick that lands on a still-loading tab takes the box back from the view's disabled state (the placeholder through its one owner, 2026-09-10)");
   assert.match(RENDER, /if \(snapView\) \{ sl\.replaceChildren\(\); return; \}/, "no session's statusline chip under a section list");
   assert.match(RENDER, /if \(!activeId \|\| skeletonTabs\.ids\.has\(activeId\) \|\| !liveAsks\.has\(activeId\) \|\| snapView\) \{/, "no live ask card under it");
   assert.match(RENDER, /const s = activeId && !snapView \? liveSession\(activeId\) : null;/, "no background-task box under it");

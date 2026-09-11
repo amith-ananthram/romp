@@ -82,4 +82,16 @@ test("styles.css: the overlay sits over the box, dim like a placeholder, the nam
   assert.match(CSS, /#composer-ph \{ position: absolute; pointer-events: none; color: var\(--dim\);/);
   assert.match(CSS, /#composer-ph \.composer-ph-name \{ font-weight: 600; \}/);
   assert.match(CSS, /#composer-input\.ph-on::placeholder \{ color: transparent; \}/);
+  // the question flow (the user 2026-09-10): the answering tint rule sits at that rule's specificity and came later, so
+  // both texts showed — the overlay takes the tint, the native placeholder stays transparent under it
+  assert.match(CSS, /#composer-input\.ph-on\.answering::placeholder \{ color: transparent; \}/);
+  assert.match(CSS, /#composer-input\.answering ~ #composer-ph \{ color: color-mix\(in srgb, var\(--accent\) 65%, var\(--dim\)\); \}/);
+});
+
+test("render.ts: the placeholder and the answering tint have one owner — the renders that reset the box go through setComposerAskMode", () => {
+  // a render that wrote the resting form and left the tint is how the overlay came to draw over a tinted native text
+  assert.match(RENDER, /if \(ta\) \{ ta\.disabled = false; setComposerAskMode\(\); \}/);
+  assert.match(RENDER, /if \(closed\) \{ composer\.placeholder = "Session closed — read-only"; composer\.classList\.remove\("answering"\); syncComposerPh\(\); \}\n\s*else setComposerAskMode\(\);/);
+  const writers = RENDER.match(/\.placeholder = composerRestingPlaceholder\(\)/g) || [];
+  assert.equal(writers.length, 2, "setComposerAskMode's own write and the phone's resize shortening; nothing else writes the resting form");
 });
