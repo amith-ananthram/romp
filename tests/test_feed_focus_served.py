@@ -209,10 +209,20 @@ const restored = await survey();
 // (h) Clear on the SECTION's copy clears the card: both elements dismiss and leave together; Undo brings both back
 // (the review of T347: the copy ran the board builder's finish, which guarded on the board's element, so the copy
 // stayed and the card below never left)
-const keyState = () => page.evaluate((k) => {
+const keyState = () => page.evaluate(([k, sid]) => {
   const f = document.querySelector(`#feed-focus [data-key="f:a:${k}"]`), a = document.querySelector(`#feed-cols [data-key="a:${k}"]`);
-  return { copy: !!f, board: !!a, copyDismissing: !!(f && f.classList.contains("dismissing")), boardDismissing: !!(a && a.classList.contains("dismissing")) };
-}, cfg.webDone);
+  // the board's run header for this session in the column the card leaves (Completed): a Clear from the copy must
+  // start its one-motion exit as a Clear on the card below does (the follow-up after the review)
+  const head = document.querySelector(`#feed-cols .col-completed .feed-sess-head[data-fsid="${sid}"]`);
+  return { copy: !!f, board: !!a, copyDismissing: !!(f && f.classList.contains("dismissing")), boardDismissing: !!(a && a.classList.contains("dismissing")),
+           headExiting: !!(head && head.classList.contains("sess-exit")) };
+}, [cfg.webDone, cfg.web]);
+// (i) Tab from a HOVERED copy lands inside the copy, where the pointer is, not on the board's twin below
+await page.hover(`#feed-focus [data-key="f:a:${cfg.webWorking}"]`);
+await page.keyboard.press("Tab");
+const tabbed = await page.evaluate(() => { const ae = document.activeElement; return { inCopy: !!(ae && ae.closest("#feed-focus")), inBoard: !!(ae && ae.closest("#feed-cols")), tag: ae ? ae.tagName : null }; });
+await page.keyboard.press("Escape");
+await park();
 await page.locator(`#feed-focus [data-key="f:a:${cfg.webDone}"] .fdismiss`, { hasText: /^Clear$/ }).click();   // the card's Clear (its Continue wears the same chrome)
 const clearing = await keyState();                    // right after the click: both copies wear .dismissing
 await page.waitForTimeout(300);                       // the 180 ms finish, with room
@@ -223,7 +233,7 @@ await page.waitForSelector(`#feed-cols [data-key="a:${cfg.webDone}"]`, { timeout
 await frame();
 const undone = await keyState();
 fs.writeSync(1, "RESULT:" + JSON.stringify({ off, offFocused, rowsBefore, on, rowsAfter, dark, light: lit, api, none, bare,
-                                              storedBefore, reloaded, restored, clearing, cleared, undone, errors }) + "\n");
+                                              storedBefore, reloaded, restored, tabbed, clearing, cleared, undone, errors }) + "\n");
 await browser.close();
 process.exit(0);
 """
@@ -382,6 +392,9 @@ class ServedFocusedSessionSection(unittest.TestCase):
         cg, cd, un = r["clearing"], r["cleared"], r["undone"]
         self.assertEqual((cg["copy"], cg["board"], cg["copyDismissing"], cg["boardDismissing"]), (True, True, True, True),
                          "right after the click both copies wear .dismissing: %r" % cg)
+        self.assertTrue(cg["headExiting"], "the board run's header (web's only Completed card) starts its one-motion exit from a Clear on the copy: %r" % cg)
+        tb = r["tabbed"]
+        self.assertEqual((tb["inCopy"], tb["inBoard"]), (True, False), "Tab from a hovered copy lands inside the copy, where the pointer is: %r" % tb)
         self.assertEqual((cd["copy"], cd["board"]), (False, False), "after the finish neither element remains: %r" % cd)
         self.assertEqual((un["copy"], un["board"], un["copyDismissing"], un["boardDismissing"]), (True, True, False, False),
                          "Undo restores the card below and its copy above, neither still dismissing: %r" % un)
