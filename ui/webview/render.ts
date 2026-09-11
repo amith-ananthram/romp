@@ -10092,9 +10092,10 @@ function renderCommentPopover(): void {
     // EFFECTIVE state the frame carries, so a mailbox the user toggled off since reads as off (the review's low)
     const mailOn = el("div", "cmt-note cmt-mail");
     const held = th.heldMail || 0;
-    mailOn.textContent = th.mailOff
-      ? "Its mailbox is off: the lane's mailbox toggle turns peer mail back on."
-      : "Its mail is on now: peers can reach it and it can send." + (held ? " " + held + (held === 1 ? " held message lands" : " held messages land") + " in a moment." : "");
+    mailOn.textContent = !th.mailOff
+      ? "Its mail is on now: peers can reach it and it can send." + (held ? " " + held + (held === 1 ? " held message lands" : " held messages land") + " in a moment." : "")
+      : th.mailOffWhy === "unreadable" ? "Its mail is held: this session's record cannot be read, and mail flows again once the record is repaired."
+      : "Its mailbox is off: the lane's mailbox toggle turns peer mail back on.";   // the reason rides the frame: a remedy that fits (T356)
     pop.appendChild(mailOn);
     const row = el("div", "cmt-actions");
     const open = el("button", "cmt-act") as HTMLButtonElement;

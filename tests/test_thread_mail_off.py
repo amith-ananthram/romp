@@ -131,7 +131,25 @@ class UnreadableRecordOnTheKernelSide(unittest.TestCase):
         (Path(self.td) / "session-flags.json").write_text(json.dumps({PARENT: {"postalOff": True}}))
         self.assertEqual(km._mail_off_why_k(PARENT), "isolation", "the legacy key still isolates, under its reason")
         whole = Path(os.path.join(BIN, "romp-kernel")).read_text()
-        self.assertEqual(whole.count('"mailOffWhy": _mail_off_why_k('), 3, "chat rows, thread rows, Sessions pane rows carry the reason")
+        self.assertEqual(whole.count('"mailOffWhy": _mail_off_why_k('), 4, "chat rows, thread rows, Sessions pane rows and the comments frame carry the reason")
+        self.assertIn('"mailOffWhy": _mail_off_why_k(tsid)', inspect.getsource(km._comments_frame), "the promoted popover reads the reason")
+
+    def test_the_unreadable_check_reads_the_registration_memo_not_the_file(self):
+        # the review's low: a sweep re-read and re-parsed every record; the memo (mtime, size, inode) answers now
+        (Path(self.td) / "sdk" / (PLAIN + ".json")).write_text(json.dumps({"sid": PLAIN, "alive": True}))
+        km._thread_reg_memo.clear()
+        self.assertFalse(km._reg_unreadable(PLAIN))
+        self.assertIn(PLAIN, km._thread_reg_memo, "the read went through the memo")
+        src = inspect.getsource(km._reg_unreadable)
+        self.assertIn("return not _thread_reg(str(sid))", src); self.assertNotIn("json.loads", src, "no parse of its own")
+        (Path(self.td) / "sdk" / (PLAIN + ".json")).write_text("{corrupt")
+        self.assertTrue(km._reg_unreadable(PLAIN), "a rewrite is a new memo key: the corrupt record reads unreadable")
+        if os.geteuid() != 0:
+            os.chmod(Path(self.td) / "sdk", 0)
+            try:
+                self.assertTrue(km._reg_unreadable(PLAIN), "a directory the kernel cannot read: closed")
+            finally:
+                os.chmod(Path(self.td) / "sdk", 0o755)
 
 
 if __name__ == "__main__":
