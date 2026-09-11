@@ -17097,8 +17097,20 @@ def _rename_session(sid, name):
 
 
 def _num(x):
+    """A backend row's `since` as an epoch int, else None. A float string parses too, truncated
+    (2026-09-11): the Codex backend stamps since = time.time() and ships it raw (the SDK backend ships
+    str(int(...))), and the SDK backend's dormant read serves the state log's LAST record, whose
+    machineCut and resume-fork lines carry a float t. The digits-only test read every such since as
+    None, so _idle_faded never fired: a Codex session idle past FADED_S stayed a solid "ready" in the
+    chat tab and the timeline lane while every idle SDK tab and lane dimmed. Non-numbers, nan and inf
+    stay None."""
     x = (x or "").strip()
-    return int(x) if x.lstrip("-").isdigit() else None
+    if x.lstrip("-").isdigit():
+        return int(x)
+    try:
+        return int(float(x))
+    except (ValueError, OverflowError):
+        return None
 
 
 # One liveness snapshot per PUSHER CYCLE (the 2026-08-10 CPU fix). Every Sessions.live() read sweeps the
