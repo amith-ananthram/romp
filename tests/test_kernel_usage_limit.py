@@ -239,7 +239,7 @@ class AutoPauseOnSpendLimit(unittest.TestCase):
     def _sessions(self, *errs):
         sess = [{"sid": "s%d" % i, "path": "/tmp/s%d.jsonl" % i} for i in range(len(errs))]
         emap = {s["path"]: e for s, e in zip(sess, errs)}
-        km._alive_sessions = lambda now, tmux: sess
+        km._alive_sessions = lambda now, live: sess
         km._api_error = lambda p: emap.get(p)
 
     def test_a_spend_cap_engages_the_pause_with_reason_spend(self):

@@ -346,6 +346,7 @@ def build_buckets(restarts, quiet, events, turns, statelog_turns, machine_cuts, 
                     "quietWindows": 0, "backstopFires": 0, "_quietWait": [],
                     "events": {}, "orphansReaped": 0, "scopesStopped": 0, "duplicateClis": 0, "crashHeals": 0,
                     "crashLoops": 0, "drainLeftClosing": 0, "leaseProblems": 0, "boots": 0, "resumedTurns": 0,
+                    "attachedAtBoot": 0, "attachedLater": 0,
                     "redo": {"turns": 0, "usd": 0.0, "tokens": 0}, "_l_res": [], "_l_first": [], "_l_api": [],
                     "_l_dur": [], "turns": 0, "_sl": [], "stateLogTurns": 0, "machineCuts": {}, "spendUsd": None,
                     "_k_rss": [], "_k_cpu": []}
@@ -404,6 +405,11 @@ def build_buckets(restarts, quiet, events, turns, statelog_turns, machine_cuts, 
             b["crashLoops"] += 1
         elif k == "drain.unjoined":
             b["drainLeftClosing"] += 1
+        elif k == "host.attached":                        # a session host re-attached (T315): at the kernel's boot (the
+            if e.get("boot") is True:                    #  sessions a restart kept running under their hosts), or later
+                b["attachedAtBoot"] += 1                 #  (a send after the boot found a host to attach to)
+            else:
+                b["attachedLater"] += 1
         if k.startswith("lease."):
             b["leaseProblems"] += 1
     for tr in turns:
@@ -788,6 +794,7 @@ def summary(doc: dict) -> str:
                      "crash loops %d · drain left closing %d (cut rows: unjoined %d, reaped %d) · lease problems %d"
                      % (b["boots"], b["orphansReaped"], b["scopesStopped"], b["duplicateClis"], b["crashHeals"],
                         b["crashLoops"], b["drainLeftClosing"], b["drainUnjoinedCount"], b["drainReapedCount"], b["leaseProblems"]))
+        lines.append("  hosts attached: at boot %d · later %d" % (b["attachedAtBoot"], b["attachedLater"]))
         red = b["redo"]
         spend = (" of $%.2f that day" % b["spendUsd"]) if isinstance(b.get("spendUsd"), (int, float)) and w["kind"] == "day" else \
                 (" of $%.2f in the window" % b["spendUsd"]) if isinstance(b.get("spendUsd"), (int, float)) else ""

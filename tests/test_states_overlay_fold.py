@@ -396,7 +396,7 @@ class InterruptTickRetires(unittest.TestCase):
                  "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}],
                              "stop_reason": "end_turn"}}]
         (pdir / (SID + ".jsonl")).write_text("\n".join(json.dumps(r) for r in recs) + "\n")
-        self.tmux = {SID: {"state": "idle", "since": NOW - 100, "model": "", "effort": "",
+        self.live = {SID: {"state": "idle", "since": NOW - 100, "model": "", "effort": "",
                            "context": None, "compactPct": None, "color": None}}
 
     def _reset(self):
@@ -419,7 +419,7 @@ class InterruptTickRetires(unittest.TestCase):
         (jd.STATE / "states" / (sid + ".jsonl")).write_text("".join(json.dumps(r) + "\n" for r in rows))
 
     def test_a_sid_leaving_the_alive_set_loses_its_entry(self):
-        self.assertEqual({s["sid"] for s in km._alive_sessions(NOW, self.tmux)}, {SID},
+        self.assertEqual({s["sid"] for s in km._alive_sessions(NOW, self.live)}, {SID},
                          "fixture invariant: the alive set holds the live session alone")
         for sid in (SID, DEAD):
             self._write_states(sid, [{"t": T0, "awaiting": True, "why": "a build"}, {"t": T0 + 1, "state": "idle"}])
@@ -428,21 +428,16 @@ class InterruptTickRetires(unittest.TestCase):
         dead_key = str(jd.STATE / "states" / (DEAD + ".jsonl"))
         self.assertEqual(set(km._states_overlay_cache), {live_key, dead_key})
         s0 = km._states_overlay_report()
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         self.assertNotIn(dead_key, km._states_overlay_cache, "a sid outside the alive set is dropped")
         self.assertIn(live_key, km._states_overlay_cache, "the alive one stays")
         s1 = km._states_overlay_report()
         self.assertEqual((s1["evict"] - s0["evict"], s1["entries"]), (1, 1))
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         self.assertIn(live_key, km._states_overlay_cache, "a second tick keeps the alive entry")
         self.assertEqual(km._states_overlay_report()["evict"], s1["evict"], "nothing to drop: no count")
-        # an EMPTY alive set (every session gone; not headless) retires the last entry too
-        saved = km._has_tmux
-        km._has_tmux = lambda: True
-        try:
-            km._interrupt_block_tick(NOW, {})
-        finally:
-            km._has_tmux = saved
+        # an EMPTY alive set (every session gone) retires the last entry too: an empty map is authoritative
+        km._interrupt_block_tick(NOW, {})
         self.assertEqual(km._states_overlay_cache, {}, "the live session left: its entry goes")
         self.assertEqual(km._states_overlay_report()["entries"], 0)
 
@@ -467,7 +462,7 @@ class InterruptTickRetires(unittest.TestCase):
             with redirect_stderr(err):
                 self.assertIsNone(km._states_awaiting_overlay(DEAD), "the read failed: no overlay")
             self.assertEqual(err.getvalue().count("unreadable"), 1, "the episode opens with one line")
-            km._interrupt_block_tick(NOW, self.tmux)                    # DEAD is outside the tick's alive set
+            km._interrupt_block_tick(NOW, self.live)                    # DEAD is outside the tick's alive set
             self.assertIn(str(dead_path), km._states_overlay_failed, "the forget leaves the open episode alone")
             with redirect_stderr(err):
                 self.assertIsNone(km._states_awaiting_overlay(DEAD), "a kept-open tab's rebuild reads it again")

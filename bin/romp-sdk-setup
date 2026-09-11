@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# romp-sdk-setup — provision the Claude Agent SDK for romp's non-tmux backend.
+# romp-sdk-setup — provision the Claude Agent SDK for romp's Claude Code backend.
 #
 # Rather than install the SDK into the system python (PEP 668 / externally-managed envs), we keep
 # it in a DEDICATED venv under romp's state dir and the kernel adds that venv's site-packages to
@@ -7,8 +7,7 @@
 # kernel runs (pick_python below matches bin/romp-serve's), so the ABI matches. Both pickers follow
 # the venv's own recorded interpreter once one exists, so a re-run keeps the interpreter and only
 # upgrades the SDK; the venv is REBUILT for a different python only when ROMP_PYTHON names one or the
-# recorded interpreter is gone, loudly (see below). Idempotent; the tmux backend is unaffected
-# whether or not this is run. Re-run to upgrade.
+# recorded interpreter is gone, loudly (see below). Idempotent. Re-run to upgrade.
 set -euo pipefail
 STATE="${ROMP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/romp}"
 VENV="$STATE/sdkvenv"
@@ -140,7 +139,7 @@ pyver() { "$1" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/nul
 pytag() { "$1" -c 'import sys; print("%d.%d%s" % (sys.version_info[0], sys.version_info[1], "t" if "t" in getattr(sys, "abiflags", "") else ""))' 2>/dev/null || echo "?"; }
 if ! "$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; then
   echo "romp-sdk-setup: best python found is $PY ($(pyver "$PY")) but claude-agent-sdk needs >= 3.10." >&2
-  echo "romp-sdk-setup: install one (e.g. 'uv python install 3.12') and re-run. tmux sessions are unaffected." >&2
+  echo "romp-sdk-setup: install one (e.g. 'uv python install 3.12') and re-run." >&2
   exit 1
 fi
 

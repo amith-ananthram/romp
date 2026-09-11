@@ -96,23 +96,23 @@ class CyclePublishesNamesScope(unittest.TestCase):
         names = Path(self.td.name) / "names"
         names.mkdir()
         (names / SID).write_text("web\t/work/web\t#112233\t#ffffff\n")
-        self.saved = (km.NAMES, km._tmux_sessions, km._pusher_cycle_jobs)
+        self.saved = (km.NAMES, km._live_map, km._pusher_cycle_jobs)
         km.NAMES = names
-        km._tmux_sessions = lambda: {}
+        km._live_map = lambda: {}
         self.addCleanup(lambda: (setattr(km, "NAMES", self.saved[0]),
-                                 setattr(km, "_tmux_sessions", self.saved[1]),
+                                 setattr(km, "_live_map", self.saved[1]),
                                  setattr(km, "_pusher_cycle_jobs", self.saved[2])))
         self.addCleanup(self.td.cleanup)
 
     def test_jobs_see_the_snapshot_and_it_clears_after(self):
         seen = []
-        km._pusher_cycle_jobs = lambda now, tmux, any_client: seen.append(getattr(km._live_scope, "names", None))
+        km._pusher_cycle_jobs = lambda now, live, any_client: seen.append(getattr(km._live_scope, "names", None))
         km._pusher_cycle()
         self.assertEqual(seen, [{SID: ["web", "/work/web", "#112233", "#ffffff"]}])
         self.assertIsNone(getattr(km._live_scope, "names", None), "cleared at cycle end")
 
     def test_a_jobs_raise_still_clears_the_scope(self):
-        km._pusher_cycle_jobs = lambda now, tmux, any_client: (_ for _ in ()).throw(RuntimeError("job died"))
+        km._pusher_cycle_jobs = lambda now, live, any_client: (_ for _ in ()).throw(RuntimeError("job died"))
         with self.assertRaises(RuntimeError):
             km._pusher_cycle()
         self.assertIsNone(getattr(km._live_scope, "names", None), "the finally clears it on the raise too")

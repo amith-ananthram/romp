@@ -17,10 +17,14 @@ The served guard drives the real /chat page from a hermetic kernel with two tagg
 holds, opens the picker with the strip's +, and reads the Tags row: one option per tag, each holding one chip whose
 border wears the tag's colour; the tags the ACTIVE tab holds are selected (the full chip), the rest unselected (the
 faded chip); no dot anywhere. A click flips one option: the state class the create reads (`sel`) and the chip's off
-class move together, and a second click puts them back. No backend pick greys the row (T331)
-(the off chip's fade is not stacked with the row's).
+class move together, and a second click puts them back. No backend pick greys the row (T331; the off chip's fade is not
+stacked with the row's). The three chip states (T343): faded at rest, a hover that lightens only the pill's ground,
+selected at the strongest level whatever the hover (a themed filter: brighter on the dark card, darker on cream);
+TAG_SHOTS=<dir> writes the picker with all three side by side, dark and light.
 
-Skips LOUDLY without the extension deps or a Playwright browser (CI installs none); the CI-safe pins ride
+Skips LOUDLY without the extension deps or a Playwright browser; under ROMP_SERVED_TESTS_REQUIRE=1 (the CI extension job,
+which installs Chromium and runs every served file) that skip is a failure, and the Python matrix jobs, with no browser,
+skip. The CI-safe pins ride
 ui/webview/tag-chip-everywhere.test.ts, picker-tag-chips.test.ts and tab-groups.test.ts. All fixtures synthetic (the
 notes-api demo world)."""
 import json
@@ -58,6 +62,20 @@ def _free_port():
     p = s.getsockname()[1]
     s.close()
     return p
+
+
+def _rgba(s):
+    """'rgb(r, g, b)' or 'rgba(r, g, b, a)' as the browser computes it -> (r, g, b, a)."""
+    parts = [float(x) for x in s[s.index("(") + 1:s.index(")")].split(",")]
+    return tuple(parts) + ((1.0,) if len(parts) == 3 else ())
+
+
+def _wash_step(wash, surface):
+    """How far the wash moves the surface once composited over it: the largest per-channel change (a translucent wash
+    string never EQUALS an opaque surface string, so only the composite says whether the two are distinct)."""
+    r, g, b, a = _rgba(wash)
+    R, G, B, _ = _rgba(surface)
+    return max(abs(c * a + s * (1 - a) - s) for c, s in ((r, R), (g, G), (b, B)))
 
 
 def _rgb(hex6):
@@ -128,6 +146,22 @@ const survey = () => page.evaluate(() => {
   };
 });
 const open = await survey();
+// T343 (the user 2026-09-11): the three chip states side by side: web selected, docs hovered (faded), infra faded at
+// rest; then the selected chip hovered; the same in the light theme. The picker box is what the screenshots show.
+const pickerBox = async () => (await page.$("#picker .picker-box")).boundingBox();
+const hoverSurvey = async (tag) => { await page.hover('#picker .picker-tags .picker-be-opt[data-tag="' + tag + '"]'); await page.waitForTimeout(150); return await survey(); };
+const shot = async (name) => { if (!cfg.shots) return; fs.mkdirSync(cfg.shots, { recursive: true }); const b = await pickerBox(); await page.screenshot({ path: cfg.shots + "/" + name + ".png", clip: { x: b.x, y: b.y, width: b.width, height: b.height } }); };
+const surface = () => page.evaluate(() => getComputedStyle(document.querySelector("#picker .picker-box")).backgroundColor);
+const hoverFaded = await hoverSurvey("docs");
+await shot("romp_chat-picker-tag-chips-dark");
+const hoverSel = await hoverSurvey("web");
+const surfaceDark = await surface();
+await page.evaluate(() => document.body.classList.add("theme-light")); await page.waitForTimeout(150);
+const hoverFadedLight = await hoverSurvey("docs");
+await shot("romp_chat-picker-tag-chips-light");
+const surfaceLight = await surface();
+const hoverSelLight = await hoverSurvey("web");
+await page.evaluate(() => document.body.classList.remove("theme-light")); await page.mouse.move(5, 5); await page.waitForTimeout(150);
 // flip the unselected infra tag on, then off again
 await page.click('#picker .picker-tags .picker-be-opt[data-tag="infra"]');
 await page.waitForTimeout(100);
@@ -143,7 +177,7 @@ await page.evaluate(() => document.body.classList.remove("chat-theme-yatharth", 
 await page.waitForTimeout(100);
 // T331: no backend pick disables the row any more (the terminal backend is no longer offered); the picker's toggles
 const backends = await page.evaluate(() => Array.from(document.querySelectorAll('#picker .picker-be-opt:not([data-tag])')).map((b) => b.getAttribute('data-be')).filter(Boolean));
-fs.writeSync(1, "RESULT:" + JSON.stringify({ strip, lensMenu, open, on, off, light, backends }) + "\n");
+fs.writeSync(1, "RESULT:" + JSON.stringify({ strip, lensMenu, open, on, off, light, backends, hoverFaded, hoverSel, hoverFadedLight, hoverSelLight, surfaceDark, surfaceLight }) + "\n");
 await browser.close();
 process.exit(0);
 """
@@ -209,14 +243,15 @@ class ServedPickerTagChips(unittest.TestCase):
     def _drive(self):
         cfg = os.path.join(self.lab, "cfg.json")
         with open(cfg, "w") as f:
-            json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "activeSid": SESSIONS[0][1]}, f)
+            json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "activeSid": SESSIONS[0][1],
+                       "shots": os.environ.get("TAG_SHOTS", "")}, f)   # TAG_SHOTS=<dir>: the picker with its three chip states, dark and light (T343)
         driver = os.path.join(self.lab, "driver.mjs")
         with open(driver, "w") as f:
             f.write(DRIVER)
         p = subprocess.run(["node", driver], capture_output=True, text=True, timeout=300,
                            env=dict(os.environ, EXT_PKG=os.path.join(EXT, "package.json"), CFG=cfg))
         if p.returncode == 3:
-            raise unittest.SkipTest("no playwright browser on this box, and the served guard needs one (CI installs none)")
+            raise unittest.SkipTest("no playwright browser on this box, and the served guard needs one (the CI extension job installs Chromium and requires this file to run)")
         self.assertEqual(p.returncode, 0, "driver failed:\n" + p.stdout[-3000:] + p.stderr[-3000:])
         line = next((ln for ln in p.stdout.splitlines() if ln.startswith("RESULT:")), None)
         self.assertIsNotNone(line, "driver printed no result:\n" + p.stdout[-3000:])
@@ -293,6 +328,39 @@ class ServedPickerTagChips(unittest.TestCase):
         # T331: the picker offers Claude Code and Codex, both of whose creates take tags: no pick greys the row
         self.assertEqual(out["backends"], ["sdk", "codex"], "the terminal backend is no longer offered")
         self.assertFalse(out["on"]["rowDisabled"], "the row is never disabled")
+
+    def test_three_chip_states_faded_at_rest_a_hover_that_lightens_the_ground_only_selected_brightest_whatever_the_hover(self):
+        """T343 (the user 2026-09-11): faded and selected read too close, and a hover looked like a selection. On the real
+        picker: FADED (unselected at rest) is the off chip on a transparent ground; HOVER lightens the pill's ground one step
+        (the button's --chip-wash, the pill's own shape) and changes no colour, opacity or brightness; SELECTED wears the
+        strongest level whatever the hover: brightness(1.3) on the dark card (the level a hovered chip used to get) and
+        brightness(0.75) on cream, where a lift paled the chip below its faded neighbour (the review's find). In light the
+        wash is the darker step; composited over the picker's card surface it moves the surface by a visible amount."""
+        out = self._once()
+        rest = {x["tag"]: x for x in out["open"]["opts"]}
+        hf = {x["tag"]: x for x in out["hoverFaded"]["opts"]}       # docs (faded) under the pointer
+        hs = {x["tag"]: x for x in out["hoverSel"]["opts"]}         # web (selected) under the pointer
+        for name in ("infra", "docs"):
+            self.assertEqual((rest[name]["chipClass"], rest[name]["chipOpacity"], rest[name]["btnBg"], rest[name]["btnFilter"]),
+                             ("tag-chip-off", "0.45", "rgba(0, 0, 0, 0)", "none"), "faded at rest: the off chip, no ground, no filter: %r" % rest[name])
+        self.assertEqual((rest["web"]["chipClass"], rest["web"]["chipOpacity"], rest["web"]["btnBg"], rest["web"]["btnFilter"]),
+                         ("", "1", "rgba(0, 0, 0, 0)", "brightness(1.3)"), "selected at rest: the full chip at the brightest level, its own ground: %r" % rest["web"])
+        # hover on a faded chip: the ground one step lighter, the chip itself untouched
+        self.assertEqual(hf["docs"]["btnBg"], "rgba(255, 255, 255, 0.1)", "the hovered chip's ground is the wash: %r" % hf["docs"])
+        self.assertEqual((hf["docs"]["btnFilter"], hf["docs"]["chipClass"], hf["docs"]["chipOpacity"], hf["docs"]["chipColor"], hf["docs"]["chipBorder"]),
+                         ("none", "tag-chip-off", "0.45", rest["docs"]["chipColor"], rest["docs"]["chipBorder"]), "…and nothing about the chip changes: no brightness, no colour, still faded: %r" % hf["docs"])
+        self.assertEqual((hf["infra"]["btnBg"], hf["infra"]["btnFilter"]), ("rgba(0, 0, 0, 0)", "none"), "the other faded chip stays at rest")
+        self.assertEqual((hf["web"]["btnBg"], hf["web"]["btnFilter"]), ("rgba(0, 0, 0, 0)", "brightness(1.3)"), "the selected chip keeps its level, its own ground")
+        # hover on the selected chip: the brightness stays, the ground takes the wash
+        self.assertEqual((hs["web"]["btnFilter"], hs["web"]["btnBg"], hs["web"]["chipOpacity"]), ("brightness(1.3)", "rgba(255, 255, 255, 0.1)", "1"), "a hovered selected chip: %r" % hs["web"])
+        self.assertGreaterEqual(_wash_step(hs["web"]["btnBg"], out["surfaceDark"]), 12, "the hovered ground moves the dark card's surface by a visible step: %r over %r" % (hs["web"]["btnBg"], out["surfaceDark"]))
+        # the light theme: the wash is the darker step, distinct from the picker's card surface; the levels hold
+        hfl = {x["tag"]: x for x in out["hoverFadedLight"]["opts"]}
+        hsl = {x["tag"]: x for x in out["hoverSelLight"]["opts"]}
+        self.assertEqual((hfl["docs"]["btnBg"], hfl["docs"]["btnFilter"], hfl["docs"]["chipOpacity"]), ("rgba(0, 0, 0, 0.07)", "none", "0.45"), "light, a hovered faded chip: %r" % hfl["docs"])
+        self.assertGreaterEqual(_wash_step(hfl["docs"]["btnBg"], out["surfaceLight"]), 12, "…and moves the light card's surface by a visible step: %r over %r" % (hfl["docs"]["btnBg"], out["surfaceLight"]))
+        self.assertEqual((hsl["web"]["btnBg"], hsl["web"]["btnFilter"]), ("rgba(0, 0, 0, 0.07)", "brightness(0.75)"), "light, the hovered selected chip: the DARKER level, the wash: %r" % hsl["web"])
+        self.assertEqual((hfl["web"]["btnBg"], hfl["web"]["btnFilter"]), ("rgba(0, 0, 0, 0)", "brightness(0.75)"), "light, the selected chip at rest: darker than its rest colour, never paler")
 
 
 if __name__ == "__main__":

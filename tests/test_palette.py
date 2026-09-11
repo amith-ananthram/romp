@@ -7,7 +7,6 @@ can't drift. Curation invariant: every choosable set is 9 mid-tone, mutually dis
 (Crameri "S" palettes ship near-black/near-white entries for paper; those must never reach a tab).
 """
 import os
-import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -103,15 +102,6 @@ class ActiveName(unittest.TestCase):
 
 
 class ShellFallbackSync(unittest.TestCase):
-    def test_bin_romp_fallback_matches_the_default_palette(self):
-        # bin/romp normally assigns from the kernel's STATE/palette-colors mirror; its hardcoded
-        # FALLBACK (kernel never booted) must stay byte-identical to the module's default set.
-        src = Path(BIN, "romp").read_text()
-        m = re.search(r"_palette=\(\n(.*?)\)\n\s*_fg=\(\n(.*?)\)", src, re.S)
-        self.assertIsNotNone(m, "bin/romp fallback palette block not found")
-        self.assertEqual(re.findall(r'"(#[0-9A-F]{6})"', m.group(1)), ROMP_BG)
-        self.assertEqual(re.findall(r'"(black|white)"', m.group(2)), pal.PALETTES["romp"]["fg"])
-
     def test_bin_romp_reads_the_kernel_mirror_first(self):
         src = Path(BIN, "romp").read_text()
         self.assertIn("palette-colors", src, "the launcher assigns from the kernel-maintained mirror")

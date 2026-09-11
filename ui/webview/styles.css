@@ -92,11 +92,21 @@ body.scheme-solarized-dark {
                        defined (a phantom token) until 2026-08-26; mirrored in feed.css (own :root). */
   /* the postal card's three KIND colours (T320, the user 2026-09-10): one SEQUENTIAL ramp in the accent's hue, not
      three unrelated hues, ranked by how much the kind asks of the reader: coordination lowest (an FYI), delegation
-     next (work handed over), question highest (an answer owed). More asking = more intense against the page: on the
-     dark page the ramp climbs toward the accent's brightness (OKLCH hue 244, L .66 / .76 / .86; 5.4:1, 7.8:1 and
-     10.8:1 on the page, 5.0:1, 7.3:1 and 9.9:1 on a boxed card, whose --box-bg wash the word also sits on); the light
-     theme re-inks the same three ranks toward the deep end of its clay accent (below). */
-  --postal-coordinate: #7996af;  --postal-delegate: #7fb8e7;  --postal-question: #91d9ff;
+     next (work handed over), question highest (an answer owed). More asking = more intense against the page. The
+     three are sampled EVENLY, at positions 0, 1/2 and 1 of one straight line in OKLCH (T337, the user 2026-09-10, who
+     found the first three too alike: T320's steps sat at L .66, .76 and .85 with the top two at one saturation, so
+     they read as two tints of one blue). The line's two ends are two floors. The deep end is the deepest blue that
+     still reads at 4.5:1 on the PROVISIONAL card, the darkest ground a kind word sits on (a sent card not yet landed
+     wears the pending bubble's dress, an 8.5% wash of --you over the page; the boxed card and the bare page sit above
+     it): L .65, C .10. The far end stops short of the prose ink, so a lone Question still reads as a colour and not
+     as body text: the accent's own height, L .85, C .078, the sRGB gamut's edge for the hue; hue pinned
+     at the accent's 244 throughout. The trade-off is span against distance from the ink: a brighter far end widens
+     the ramp but converges on --fg (L .845), and this end keeps the word 0.079 from it in OKLab, all of it chroma.
+     Contrast: 5.2:1, 7.6:1 and 10.6:1 on the page, 4.8:1, 7.0:1 and 9.8:1 on a boxed card, 4.8:1, 7.0:1 and 9.8:1 on the provisional
+     wash. The light theme runs its own line the other way, deepening toward the dark end of its clay accent (below).
+     postal-kind-ramp.test.ts holds the positions and the distance from the ink, theme-parity.test.ts the contrast on
+     all three grounds. */
+  --postal-coordinate: #5696c8;  --postal-delegate: #7cb5e3;  --postal-question: #a2d4fe;
   /* THE romp accent — light blue (the user 2026-06-24). Use var(--accent) for accent/highlight chrome
      (selected toggles, in-progress loading dots, the Fleet pill, focus) — NOT for STATUS colors, which keep
      their own meaning (--st-working-bg yellow = working, --st-blocked-bg red, etc.). --accent-fg reads on it. */
@@ -104,6 +114,8 @@ body.scheme-solarized-dark {
   /* THE faint accent wash — the one alpha behind every selected/hovered accent chrome (0.10 and 0.14
      variants drifted in before 2026-08-26). Mirrored in feed.css (own :root). */
   --accent-wash: rgba(156, 210, 255, 0.12);
+  --chip-wash: rgba(255, 255, 255, 0.10);   /* a hovered tag chip's ground, one step lighter than the pill's own (T343) */
+  --chip-sel-filter: brightness(1.3);        /* a SELECTED tag chip's strongest level: brighter on the dark card (T343) */
   --tab-active-bg: rgba(255, 255, 255, 0.14);   /* the selected tab's fill, and the tag row's while its overview shows (T322) */
   /* the menu vocabulary (CLAUDE.md "Menus and dropdowns wear ONE vocabulary") — every dropdown's
      radius and shadow resolve through these; two menus had drifted onto their own shadows before
@@ -234,17 +246,16 @@ body.theme-light {
   --hl-cmt: #67614f; --hl-title: #8C4A00; --hl-meta: #6E6455; --hl-attr: #7A5A20;   /* --hl-cmt from #6E675C (4.39:1 on a code block) to 4.86:1 */
   --box-bg: rgba(0, 0, 0, 0.03);
   --box-border: rgba(0, 0, 0, 0.12);
-  --postal-coordinate: #974a32;  --postal-delegate: #962b00;  --postal-question: #751000;   /* the kind ramp (T320): the
-                                                                                            accent's clay hue (OKLCH 38)
-                                                                                            deepening with rank, L .50 /
-                                                                                            .45 / .36; 5.3:1, 6.7:1 and
-                                                                                            9.6:1 on the cream page and
-                                                                                            5.0:1, 6.2:1 and 9.0:1 on a
-                                                                                            boxed card (the review's
-                                                                                            floor is the box, 4.5:1) */
+  /* the kind ramp (T320, T337): the accent's clay hue (OKLCH 38) deepening with rank, sampled evenly along the line
+     from L .50, C .11 (the same first step as T320, the lightest clay that reads at 4.5:1 on the provisional wash) to
+     L .30, C .098 (the hue's gamut edge there; a deep rust that stays red, short of the prose ink --fg at L .236: 0.118 from it in OKLab); 5.3:1, 8.1:1 and 11.8:1
+     on the cream page, 4.9:1, 7.6:1 and 11.1:1 on a boxed card, 4.8:1, 7.3:1 and 10.7:1 on the provisional wash */
+  --postal-coordinate: #974a32;  --postal-delegate: #752f18;  --postal-question: #551400;
   --err: #B02A1C;
   --accent: #C2410C; --accent-fg: #FFF8F2;
   --accent-wash: rgba(194, 65, 12, 0.10);
+  --chip-wash: rgba(0, 0, 0, 0.07);   /* a hovered tag chip's ground (T343): on a light card the visible step is darker, and it stays distinct from the card's surface */
+  --chip-sel-filter: brightness(0.75);   /* a SELECTED tag chip's strongest level on cream is DARKER (T343 review): brightness(1.3) here paled every selected chip below its faded neighbour; 0.75 lifts each tag's contrast above its rest value */
   --tab-active-bg: rgba(255, 255, 255, 0.14);   /* the same fill the dark tab wears: a whiter sheet over cream (T322) */
   --cmt-hl: #FFDF70;
   --cmt-hl-outline: #8f6a00;   /* amber ink: 4.2:1 on the cream page — the fill's yellow measures 1.1:1 there, invisible as a line (T310) */
@@ -1352,7 +1363,7 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 /* the resting placeholder names the session (the user 2026-09-09): an overlay over the empty box, the name bold in
    the session's identity colour (its tab label's); the native placeholder beneath it goes transparent while it
    shows, and stays for assistive tech. Positioned and sized by render.ts syncComposerPh from the box's own metrics. */
-#composer-ph { position: absolute; pointer-events: none; color: var(--dim); white-space: pre; overflow: hidden; text-overflow: ellipsis; box-sizing: border-box; z-index: 1; }
+#composer-ph { position: absolute; pointer-events: none; color: var(--dim); white-space: pre; overflow: hidden; text-overflow: ellipsis; box-sizing: border-box; z-index: 1; --host-fade: 0.75; }   /* the host prefix at the midpoint its name sits at (T341; the rule is .name-faded .host-prefix below) */
 #composer-ph .composer-ph-name { font-weight: 600; }
 #composer-input.ph-on::placeholder { color: transparent; }
 /* A box grown past the height cap scrolls — and the scrollbar's TRACK paints square into the rounded
@@ -1376,10 +1387,14 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
   #composer-send:disabled { background: rgba(255, 255, 255, 0.10); color: var(--dim); opacity: 1; }
   #composer-input { min-height: 40px; border-radius: 20px; padding: 10px 14px; }
 }
-/* Cursor in the message box → a thin romp-blue border, exactly on the box edge — the same accent blue that
-   marks the focused panel (the user 2026-06-26). It only fills in the existing 1px border (no glow, no layout
-   shift), so the chat's two focus spots read clearly: the tabs, or the message box. */
-#composer-input:focus { border-color: var(--accent); }
+/* Cursor in the message box → a thin border, exactly on the box edge, in the colour of the SESSION you are messaging
+   (T345, the user 2026-09-11): --composer-identity, published on #composer by the placeholder's sync (render.ts
+   syncComposerPh) from the same source the placeholder's name uses; the accent blue that marks the focused panel
+   (the user 2026-06-26) stays the fallback for a session with no colour or one too close to the page to read as a
+   ring. It only fills in the existing 1px border (no glow, no layout shift), so the chat's two focus spots read
+   clearly: the tabs, or the message box. The live picker's free-text tint below keeps winning while it applies: its
+   rule follows this one at the same specificity, so a focused answering box wears the accent. */
+#composer-input:focus { border-color: var(--composer-identity, var(--accent)); }
 /* A live picker with a free-text path is up → the message box IS that picker's "add your own answer" field
    now (the user 2026-07-09). Tint it so it's discoverable that typing here answers the prompt (the placeholder
    also reads "add your own answer…"); the picker's controls stay visible above. */
@@ -1430,8 +1445,8 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 /* a remote session's "host:" on either chip sits on that shared backing, which is the same in both themes,
    so its colour is too: the global .host-prefix rule's var(--dim) is tuned for the page, and the light
    theme's dim (#5D574E) reads about 2.2 to 2.7:1 on this backing. White at 0.7 alpha reads 9.1:1 on the
-   Awaiting chip and 9.5:1 on the user bubble, the same in both themes (a queued bubble's 0.85 opacity dims the
-   whole chip alike, and the prefix still clears 4.5:1 there), and stays visibly quieter than the #fff peer name
+   Awaiting chip and 9.5:1 on the user bubble, the same in both themes (a queued bubble fades by its text ink, not
+   by an element opacity, so a chip inside it keeps this backing whole: T337), and stays visibly quieter than the #fff peer name
    and the identity-coloured mention name. Not color: inherit (.fileview-sess's idiom): on the mention chip that
    is the identity colour, and the palette's darker swatches are already the faintest text on this backing. */
 .chip-peer-name .host-prefix, .mention-chip .host-prefix { color: rgba(255, 255, 255, 0.7); }
@@ -1776,14 +1791,27 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
    gutter is 59px wide and "Yesterday" measures 52.6px bold, so its "Y" fell off the left edge
    of the pane; anything sized to FIT that gutter re-clips the moment --vscode-chat-font-size
    grows. Out here the label has the whole column, so no date string can ever be cut off.
-   Left-aligned with the prose (turns pad 24px); the rule fills the rest of the line. */
+   The date is CENTERED over the column (T339, the user 2026-09-11: it sat at the prose edge with the
+   rule to its right alone), a hairline either side: the two rules share the leftover room equally, so
+   the label lands in the middle. padding-left keeps the row in the prose column (turns pad 24px). */
 .day-divider {
-  display: flex; align-items: center; gap: 9px;
+  display: flex; align-items: center; gap: 9px; position: relative;
   margin: 16px 0 6px; padding-left: 24px;
   font-size: 0.72em; letter-spacing: 0.02em;   /* same size as .time-marker — same kind of label */
 }
 .day-divider-label { flex: 0 0 auto; color: var(--fg); font-weight: 700; white-space: nowrap; }
-.day-divider::after { content: ""; flex: 1 1 auto; height: 1px; background: var(--box-border); }
+.day-divider-rule { flex: 1 1 auto; height: 1px; background: var(--box-border); }
+/* the rail runs THROUGH the divider (T339): the line is drawn per turn (.turn::before below), so a divider between
+   two turns left a gap the height of itself and its margins. This segment is the same 2px at the same left in the
+   same colour and opacity, and spans the divider's own margins, so the line is continuous. */
+.day-divider::before { content: ""; position: absolute; left: 10.5px; top: -16px; bottom: -6px; width: 2px; background: var(--active-accent, var(--rail)); opacity: 0.7; }
+/* a divider that LEADS the transcript (a session whose first row is a past day, read from its top) has no line above
+   it: the thread's first child, or the one right after the pinned system-context card, which sits OFF the rail with its
+   own line suppressed (.turn-system::before below). No segment there, and the turn it opens starts its rail at its first
+   dot, as a first turn does (.turn:first-child::before). A windowed head (.tx-spacer-top first) keeps the segment: the
+   rail continues from the turns the spacer stands in for. */
+.day-divider:first-child::before, .turn-system + .day-divider::before { display: none; }
+.day-divider:first-child + .turn::before, .turn-system + .day-divider + .turn::before { top: 16px; }
 /* "worked …" footer — how long the session ran on a finished prompt. Sits IN-FLOW
    below that prompt's last reply, left-justified under the response text (turns pad
    30px on the left, so a normal block lands at the text's left edge). It used to ride
@@ -2019,18 +2047,33 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
    box at the bubble's 72% width until the receipt landed; `.notice.queued-bubble` outranks it. The slim selector stays:
    `.notice.notice-slim`, later in the file too, would otherwise beat `.notice.queued-bubble` on the slim card. */
   max-width: 72%; overflow-wrap: anywhere; display: flow-root;
-  background: color-mix(in srgb, var(--you) 10%, transparent); border: 1px dashed color-mix(in srgb, var(--you) 65%, transparent);
-  border-radius: 14px; padding: 7px 12px; color: var(--fg); opacity: 0.85;
+  /* the FADE is in the dress's colours, not an opacity on the element (T337, the review of the kind colours): an element
+     opacity dimmed every colour inside, the postal kind word included, which then read below 4.5:1 on the wash. The
+     three values are the old 10% wash, 65% dashes and --fg text at the old 0.85, folded in, so the pending bubble looks
+     as it did; what changed is that a descendant with a colour of its own (the postal head's chips, kind word and mark,
+     a link or code span in the pending text) now shows that colour whole. --prov-ink is the faded text, read below by
+     the notice's gist and body, whose own rules would otherwise set --fg back. */
+  --prov-ink: color-mix(in srgb, var(--fg) 85%, transparent);
+  background: color-mix(in srgb, var(--you) 8.5%, transparent); border: 1px dashed color-mix(in srgb, var(--you) 55%, transparent);
+  border-radius: 14px; padding: 7px 12px; color: var(--prov-ink);
 }
+/* the kernel's echo of a send ANOTHER window made, not yet read by the model: the sender's tail-bubble dress on the
+   user bubble it is drawn as — the same dashed border (its own 1px, so nothing shifts) and dim caption — so two views
+   of one session agree on what is pending (2026-09-10) */
+.turn.echo .echo-bubble { border-style: dashed; border-color: color-mix(in srgb, var(--you) 65%, transparent); opacity: 0.85; }
+.echo-note { font-size: 0.82em; color: var(--dim); letter-spacing: 0.02em; text-align: right; }
 .notice.queued-bubble, .notice.notice-slim.queued-bubble { max-width: none; display: block; }   /* the notice keeps its row
    width and flex head at either density; only the dress is the bubble's (the shared rule's specificities, later in the
    file). The boxed card too: it fills the column while provisional, so nothing snaps when the receipt lands. */
+.notice.queued-bubble .notice-gist, .notice.queued-bubble .notice-body { color: var(--prov-ink); }   /* the words fade with
+   the dress; the head's own colours (the ends' chips, the kind word, the delivery mark) stay whole */
 /* A CANCELABLE queued bubble carries an explicit ✕ (the user 2026-07-08 — the old whole-bubble click was
    undiscoverable and re-render-fragile). The bubble itself is no longer clickable; only the ✕ acts. It sits
    in the top-right corner (the bubble reserves padding for it) — dim until the bubble is hovered, red on
    its own hover, matching the "remove" reading everywhere else. */
-.queued-bubble.cancelable { position: relative; padding-right: 30px; transition: opacity .1s, border-color .1s, background .1s; }
-.queued-bubble.cancelable:hover { opacity: 1; border-color: var(--accent); }
+.queued-bubble.cancelable { position: relative; padding-right: 30px; transition: color .1s, border-color .1s, background .1s; }
+.queued-bubble.cancelable:hover { --prov-ink: var(--fg); border-color: var(--accent); }   /* hovered, the words lift to full ink
+   (the old opacity lift, now that the fade is the ink: T337) */
 .queued-x {
   position: absolute; top: 3px; right: 4px; width: 20px; height: 20px;
   display: flex; align-items: center; justify-content: center;
@@ -2053,7 +2096,7 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
    width, the dashed provisional look kept, the ✕ still in its corner — with Save and Cancel under the text. The field
    inherits the bubble's type; the buttons and the labels wear the queued header's 0.82em. A bubble another client is
    editing reads "editing" beside its text; a refused edit says why on its own line. */
-.queued-bubble.editing { opacity: 1; border-color: var(--accent); padding-right: 52px; box-sizing: border-box; }   /* the width set from the measured bubble is its border box; the idle padding kept, so the words keep their wrap (the ✎'s room stays empty) */
+.queued-bubble.editing { --prov-ink: var(--fg); border-color: var(--accent); padding-right: 52px; box-sizing: border-box; }   /* full ink while editing (the old opacity lift, now the ink: T337); the width set from the measured bubble is its border box; the idle padding kept, so the words keep their wrap (the ✎'s room stays empty) */
 .queued-editor { display: flex; flex-direction: column; gap: 6px; }
 .queued-editbox {
   width: 100%; box-sizing: border-box; display: block; resize: none; overflow: hidden;
@@ -2071,7 +2114,8 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
 /* A notice romp itself queued (T243) wears the LANDED romp notice card nested inside the queued bubble: the
    dashed "you" dress comes off the wrapper (the card brings its own gray tone), and the ✕ moves inside the
    card's corner so it reads as the card's control. */
-.queued-bubble.queued-romp { background: transparent; border: 0; padding: 0; opacity: 1; }
+.queued-bubble.queued-romp { background: transparent; border: 0; padding: 0; --prov-ink: var(--fg); }   /* the nested card's
+   gist reads at the landed card's full ink, not the dress's faded ink (T337) */
 .queued-bubble.queued-romp.cancelable { padding-right: 0; }
 .queued-bubble.queued-romp.cancelable:hover { border-color: transparent; }
 .queued-bubble.queued-romp > .notice { margin-top: 0; }
@@ -2509,9 +2553,9 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
    T320 (the user, later that day): the word wears the prose weight, not bold, and its three colours are one
    sequential ramp ranked by how much the kind asks of the reader (the tokens' comment has the ranking). */
 .postal-kind { font-weight: 400; }
-.postal-kind-delegate { color: var(--postal-delegate, #7fb8e7); }
-.postal-kind-coordinate { color: var(--postal-coordinate, #7996af); }
-.postal-kind-question { color: var(--postal-question, #91d9ff); }
+.postal-kind-delegate { color: var(--postal-delegate, #7cb5e3); }
+.postal-kind-coordinate { color: var(--postal-coordinate, #5696c8); }
+.postal-kind-question { color: var(--postal-question, #a2d4fe); }
 /* BOTH ENDS of a postal card in the head, each in its session's identity colour (the peer's chip as before, and this
    session's own chip after it); a narrow head collapses this session's chip to its coloured dot, so both colours
    still show where the words would not fit */
@@ -2521,9 +2565,12 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
   .turn-postal-service .notice-src-self .notice-src-name { display: none; }
 }
 /* the DELIVERY STATE icon at the head's right edge (postal-state.ts for the map): dim for sent and delivered, the
-   accent for read, the heads-up amber for parked, the blocked red for bounced */
+   accent for read, the heads-up amber for parked, the blocked red for bounced. The mark keeps the STATE colour, never
+   the kind word's. sent / delivered / read is the circled-check ladder (T337): the read rung is the filled circle with
+   its check cut out in the page colour, so the check reads as a hole, not a second colour */
 .postal-delivery { flex: 0 0 auto; margin-left: auto; display: inline-flex; align-self: center; color: var(--dim); }
 .postal-delivery-read { color: var(--accent); }
+.postal-delivery-read .postal-mark-check { stroke: var(--bg); }
 .postal-delivery-parked { color: var(--warn); }   /* the heads-up amber: waiting, not an error */
 .postal-delivery-bounced { color: var(--st-blocked-bg); }
 /* a postal card with NOTHING TO FOLD hides nothing behind a fold, so it may not hide anything behind an ellipsis
@@ -2951,13 +2998,22 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
 .picker-auth-fixed { flex: 0 0 auto; color: var(--fg); font-size: 0.82em; padding: 4px 0; }
 /* the picker's Tags row (tab groups, the user 2026-09-04): one option per tag; several may be selected, a session
    can hold several tags. Each option IS the tag chip every surface draws (T321, the user 2026-09-10): the thin
-   border in the tag's colour, the faded chip (.tag-chip-off) for unselected, so the button around it carries no
-   chrome: no border, no padding, the page's typeface (a bare button wears the browser's control face), and never
-   the Backend row's accent fill or hover wash; the hover cue is the strip's own, the chip brightened */
+   border in the tag's colour, so the button around it carries no chrome: no border, no padding, the page's typeface
+   (a bare button wears the browser's control face), and never the Backend row's accent fill or hover wash. Three
+   states, each explicit (T343, the user 2026-09-11: faded and selected read too close, and a hover looked like a
+   selection): FADED, unselected at rest, is the off chip (.tag-chip-off at 0.45) on a transparent ground; HOVER
+   lightens the pill's own ground one step (--chip-wash on the button, which hugs the chip and wears its radius, so
+   the wash has the pill's shape and shows through the chip's transparent ground at full strength however faded the
+   chip) and never touches the chip's colour or brightness; SELECTED wears the STRONGEST level, the full chip
+   through --chip-sel-filter (brighter on the dark card, darker on cream: a lift on a light card pales the chip
+   below its faded neighbour, the review's find), whatever the hover, and a hovered selected chip keeps it and
+   takes the wash. The .sel rule follows the :hover rule at the same specificity, so a selected chip's ground
+   is its own; .sel:hover then adds the wash by construction. */
 .picker-tags { flex-wrap: wrap; }
-.picker-tags .picker-be-opt { padding: 0; border: none; background: transparent; font-family: inherit; }
-.picker-tags .picker-be-opt:hover, .picker-tags .picker-be-opt.sel { background: transparent; border-color: transparent; color: inherit; }
-.picker-tags .picker-be-opt:hover { filter: brightness(1.3); }
+.picker-tags .picker-be-opt { padding: 0; border: none; background: transparent; font-family: inherit; display: inline-flex; border-radius: 9px; filter: none; }
+.picker-tags .picker-be-opt:hover { background: var(--chip-wash); border-color: transparent; color: inherit; }
+.picker-tags .picker-be-opt.sel { background: transparent; border-color: transparent; color: inherit; filter: var(--chip-sel-filter); }
+.picker-tags .picker-be-opt.sel:hover { background: var(--chip-wash); }
 .picker-list { overflow-y: auto; }
 /* The resume list's heading (the user 2026-08-12): the list sits LAST in the dialog — typing in the
    name box re-filters it, and its changing height used to jump every control below it — so this line
@@ -3046,6 +3102,28 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
   box-shadow: var(--shadow-toast); font-size: 12px; color: var(--fg);
 }
 #seek-note .seek-note-label { color: var(--dim); }
+
+/* the reveal progress line (render.ts revealProgressPaint, T336): while the index wire's fetch-until-resident
+   loop walks back to a far-past anchor, one quiet line in the seek note's slot says how far along it is, in the
+   composer placeholder's dim ink: a thin bar when the anchor's moment makes the fraction honest, the count of
+   older messages loaded and the oldest loaded time otherwise. Nothing animates; it dies with the loop. The
+   --menu-border hairline, not the seek note's raw white alpha (which vanished on the light page). */
+#reveal-progress {
+  position: fixed; left: 50%; bottom: 86px; transform: translateX(-50%); z-index: 60;
+  display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: var(--radius-toast);
+  background: var(--vscode-menu-background, var(--surface-raised)); border: 1px solid var(--menu-border);
+  box-shadow: var(--shadow-toast); font-size: 12px; color: var(--dim); white-space: nowrap;
+}
+#reveal-progress .rp-bar { position: relative; width: 120px; height: 3px; border-radius: 2px; overflow: hidden; background: color-mix(in srgb, var(--dim) 28%, transparent); }
+#reveal-progress .rp-bar[hidden] { display: none; }
+#reveal-progress .rp-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 2px; background: var(--dim); }
+#reveal-progress .rp-detail:empty { display: none; }
+#reveal-progress .rp-dots[hidden] { display: none; }   /* the loader's pulsing dots stand in only while no honest fraction exists */
+#reveal-progress .rp-x {
+  flex: 0 0 auto; border: none; background: none; cursor: pointer; color: var(--dim);
+  font-size: 11px; line-height: 1.4; padding: 2px 4px; border-radius: 8px;
+}
+#reveal-progress .rp-x:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 8%, transparent); }
 
 /* jump to newest (the user 2026-08-31): the deliberate way back into follow mode once scrolled-up
    reading (and the send gate that respects it) has left it. The seek-note's menu-card vocabulary in
@@ -3349,8 +3427,16 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
 /* ...but it must FADE with the name it precedes. Because the rule above is a declaration on the child,
    the at-rest tab's inline faded color can't inherit into it, so a remote session's "host:" stayed bright
    while its name dimmed (the user 2026-07-22). renderTabs adds .name-faded whenever it applies the faded
-   name color, and drops it on hover, so the two always move together. */
-.tab-label.name-faded .host-prefix { opacity: 0.5; }
+   name color, and drops it on hover, so the two always move together. The composer's name overlay wears the
+   class too (#composer-ph, T335): its name is painted faded, so its host fades by this same rule; one
+   selector for both carriers. The STRENGTH is a variable with the strip's value as its
+   default (T341, the user 2026-09-11): the overlay's name is painted halfway between its identity colour and
+   the at-rest fade (render.ts PH_NAME_FADE), so its host sits at the matching midpoint, 0.75, set on
+   #composer-ph alone; the tab label keeps 0.5. One rule, two strengths, never a second rule. The compound
+   second selector keeps the fade WINNING over the stale-link cue below (.host-prefix.off, opacity 0.75) by
+   specificity, as the scoped rule did before: an at-rest label on a down host fades with its name, and the
+   cue's italic and dotted underline still show. A state rule wins the cascade by construction, never by order. */
+.name-faded .host-prefix, .name-faded .host-prefix.off { opacity: var(--host-fade, 0.5); }
 /* DISCONNECTED host (the user 2026-07-29): its sessions keep their tabs, lanes and cards — dropping them
    would lose the thread — but the "host:" token says the link is down, so nobody reads a frozen transcript
    thinking it is live. Struck + dimmed, the strike on the HOST only: a struck WHOLE name already means a
@@ -3583,6 +3669,10 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
    (pending bubbles, dots, notes) come after the turns, so the + combinator never misses a pair;
    keep the -6px paired with .cmt-msgs' gap above. */
 .cmt-msgs .turn + .turn::before { top: -6px; }
+/* the day divider between two turns (fillCommentMsgs, T339): its segment spans only its own margins (16px above, 6px
+   below), and this flex column adds its 6px gap on both sides of it, which the rule above does not bridge (the turn after
+   a divider is not `.turn + .turn`); stretch the segment over margin plus gap each side, so the rail runs through here too */
+.cmt-msgs .day-divider::before { top: -22px; bottom: -12px; }
 /* the quoted passage as CONTEXT on the thread's opening message (the user 2026-08-24) — the
    .cmt-quote dress, sitting inside the turn above its bubble, the chat's citation-as-context shape */
 .cmt-quote-ctx { margin: 0 0 4px; }

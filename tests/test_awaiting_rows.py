@@ -37,10 +37,10 @@ class AwaitingRows(unittest.TestCase):
 
     def setUp(self):
         self._saved = {n: getattr(km, n) for n in
-                       ("_tmux_sessions", "_bg_live_norm", "_bg_pending", "_states_awaiting_overlay",
+                       ("_live_map", "_bg_live_norm", "_bg_pending", "_states_awaiting_overlay",
                         "_owned_yield_why", "_session_stamp_full", "_session_delegated_why",
                         "_session_delegated_identities", "_watches", "_pr_watches", "_peer_identity")}
-        km._tmux_sessions = lambda: {SID: {}}
+        km._live_map = lambda: {SID: {}}
         km._bg_live_norm = lambda sid, path: []
         km._bg_pending = lambda sid, path, tasks: tasks
         km._states_awaiting_overlay = lambda sid: None
@@ -57,7 +57,7 @@ class AwaitingRows(unittest.TestCase):
     # ---- all sources at once ----
 
     def test_all_three_sources_contribute_rows_and_several_kinds_read_mixed(self):
-        km._tmux_sessions = lambda: {SID: {"subagents": [{"type": "explore", "since": 100, "agentId": AID}]}}
+        km._live_map = lambda: {SID: {"subagents": [{"type": "explore", "since": 100, "agentId": AID}]}}
         km._bg_live_norm = lambda sid, path: [
             {"tid": "tu_agent2", "desc": "map the parser", "t": 120, "type": "local_agent", "agentId": "a1111111111111111"},
             {"tid": "tu_bash1", "desc": "build the docs", "t": 130, "type": "local_bash"}]
@@ -86,7 +86,7 @@ class AwaitingRows(unittest.TestCase):
     def test_a_hook_seen_agent_and_its_launch_row_merge_into_one_row(self):
         # the same agent is in BOTH the hook set (SubagentStart) and the task stream (the launch ack):
         # one row, wearing the launch's id (Stop's handle), its description, and the earliest start
-        km._tmux_sessions = lambda: {SID: {"subagents": [{"type": "explore", "since": 100, "agentId": AID}]}}
+        km._live_map = lambda: {SID: {"subagents": [{"type": "explore", "since": 100, "agentId": AID}]}}
         km._bg_live_norm = lambda sid, path: [
             {"tid": "tu_agent1", "desc": "map the parser", "t": 95, "type": "local_agent", "agentId": AID}]
         aw = km._session_awaiting(SID, "/tmp/x", True)
@@ -115,7 +115,7 @@ class AwaitingRows(unittest.TestCase):
         km._watches = km._watches[:1]
         self.assertEqual(km._session_awaiting(SID, "/tmp/x", True)["why"], "waiting on the CI run")
         km._watches = []
-        km._tmux_sessions = lambda: {SID: {"subagents": [{"type": "a", "since": 1}, {"type": "b", "since": 2}]}}
+        km._live_map = lambda: {SID: {"subagents": [{"type": "a", "since": 1}, {"type": "b", "since": 2}]}}
         self.assertEqual(km._session_awaiting(SID, "/tmp/x", True)["why"], "2 background agents still working")
 
     def test_a_monitor_is_a_command_row(self):
@@ -193,10 +193,10 @@ class RowsDoNotDependOnIdleness(unittest.TestCase):
 
     def setUp(self):
         self._saved = {n: getattr(km, n) for n in
-                       ("_tmux_sessions", "_bg_live_norm", "_bg_pending", "_states_awaiting_overlay",
+                       ("_live_map", "_bg_live_norm", "_bg_pending", "_states_awaiting_overlay",
                         "_owned_yield_why", "_session_stamp_full", "_session_delegated_why",
                         "_session_delegated_identities", "_watches", "_pr_watches", "_peer_identity")}
-        km._tmux_sessions = lambda: {SID: {"subagents": [{"type": "general-purpose", "since": 100, "agentId": self.A1},
+        km._live_map = lambda: {SID: {"subagents": [{"type": "general-purpose", "since": 100, "agentId": self.A1},
                                                          {"type": "general-purpose", "since": 105, "agentId": self.A2}]}}
         km._bg_live_norm = lambda sid, path: [
             {"tid": "toolu_01", "desc": "Check the exporter for banned words", "t": 98, "type": "local_agent", "agentId": self.A1},
@@ -241,7 +241,7 @@ class RowsDoNotDependOnIdleness(unittest.TestCase):
         self.assertEqual(rows, km._session_awaiting(SID, "/tmp/x", True)["items"])
 
     def test_a_stamp_wait_ships_its_own_rows_and_nothing_running_ships_none(self):
-        km._tmux_sessions = lambda: {SID: {}}
+        km._live_map = lambda: {SID: {}}
         km._bg_live_norm = lambda sid, path: []
         self.assertEqual(km._session_background_items(SID, "/tmp/x"), [])
         self.assertEqual(km._awaiting_items_payload(None, SID, "/tmp/x"), [], "nothing in flight → no rows, no box")
@@ -264,7 +264,7 @@ class RowsDoNotDependOnIdleness(unittest.TestCase):
         snap = {SID: {"subagents": [{"type": "explore", "since": 100, "agentId": self.A1}],
                       "bgTasks": [{"toolUseId": "toolu_03", "taskId": "b3333", "type": "local_bash", "since": 110,
                                    "desc": "build the docs site", "lastTool": ""}]}}
-        km._tmux_sessions = self._saved["_tmux_sessions"]   # the real delegator: scope snapshot, else Sessions.live
+        km._live_map = self._saved["_live_map"]   # the real delegator: scope snapshot, else Sessions.live
         saved_live, saved_scope = km.Sessions.live, getattr(km._live_scope, "snapshot", None)
         km.Sessions.live = lambda: (reads.append(1), {})[1]
         km._live_scope.snapshot = None
@@ -312,13 +312,13 @@ class MixedKind(unittest.TestCase):
         self.assertEqual(ops, [{"do": "awaiting", "why": "w", "goal": 1}])
 
     def test_an_overlay_row_saying_mixed_is_accepted_as_data(self):
-        saved = km._states_awaiting_overlay, km._tmux_sessions
-        km._tmux_sessions = lambda: {SID: {}}
+        saved = km._states_awaiting_overlay, km._live_map
+        km._live_map = lambda: {SID: {}}
         km._states_awaiting_overlay = lambda sid: {"awaiting": True, "why": "several things", "kind": "mixed", "t": 1, "count": 3}
         try:
             aw = km._session_awaiting(SID, "/tmp/x", True)
         finally:
-            km._states_awaiting_overlay, km._tmux_sessions = saved
+            km._states_awaiting_overlay, km._live_map = saved
         self.assertEqual((aw["kind"], aw["count"], aw["items"]), ("mixed", 3, []))
 
 
@@ -337,7 +337,7 @@ class NestedWaits(unittest.TestCase):
 
     def setUp(self):
         self._saved = {n: getattr(km, n) for n in
-                       ("_tmux_sessions", "_bg_live_norm", "_bg_pending", "_states_awaiting_overlay",
+                       ("_live_map", "_bg_live_norm", "_bg_pending", "_states_awaiting_overlay",
                         "_owned_yield_why", "_session_stamp_full", "_session_delegated_why",
                         "_session_delegated_identities", "_watches", "_pr_watches")}
         km._bg_pending = lambda sid, path, tasks: tasks
@@ -350,7 +350,7 @@ class NestedWaits(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.path = os.path.join(self.tmp, "parent.jsonl")
         self._write(self.path, [])
-        km._tmux_sessions = lambda: {SID: {"subagents": [{"type": "general-purpose", "since": 100, "agentId": self.A1}]}}
+        km._live_map = lambda: {SID: {"subagents": [{"type": "general-purpose", "since": 100, "agentId": self.A1}]}}
 
     def tearDown(self):
         for n, f in self._saved.items():
@@ -436,7 +436,7 @@ class NestedWaits(unittest.TestCase):
     def test_a_nested_agent_nests_under_its_launcher_one_level_per_row(self):
         # A launched B (B's launch tool_use is in A's file); B launched the command (the ledger's acting agent):
         # the session waits on A; A waits on B; B waits on the command — each nested under its owner
-        km._tmux_sessions = lambda: {SID: {"subagents": [{"type": "general-purpose", "since": 100, "agentId": self.A1},
+        km._live_map = lambda: {SID: {"subagents": [{"type": "general-purpose", "since": 100, "agentId": self.A1},
                                                          {"type": "general-purpose", "since": 110, "agentId": self.A2}]}}
         self._write(self._agent_file(self.A1), [self._agent_call("tu_agent2", "audit the retries")])
         km._bg_live_norm = lambda sid, path: [
@@ -453,7 +453,7 @@ class NestedWaits(unittest.TestCase):
 
     def test_a_nested_agent_with_a_sidecar_parent_needs_no_transcript(self):
         # the sidecar's parentAgentId (an optional key the CLI writes) is the designed link when present
-        km._tmux_sessions = lambda: {SID: {"subagents": [{"type": "general-purpose", "since": 100, "agentId": self.A1},
+        km._live_map = lambda: {SID: {"subagents": [{"type": "general-purpose", "since": 100, "agentId": self.A1},
                                                          {"type": "general-purpose", "since": 110, "agentId": self.A2}]}}
         self._write(self._agent_file(self.A2), [])
         with open(os.path.join(self.tmp, "parent", "subagents", "agent-%s.meta.json" % self.A2), "w") as f:
@@ -474,7 +474,7 @@ class NestedWaits(unittest.TestCase):
 
     def test_without_agents_no_transcript_is_read(self):
         # the join is only ever consulted with a live agent to attribute to — a plain command costs nothing extra
-        km._tmux_sessions = lambda: {SID: {}}
+        km._live_map = lambda: {SID: {}}
         km._bg_live_norm = lambda sid, path: [{"tid": "tu_bash1", "desc": "build the docs", "t": 130, "type": "local_bash"}]
         saved = km._agent_launch_ids
         km._agent_launch_ids = lambda p: (_ for _ in ()).throw(AssertionError("read a transcript with no agent to attribute to"))

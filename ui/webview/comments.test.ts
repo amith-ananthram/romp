@@ -428,7 +428,7 @@ test("while the thread is WRITING the passage holds the await-green tint and NOT
 test("the popover renders the thread with the CHAT's own renderer from the branch point", () => {
   assert.match(UI, /renderingSid = th\.tid;/);
   assert.match(UI, /const node = renderEvent\(ev, prev, turnWorkedSecs\(evs, it\.index, thWorking\)\);\s*\n\s*list\.appendChild\(node\);/);   // + the chat's worked footers (the parity bundle, 2026-08-26)
-  assert.match(KERNEL, /def _thread_events\(tsid, cut_uuid, now, tmux\):/);
+  assert.match(KERNEL, /def _thread_events\(tsid, cut_uuid, now, live_map\):/);
   assert.match(KERNEL, /evs = evs\[at \+ 1:\]/, "sliced to AFTER the branch point — the head system card never rides");
   // the thread's own statusline posts the chat's own ops through the SHARED menu, keyed to the
   // thread sid (toggleMetaMenu's opSid — 2026-08-25 parity: one builder, sid-scoped)
@@ -480,6 +480,12 @@ test("the thread's identity rail runs continuous — no holes at the list's flex
   assert.match(CSS, /\.cmt-msgs \{ flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; \}/,
     "the 6px gap the -6px below must stay paired with");
   assert.match(CSS, /\.cmt-msgs \.turn \+ \.turn::before \{ top: -6px; \}/);
+  // the day divider between two turns (T339): the flex gap sits on both sides of it and `.turn + .turn` does not fire
+  // after it, so its own segment spans margin plus gap each side; derived from the gap and the divider's margins
+  const gap = Number(CSS.match(/^\.cmt-msgs \{[^}]*gap: (\d+)px;/m)![1]);
+  const margins = CSS.match(/^\.day-divider \{[^}]*margin: (\d+)px 0 (\d+)px;/m)!;
+  assert.match(CSS, new RegExp("^\\.cmt-msgs \\.day-divider::before \\{ top: -" + (gap + Number(margins[1])) + "px; bottom: -" + (gap + Number(margins[2])) + "px; \\}", "m"),
+    "the popover's divider segment covers the gap above and below");
 });
 
 test("the quoted passage is CONTEXT on the thread's opening message — never an item above the branch divider", () => {
@@ -653,7 +659,7 @@ test("the pending echo prunes against EVENTS too — a landed user turn never do
 
 test("the parity bundle (2026-08-26): dividers, owner-scoped in-turn controls, the sid stamp", () => {
   // day dividers open new days in the popover exactly as in the chat (same helper, same idiom)
-  assert.match(UI, /const dayOpen = eventEpoch\(evs\[itemFirstEvent\(it\)\]\);[\s\S]{0,300}?if \(dayOpen != null\) \{\s*\n\s*const dv = dayDividerFor\(dayOpen, prev\);/);   // the T145 relay-note insert sits between
+  assert.match(UI, /const anchor = itemAnchor\(it, \(i\) => eventEpoch\(evs\[i\]\)\);\s*\n\s*const dayOpen = eventEpoch\(evs\[anchor\]\);[\s\S]{0,300}?if \(dayOpen != null\) \{\s*\n\s*const dv = dayDividerFor\(dayOpen, walk\);/);   // the T145 relay-note insert sits between; the unit timed by its anchor member, the divider decided against the walk's mark (T339)
   // the popover's list is stamped with the THREAD sid, and in-turn controls resolve their owner
   // from the DOM at click time — queued ✕ and the api-error card act on the thread, never the tab
   assert.match(UI, /list\.dataset\.session = th\.tid;/);

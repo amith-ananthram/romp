@@ -39,7 +39,7 @@ SID = "11111111-2222-3333-4444-00000000c001"
 STATE_ROOT = km.RESTART_CUTS_FILE.parent
 
 # bin/romp's `romp refresh` row: caller attribution with no action field, as the CLI writes it.
-REFRESH_CLI_ROW = {"ppid": 4242, "parent": "bash", "sid": "", "name": "", "tty": "/dev/pts/0", "tmux": ""}
+REFRESH_CLI_ROW = {"ppid": 4242, "parent": "bash", "sid": "", "name": "", "tty": "/dev/pts/0"}
 
 
 class DeadTty:
@@ -204,7 +204,8 @@ class CutRow(unittest.TestCase):
         import types as _t
         sbmod = km.sb if hasattr(km, "sb") else None
         src = open(os.path.join(os.path.dirname(HERE), "kernel", "sdk_backend.py")).read()
-        self.assertIn("cut = [{\"sid\": s.sid, \"name\": s.name} for s in sessions if s.inflight]", src,
+        # …and a session under a per-session host is detached, never cut (T315): the join keeps that filter
+        self.assertIn("cut = [{\"sid\": s.sid, \"name\": s.name} for s in sessions\n               if s.inflight and getattr(s, \"_host\", None) is None and not getattr(s, \"_host_intent\", False)]", src,
                       "every in-flight session is a cut — ended included (the join, not a filter)")
         self.assertIn("if s.thread is not None:", src,
                       "a threadless session can no longer crash the drain")

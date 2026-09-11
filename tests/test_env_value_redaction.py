@@ -192,7 +192,7 @@ class RedactionRule(_WithConftest):
         p = "/some/where/deep/enough/to/count"
         self.assertFalse(os.path.exists(p), "by NAME: the path rule below does not apply to a path that is not there")
         env = {"PWD": p, "HOME": p, "XDG_STATE_HOME": p, "PATH": p, "CLAUDE_CONFIG_DIR": p,
-               "TMUX_TMPDIR": p, "ROMP_TESTS_SYSTEM_TMPDIR": p,
+               "ROMP_TESTS_SYSTEM_TMPDIR": p,
                # GitHub Actions: the runner's dirs and the six names setup-python exports the
                # interpreter prefix under, which every stdlib and site-packages frame of a CI
                # traceback quotes
@@ -205,8 +205,6 @@ class RedactionRule(_WithConftest):
         env = {"PWD_TOKEN": p, "ANTHROPIC_PWD": p, "MY_SECRET_PATH": p}
         self.assertEqual(self.cf.env_values_to_redact(env), {p}, "a credential-shaped name is never exempt")
         self.assertTrue(self.cf.env_value_qualifies("SOME_TOKEN", p))
-        self.assertFalse(self.cf.env_value_qualifies("TMUX_TMPDIR", p),
-                         "the private tmux socket dir conftest mints is a path a failure may quote")
         self.assertFalse(self.cf.env_value_qualifies("ROMP_TESTS_REAL_CLAUDE_CONFIG_DIR", p),
                          "the pre-floor settings dir is a path a failure report may quote")
 

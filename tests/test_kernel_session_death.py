@@ -8,9 +8,11 @@ state vocabulary) plus a load-bearing marker in STATE/gone/ with a closed reader
 the backend that owns the liveness fact and corroborated before every stamp:
   * SDK sids: the kill gesture only (reg alive:True — dormant-revivable AND crash-looped — is never
     stamped by anyone, so the boot-resume contract is untouched by construction);
-  * tmux sids: the set-diff is a TRIGGER; the tmux server itself answers per batch via
-    TmuxBackend.alive_sids() — identity-true (@romp-session-id, never a NAME: same-named
-    generations coexist), where the no-server exit IS the authoritative zero-sessions answer;
+  * Codex sids: the set-diff is a TRIGGER; the Codex backend's registry answers — its dead mark
+    stamps, a row still owned blocks the stamp, and while the registry cannot be read
+    (_codex_records_blind) every writer stands down, loudly and counted;
+  * a names entry with no registry row anywhere is dead history (a session no backend can revive)
+    and stamps;
   * a boot pass over names/ covers deaths no kernel was up to see, re-deaths after revival, and the
     upgrade backfill.
 Idempotence keys on the marker being the NEWEST event (die → revive → die is recordable every
@@ -19,10 +21,11 @@ supersession the episode machinery owns, not a death).
 
 All fixtures synthetic (placeholder UUIDs, invented names).
 """
+import contextlib
+import io
 import json
 import os
 import tempfile
-import types
 import unittest
 from romp_load import load_source
 
@@ -108,96 +111,143 @@ class RecordDeath(unittest.TestCase):
         self.assertIsNone(_marker(SID))
 
 
-class AliveSids(unittest.TestCase):
-    def _probe(self, rc, out="", err=""):
-        saved = km._TMUX._run
-        km._TMUX._run = lambda args, t=3: types.SimpleNamespace(returncode=rc, stdout=out, stderr=err)
+class _FakeCodex:
+    """The Codex backend as the death writers read it: a registry of sids, each still owned (alive) or
+    marked dead, or a registry the backend could not read."""
+    def __init__(self, rows=None, unreadable=False):
+        self.rows = dict(rows or {})            # sid → alive
+        self._registry_unreadable = unreadable
+
+    def _session(self, sid):
+        return self.rows.get(sid) if sid in self.rows else None   # a row (truthy or not) vs no row
+
+    def owns(self, sid):
+        return bool(self.rows.get(sid))
+
+
+class CodexRecordsBlind(unittest.TestCase):
+    """The one predicate every death writer stands down on: the Codex records cannot be read right now."""
+    def tearDown(self):
         try:
-            return km._TMUX.alive_sids()
-        finally:
-            km._TMUX._run = saved
+            (jd.STATE / "codex" / "registry.json").unlink()
+        except OSError:
+            pass
 
-    def test_a_healthy_scan_returns_the_sid_set(self):
-        self.assertEqual(self._probe(0, out=SID + "\n\n" + SID2 + "\n"), {SID, SID2})
+    def test_a_readable_registry_is_not_blind(self):
+        self.assertFalse(km._codex_records_blind(_FakeCodex({SID: True})))
+        self.assertFalse(km._codex_records_blind(_FakeCodex()))
 
-    def test_no_server_is_the_authoritative_zero_answer(self):
-        # verified live: `list-sessions` with no server exits 1 with 'error connecting … No such
-        # file or directory' — the mass-death/reboot shape, and the boot backfill's normal world
-        self.assertEqual(self._probe(1, err="error connecting to /tmp/tmux-1000/default (No such file or directory)"),
-                         set())
-        self.assertEqual(self._probe(1, err="no server running on /tmp/tmux-1000/default"), set())
+    def test_an_unreadable_registry_is_blind(self):
+        self.assertTrue(km._codex_records_blind(_FakeCodex(unreadable=True)))
 
-    def test_a_real_probe_failure_is_none_so_writers_stand_down(self):
-        self.assertIsNone(self._probe(1, err="some other tmux error"))
-        saved = km._TMUX._run
-        km._TMUX._run = lambda args, t=3: None
-        try:
-            self.assertIsNone(km._TMUX.alive_sids())
-        finally:
-            km._TMUX._run = saved
+    def test_no_module_is_blind_only_while_a_registry_file_exists(self):
+        self.assertFalse(km._codex_records_blind(None), "no module and no records: nothing to be blind to")
+        (jd.STATE / "codex").mkdir(parents=True, exist_ok=True)
+        (jd.STATE / "codex" / "registry.json").write_text("{}")
+        self.assertTrue(km._codex_records_blind(None), "records exist that this kernel cannot read")
 
 
 class DeathSweepTick(unittest.TestCase):
     def setUp(self):
-        self._saved_avail, self._saved_run = km._TMUX.available, km._TMUX._run
-        km._TMUX.available = lambda: True
+        self._saved_codex = km._codex
         km._prev_live_sids[0] = None
+        jd.NAMES.mkdir(parents=True, exist_ok=True)
+        # the SDK registry directory EXISTS and is readable: a names-only sid is dead history only when the
+        # registry that would hold its reg can be read (a missing sdk/ with names on record is blindness, and
+        # the sweep stands down instead: tests/test_sdk_registry_blind.py)
+        jd.SDKDIR.mkdir(parents=True, exist_ok=True)
 
     def tearDown(self):
-        km._TMUX.available, km._TMUX._run = self._saved_avail, self._saved_run
+        km._codex = self._saved_codex
         km._prev_live_sids[0] = None
         _wipe(SID)
         _wipe(SID2)
 
-    def _scan(self, sids):
-        km._TMUX._run = lambda args, t=3: types.SimpleNamespace(
-            returncode=0, stdout="\n".join(sids), stderr="")
+    def _codex(self, rows=None, unreadable=False):
+        fake = _FakeCodex(rows, unreadable)
+        km._codex = lambda: fake
 
-    def test_a_departed_sid_confirmed_gone_is_stamped(self):
-        self._scan([])
-        km._death_sweep_tick(NOW, {SID: {}})
-        km._death_sweep_tick(NOW + 5, {})
-        self.assertIsNotNone(_marker(SID), "left the map + the owner confirms absence → stamped")
+    def _depart(self, sid=SID):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            km._death_sweep_tick(NOW, {sid: {}})
+            km._death_sweep_tick(NOW + 5, {})
+        return err.getvalue()
+
+    def test_a_departed_codex_sid_its_registry_marks_dead_is_stamped(self):
+        self._codex({SID: False})
+        self._depart()
+        self.assertIsNotNone(_marker(SID), "left the map + the owner's record says dead → stamped")
+
+    def test_a_departed_names_only_sid_is_dead_history_and_is_stamped(self):
+        (jd.NAMES / SID).write_text("web\t/tmp\t#123456\t#fff\n")
+        self._codex({})
+        self._depart()
+        self.assertIsNotNone(_marker(SID), "no registry row anywhere: a session no backend can revive")
 
     def test_the_owner_saying_alive_blocks_the_stamp(self):
-        self._scan([SID])
-        km._death_sweep_tick(NOW, {SID: {}})
-        km._death_sweep_tick(NOW + 5, {})
+        self._codex({SID: True})
+        self._depart()
         self.assertIsNone(_marker(SID), "our snapshot blinked; the session is alive")
 
     def test_an_sdk_owned_sid_is_never_stamped_here(self):
         jd.SDKDIR.mkdir(parents=True, exist_ok=True)
         (jd.SDKDIR / (SID + ".json")).write_text(json.dumps({"sid": SID, "alive": True}))
-        self._scan([])
-        km._death_sweep_tick(NOW, {SID: {}})
-        km._death_sweep_tick(NOW + 5, {})
+        self._codex({})
+        self._depart()
         self.assertIsNone(_marker(SID),
                           "SDK deaths are the kill gesture's to stamp — alive:True is revivable/"
                           "crash-looped and the boot-resume contract rides on never stamping it")
 
-    def test_a_failed_probe_stamps_nothing(self):
-        km._TMUX._run = lambda args, t=3: None
-        km._death_sweep_tick(NOW, {SID: {}})
-        km._death_sweep_tick(NOW + 5, {})
-        self.assertIsNone(_marker(SID))
+    def test_a_blind_codex_registry_stamps_nothing_and_says_so_once(self):
+        (jd.NAMES / SID).write_text("web\t/tmp\t#123456\t#fff\n")
+        self._codex({}, unreadable=True)
+        err = self._depart()
+        self.assertIsNone(_marker(SID), "silence is not an answer: a Codex sid and dead history look alike")
+        self.assertEqual(err.count("death-sweep: the Codex registry cannot be read"), 1, err)
+        self.assertIn("1 departed sid(s)", err)
 
 
 class DeathBootPass(unittest.TestCase):
     def tearDown(self):
         _wipe(SID)
         _wipe(SID2)
-        km._TMUX.available, km._TMUX._run = self._saved_avail, self._saved_run
+        km._codex = self._saved_codex
 
     def setUp(self):
-        self._saved_avail, self._saved_run = km._TMUX.available, km._TMUX._run
-        km._TMUX.available = lambda: True
-        km._TMUX._run = lambda args, t=3: types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        self._saved_codex = km._codex
+        km._codex = lambda: _FakeCodex({})
         jd.NAMES.mkdir(parents=True, exist_ok=True)
 
-    def test_a_regless_tmux_sid_dead_before_boot_is_stamped(self):
+    def test_a_names_only_sid_dead_before_boot_is_stamped(self):
         (jd.NAMES / SID).write_text("web\t/tmp\t#123456\t#fff\n")
         km._death_boot_pass(NOW)
-        self.assertIsNotNone(_marker(SID), "the RC7 case: a tmux death no kernel was up to see")
+        self.assertIsNotNone(_marker(SID), "the RC7 case: dead history no kernel was up to see")
+
+    def test_a_codex_sid_its_registry_still_owns_is_left_alone(self):
+        (jd.NAMES / SID).write_text("web\t/tmp\t#123456\t#fff\n")
+        km._codex = lambda: _FakeCodex({SID: True})
+        km._death_boot_pass(NOW)
+        self.assertIsNone(_marker(SID))
+
+    def test_a_codex_dead_mark_is_stamped(self):
+        (jd.NAMES / SID).write_text("web\t/tmp\t#123456\t#fff\n")
+        km._codex = lambda: _FakeCodex({SID: False})
+        km._death_boot_pass(NOW)
+        self.assertIsNotNone(_marker(SID))
+
+    def test_a_blind_registry_skips_every_regless_sid_loudly(self):
+        (jd.NAMES / SID).write_text("web\t/tmp\t#123456\t#fff\n")
+        (jd.NAMES / SID2).write_text("api\t/tmp\t#123456\t#fff\n")
+        jd.SDKDIR.mkdir(parents=True, exist_ok=True)
+        (jd.SDKDIR / (SID2 + ".json")).write_text(json.dumps({"sid": SID2, "alive": False}))
+        km._codex = lambda: _FakeCodex({}, unreadable=True)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            km._death_boot_pass(NOW)
+        self.assertIsNone(_marker(SID), "reg-less: stood down while the Codex records cannot be read")
+        self.assertIsNotNone(_marker(SID2), "the SDK reg's alive:False is its own affirmative answer")
+        self.assertIn("death-boot: the Codex registry cannot be read", err.getvalue())
 
     def test_an_alive_true_reg_is_left_for_the_resume_contract(self):
         (jd.NAMES / SID).write_text("api\t/tmp\t#123456\t#fff\n")

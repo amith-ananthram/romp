@@ -249,6 +249,17 @@ class LeaseRules(unittest.TestCase):
         c = self._census([self._cli(701, 1)], [self._lease(701)], {701: "1000", self.HOLDER: "51"})
         self.assertEqual((c["orphans"], [p["kind"] for p in c["problems"]]), ([701], ["lease.holder-gone"]))
 
+    def test_a_dead_hosts_cli_is_left_to_finish_its_turn_not_reaped(self):
+        # T315: a per-session HOST that died closed its CLI's stdin; the CLI finishes its turn and exits on its
+        # own, and the session's next connect waits for that. The census reports the lost host but never reaps.
+        lease = self._lease(720, holder={"pid": self.HOLDER, "start": "50", "kind": "host"})
+        c = self._census([self._cli(720, 1)], [lease], {720: "1000"})              # the host (holder) is gone
+        self.assertEqual((c["orphans"], c["owned"]), ([], {720: "host-gone-finishing"}))
+        self.assertEqual([p["kind"] for p in c["problems"]], ["lease.holder-gone"])
+        # a KERNEL-held lease with its holder gone is still today's orphan
+        c = self._census([self._cli(721, 1)], [self._lease(721)], {721: "1000"})
+        self.assertEqual(c["orphans"], [721])
+
     def test_a_stale_heartbeat_makes_the_cli_an_orphan_and_the_boundary_is_the_ttl(self):
         starts = {702: "1000", self.HOLDER: "50"}
         c = self._census([self._cli(702, 1)], [self._lease(702, t=self.NOW - sb.LEASE_TTL_S - 0.5)], starts)
@@ -261,10 +272,20 @@ class LeaseRules(unittest.TestCase):
         # process has no valid lease (identity differs), so it is judged on its own and the row says why
         c = self._census([self._cli(703, 1)], [self._lease(703, start="1000")], {703: "2000", self.HOLDER: "50"})
         self.assertEqual((c["orphans"], [p["kind"] for p in c["problems"]]), ([703], ["lease.no-live-process"]))
-        # …and by an unrelated process: no CLI to reap, the lease is dead and listed for removal
-        c = self._census([" 1 0 /sbin/launchd", " 704 1 sleep 300"], [self._lease(704)], {704: "1000", self.HOLDER: "50"})
+        # …and a lease whose process is GONE (no start time at all): no CLI to reap, the lease is dead and dropped
+        c = self._census([" 1 0 /sbin/launchd"], [self._lease(704)], {self.HOLDER: "50"})
         self.assertEqual((c["orphans"], c["dead_leases"], [p["kind"] for p in c["problems"]]),
                          ([], [self.RSID], ["lease.no-live-process"]))
+        # a process wearing the lease's EXACT identity (pid and start time) whose argv names no current conversation is
+        # still the leased CLI: after a /clear the registry's lastSid moves on while the running CLI keeps its
+        # --resume of the old id (T315 found this with a host; the identity is the authority, the argv is not)
+        c = self._census([" 1 0 /sbin/launchd", " 705 1 /x/claude --output-format stream-json --resume=%s --input-format stream-json" % self.RSID],
+                         [self._lease(705)], {705: "1000", self.HOLDER: "50"})
+        self.assertEqual((c["orphans"], c["owned"], c["dead_leases"], c["problems"]), ([], {705: "lease"}, [], []))
+        # …and when that lease does not hold (its holder is gone), the process is an orphan with the lease's reason
+        c = self._census([" 705 1 /x/claude --output-format stream-json --resume=%s --input-format stream-json" % self.RSID],
+                         [self._lease(705)], {705: "1000"})
+        self.assertEqual((c["orphans"], [p["kind"] for p in c["problems"]]), ([705], ["lease.holder-gone"]))
 
     def test_this_kernels_own_child_without_a_lease_is_owned_and_not_a_row(self):
         # the window between this kernel's spawn and its connect-time lease write is by design

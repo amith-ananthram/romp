@@ -30,20 +30,7 @@ em = load_source("romp_event_model", HERE / "event_model.py")
 jd = load_source("romp_judge", HERE / "judge.py")
 cm = load_source("romp_colormap", HERE / "colormap.py")  # age → recency tint
 pal = load_source("romp_palette", HERE / "palette.py")  # session-identity palettes (selectable)
-ap = load_source("romp_askparse", HERE / "askparse.py")  # tmux-pane → live AskUserQuestion picker
 sb = load_source("romp_session_backend", HERE / "session_backend.py")  # the SessionBackend ABC
-tsock = load_source("romp_tmux_socket", HERE / "tmux_socket.py")  # where the tmux server's socket lives (T325)
-# Settled into THIS process's environment before the first tmux call, so every dial below (TmuxBackend shells tmux
-# with the inherited environment) and every `romp new -t` the kernel spawns agree with the server. A MANAGED kernel
-# (ROMP_MANAGER_PID) takes the manager's TMUX_TMPDIR as it stands, absent meaning tmux's default: the manager alone
-# starts the server, and a new-code kernel respawned under a manager that predates the rule must dial the /tmp
-# server that manager started, not a runtime-dir socket nobody serves (review find: it would have read every
-# terminal session as dead and started a second, unscoped server on its next spawn). Unmanaged (romp-serve bare, a
-# lab, a test) resolves for itself. The rule that fired is logged at boot and reported on /version.
-_TMUX_TMPDIR, _TMUX_TMPDIR_RULE = tsock.export_tmux_tmpdir(os.environ, managed=bool(os.environ.get("ROMP_MANAGER_PID")))
-# the MANAGER's own rule, passed beside the value (specEnv): "" under a manager from before the rule, so bin/romp can tell
-# that manager (restart it) from a current one that simply has no runtime directory
-_TMUX_MANAGER_RULE = (os.environ.get(tsock.LAUNCHER_MARK) or "") if os.environ.get("ROMP_MANAGER_PID") else ""
 CHAT_VIEW = ROOT / "vscode-extension"               # the tuned UI, current in this worktree via `git merge main`
 # ROMP_DIST_DIR: test seam (romp-lab serves a COPY of the built bundles, so its rebuild simulations —
 # mtime bumps that must raise the reload banner — never touch the dist the LIVE kernel serves).
@@ -223,7 +210,7 @@ class _PerfStats:
                                    wakes_backstop (how the loop's wait ended: flag set, or the 0.5 s
                                    timeout), cycle_ms_sum / cycle_ms_max (since start) /
                                    cycle_ms_last, cycle_cpu_ms_sum (the pusher thread's own CPU,
-                                   time.thread_time, so a forked tmux read is excluded), and
+                                   time.thread_time, so lock waits and any forked child are excluded), and
                                    cycle_ms_p50 / cycle_ms_p90 / cycle_ms_ring_max / ring_n from a
                                    ring of the last RING cycle durations; sends (every client payload);
                                    idle_cycles / idle_ms_sum / idle_cpu_ms_sum (cycles that set no wake,
@@ -670,8 +657,8 @@ def _session_working(turns):
     """Whether a session is ACTIVELY WORKING — the single source of truth for the working signal (the yellow
     dot on every surface, the auto-nudge orphan check). Derived from the EVENT MODEL: its last turn is OPEN
     (not ended, not idle-terminated) and its last activity isn't stranded before a host sleep (frozen, not
-    working). NOT the tmux pane state — tmux is just one possible backend, so the working signal must not
-    depend on it; the transcript is backend-agnostic (the user 2026-06-22)."""
+    working). NOT a backend's live row — a backend is just one way to run a session, so the working signal
+    must not depend on it; the transcript is backend-agnostic (the user 2026-06-22)."""
     if not turns:
         return False
     lt = turns[-1]
@@ -976,8 +963,8 @@ def _last_plain_user_turn_t(turns):
         trig = turn.get("trigger") or {}
         tuid = trig.get("uuid") if isinstance(trig, dict) else trig
         a = next((x for x in atoms if x.get("uuid") == tuid), None) or (atoms[0] if atoms else None)
-        if not a or a.get("author") != "human":
-            continue
+        if not a or a.get("author") != "human" or a.get("_echo_text") or turn.get("echoTurn"):
+            continue    # an echo (a send the transcript never took; since T344 placed by time) is never a prompt turn
         if "romp-goal-id" in (_atom_user_text(a) or ""):   # a nudge / typed card-reply → targeted, not a plain reply
             continue
         best = max(best, a.get("t") or turn.get("t") or 0)
@@ -1143,11 +1130,10 @@ def _version_info():
     _mv, _mgt = _mesh_settings_snapshot()   # value AND stamp of each mesh-adopted store from ONE read (T248b)
     return {"kernel_sha": _kernel_sha(), "kernel_ver": _kernel_ver(), "pid": os.getpid(), "started": int(_STARTED),
             "boot": _BOOT_ID,   # lets a page retire update offers from a previous kernel life (2026-08-15)
-            # where this kernel's tmux server keeps its socket ("" = tmux's default) and the rule that chose it
-            # (T325): bin/romp compares its own answer with this before it starts a terminal session, so a shell
-            # that resolved differently (a cron job, a `sudo -u`, a `docker exec`) never starts a second server
-            "tmuxSocketDir": _TMUX_TMPDIR or "", "tmuxSocketRule": _TMUX_TMPDIR_RULE, "tmuxSocketManagerRule": _TMUX_MANAGER_RULE,
             "uptime_s": int(time.time() - _STARTED), "dist_ver": _dist_ver(), "bundles": bundles,
+            # how often a backend's liveness read RAISED since boot and its previous rows were served instead
+            # (_backend_rows: the loud, counted stand-down that replaced the tmux-presence fallback, 2026-09-11)
+            "liveReadFailures": _LIVE_READ_FAILS["count"],
             # the WS ops beyond the base protocol this kernel answers (KERNEL_WS_CAPS) — the same list
             # the `caps` frame carries at `ready`; `romp version` and a curl can read it here
             "caps": list(KERNEL_WS_CAPS),
@@ -1193,7 +1179,6 @@ def _version_info():
             "commentModel": jd._state_str("comment-model", "session"),
             "commentEffort": jd._state_str("comment-effort", "session"),
             "commentFast": jd._state_str("comment-fast", "session"),
-            "tmuxBackend": jd._state_str("tmux-backend", "off"),   # T288: "on" offers Claude Code (tmux) in the picker and the gear
             "judgeFast": jd._state_str("judge-fast", "off"),   # RAW "on" | "off": the TRIAGE tier's Fast mode box (T300: one per tier)
             "distillFast": jd._state_str("distill-fast", "off"), "indexFast": jd._state_str("index-fast", "off"),
             "fastRefused": jd._fast_refused(),   # tier -> {reason, model, t}: the CLI declined a fast ask; the gear's box says why
@@ -1216,7 +1201,6 @@ def _version_info():
                          "commentModel": jd._state_str("comment-model", "session"),
                          "commentEffort": jd._state_str("comment-effort", "session"),
                          "commentFast": jd._state_str("comment-fast", "session"),
-                         "tmuxBackend": jd._state_str("tmux-backend", "off"),
                          "judgeFast": jd._state_str("judge-fast", "off"),
                          "distillFast": jd._state_str("distill-fast", "off"), "indexFast": jd._state_str("index-fast", "off")},
             # every gt-gated store's last-applied gesture stamp (epoch-ms ints, nothing path-shaped):
@@ -1560,9 +1544,6 @@ _seen_live = set()
 _kept_open = set()
 
 # Names whose "Opening…" spawn the webview cancelled (the ✕/Esc on the cue, the user 2026-07-14). A
-# LOCAL name lands here so a still-in-flight threaded tmux spawn is reaped the moment it materializes;
-# an already-live session is torn down inline in the handler and never enters this set.
-_cancel_pending = set()
 
 
 # ───────────────────────── helpers ─────────────────────────
@@ -1590,7 +1571,7 @@ def _names_snapshot():
     _cwd_of and every outgoing postal card through _name_color_by_name, so the ACTIVE tab's rebuild
     re-read the same ~64 one-line files hundreds of times per 0.5s cycle — ~38% of the pusher's wall
     time (py-spy 2026-08-31: _cwd_of 22%, _name_color_by_name 16%). Same one-snapshot-per-cycle idiom
-    as the tmux liveness hoist (2026-08-10); a mid-cycle rename/create lands next cycle, the exact
+    as the liveness-snapshot hoist (2026-08-10); a mid-cycle rename/create lands next cycle, the exact
     staleness the liveness snapshot already tolerates by construction."""
     snap = {}
     try:
@@ -1639,7 +1620,7 @@ def _name_color(sid):
 
 # The romp session-identity palette — SELECTABLE now (the user 2026-07-12): the sets live in
 # romp_palette.PALETTES (the single source of truth), the chosen name in STATE/palette (gear → Session
-# colors → setPalette). The SDK backend imports the same module; the tmux launcher (bin/romp, shell)
+# colors → setPalette). The SDK backend imports the same module; the shell CLI (bin/romp, `romp color`)
 # reads the STATE/palette-colors mirror _write_palette_mirror keeps current. The right-click tab menu
 # offers the ACTIVE set as swatches (/palette), and setSessionColor accepts a value from ANY known set
 # (so a click from a menu rendered just before a switch still lands — it re-slots on the next switch).
@@ -1664,7 +1645,7 @@ def _palette_name():
 
 
 def _write_palette_mirror():
-    """STATE/palette-colors: `bg<TAB>fg` per line for the ACTIVE palette — the tmux launcher (bin/romp)
+    """STATE/palette-colors: `bg<TAB>fg` per line for the ACTIVE palette — the CLI (bin/romp, `romp color`)
     is shell and can't import romp_palette, so it assigns from this mirror. Rewritten at boot and on
     every switch; bin/romp falls back to the default set when it doesn't exist (kernel never booted)."""
     try:
@@ -2433,9 +2414,9 @@ def _model_alias_boot_pass():
         _atomic_write(marker, json.dumps({"t": int(time.time()), "moved": n}))
     return n
 # "ultracode" tops the ladder (the user 2026-08-04): the CLI's own /effort offers it — xhigh effort plus
-# standing dynamic-workflow orchestration, per session. tmux delivers the literal "/effort ultracode"; the
-# SDK backend maps it to effort=xhigh + the `ultracode` settings key (the CLI's documented per-session
-# hook), since the SDK's typed EffortLevel has no such value. See sdk_backend flag_settings_path.
+# standing dynamic-workflow orchestration, per session. The SDK backend maps it to effort=xhigh + the
+# `ultracode` settings key (the CLI's documented per-session hook), since the SDK's typed EffortLevel has no
+# such value. See sdk_backend flag_settings_path.
 EFFORT_CHOICES = [{"value": v, "label": v} for v in ("low", "medium", "high", "xhigh", "max", "ultracode")]
 _MODEL_VALUES = {m["value"] for m in MODEL_CHOICES}
 _EFFORT_VALUES = {e["value"] for e in EFFORT_CHOICES}
@@ -2456,8 +2437,9 @@ def _names_fields_for_edit(sid, what):
     record (_set_name, _set_session_color, _set_palette), or None for a record that reads with NO NAME,
     which is left exactly as it is. Every writer puts the name first, so an empty first field is never a
     real record: it is another writer's window (a writer that truncates before it writes, as bin/romp's
-    record writer did, behind the tmux after-rename hook that races _set_name's synchronous publish
-    after a live rename) or a damaged file. Padded to four fields and published over, it cost the
+    record writer did behind the tmux backend's after-rename hook, racing _set_name's synchronous publish
+    after a live rename, until that backend's removal 2026-09-11) or a damaged file. Padded to four fields
+    and published over, it cost the
     session its name, cwd and colors while the edit reported success. One re-read after a short pause
     (_NAMES_REREAD_S, paid only on an empty read; the window is a printf's worth of time) tells a window
     from damage: a record whole on the second read is edited as usual; one still without a name is
@@ -2491,8 +2473,7 @@ def _set_session_color(sid, bg):
     the fg). Returns True on a real write; False for a record that cannot be read, and for one that
     reads with no name (_names_fields_for_edit: left alone and reported, where a publish over it erased
     the session's name and cwd). The dashboard reads color from here (_name_color) and a resume
-    reuses it, so this is the durable store; the live tmux status bar (a separate @identity-bg) refreshes
-    on the session's next resume."""
+    reuses it, so this is the durable store."""
     if not pal.find(bg):
         return False
     try:
@@ -2511,8 +2492,7 @@ def _set_palette(name):
     """Switch the session-identity palette (gear → Session colors): persist the choice, remap every
     stored session color to the SAME SLOT in the new set (the whole fleet recolors consistently and a
     round-trip restores the original colors), refresh the shell launcher's mirror, and re-broadcast.
-    A color no palette owns is left alone. Unknown palette names are ignored. Live tmux status bars
-    refresh on the session's next resume (same contract as _set_session_color)."""
+    A color no palette owns is left alone. Unknown palette names are ignored."""
     if name not in pal.PALETTES:
         return False
     try:
@@ -2558,7 +2538,7 @@ def _name_of(sid):
 
 def _cwd_of(sid):
     """The session's working directory from the names registry (2nd tab field: name\\tcwd\\tbg\\tfg), or "".
-    Written at launch for BOTH backends (tmux romp launcher + SDK write_name), so it's available before any
+    Written at launch by every backend (SDK write_name, the Codex registration), so it's available before any
     transcript exists — and REWRITTEN by a move (SdkBackend.move, the CLI's set_cwd control request), so
     this is the current directory, not the launch one; every transcript path derives from it."""
     parts = _names_parts(sid)
@@ -2587,8 +2567,8 @@ def _session_cwd(sid, path=None, meta=None):
 
 def _identity_of(sid):
     """The session's identity colors (bg, fg) from the names registry (3rd/4th tab fields), or ("", ""). Written
-    at launch for BOTH backends (tmux launcher + SDK write_name), so it's available without shelling tmux —
-    the unified GET /sessions reads identity from here for either backend."""
+    at launch by every backend (SDK write_name, the Codex registration), so it's available without asking a
+    backend — the unified GET /sessions reads identity from here for either backend."""
     parts = _names_parts(sid)
     if not parts:
         return ("", "")
@@ -2596,18 +2576,20 @@ def _identity_of(sid):
 
 
 def _session_backend(sid, tm):
-    """Per-session backend label ('sdk' | 'tmux') for the UI (tab tooltip / timeline lane): the live
-    metadata's field if present, else SDK-registry ownership (so a DEAD lane still reports which kind it
-    was). A non-SDK session is tmux by construction. (the user 2026-06-22, via the ui peer)"""
+    """Per-session backend label ('sdk' | 'codex' | '') for the UI (tab tooltip / timeline lane): the live
+    metadata's field if present, else the durable records (an SDK reg, a Codex registry row), so a DEAD
+    lane still reports which kind it was. "" for a session no backend holds a record of — a names entry
+    from before the tmux backend's removal (2026-09-11), or a transcript-derived one. (the user
+    2026-06-22, via the ui peer)"""
     if tm and tm.get("backend"):
         return tm["backend"]
     be = _sdk()
-    if be and be.owns(sid):
+    if (be and be.owns(sid)) or (jd.SDKDIR / (str(sid) + ".json")).exists():
         return "sdk"
     cx = _codex()
-    if cx is not None and cx.owns(sid):
-        return "codex"                        # a Codex-backed session (docs/codex.md)
-    return "tmux"
+    if cx is not None and cx._session(sid) is not None:
+        return "codex"                        # a Codex-backed session, live or dead (docs/codex.md)
+    return ""
 
 
 def _open_leaf_bullets(nodes, subs, cap=12, indent="  "):
@@ -3055,7 +3037,7 @@ def _sessions(now, window=None, forks=True):
     lists each ran a discover fingerprint (a stat per names entry, three times, plus one per
     transcript) and a stat per row — 34-37 sweeps per cycle on a profiled 30-session kernel, 4.3% of
     the pusher's GIL, all returning the same rows. One sweep per (window, forks) key per cycle now;
-    outside a cycle every read is fresh, exactly as _tmux_sessions and _path_of behave. The key is
+    outside a cycle every read is fresh, exactly as _live_map and _path_of behave. The key is
     normalized the way discover normalizes its own (jd.WINDOW for None, bool(forks)).
 
     Every call hands out a COPY of the row list, hit or miss, so no caller can grow or reorder the
@@ -3130,24 +3112,13 @@ def _path_of(sid, now=None):
     return p
 
 
-def _has_tmux():
-    """True iff a tmux binary exists at all. The kernel runs on the HOST where the
-    sessions + Claude live, so tmux is normally present; a 'headless' run (a test box
-    / CI with no tmux) is the only case it's absent. This is what lets _alive_sessions
-    tell 'the user has zero live sessions' (tmux present, query returned nothing →
-    show nothing) apart from 'there is no tmux here at all' (fall back to file-derived
-    sessions). Only consulted when the tmux query came back empty, so it's off the hot
-    path. Keyed on tmux's PRESENCE, not on a count or a timeout (no heuristics)."""
-    return shutil.which("tmux") is not None
-
-
 # ── a LIVE session survives a transient transcript-read failure on the tab list (T258) ─────────────────────
 # _alive_sessions resolves each live sid to a transcript through discover(), which scans project dirs for
 # <sid>.jsonl. A file moved aside (a torn write, a hand `mv`, a resume that renames the leaf before the CLI
 # recreates it) leaves discover with NO entry, so the live session dropped off _alive_sessions → the chat tab
 # list → the tabOrder push, and the pane tore its tab down through the T236 omission path. A read that failed
-# for a cycle is NOT a state change (the same rule as T249b's empty-build guard). A session whose tmux lane /
-# SDK reg is live stays listed with a names/-derived stub — the EXPECTED path under its cwd, which discover
+# for a cycle is NOT a state change (the same rule as T249b's empty-build guard). A session whose SDK reg /
+# Codex row is live stays listed with a names/-derived stub — the EXPECTED path under its cwd, which discover
 # re-resolves the instant the file returns — and build_session parses the missing file to empty while the
 # T249b guard holds its last content. Said once per episode + a romp-perf line.
 _UNRESOLVED_LIVE_NOTED = set()      # live sids inside an unresolved-transcript episode (one stderr line each)
@@ -3192,7 +3163,7 @@ def _tab_order_frame(order, tabs, live, c=None):
     """The ONE tabOrder frame shape (T258) for its three senders (the pusher's tabs-first send, which is also the
     connect push a `ready` triggers, _push_session_now and _confirm_close_now), all of which go through
     _send_tab_order: the shared order, the tabs meta, the viewer's views blob, `live` — the sids the kernel
-    affirms are LIVE this build (raw tmux/SDK liveness, independent of whether discover could resolve each
+    affirms are LIVE this build (raw backend liveness, independent of whether discover could resolve each
     one's transcript) — and `selfHost`, this kernel's own name (_self_host). The pane keeps a live sid on the
     strip even if this frame's `order` omits it: a transient read failure that drops a session from the order
     is not a close (render.ts applyTabOrder). That rule is why the WS `ready` handler sends no strip of its own:
@@ -3222,27 +3193,28 @@ def _tab_order_frame(order, tabs, live, c=None):
     return fr
 
 
-def _alive_sessions(now, tmux):
-    """The sessions shown on EVERY surface (feed / timeline / chat tabs): only those alive in tmux
+def _alive_sessions(now, live_map):
+    """The sessions shown on EVERY surface (feed / timeline / chat tabs): only those alive on a backend
     right now. The hard liveness filter (the user 2026-06-15) — ignore everything that isn't a living
     session: a dead session's transcript stays in discover()'s window but is dropped from all
     surfaces. A living session is shown FULLY — the event model re-parses its whole transcript with
     the new core each build, so old-system sessions are reprocessed.
 
-    An EMPTY tmux result is ambiguous: it means either the user has zero live sessions, OR there is
-    no tmux here (headless). Only the latter should fall back to file-derived sessions; the former
-    must show NOTHING (the user 2026-06-16: after killing every session and reloading, the surfaces
-    wrongly reopened tabs for all the dead ones — that was this fallback firing on a genuine zero).
-    So: tmux reachable (sessions present, or a tmux binary exists) → trust the empty result and show
-    only living sessions; no tmux at all → fall back so a headless box isn't blank."""
-    alive = [s for s in _sessions(now) if s["sid"] in tmux]
+    An EMPTY map is authoritative (decision (b) of the tmux backend's removal, 2026-09-11): the backends'
+    registries are local files, so a kernel that reads no live session shows nothing. An empty tmux read
+    used to be ambiguous — zero live sessions, or no tmux on the box (headless) — and only the latter was
+    meant to fall back to file-derived sessions; that fallback fired on a genuine zero and reopened every
+    dead session's tab after the user had killed them all (the user 2026-06-16), and its discriminator (a
+    tmux binary's presence) is gone. A read that FAILS is
+    another thing entirely, and is stood down on before the map reaches here (_backend_rows)."""
+    alive = [s for s in _sessions(now) if s["sid"] in live_map]
     # LIVE IS ALWAYS VISIBLE (2026-08-13, generalizing the SDK-only exception below): a genuinely
     # LIVE sid missing from the 48h _sessions set — a session idle longer than the caption window,
     # which used to silently VANISH from every surface while still running — resolves through
     # discover's cached wide walk (the picker's own (window, forks) cache key: one filesystem walk,
     # not one per session). Liveness owns visibility; age owns nothing but caption/walk cost.
     have = {s["sid"] for s in alive}
-    stale_live = [sid for sid in tmux if sid not in have]
+    stale_live = [sid for sid in live_map if sid not in have]
     if stale_live:
         wide = _discover_wide(now, jd.DEATH_BACKFILL_WINDOW)   # one walk per cycle (the scope memo)
         for sid in stale_live:
@@ -3256,17 +3228,17 @@ def _alive_sessions(now, tmux):
                 alive.append({"sid": fsid, "name": name or fsid[:8], "anchor": anchor,
                               "path": str(path), "mtime": mtime})
                 have.add(sid)
-    # SDK sessions that are alive (in the merged `tmux` map) but have no transcript on disk yet — a
+    # SDK sessions that are alive (in the merged map) but have no transcript on disk yet — a
     # just-created or never-run SDK session — aren't in discover()/_sessions, so add them here, else
     # their tab never opens (the user 2026-06-22). Once they run and write a transcript, discover takes over.
     be = _sdk()
     if be:
-        for sid in tmux:
+        for sid in live_map:
             if sid not in have and be.owns(sid):
                 alive.append(_sdk_sess(sid, now)); have.add(sid)
     # a LIVE sid discover STILL cannot resolve (its transcript file is momentarily unreadable) stays listed
     # with a stub rather than dropping off the strip (T258, see _live_stub_session above)
-    still = [sid for sid in tmux if sid not in have]
+    still = [sid for sid in live_map if sid not in have]
     for sid in still:
         stub = _live_stub_session(sid, now)
         if stub is not None:
@@ -3275,9 +3247,7 @@ def _alive_sessions(now, tmux):
     for sid in list(_UNRESOLVED_LIVE_NOTED):     # resolved again OR died → the episode is over, re-arm the note
         if sid not in still:
             _clear_unresolved_live_note(sid)
-    if tmux or _has_tmux():
-        return alive
-    return _sessions(now)
+    return alive
 
 
 class _StateUnreadable(Exception):
@@ -8215,7 +8185,7 @@ def _auto_pause_on_limit():
         # carries the flip in its globalRetryPaused frame (see _auto_resume_retry)
 
 
-def _spend_capped_session(now, tmux, after=0):
+def _spend_capped_session(now, live_map, after=0):
     """The first alive session sitting blocked on a MONTHLY SPEND CAP error whose record is not older than
     `after`, or None. Account-wide by nature (the cap is on the account, so every session hits it), so one is
     enough to pause everything. `after` is the last spend lift's instant (_retry_pause_lifted_at): a record
@@ -8229,7 +8199,7 @@ def _spend_capped_session(now, tmux, after=0):
     though it postdated the lift's evidence. A record with no readable time (t 0) is not proof of staleness
     and counts."""
     floor = float(after or 0)
-    for s in _alive_sessions(now, tmux):
+    for s in _alive_sessions(now, live_map):
         p = s.get("path")
         if p:
             e = _api_error(p)
@@ -8241,7 +8211,7 @@ def _spend_capped_session(now, tmux, after=0):
     return None
 
 
-def _auto_pause_on_spend_limit(now, tmux):
+def _auto_pause_on_spend_limit(now, live_map):
     """A monthly spend cap auto-engages the global retry-pause (the user 2026-07-14) — the SPEND twin of
     _auto_pause_on_limit. Unlike a 5h/7d RATE window (a known reset the card counts down to, retried at
     the reset), a spend cap has no readable reset: retrying just re-fails until the user raises it, so the
@@ -8262,13 +8232,13 @@ def _auto_pause_on_spend_limit(now, tmux):
     older than it; a NEW spendLimit record, written after the lift, engages with a new floor."""
     if _retry_paused_on():
         return
-    capped = _spend_capped_session(now, tmux, after=_retry_pause_lifted_at())
+    capped = _spend_capped_session(now, live_map, after=_retry_pause_lifted_at())
     if capped is not None:
         # which billing the cap is on, from the capped session's live row: the lift rule accepts fresh output
         # from that billing only, so a session on the other account cannot lift a cap it never hit and
         # re-engage it here the next cycle (the pause file flapped every cycle in a login-plus-key install
         # while one session streamed past the other's cap)
-        live = tmux if isinstance(tmux, dict) else {}
+        live = live_map if isinstance(live_map, dict) else {}
         bills = "login" if _bills_login(live.get(str(capped.get("sid") or ""))) else "key"
         _set_retry_paused(True, reason="spend", bills=bills)
         sys.stderr.write("retry-pause: auto-engaged: monthly spend limit reached (%s billing); auto-retry + judges "
@@ -8279,8 +8249,8 @@ def _auto_pause_on_spend_limit(now, tmux):
 
 def _bills_login(tm):
     """Whether a live-map row's session bills the machine LOGIN (the account a usage limit is on): the CLI's
-    own authLive report first, the registry's auth next; a row with neither (a tmux session, an SDK session
-    before its init landed) can only be billing the login when this machine holds no key at all
+    own authLive report first, the registry's auth next; a row with neither (an SDK session before its init
+    landed) can only be billing the login when this machine holds no key at all
     (_auth_key_present: an apiKeyHelper is configured), and is taken as billing a key otherwise. The spend
     pause reads it at both edges (_auto_pause_on_spend_limit records the capped session's billing;
     _auto_resume_retry's spend rule compares a candidate's against it)."""
@@ -8290,7 +8260,7 @@ def _bills_login(tm):
     return not _auth_key_present()
 
 
-def _auto_resume_retry(now, tmux):
+def _auto_resume_retry(now, live_map):
     """The global retry-pause is an API-HEALTH flag, not a permanent switch. The user flips it to stop the
     auto-retry (and, with it, the judge) storm during an API / usage-limit outage — but it must AUTO-CLEAR
     the moment the API is healthy again: "cleared the second I get a successful response that's not an API
@@ -8353,8 +8323,8 @@ def _auto_resume_retry(now, tmux):
         _lift_retry_pause(now, "the usage window reset")
         return
     bills = _retry_pause_bills() if reason == "spend" else ""
-    live = tmux if isinstance(tmux, dict) else {}
-    for s in _alive_sessions(now, tmux):
+    live = live_map if isinstance(live_map, dict) else {}
+    for s in _alive_sessions(now, live_map):
         path = s.get("path")
         if not path or _api_error(path):                 # still blocked on an API error → not proof of recovery
             continue
@@ -8504,7 +8474,7 @@ def _clear_session_retry_suppress(sid):
             return False
 
 
-def _auto_resume_session_retry(now, tmux):
+def _auto_resume_session_retry(now, live_map):
     """Per-session mirror of _auto_resume_retry: clear a thread's retry-suppression once it lands a
     SUCCESSFUL user turn again. Re-arm signal (event-based, no timer): the user spoke on the thread AFTER the
     suppression floor AND the session settled to a healthy, non-API-error chip (ready/idle/awaiting/closed) —
@@ -8515,7 +8485,7 @@ def _auto_resume_session_retry(now, tmux):
     if not d:
         return
     changed = False
-    for s in _alive_sessions(now, tmux):
+    for s in _alive_sessions(now, live_map):
         sid = str(s.get("sid"))
         floor = d.get(sid)
         if floor is not None and (isinstance(floor, bool) or not isinstance(floor, (int, float))):
@@ -8532,7 +8502,7 @@ def _auto_resume_session_retry(now, tmux):
         session = (_parse_cached(path) if path else None) or {"turns": []}
         if _last_human_msg_t(session["turns"]) <= floor:
             continue                                      # user hasn't re-engaged since the stop → still hands-off
-        chip = _session_chip(sid, path, session, tmux.get(sid), now)
+        chip = _session_chip(sid, path, session, live_map.get(sid), now)
         if chip in ("ready", "idle", "needsInput", "awaitingBg", "closed"):   # re-engaged turn settled clean → the message went through
             if _clear_session_retry_suppress(sid):
                 changed = True
@@ -8955,7 +8925,7 @@ _PARSE_WARM_STATES = ("working", "compacting", "retrying")   # a session the fee
 
 
 def _warm_wanted(s, tm):
-    """Whether the feed warm would parse session row `s` (its tmux row `tm`): it moved since this kernel booted, or
+    """Whether the feed warm would parse session row `s` (its liveness row `tm`): it moved since this kernel booted, or
     it is working now. build_feed asks for a warm only for such a session; one the gate leaves cold is cold by
     design (its card reads the store, its dots wait for a client), not a cold parse to chase every cycle."""
     return _session_moved_since_boot(s) or (tm or {}).get("state", "") in _PARSE_WARM_STATES
@@ -9152,7 +9122,7 @@ def _persist_checkpoints(now):
     return written
 
 
-def _interrupt_block_tick(now, tmux):
+def _interrupt_block_tick(now, live_map):
     """Interrupt → Blocked, INDEPENDENT of the auto-nudge switch (the user 2026-07-14). A session the
     user genuinely STOPPED mid-turn is waiting on their next instruction: its focus goal needs THEM, so
     it belongs in the Blocked (needs-you) column — never sitting quietly in Working. This flip used to
@@ -9176,17 +9146,17 @@ def _interrupt_block_tick(now, tmux):
     pushed with nothing new to show. The two fault paths push nothing either: an unproved ledger
     stands the block down before any write, and a refused marker write leaves the store write's own
     dirty mark to carry the flip."""
-    alive = _alive_sessions(now, tmux)
+    alive = _alive_sessions(now, live_map)
     for s in alive:
         sid = s["sid"]
         if _session_flag(sid, "hideFromFeed"):           # muted from the feed → no interrupt-block bookkeeping either
             continue
-        st = (tmux.get(sid) or {}).get("state", "")
+        st = (live_map.get(sid) or {}).get("state", "")
         # the row's own path and live meta go in: the default _path_of searched the 48h set, so a LIVE
         # session idle longer than that — resolved into this row by _alive_sessions' wide walk — read as
         # having no transcript here, and an optimistic compact click on it could not be disproved by its
         # compact_boundary for the 180 s cap
-        if st in _NEEDS_INPUT_STATES or st == "compacting" or _compacting_now(sid, tm=tmux.get(sid), path=s["path"]):
+        if st in _NEEDS_INPUT_STATES or st == "compacting" or _compacting_now(sid, tm=live_map.get(sid), path=s["path"]):
             continue                                     # awaiting you / compacting → a different needs-you path owns it
         if _api_error(s["path"]):                        # stopped on an API error → not a user stop
             continue
@@ -9507,9 +9477,10 @@ def _messages_rows(path=None):
 
 def _last_state(sid):
     """(value, t) of the most-recent STATE transition in states/<sid>.jsonl ('working'/'waiting'/'idle'/…),
-    ignoring the interleaved awaiting overlays; ('', 0) when there's no state file yet. The Stop hook (tmux) and
-    the SDK backend (on ResultMessage) BOTH write a stopped state ('waiting'/'idle') here on a GENUINE turn-end,
-    so this is the authoritative "properly stopped" signal. The TIME matters for auto-nudge: a progressing
+    ignoring the interleaved awaiting overlays; ('', 0) when there's no state file yet. The SDK backend (on
+    ResultMessage) writes a stopped state ('waiting'/'idle') here on a GENUINE turn-end (as the tmux backend's
+    Stop hook did, until its removal 2026-09-11), so this is the authoritative "properly stopped" signal.
+    The TIME matters for auto-nudge: a progressing
     state recorded AFTER the parsed turn's end means the session is genuinely still working (a newer turn the
     parse hasn't caught up to); one recorded BEFORE it means the turn ended and the post-turn 'waiting' write
     was lost (e.g. a kernel restart) — a stale record that must not block the nudge forever. A fold_records
@@ -9567,9 +9538,10 @@ def _settle_event_key(sid):
     hook-ledger round). Primary: the SDK backend's hook ledger — the CLI's own Stop hook stamps
     `lastStopAt` (int epoch seconds) on the session's registry entry (STATE/sdk/<sid>.json) on
     EVERY turn end; that is the authoritative settle signal. Fallback when the field is absent
-    (tmux CLIs have no SDK hooks; a pre-ledger SDK session carries no field until its first
-    post-ledger turn): the newest states/ transition (_last_state), which the tmux Stop hook
-    writes. Absence reads as "no settle evidence" (key 0), never as "never settled". Both sources
+    (a pre-ledger SDK session carries no field until its first post-ledger turn): the newest
+    states/ transition (_last_state), which the SDK backend writes at the same turn end (the tmux
+    backend's Stop hook did too, until 2026-09-11). Absence reads as "no settle evidence" (key 0), never
+    as "never settled". Both sources
     stamp on every turn end including romp-fed ones — fine here: a settle re-arms at most ONE
     re-judge, and the memo re-mints against the new key."""
     try:
@@ -9585,9 +9557,10 @@ _PROGRESSING_STATES = ("working", "compacting", "retrying", "permission", "picke
 
 # Live states where the session is STOPPED on a prompt only the user can answer — a tool-permission
 # Allow/Deny ("permission") OR an AskUserQuestion / resume picker ("picker"). Both floor the focus card to
-# BLOCKED and show the awaiting chip. tmux labels an AskUserQuestion "permission" (its Notification hook)
-# while the SDK backend labels it "picker" (it IS a picker, not a permission) — so every needs-input
-# surface must honor BOTH, or an SDK AskUserQuestion never registers as blocked (the user 2026-06-27).
+# BLOCKED and show the awaiting chip. The SDK backend labels an AskUserQuestion "picker" (it IS a picker,
+# not a permission) and a tool approval "permission" (the tmux backend's Notification hook labelled both
+# "permission", until its removal 2026-09-11) — so every needs-input surface honors BOTH, or an SDK
+# AskUserQuestion never registered as blocked (the user 2026-06-27).
 _NEEDS_INPUT_STATES = ("permission", "picker")
 
 
@@ -9657,8 +9630,8 @@ def _compact_suggest_body(name):
     """The suggestion's prose, named for ITS recipient (T212, the user 2026-09-01: the message said
     "run /compact", a terminal affordance — an SDK session cannot type a slash command and burned
     attempts finding the kernel-mediated form). One universal wording, not a per-backend branch:
-    only SDK sessions ever receive this message (a tmux CLI carries no token count, so the watcher
-    never fires for it — the /compact branch would be unreachable code), and `romp compact <name>`
+    only SDK sessions ever receive this message (only the SDK backend's rows carry a token count, so
+    the watcher never fires for another — the /compact branch would be unreachable code), and `romp compact <name>`
     is the form that works from an SDK session's own shell, queueing safely if a turn is open.
     Naming the romp COMMAND is practical information, not machinery-naming — the session-prompt
     housekeeping note already gives every session the name's meaning (the sanctioned precedent);
@@ -9676,7 +9649,7 @@ def _compact_suggest_tick(sid, tm, now):
     #                                                    runs only where this install's config says so
     tokens = (tm or {}).get("ctxTokens")
     if not isinstance(tokens, (int, float)) or tokens <= 0:
-        return False                                   # tmux CLIs / pre-plumbing sessions carry no
+        return False                                   # a row without a count (pre-plumbing sessions) carries no
     #                                                    count → never suggested (conservative)
     tokens = int(tokens)
     with _NUDGE_LOCK:                                  # blob read-modify-write only — the send happens
@@ -9793,7 +9766,7 @@ def _compact_suggest_tick(sid, tm, now):
 _AUTO_NUDGE_TICK_LOCK = threading.Lock()
 
 
-def _auto_nudge_tick(now, tmux, run_dead_wait=True):
+def _auto_nudge_tick(now, live_map, run_dead_wait=True):
     """One Auto-Nudge pass (from the periodic pusher). For each ALIVE, IDLE session (its turn ended) that
     isn't awaiting/compacting/api-error, isn't WAITING ON A LIVE PEER (a wait isn't a stall — the human's
     "waiting on a peer isn't needs-you"; a mutual-wait cycle is surfaced by the deadlock chip, not nudged),
@@ -9817,7 +9790,7 @@ def _auto_nudge_tick(now, tmux, run_dead_wait=True):
     if not _AUTO_NUDGE_TICK_LOCK.acquire(blocking=False):
         return                                            # a pass is in flight: it owns this world's sends
     try:
-        _auto_nudge_pass(now, tmux, run_dead_wait)
+        _auto_nudge_pass(now, live_map, run_dead_wait)
     finally:
         _AUTO_NUDGE_TICK_LOCK.release()
 
@@ -9835,7 +9808,7 @@ def _ws_act_now_tick():
     prev-swap could spend a transition uncorroborated. Single-flight against the pusher's pass through
     _AUTO_NUDGE_TICK_LOCK, inside the call."""
     try:
-        _auto_nudge_tick(int(time.time()), _tmux_sessions(), run_dead_wait=False)
+        _auto_nudge_tick(int(time.time()), _live_map(), run_dead_wait=False)
     except Exception:
         sys.stderr.write("auto-nudge (ws act-now): %s\n" % traceback.format_exc())
 
@@ -9867,7 +9840,7 @@ def _auto_nudge_resume():
         sys.stderr.write("auto-nudge: auto-nudge.json reads again — nudging resumed\n")
 
 
-def _auto_nudge_pass(now, tmux, run_dead_wait):
+def _auto_nudge_pass(now, live_map, run_dead_wait):
     """The body of one pass — the walk, the sweeps, the push. Only _auto_nudge_tick calls it, under
     the single-flight guard (split out the way _pusher_cycle_jobs is from _pusher_cycle). `on` is the auto-nudge toggle:
     off, the walk runs WAKE-ONLY — the awaiting dead-man still fires (see _auto_nudge_tick). An UNPROVED
@@ -9889,7 +9862,7 @@ def _auto_nudge_pass(now, tmux, run_dead_wait):
             return
     on = _auto_nudge_on()
     nudged = dict(snap.get("nudged", {}))                 # {gid: {count, lastTurnId}}
-    alive = list(_alive_sessions(now, tmux))
+    alive = list(_alive_sessions(now, live_map))
     alive_ids = {s["sid"] for s in alive}
     waitfor = _wait_for_graph(now, alive_ids)             # {sid:{peerSid,name,inCycle}} — the peer-wait gate
     fired = False
@@ -9903,7 +9876,7 @@ def _auto_nudge_pass(now, tmux, run_dead_wait):
         # ticks over two days before anyone noticed; every session after the bad one in the
         # iteration lost its nudges. The failure still logs loudly, per session.
         try:
-            r = _auto_nudge_session(s, now, tmux, nudged, waitfor, alive_ids, wake_only=not on, cleared=cleared)
+            r = _auto_nudge_session(s, now, live_map, nudged, waitfor, alive_ids, wake_only=not on, cleared=cleared)
             fired = (r is True) or fired
             # the walk->sweep handoff journal (the user 2026-08-24): a session gate names itself as
             # the return value; the sweep owns gate-held records by the GATE'S CLASS, never by age
@@ -9915,7 +9888,7 @@ def _auto_nudge_pass(now, tmux, run_dead_wait):
             # Deliberately INSIDE the auto-nudge toggle: a user who turned injected follow-ups
             # off has said no unprompted messages, and this is exactly that class.
             if on:
-                fired = _compact_suggest_tick(s["sid"], tmux.get(s["sid"]), now) or fired
+                fired = _compact_suggest_tick(s["sid"], live_map.get(s["sid"]), now) or fired
         except Exception:
             sys.stderr.write("auto-nudge (session %s): %s\n"
                              % (s.get("sid") or "?", traceback.format_exc()))
@@ -10163,7 +10136,7 @@ def _lift_gate_report():
     return out
 
 
-def _lift_spent_awaiting(now, tmux):
+def _lift_spent_awaiting(now, live_map):
     """Retire a goal's ⏳ awaiting stamp once the dispatches it was waiting on have RETURNED (the user
     2026-07-22). The closer's lift is bounded to the goals a turn actually WORKED ON (`touched`), which is
     right for goals merely riding the menu — but it means a goal the session ABANDONED keeps its stamp
@@ -10202,11 +10175,11 @@ def _lift_spent_awaiting(now, tmux):
     stale decision. After the loop, the gate entries and the placed-launch memo's entries of sids that
     left the alive set are dropped: nothing to gate, nothing to place for."""
     seen = set()
-    for s in _alive_sessions(now, tmux):
+    for s in _alive_sessions(now, live_map):
         sid = s["sid"]
         seen.add(sid)
         try:
-            if tmux.get(sid) is None:                 # dormant → its tasks died with the CLI, don't rule
+            if live_map.get(sid) is None:                 # dormant → its tasks died with the CLI, don't rule
                 continue
             # Every fact this lift rules on is recorded somewhere that stats: the goal store and its
             # override journal (the stamps), the transcript (the returns), the postal log (a peer's
@@ -10219,7 +10192,7 @@ def _lift_spent_awaiting(now, tmux):
             # read: _replay_overrides logs history-unreadable, returns the store without the user's rows
             # and marks it `_unread`. A ruling on that store is not a ruling on the files (a stamp the
             # journal restored is missing from it), so the entry is forgotten and the next cycle retries.
-            snap = tmux.get(sid) or {}
+            snap = live_map.get(sid) or {}
             # …plus the two facts the ruling reads that no file records: the live subagent count, and
             # for every dispatch the transcript pairs, WHETHER its recorded deadline has passed (a
             # watcher past deadline+grace counts as returned — a clock fact, keyed as the boolean it
@@ -10250,7 +10223,7 @@ def _lift_spent_awaiting(now, tmux):
                 _lift_seen.pop(sid, None)             # not a ruling on the files; the next cycle retries
             if isinstance(store, jd.FrozenStore):
                 _lift_gate_stats["shared"] += 1
-            if not _lift_decisions(sid, s, store, now, tmux):
+            if not _lift_decisions(sid, s, store, now, live_map):
                 continue                              # nothing due (no candidate, or the common stamped case:
                 #                                       the dispatch still out): no writer load
             # PHASE 2, the write: a fresh private copy, decided on again, and only its own decisions filed.
@@ -10265,7 +10238,7 @@ def _lift_spent_awaiting(now, tmux):
                 _lift_seen.pop(sid, None)
             wnodes = wstore.get("nodes") or {}
             changed = False
-            for nid, top, drop_rec, end_ev in _lift_decisions(sid, s, wstore, now, tmux):
+            for nid, top, drop_rec, end_ev in _lift_decisions(sid, s, wstore, now, live_map):
                 nd = wnodes.get(nid)
                 if nd is None:
                     continue
@@ -10320,7 +10293,7 @@ def _lift_candidates(store):
     return stamped, rolled
 
 
-def _lift_decisions(sid, s, store, now, tmux):
+def _lift_decisions(sid, s, store, now, live_map):
     """The lifts due for one alive session, decided on `store` and written NOWHERE: [(nid, top, drop_rec,
     end_ev)], one per stamp the tick would retire. `top` is the node's top ancestor; `drop_rec` says whether
     the goal's spent nudge record goes with the lift (the rolled-up arm drops none); `end_ev` is the
@@ -10380,7 +10353,7 @@ def _lift_decisions(sid, s, store, now, tmux):
     every = _bg_scan_all_cached(s["path"])
     # the backend's lifecycle set (present-but-empty is AUTHORITATIVE — _bg_live_norm's own
     # rule) and the CLI epoch it (re)started at: the restart-orphan reconciliation evidence
-    snap = tmux.get(sid) or {}
+    snap = live_map.get(sid) or {}
     reg_ids = ({str(t.get("toolUseId") or "") for t in snap.get("bgTasks") or []
                 if isinstance(t, dict)} if "bgTasks" in snap else None)
     sp = _sdk_spawned_at(sid) or 0
@@ -10564,39 +10537,65 @@ def _lift_decisions(sid, s, store, now, tmux):
 
 
 _PREV_ALIVE = None                       # last tick's alive sids — a sid LEAVING is the death event
+_DEAD_WAIT_LIFE_SAID = [set()]           # the sids the last dead-wait pass stood down for recent life: the line
+#                                          repeats only when that set changes (an episode, not every 0.5 s pass)
 
 
-def _dead_wait_corroborated(sid, scan=None, stats=None):
+def _codex_records_blind(cx):
+    """True when this kernel cannot read the Codex backend's records right now: the backend loaded but its
+    registry was unreadable (_load_registry says so and keeps no rows), or the module is unavailable while a
+    registry file exists on disk. While blind, a sid with a names entry and no SDK reg cannot be told from
+    a Codex session, so every death writer stands down on it (loudly, counted) instead of stamping dead
+    history over a session it merely cannot see (decision (d) of the tmux backend's removal, 2026-09-11)."""
+    if cx is None:
+        return (jd.STATE / "codex" / "registry.json").exists()
+    return bool(getattr(cx, "_registry_unreadable", False))
+
+
+def _dead_wait_corroborated(sid, stats=None, now=None):
     """May the dead-wait writers (_dead_wait_sweep, _wake_goal's dormant branch) treat this sid as
-    actually DEAD? Their trigger — absence from a raw liveness listing — inherits every collapse
-    that listing has (list_lines' error/timeout→[] empties the tmux half for a cycle; a swallowed
-    SDK live_sessions merge exception empties the other), and the block they file is irreversible
-    bookkeeping the user acts on, with nothing lifting it when the listing returns. So absence
-    alone NEVER files: corroborate with the liveness OWNER first — the same doctrine as
-    _death_sweep_tick / _death_boot_pass (a death is certified only by an affirmative answer,
+    actually DEAD? Their trigger — absence from the live map — inherits every collapse that map can
+    have (a backend's read that failed and is stood down on, _backend_rows), and the block they file
+    is irreversible bookkeeping the user acts on, with nothing lifting it when the map returns. So
+    absence alone NEVER files: corroborate with the owner's DURABLE RECORD first — the same doctrine
+    as _death_sweep_tick / _death_boot_pass (a death is certified only by an affirmative answer,
     never by silence). Tri-state:
       True  — corroborated dead: the SDK reg's alive bit is False (the death sweep's partition —
               alive:True is live/revivable/crash-looped and must never convert; the resume
               contract owns it), a standing death record postdates the session's last recorded
-              state, or the owner scan answers without the sid.
-      False — the owner says ALIVE: the raw listing blinked, not the session.
-      None  — cannot confirm: a real probe failure, an unreadable reg, or a reg-less sid with no
-              names-registry entry — a session launched by NEITHER backend (both write names/<sid>
-              at creation), whose existence is transcript-derived (the same file walk
-              _alive_sessions falls back to on a tmux-less box) and which no owner here can
-              answer for. The caller stands down for the cycle — the stamp stays, and the sweep
-              keeps the death transition armed so the next tick re-asks.
-    `scan` is a zero-arg owner-scan supplier for a batch pass sharing ONE scan across its probes
-    (_death_sweep_tick's idiom); the default takes its own. `stats` is a batch pass's stand-down
-    tally ({reason: count}): with it, the loud stand-downs increment their tally instead of
-    writing stderr per candidate, and the pass reports ONE line per reason (_death_sweep_tick's
-    idiom — the per-candidate line multiplied by the candidate count under exactly the wedge it
-    reports); without it (a single-probe caller like _wake_goal), the line names the sid inline."""
+              state, the Codex registry marks the sid dead, or the sid has a names entry and no
+              registry row anywhere — dead history (decision (f) of the tmux backend's removal,
+              2026-09-11: nothing launched by either backend, or a terminal session from before
+              the removal, which no backend can revive).
+      False — the owner's record says ALIVE: the map blinked, not the session.
+      None  — cannot confirm: an unreadable SDK reg, an unreadable SDK registry DIRECTORY
+              (_sdk_records_blind), an unreadable Codex registry
+              (_codex_records_blind), or a reg-less sid with no names-registry entry — a session
+              launched by NEITHER backend (both write names/<sid> at creation), whose existence is
+              transcript-derived and which no owner here can answer for. The caller stands down
+              for the cycle — the stamp stays, and the sweep keeps the death transition armed so
+              the next tick re-asks.
+    `stats` is a batch pass's stand-down tally ({reason: count}): with it, the loud stand-downs
+    increment their tally instead of writing stderr per candidate, and the pass reports ONE line per
+    reason (_death_sweep_tick's idiom — the per-candidate line multiplied by the candidate count
+    under exactly the wedge it reports); without it (a single-probe caller like _wake_goal), the
+    line names the sid inline."""
     sid = str(sid)
     reg = jd.SDKDIR / (sid + ".json")
-    if reg.exists():
+    present = _sdk_reg_exists(sid)
+    if present is None:
+        if stats is not None:
+            stats["sdk"] = stats.get("sdk", 0) + 1
+        else:
+            sys.stderr.write("dead-wait: the SDK registry directory cannot be read for %s — standing down this cycle\n" % sid)
+        return None                              # the check itself failed (an unlistable sdk/)
+    if present:
         try:
-            return not bool(json.loads(reg.read_text()).get("alive"))
+            reg_d = json.loads(reg.read_text())
+            if "alive" in reg_d:
+                return not bool(reg_d.get("alive"))
+            present = False                      # a GUTTED reg (the backend's routine write re-created it with no
+            #                                      alive bit): no verdict of its own; judged like a vanished one below
         except Exception:
             # unreadable reg — stand down, retried next tick, but LOUDLY (the fail-loudly rule):
             # a silent stand-down would wedge the conversion behind a corrupt reg forever,
@@ -10612,26 +10611,36 @@ def _dead_wait_corroborated(sid, scan=None, stats=None):
             return True                          # answers without a probe, even under a wedged server
     except (OSError, ValueError):
         pass
-    # AUTHORITY FOLLOWS OWNERSHIP (2026-08-23): the owner scan below settles only sids tmux could
+    # AUTHORITY FOLLOWS OWNERSHIP (2026-08-23): the records below settle only sids a backend could
     # have RUN. A reg-less sid with no names-registry entry was launched by neither backend — its
-    # existence is transcript-derived — so no owner here can answer for it, whatever the box has
-    # installed. Keying the stand-down on _TMUX.available() alone would tie authority to the BOX:
-    # the availability probe is live (shutil.which), so tmux APPEARING mid-flight would hand a
-    # fresh, EMPTY server's scan authority over a live file-derived session's death and convert
-    # its card. The tmux-less box falls out of the same rule: a registered sid still stands down
-    # below when there is no server to ask.
+    # existence is transcript-derived — so no owner here can answer for it.
     if not (jd.NAMES / sid).is_file():
         return None                              # transcript-derived: no owner here — stand down
-    if not _TMUX.available():
-        return None                              # tmux-launched, but no server on this box to ask
-    scan = scan() if scan is not None else _TMUX.alive_sids()
-    if scan is None:
+    if _sdk_records_blind():
         if stats is not None:
-            stats["probe"] = stats.get("probe", 0) + 1
+            stats["sdk"] = stats.get("sdk", 0) + 1
         else:
-            sys.stderr.write("dead-wait: liveness probe failed for %s — standing down this cycle\n" % sid)
-        return None
-    return sid not in scan
+            sys.stderr.write("dead-wait: the SDK registry directory cannot be read for %s — standing down this cycle\n" % sid)
+        return None                              # its reg may sit behind the unreadable directory
+    cx = _codex()
+    if _codex_records_blind(cx):
+        if stats is not None:
+            stats["codex"] = stats.get("codex", 0) + 1
+        else:
+            sys.stderr.write("dead-wait: the Codex registry cannot be read for %s — standing down this cycle\n" % sid)
+        return None                              # a Codex sid and a names-only one look alike until it reads
+    if cx is not None and cx._session(sid) is not None:
+        return not cx.owns(sid)                  # the Codex registry's dead mark is the answer
+    if _sdk_thread_alive(sid):
+        return False                             # its reg went, its driver runs: alive
+    if _recent_life(sid, int(now if now is not None else time.time())):
+        if stats is not None:
+            stats["life"] = stats.get("life", 0) + 1
+            stats.setdefault("lifeSids", set()).add(sid)
+        else:
+            sys.stderr.write("dead-wait: %s holds no reg but shows recent life — standing down (a registry moved aside?)\n" % sid)
+        return None                              # a real end leaves alive:False or a marker, never a vanished reg
+    return True                                  # a names entry with no registry row anywhere: dead history
 
 
 def _dead_wait_sweep(alive_ids, nudged, now):
@@ -10641,7 +10650,7 @@ def _dead_wait_sweep(alive_ids, nudged, now):
     sweep of all dormant stores on the first tick after boot — the same boot-re-audit pattern the
     awaiting stamps already use — for sessions that died under a previous kernel (the two measured
     cards had been dead 79 hours across many restarts). The transition is a RAW-listing diff, so
-    every candidate's death is corroborated with the liveness owner (_dead_wait_corroborated)
+    every candidate's death is corroborated with the owner's record (_dead_wait_corroborated)
     before its store is even walked; a stood-down candidate (owner says alive, or unconfirmable)
     is kept in _PREV_ALIVE so the transition stays armed and the next tick re-asks — an
     unconfirmed absence must never spend the one event that triggers this sweep."""
@@ -10654,17 +10663,10 @@ def _dead_wait_sweep(alive_ids, nudged, now):
             return
     else:
         cands = prev - set(alive_ids)
-    scan_memo = []                               # one owner scan per pass (_death_sweep_tick's idiom):
-
-    def _pass_scan():                            # under the exact collapse this guard exists for, EVERY
-        if not scan_memo:                        # alive sid is a candidate, and a per-sid probe would
-            scan_memo.append(_TMUX.alive_sids())  # fork a subprocess per session per tick
-        return scan_memo[0]
-
     stats = {}                                   # loud stand-down tallies → ONE line per reason per pass
     for sid in cands:
         try:
-            if _dead_wait_corroborated(sid, scan=_pass_scan, stats=stats) is not True:
+            if _dead_wait_corroborated(sid, stats=stats, now=now) is not True:
                 _PREV_ALIVE.add(sid)             # not corroborated dead: nothing files, and the death
                 continue                         # transition stays armed for the next tick's re-ask
             store = jd.load_goals(sid)
@@ -10748,9 +10750,18 @@ def _dead_wait_sweep(alive_ids, nudged, now):
     # The pass's loud stand-downs, collapsed to one line per reason (_death_sweep_tick's idiom):
     # per-candidate lines multiply by the candidate count under exactly the wedge they report
     # (a 20-session listing collapse would log every candidate every tick), drowning the signal.
-    if stats.get("probe"):
-        sys.stderr.write("dead-wait: probe failed; %d candidate(s) stood down this pass\n"
-                         % stats["probe"])
+    if stats.get("sdk"):
+        sys.stderr.write("dead-wait: the SDK registry directory cannot be read; %d candidate(s) stood down this pass\n"
+                         % stats["sdk"])
+    life_sids = set(stats.get("lifeSids") or ())
+    if life_sids != _DEAD_WAIT_LIFE_SAID[0]:          # once per EPISODE: the pass runs every 0.5 s for up to 48 h
+        _DEAD_WAIT_LIFE_SAID[0] = life_sids
+        if life_sids:
+            sys.stderr.write("dead-wait: %d candidate(s) hold no reg but show recent life; stood down "
+                             "(a registry moved aside?)\n" % len(life_sids))
+    if stats.get("codex"):
+        sys.stderr.write("dead-wait: the Codex registry cannot be read; %d candidate(s) stood down this pass\n"
+                         % stats["codex"])
     if stats.get("reg"):
         sys.stderr.write("dead-wait: unreadable SDK reg; %d candidate(s) stood down this pass\n"
                          % stats["reg"])
@@ -10896,7 +10907,7 @@ def _file_wake_answer(sid, gid, now):
     return False
 
 
-def _wake_goal(sid, gid, stamp, nudged, turns, store, now, lt, tmux, wake_only=False):
+def _wake_goal(sid, gid, stamp, nudged, turns, store, now, lt, live_map, wake_only=False):
     """The AWAITING branch of _auto_nudge_session's goal walk — one stamped top goal. The stamp is a
     judged wait, so the plain status nudge stays off; but a wait is not an exemption from the ladder
     (the user 2026-08-11): fire the check-in past the backstop, track its outcome through the same record
@@ -10927,16 +10938,16 @@ def _wake_goal(sid, gid, stamp, nudged, turns, store, now, lt, tmux, wake_only=F
     in-flight/outcome legs above still run for a wake that fired while nudges were on."""
     at, why = stamp[0], stamp[1]
     kind = stamp[2] if len(stamp) > 2 else None
-    if tmux.get(sid) is None:
+    if live_map.get(sid) is None:
         # DORMANT owner (the user 2026-08-22): the CLI died while this judged wait still stood — and a
         # stamped Working card on a dead session was exempt from the WHOLE ladder (this wake, the plain
         # nudge, the staller), so it sat "paused" forever (two live cards measured at 79 hours). The
         # death notice tells the CHAT what happened; nothing ever moved the CARD. Nothing that could
         # answer the wait is running, so convert ONCE per stamp episode to a procedural block naming
         # the dead wait — the same terminal an unanswered wake reaches — and let a revival's reply
-        # lift it like any block. But the map's absence is a RAW read (on a tmux-less box this branch
-        # takes every file-derived session _alive_sessions falls back to, alive included), so the
-        # death is corroborated with the liveness owner first; unconfirmable stands down — the stamp
+        # lift it like any block. But the map's absence is a RAW read (a liveness blink is not a death;
+        # until 2026-09-11 a box with no tmux even took every file-derived session here, alive included),
+        # so the death is corroborated with the liveness owner first; unconfirmable stands down — the stamp
         # stays and the next walk re-asks.
         if _dead_wait_corroborated(sid) is not True:
             return False
@@ -10987,7 +10998,7 @@ def _wake_goal(sid, gid, stamp, nudged, turns, store, now, lt, tmux, wake_only=F
                     if n.get("awaitingWhy") and n.get("awaitingAt") == at), None)
         _peers = (_pn or {}).get("awaitingPeers") or ()
         if _peers and all(":" not in str(p) for p in _peers) \
-                and all(tmux.get(str(p)) is not None for p in _peers):
+                and all(live_map.get(str(p)) is not None for p in _peers):
             return False                             # every ending is an observable event — no clock
     since = max(at, rec.get("answeredAt") or 0, rec.get("at") or 0)
     if now - since < AWAITING_DEADMAN_SECS:
@@ -11129,11 +11140,12 @@ def _launch_error(sid):
 
 def _backend_queued(sid):
     """True if the session's backend holds queued-but-unstarted USER turns (the SDK keeps them in _pending;
-    tmux folds them from the transcript's queue-op records). Composer sends now go straight to that queue
+    the Codex backend in its own list). Composer sends now go straight to that queue
     while a turn runs (_send_or_park), so 'the user has messages waiting' — the nudge-suppression guard —
     must consult it, not just the kernel FIFO. Genuine entries only: the idle-queue drive parks harness
-    wrappers in the same SDK _pending, and a wrapper is not the user having said something (the tmux fold
-    already filters via _pending_queued). Guarded: a backend hiccup reads as 'nothing queued' rather than
+    wrappers in the same SDK _pending, and a wrapper is not the user having said something (_genuine_queued,
+    the filter the transcript queue ledger applied too). Guarded: a backend hiccup reads as 'nothing
+    queued' rather than
     crashing the nudge check."""
     try:
         be = Sessions.backend_for(str(sid))
@@ -11145,7 +11157,7 @@ def _backend_queued(sid):
 def _backend_rewind_pending(sid):
     """True while the session's backend holds an ARMED, unconsumed bare rollback (SDK pending_cut):
     the user deleted a message and nothing has landed on the new branch yet. Backends without the
-    affordance (tmux) have no pending_cut and read False; a backend hiccup also reads False —
+    affordance (Codex) have no pending_cut and read False; a backend hiccup also reads False —
     matching _backend_queued's posture, since the pre-gate status quo was 'nudge anyway'."""
     try:
         be = Sessions.backend_for(str(sid))
@@ -11651,7 +11663,7 @@ def _nudge_placement_gate(sid, turns, store):
     return unplanned
 
 
-def _auto_nudge_session(s, now, tmux, nudged, waitfor, alive_ids=None, wake_only=False, cleared=None):
+def _auto_nudge_session(s, now, live_map, nudged, waitfor, alive_ids=None, wake_only=False, cleared=None):
     """One session's slice of the auto-nudge tick: the session-level gates, then the fire/stamp
     walk over its still-'working' top goals. Split from _auto_nudge_tick so the tick isolates
     failures per session (see the tick's loop). Mutates `nudged` (the tick's in-memory mirror);
@@ -11669,9 +11681,9 @@ def _auto_nudge_session(s, now, tmux, nudged, waitfor, alive_ids=None, wake_only
     sid = s["sid"]
     if _session_flag(sid, "hideFromFeed"):           # muted from the feed → no auto-nudges either; a nudge IS a
         return "muted"                              # feed feature, so opting out of the feed opts out of nudges (the user)
-    st = (tmux.get(sid) or {}).get("state", "")
-    # awaiting your input/approval / compacting → not orphaned. The tmux `st` is EMPTY for SDK sessions
-    # (no tmux), so the raw-state "compacting" check MISSES them — corroborate with _compacting_now (the
+    st = (live_map.get(sid) or {}).get("state", "")
+    # awaiting your input/approval / compacting → not orphaned. The raw-state "compacting" check alone MISSED
+    # SDK sessions (only the tmux backend's row ever said it) — corroborate with _compacting_now (the
     # same signal the chip/timeline/chat use), or a /compact on an SDK session gets nudged mid-compaction
     # ("nudge got called after compact" — the user 2026-07-06).
     if st in _NEEDS_INPUT_STATES or st == "compacting" or _compacting_now(sid):
@@ -11813,7 +11825,7 @@ def _auto_nudge_session(s, now, tmux, nudged, waitfor, alive_ids=None, wake_only
             # done / block / user reply / a peer's answer superseding the stamp). But a wait is not an
             # exemption from the ladder (the user 2026-08-11): past the backstop the goal takes a WAKE —
             # same records, same response gates, same escalation, its own copy (see _wake_goal).
-            fired = _wake_goal(sid, gid, _stamp, nudged, turns, store, now, lt, tmux, wake_only) or fired
+            fired = _wake_goal(sid, gid, _stamp, nudged, turns, store, now, lt, live_map, wake_only) or fired
             continue
         if wake_only:
             continue                                 # auto-nudge OFF: the dead-man was the whole errand
@@ -12287,10 +12299,10 @@ def _nudge_fire_list(fresh, to_fire, arm_t=None, seen_t=None, held=None):
 
 
 WORKING_DIR = jd.STATE / "working"     # backend-agnostic working-note store (working/<sid> files): the
-                                       # set_working ownership claim list_agents shows. Replaces the tmux
-                                       # @romp-working var so SDK sessions can publish one too, and so the
-                                       # postal bus reads/writes it through the kernel, never tmux (the user
-                                       # 2026-06-26).
+                                       # set_working ownership claim list_agents shows. Replaced the tmux
+                                       # backend's @romp-working var so SDK sessions could publish one too, and
+                                       # so the postal bus reads/writes it through the kernel, never a backend
+                                       # (the user 2026-06-26).
 
 
 def _working_note_path(sid):
@@ -12344,7 +12356,8 @@ _working_notes_memo = [None]      # ((name, mtime_ns, size, ino) per entry, {sid
 
 def _set_working_note(sid, text):
     """Publish (text) or clear (text='') a session's working-note in the backend-agnostic store — what the
-    postal bus reads for list_agents. Works for BOTH backends (no tmux); replaces the @romp-working var."""
+    postal bus reads for list_agents. Works for every backend; replaced the tmux backend's @romp-working var
+    (2026-06-26)."""
     p = _working_note_path(sid)
     if p is None:
         return
@@ -12358,7 +12371,7 @@ def _set_working_note(sid, text):
             pass
 
 
-def _clear_done_working_notes(now, tmux):
+def _clear_done_working_notes(now, live_map):
     """Event-based expiry of the set_working ownership note (the user 2026-06-24): once a session is IDLE
     with NO open top goal left — its work is done (only done / cleared remains) — its @romp-working claim
     is moot, so clear it. Peers reading list_agents then stop coordinating against a finished session
@@ -12369,16 +12382,16 @@ def _clear_done_working_notes(now, tmux):
     still its own — the first cut lifted those notes too, and parked sessions were then observed with their
     claims gone from list_agents while they still held them, which is the interference the contract "a peer
     with no note holds nothing" exists to prevent. Runs every pusher tick, independent of the auto-nudge
-    toggle; a no-op (one tmux read) unless some session has published a note."""
+    toggle; a no-op (one liveness read) unless some session has published a note."""
     notes = _working_notes()
     if not notes:
         return
-    for s in _alive_sessions(now, tmux):
+    for s in _alive_sessions(now, live_map):
         sid = s["sid"]
         if sid not in notes:
             continue
-        if (tmux.get(sid) or {}).get("state", "") in ("working", "compacting", "permission", "picker", "retrying"):
-            continue                                     # actively progressing / awaiting input per tmux → keep (cheap pre-gate, no parse)
+        if (live_map.get(sid) or {}).get("state", "") in ("working", "compacting", "permission", "picker", "retrying"):
+            continue                                     # actively progressing / awaiting input per the row → keep (cheap pre-gate, no parse)
         skip, files_st = _tick_job_check("working-notes", s)   # nothing appended since the last completed look (or
         if skip:                                               # since boot) → the note's fate was settled then
             continue
@@ -12394,13 +12407,13 @@ def _clear_done_working_notes(now, tmux):
         _set_working_note(sid, "")                        # idle + nothing open → lift the stale claim
 
 
-def _chat_tab_sessions(now, tmux):
+def _chat_tab_sessions(now, live_map):
     """The sessions shown as CHAT TABS, in the shared session order: EVERY living session PLUS only the
     dead sessions the user explicitly opened READ-ONLY (_kept_open). A dead session is otherwise
     TIMELINE-ONLY — it does NOT auto-keep a tab when it dies (the user 2026-06-17 reversed the old 'keep
     a tab when it dies'); reopen it from the timeline instead. There is no hidden/open tab subset (the
     user 2026-08-11): alive = visible, and × ends the session."""
-    live = _alive_sessions(now, tmux)
+    live = _alive_sessions(now, live_map)
     live_sids = {s["sid"] for s in live}
     all_sessions = _sessions(now)
     dead_kept = [s for s in all_sessions if s["sid"] in _kept_open and s["sid"] not in live_sids]
@@ -12423,7 +12436,7 @@ TL_LANE_WINDOW = 12 * 3600       # default: DEAD lanes only from the last 12h (t
                                  # anyway; older dead sessions just aren't loaded. LIVE sessions show at any age.
 
 
-def _timeline_sessions(now, tmux, live_only=False):
+def _timeline_sessions(now, live_map, live_only=False):
     """Sessions shown as TIMELINE LANES (the user 2026-06-16): living sessions in the shared order PLUS
     every DEAD session whose transcript is within TL_LANE_WINDOW (12h) — so scrolling back surfaces the
     sessions that were active then, struck through. Independent of chat tabs: a dead session is a lane
@@ -12438,7 +12451,7 @@ def _timeline_sessions(now, tmux, live_only=False):
     user 2026-06-17 reversed the earlier rule that ×-ing a chat tab also dropped the timeline lane). A
     now-dead session that was active during the visible span appears on scrollback regardless of tab
     state — the active filter alone gates it."""
-    live = _alive_sessions(now, tmux)
+    live = _alive_sessions(now, live_map)
     if live_only:
         return _ordered(live)                          # cold-start first paint: live sessions only, no dead reads
     live_sids = {s["sid"] for s in live}
@@ -12469,26 +12482,26 @@ def _rel_ago(now, t):
     return "%dd ago" % (d // 86400)
 
 
-def _live_names(tmux):
-    """name → sid for the sessions alive in tmux right now (tmux is keyed by sid)."""
-    return {n: sid for sid in (tmux or {}) for n in [_name_of(sid)] if n}
+def _live_names(live_map):
+    """name → sid for the sessions alive right now (the live map is keyed by sid)."""
+    return {n: sid for sid in (live_map or {}) for n in [_name_of(sid)] if n}
 
 
 def _live_names_now():
-    """_live_names(_tmux_sessions()) read NOW, past any pusher-cycle scope on this thread. On the pusher
-    thread _tmux_sessions() serves the cycle-start liveness map (_live_scope.snapshot) and _name_of the
+    """_live_names(_live_map()) read NOW, past any pusher-cycle scope on this thread. On the pusher
+    thread _live_map() serves the cycle-start liveness map (_live_scope.snapshot) and _name_of the
     cycle-start registry (_live_scope.names), and the comment-create door runs there through
     _retry_parked_creates: its claim read a cycle-old world, so a same-name session created, registered
     and released earlier in the same cycle was in neither the snapshot nor the claims dict, and the parked
     thread was minted beside it (review find, 2026-09-08). A claim's snapshot must postdate every released
     registration, so both scopes are suspended for exactly this read and restored after: the rest of the
     cycle keeps its one honest snapshot. Off the pusher thread the scopes are unset and this is the plain
-    read. Cost: one tmux fork plus one registry read per claim on that thread, only while a create is
+    read. Cost: one registry sweep plus one names read per claim on that thread, only while a create is
     parked there."""
     saved = getattr(_live_scope, "snapshot", None), getattr(_live_scope, "names", None)
     _live_scope.snapshot = _live_scope.names = None
     try:
-        return _live_names(_tmux_sessions())
+        return _live_names(_live_map())
     finally:
         _live_scope.snapshot, _live_scope.names = saved
 
@@ -12501,15 +12514,16 @@ def _live_names_now():
 # rename ops had no live check at all. _claim_name is the one atomic step every door now takes before it
 # acts; _release_name frees the name once the registration is durable or the attempt has failed.
 # COVERAGE (review find, 2026-09-08): the KERNEL's doors, every path that reaches _claim_session_name. The
-# CLI's terminal launcher run from a shell (`romp new -t <name>`, `romp resume`, in bin/romp) checks tmux
-# alone (`tmux has-session`) and writes the names/ registry with no claim, and a tmux-native rename
-# (prefix-$, choose-tree, :rename-session) publishes through the `romp _renamed` hook the same way; a
-# namesake made by either is refused by the kernel's doors only once a later snapshot lists it as
-# "already running". The kernel's OWN tmux spawn is covered: _spawn_session_start holds the claim across
-# the `romp new -t --detach` it runs, which is also why bin/romp cannot take a claim of its own without a
-# bypass for that launch and a lease for a launcher that dies mid-way, so the CLI stays outside by design.
+# CLI's terminal launcher of the time (bin/romp's `romp new -t <name>` / `romp resume`, run from a shell)
+# checked tmux alone and wrote the names/ registry with no claim, and a tmux-native rename published
+# through the `romp _renamed` hook the same way; a namesake made by either was refused by the kernel's
+# doors only once a later snapshot listed it as "already running". The kernel's own spawn of that kind
+# (_spawn_session_start) held the claim across the `romp new -t --detach` it ran, which is also why
+# bin/romp took no claim of its own: that would have needed a bypass for that launch and a lease for a
+# launcher that dies mid-way, so the CLI stayed outside by design. The terminal paths left with the tmux
+# backend (2026-09-11); a create today goes through a kernel door.
 _NAME_CLAIMS = {}                       # name -> {"kind": create|fork|rename|promote|revive|thread, "sid": the claimant's sid, "" when unknown}
-_name_claims_lock = threading.Lock()    # guards _NAME_CLAIMS ONLY: never held across a tmux fork, a store read or a backend call
+_name_claims_lock = threading.Lock()    # guards _NAME_CLAIMS ONLY: never held across a liveness read, a store read or a backend call
 _CLAIM_HELD_TEXT = {                    # the refusal for a name another door holds right now, by what that door is doing
     "rename": 'another session is being renamed to "%s" right now',
     "revive": 'a session named "%s" is being revived right now',
@@ -12536,9 +12550,10 @@ def _claim_name(nm, live_names, kind="create", sid=""):
     flight, or the snapshot the caller passed already lists it. `kind` records what the holder is doing
     (the refusal a second claimant reads names it); `sid` is the claimant's session when known.
 
-    DESIGN POINT: the lock guards only the claims dict. The EXPENSIVE snapshot (_live_names(_tmux_sessions())
-    forks tmux, _thread_names() walks every comments store) is never taken under it, or every create door
-    would serialize behind one fork. What makes that sound is the ORDER the doors take: claim FIRST, then
+    DESIGN POINT: the lock guards only the claims dict. The EXPENSIVE snapshot (_live_names(_live_map())
+    sweeps every backend's registry, _thread_names() walks every comments store) is never taken under it,
+    or every create door would serialize behind one sweep. What makes that sound is the ORDER the doors
+    take: claim FIRST, then
     snapshot while holding the claim, then verify (_claim_session_name). Any registration of `nm` happens
     only under a claim that is released once the registration is durable, so a snapshot taken while we
     hold the claim necessarily lists every earlier registration: an earlier creator either still holds
@@ -12564,7 +12579,7 @@ def _claim_name(nm, live_names, kind="create", sid=""):
 
 def _release_name(nm):
     """Free `nm`, in the claimant's `finally`: once its registration is DURABLE — the SDK reg and names/
-    entry written, the tmux session up, the Codex row in its registry, the rename or promote landed, the
+    entry written, the Codex row in its registry, the rename or promote landed, the
     revive registered, the thread's row saved — so the next live snapshot already lists it; or on any
     failure path (a creator that raised, a backend that answered False, a launch thread that would not
     start), so a failed attempt leaves the name free for the retry."""
@@ -12576,7 +12591,7 @@ def _claim_session_name(nm, kind, sid="", own=""):
     """Claim `nm` in the session namespace for a door (create / fork / rename / promote / revive, and the
     comment thread's create, whose names share the namespace), in the ORDER that makes the claim sound:
     the dict FIRST (_claim_name against no snapshot: a rival holder refuses), then, holding the claim and
-    OUTSIDE the claims lock, BOTH snapshots: the live sessions (_live_names_now(), a tmux fork read past
+    OUTSIDE the claims lock, BOTH snapshots: the live sessions (_live_names_now(), a registry read past
     any pusher-cycle scope) and the comment threads (_thread_names(), a walk of every comments store);
     then verify. Any registration of `nm` happens only under a claim released once it is durable, so a
     snapshot taken while we hold the claim lists every earlier one; taking it BEFORE the claim let a
@@ -12611,26 +12626,18 @@ def _claim_session_name(nm, kind, sid="", own=""):
     return refusal
 
 
-class _RenameOutcome(Exception):
-    """A backend's rename that ended in a state needing its OWN words to the asker: both doors speak the
-    text verbatim (a WS warn, the route's error), where any other raise is rendered as "the rename did
-    not take — <errno>". Raised by _rename_session when tmux renamed the session but the name on file
-    could not follow: neither "renamed" (every surface reads the file) nor "did not take" (tmux did) is
-    true, so the asker hears exactly what happened and what they will see."""
-
-
 def _rename_claimed(be, sid, nm):
     """The rename door's one act, shared by POST /rename and the WS renameSession op (not _rename_session:
-    that name is the tmux backend's own rename helper further down) — `nm` already
+    that name is the dead-tab rename further down) — `nm` already
     NAME_RE-valid and not a comment thread's. The session's OWN name is a no-op ack: (True, "") with
     nothing written and never a refusal (the pre-claim route refused it as "already running"). Any
     other name is claimed (kind rename) and verified against a live snapshot taken under the claim,
     outside the claims lock; be.rename runs under the claim — it rewrites the reg and the names/ entry,
     so the next snapshot answers the new name — and the claim is released either way. Returns
-    (ok, refusal): a non-empty refusal names a taken or in-flight name, or what a backend that RAISED
-    said — a _RenameOutcome verbatim; any other exception (a names-file write that failed: ENOSPC,
-    EROFS, a permission fault — the backends compensate and re-raise so the asker hears it) as "the
-    rename did not take" with the errno, the same words for every backend. Left to escape, the WS
+    (ok, refusal): a non-empty refusal names a taken or in-flight name, or a backend that RAISED (a
+    names-file write that failed: ENOSPC, EROFS, a permission fault — the backends compensate and
+    re-raise so the asker hears it) as "the rename did not take" with the errno, the same words for
+    every backend. Left to escape, the WS
     arm's exception reached the receive loop's catch-all, which logged it and told the client nothing,
     and the route answered a 500 traceback. ok False with no refusal is the backend declining (a sid it
     does not know, or a names entry that does not exist), which the doors already report."""
@@ -12641,8 +12648,6 @@ def _rename_claimed(be, sid, nm):
         return False, refusal
     try:
         return bool(be and be.rename(sid, nm)), ""
-    except _RenameOutcome as e:
-        return False, str(e)                             # logged where it was raised, with the cause
     except Exception as e:
         sys.stderr.write("rename %s → '%s': %s\n" % (sid[:8], nm, traceback.format_exc()))
         return False, "the rename did not take — %s" % (_errno_text(e) if isinstance(e, OSError)
@@ -12658,12 +12663,12 @@ PICKER_CAP = 600                # user 2026-07-24: scroll back through the last 
 #   walk is ~78ms cold and ~4ms cached — below noticing, so laziness would buy nothing and cost a spinner.
 
 
-def _session_list(now, tmux, window=None):
+def _session_list(now, live_map, window=None):
     """Picker payload: sessions from the last PICKER_WINDOW, RUNNING ones first then by recency, each
     {id,name,color,running,time,summary} — the shape render.ts's renderPicker expects. ONE row per
     registered session: forks are off, since a fork lane is the same session listed twice under an fsid
     that is not a romp sid, so its row pointed openSession at something that isn't a session."""
-    live = set(tmux or {})
+    live = set(live_map or {})
     items = []
     for s in _sessions(now, PICKER_WINDOW if window is None else window, forks=False)[:PICKER_CAP]:
         sid = s["sid"]
@@ -12963,81 +12968,10 @@ def _end_pending_sid(sid):
     _push_soon()
 
 
-def _reap_if_cancelled(name):
-    """A pending spawn just materialized — if its "Opening…" cue was cancelled while in flight, end it now
-    (the threaded tmux spawn races the ✕; the SDK path is inline so it's caught in the handler instead)."""
-    if name in _cancel_pending:
-        _cancel_pending.discard(name)
-        sid = _live_names(_tmux_sessions()).get(name)
-        if sid:
-            _end_pending_sid(sid)
-
-
-def _spawn_session_start(nm, cwd):
-    """The tmux create door's front half, on the ASKING thread (POST /new and the WS createSession op
-    both come through here, so neither can skip the claim): claim `nm` (kind create), verified against a
-    live snapshot taken under the claim and outside the claims lock, then run _spawn_session on its own
-    thread — the seconds-long `romp new` launch must not block a WS recv loop or an HTTP handler — which
-    releases the name once the launch has settled either way (the tmux session is up and in the next
-    snapshot, or the launch failed and the name is free again). Returns "" or the refusal text, so the door
-    answers the request that asked; a claim taken on the launch thread could only refuse into a log
-    line after the door had already acked "pending". A Thread.start that fails releases the name first
-    and then raises — loud, and never a held name with no launch behind it."""
-    refusal = _claim_session_name(nm, "create")
-    if refusal:
-        return refusal
-
-    def run():
-        try:
-            _spawn_session(nm, cwd)
-        finally:
-            _release_name(nm)
-    try:
-        threading.Thread(target=run, daemon=True).start()
-    except BaseException:
-        _release_name(nm)
-        raise
-    return ""
-
-
-def _spawn_session(name, cwd=None):
-    """Create a detached romp session named `name` — the same launch the old TS backend ran
-    (`romp new -t --detach <name>`, tmux-backend.ts). Runs on the thread _spawn_session_start hands it —
-    the starter is the only door in, and it holds the name's claim for the whole launch (_claim_name) —
-    so the ~seconds-long launch never blocks the WS recv loop; the targeted push below then delivers the new tab. Scrub
-    TMUX* so the child launcher never thinks it is already inside a tmux client. `cwd` is the session's
-    working directory (validated by _resolve_create_dir); None falls back to the kernel default."""
-    cwd = cwd or _default_create_dir()
-    _commands_for_cwd(cwd)   # pre-warm the slash-command list — a new session predicts a composer (the user 2026-08-13)
-    env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
-    try:
-        r = subprocess.run([str(BIN / "romp"), "new", "-t", "--detach", name], cwd=cwd, env=env, timeout=25,
-                           capture_output=True, text=True)
-        if r.returncode != 0:
-            # said, never swallowed (T325 review): the launcher's refusal (its socket directory not this kernel's,
-            # tmux missing, the CLI below its floor) used to vanish into DEVNULL after /new had already answered
-            # ok, so no tab appeared and nothing said why. One stderr line and one error-center row.
-            detail = (r.stderr or r.stdout or "").strip().splitlines()
-            detail = " / ".join(l.strip() for l in detail if l.strip())[:400] or "romp new exited %d" % r.returncode
-            sys.stderr.write("spawn '%s': romp new -t exited %d: %s\n" % (name, r.returncode, detail))
-            _sdk_problem("terminal session '%s' did not start: %s" % (name, detail))
-    except Exception:
-        sys.stderr.write("spawn '%s': %s\n" % (name, traceback.format_exc()))
-    _reap_if_cancelled(name)   # the ✕ may have fired while this spawn was in flight
-    # Surface the new tab NOW — one targeted single-session push, not the old inline _push_all(): that
-    # duplicated the whole fleet build on this thread (against the push-architecture rule) and still left
-    # the tab's freshness to chance. The dirty wake covers feed/timeline on the next cycle.
-    sid = _live_names(_tmux_sessions()).get(name)
-    if sid:
-        _push_session_now(sid)
-    _mark_views_dirty()
-
-
 def _pick_identity_color(now=None):
     """A NEW session's identity colour, picked to stand out from what you're WORKING ON right now (the user
     2026-07-16). sdk_backend.pick_identity_color hashes the sid into the palette and never looks at what's in
-    use, so a fresh session could wear a colour a live one already had — while other colours sat free. (The
-    tmux launcher already does first-unused, but it only sees tmux sessions.)
+    use, so a fresh session could wear a colour a live one already had — while other colours sat free.
 
     Rank every palette colour by, in order:
       1. how many LIVE sessions hold it — 0 wins, so an untaken colour is always taken first;
@@ -13293,7 +13227,7 @@ def _fork_session_inner(parent_sid, cut_msg_uuid, new_name, now=None, client=Non
     whole conversation otherwise (the palette's fork-from-tip). The parent is untouched: both continue
     as separate threads (the user 2026-08-13). Returns an error string for the caller to warn-toast
     (fail loudly), None on success. SDK sessions only in v1 — the mechanism IS the SDK's
-    resume+fork_session contract; a tmux session says so instead of degrading.
+    resume+fork_session contract; a session on another backend says so instead of degrading.
 
     ORDER MATTERS: the judge stores are seeded BEFORE be.fork writes the names/ entry — discover()
     iterates names/, so an unseeded fork must not be discoverable even for one judge pass (the replay
@@ -13305,7 +13239,7 @@ def _fork_session_inner(parent_sid, cut_msg_uuid, new_name, now=None, client=Non
         return "session names use letters, digits, . _ - only."
     be = Sessions.backend_for(parent_sid)
     if not (hasattr(be, "fork") and _sdk_ready()):
-        return "fork needs a Claude Code session — this one runs in a terminal (Claude Code (tmux)), so there is nothing to fork from."
+        return "fork needs a Claude Code session — this one runs on another backend, so there is nothing to fork from."
     now = now or time.time()
     sess = next((s for s in _sessions(now) if s["sid"] == parent_sid), None)
     if not sess:
@@ -13796,7 +13730,7 @@ _built_thread = {}       # thread sid -> (key, cut_uuid, events, build_started_a
 _thread_fold_keep = [set(), set()]   # [last cycle's thread sids, this cycle's]: _push's fold eviction keeps them
 
 
-def _thread_events(tsid, cut_uuid, now, tmux):
+def _thread_events(tsid, cut_uuid, now, live_map):
     """The thread rendered with the CHAT's own builder (the user 2026-08-17: the popover shows the
     same thing the chat shows), sliced to AFTER the branch point: build_session on the thread sid
     (reachable via _sdk_sess's reg fallback — no names/ entry), events after the cut record's, the
@@ -13820,13 +13754,13 @@ def _thread_events(tsid, cut_uuid, now, tmux):
     reg = _thread_reg(tsid)
     if reg.get("forkOf"):
         return []
-    tmux = tmux if tmux is not None else {}
+    live_map = live_map if live_map is not None else {}
     _thread_fold_keep[1].add(tsid)              # this cycle's thread: _push keeps its fold prefix
     sess = _sdk_sess(tsid, now)
-    tm = tmux.get(tsid)
+    tm = live_map.get(tsid)
     key = None
     try:
-        sig = _chat_build_sig(sess, tm, now, tmux=tmux, deps=False)
+        sig = _chat_build_sig(sess, tm, now, live_map=live_map, deps=False)
         _chat_sig_ok(tsid)                          # a signature that was taken ends its fault episode
         if sig is not None:
             # plus the thread's OWN state rows (review 2026-09-08): the backend writes states/<tsid>.jsonl under
@@ -13852,7 +13786,7 @@ def _thread_events(tsid, cut_uuid, now, tmux):
     started = time.time()
     _t0 = time.monotonic()
     try:
-        m = build_session(tsid, now, tmux)
+        m = build_session(tsid, now, live_map)
     except Exception:
         _chat_dep_scope.deps = None                  # a thread records no build dependencies (see _chat_build_deps)
         return []
@@ -14055,7 +13989,7 @@ def _agent_landed_after(events, msgs, seen):
     return any(m["who"] == "agent" and m["t"] > seen for m in msgs)
 
 
-def _comments_frame(sid, tmux=None):
+def _comments_frame(sid, live_map=None):
     """The chat pane's {type:"comments"} frame for parent session `sid`, or None when it has never
     had a thread. Built per push for sessions WITH a store (few) — _send_client's dedup keeps an
     unchanged frame off the wire.
@@ -14115,7 +14049,7 @@ def _comments_frame(sid, tmux=None):
             except Exception as e:
                 live = []
                 _thread_backend_shout(tsid, "live_atoms", e)
-        events = [] if status == "promoted" else _thread_events(tsid, str(th.get("cutUuid") or ""), now, tmux)
+        events = [] if status == "promoted" else _thread_events(tsid, str(th.get("cutUuid") or ""), now, live_map)
         reg = _thread_reg(tsid)
         # the backend's queue (persisted for a dormant thread) is read BEFORE the turn read: a machine cut
         # stays open only while something is still queued behind it or a process is on it (T237b C)
@@ -14421,7 +14355,7 @@ def _comment_create(parent_sid, anchor_uuid, exact, text, name="", model="", eff
     exact/name as usual; nothing kernel-side consumes meta beyond storing it."""
     be = Sessions.backend_for(parent_sid)
     if not (hasattr(be, "fork") and _sdk_ready()):
-        return "threads need a Claude Code session; this one runs in a terminal (Claude Code (tmux)), so there is nothing to fork.", None
+        return "threads need a Claude Code session; this one runs on another backend, so there is nothing to fork.", None
     if not str(exact or "").strip() or not str(text or "").strip():
         return "nothing to send: highlight a passage and write a comment.", None
     now = now or time.time()
@@ -14445,7 +14379,7 @@ def _comment_create(parent_sid, anchor_uuid, exact, text, name="", model="", eff
     # session's name nor another thread's nor one being registered right now, and the claim (kind
     # thread) is what serializes it against every other door. It goes through _claim_session_name like
     # every session door: the dict first, then both snapshots taken UNDER the claim, outside the claims
-    # lock AND the comments lock (a tmux fork and a walk of every comments store). The first cut took
+    # lock AND the comments lock (a registry sweep and a walk of every comments store). The first cut took
     # the snapshots up here, before the claim, so a same-name session that was created, registered and
     # released while this create built its row and waited on the comments lock was in neither the
     # snapshot nor the dict; and on the pusher thread (_retry_parked_creates) the live snapshot was the
@@ -14493,7 +14427,7 @@ def _comment_create(parent_sid, anchor_uuid, exact, text, name="", model="", eff
             be.fork(nm, parent_sid, cut, bg=col, fg=(pal.fg_for(col) if col else ""), sid=tsid, thread_of=parent_sid,
                     model=model, effort=effort, fast=fast)
             be.connect(tsid)
-            be.send(tsid, text if raw_opener else _comment_first_message(exact, text))
+            _user_send(be, tsid, text if raw_opener else _comment_first_message(exact, text))
         except Exception as e:
             with _comments_lock:                       # loud + lossless: no half-born thread row
                 data = _load_comments(parent_sid)
@@ -14533,7 +14467,7 @@ def _comment_reply(parent_sid, tid, text):
         # back for exactly this gesture, and a later relay sends only the new tail past relayedT
         reg = _thread_reg(tsid)
         be.resume(reg.get("name") or ("thread-" + tsid[:8]), tsid)   # alive again; names/ untouched
-    if not be.send(tsid, str(text)):
+    if not _user_send(be, tsid, str(text)):
         return "couldn't reach this thread's session; it may have been removed."
     _push_soon()
     return None
@@ -14609,9 +14543,11 @@ def _comment_merge(parent_sid, tid):
     body = _merge_body(th.get("exact"), msgs)
     be = Sessions.backend_for(parent_sid)
     try:
-        be.send(parent_sid, body)
+        delivered = _user_send(be, parent_sid, body)     # the merge is the user's gesture (T315: it retries a stood-down attach)
     except Exception as e:
         return _revert("the merge message could not be delivered: %s" % e)
+    if delivered is False:
+        return _revert("the merge message was refused by the parent's backend; nothing was marked merged")
     _comment_update(parent_sid, tid,
                     # a thread the user CLOSED stays closed after its content is sent back (the user
                     # 2026-09-01) — "merged" is the talkable status, and resolved→relay→reply must
@@ -14881,10 +14817,9 @@ def _fork_promote_request(body):
     return {"ok": True, "name": nm}
 
 
-# --- optional SDK (non-tmux) session backend (docs/sdk-backend.md) --------------------
-# A second SessionBackend that drives Claude via the Agent SDK instead of a tmux TUI,
-# selectable per session. Built lazily so the tmux-only path never imports the SDK and the
-# kernel runs unchanged when the SDK (or its dependency) is absent.
+# --- the Claude Code session backend (the Agent SDK; docs/sdk-backend.md) ----------------
+# The SessionBackend that drives Claude via the Agent SDK. Built lazily, so the kernel starts and
+# serves its surfaces when the SDK (or its dependency) is absent, and creation refuses by name.
 _SDK_MCP = Path(os.path.expanduser("~/.claude/romp-postal.mcp.json"))
 _SDK_PROMPT = Path(os.path.expanduser("~/.claude/romp-session-prompt.md"))
 # What a session-creation refusal says when the Agent SDK isn't provisioned. ONE string for the browser
@@ -14893,7 +14828,7 @@ _SDK_PROMPT = Path(os.path.expanduser("~/.claude/romp-session-prompt.md"))
 # surfaces read it through _sdk_setup_hint, which asks the backend's venv verdict at request time and
 # hands this string over as the default for the verdicts where the install remedy fits.
 SDK_SETUP_HINT = ("Session not created: the Claude Code backend's Agent SDK isn't installed. "
-                  "Run bin/romp-sdk-setup, then try again. (Claude Code (tmux) sessions still work.)")
+                  "Run bin/romp-sdk-setup, then try again.")
 
 _sdk_backend = None   # None = not built yet, False = unavailable, else the SdkBackend
 _sdk_lock = threading.Lock()   # single-flight construction: the eager boot thread races handler
@@ -14966,7 +14901,7 @@ def _sdk_import_notice():
     ok = _ensure_sdk_on_path()
     if not ok and not _SDK_VENV_BUILT_FOR:
         sys.stderr.write("sdk-backend: claude_agent_sdk not found: run bin/romp-sdk-setup to "
-                         "enable the non-tmux backend (tmux sessions are unaffected)\n")
+                         "enable the Claude Code backend\n")
     return ok
 
 
@@ -14993,7 +14928,7 @@ def _sdk_setup_hint():
     if _SDK_VENV_BUILT_FOR:
         return ("Session not created: the Claude Code backend's Agent SDK was set up for Python %s, but romp "
                 "is running on Python %s. Re-run bin/romp-sdk-setup to rebuild it for Python %s, restart romp "
-                "and try again. (Claude Code (tmux) sessions still work.)"
+                "and try again."
                 % (" and ".join(_SDK_VENV_BUILT_FOR), _running_python_tag(), _running_python_tag()))
     return SDK_SETUP_HINT
 
@@ -15135,7 +15070,7 @@ def _sdk_locked():
 # --- optional Codex session backend (plans/codex-backend.md) ------------------------------------------
 # A THIRD SessionBackend that drives OpenAI Codex threads via `codex app-server` and materializes
 # Claude-shaped transcripts under STATE/codex/projects/ (judge._codex_rows discovers them). Built
-# lazily like _sdk(); an absent dependency is a loud refusal at creation, never a silent tmux fallback.
+# lazily like _sdk(); an absent dependency is a loud refusal at creation, never a silent fallback.
 CODEX_SETUP_HINT = ("Session not created: the Codex backend isn't installed. "
                     "Run romp-codex-setup, then try again.")
 
@@ -15326,7 +15261,7 @@ def _cap_switch_offer(sid, aerr):
     if not aerr or aerr.get("tooLong") or aerr.get("spendLimit") or aerr.get("modelLimit") \
             or aerr.get("authErr") or aerr.get("refusal"):
         return None
-    tm = (_tmux_sessions() or {}).get(str(sid)) or {}
+    tm = (_live_map() or {}).get(str(sid)) or {}
     if str(tm.get("authLive") or tm.get("auth") or "") != "login" or not _auth_key_present():
         return None
     try:
@@ -15348,13 +15283,13 @@ def _judge_limit_view():
     session's analysis rides its own billing (the judge bills the judged session, the 2026-08-12 rule). loginSessions = live sessions whose billing is the login, read from
     the authoritative per-session source (the CLI's own authLive report, falling back to the session's
     picked intent — the exact fields the Billing tooltip trusts); billingUnknown = live sessions whose
-    billing romp cannot know (a tmux CLI: its env is not romp's), listed honestly rather than silently
+    billing romp cannot know (a row that reports no billing), listed honestly rather than silently
     omitted (the fail-loud rule). Names resolve at read time, so a rename never shows stale."""
     row = jd._limit_down()
     if not row:
         return None
     billed, unknown = [], []
-    for sid, tm in (_tmux_sessions() or {}).items():
+    for sid, tm in (_live_map() or {}).items():
         if not isinstance(tm, dict):
             continue
         b = str(tm.get("authLive") or tm.get("auth") or "")
@@ -15461,13 +15396,13 @@ def _session_event_rows(since=0.0, limit=200, tail=SESSION_EVENTS_TAIL):
 
 # ── slash-command list for the composer's "/" autocomplete (the user 2026-06-29) ──────────────────────────────
 # The DESIGNED source is the Agent SDK's get_server_info()['commands'] — each {name, description, argumentHint,
-# aliases} — and it covers BOTH backends, because the command set is fixed by the `claude` binary + config + cwd,
-# NOT by how the session was launched (tmux TUI vs SDK). So we probe ONCE per cwd with a short-lived SDK client
+# aliases} — and it covers every Claude Code session, because the command set is fixed by the `claude` binary +
+# config + cwd, NOT by how the session was launched. So we probe ONCE per cwd with a short-lived SDK client
 # (minimal options: just cli_path + cwd; no MCP — commands come from skills/plugins/custom/built-ins, not MCP) and
-# cache it; tmux + SDK sessions in the same dir share the list. The probe spawns a `claude` process (slow), so it
+# cache it; every session in the same dir shares the list. The probe spawns a `claude` process (slow), so it
 # is CACHED + BACKGROUND-WARMED: the first request for a cold cwd kicks the warm and returns warming=true; the
 # composer shows the romp loader and re-fetches when it's ready. Per the repo rule, this uses the SDK's designed
-# API rather than scraping the tmux pane or hand-maintaining a built-in list.
+# API rather than scraping a terminal or hand-maintaining a built-in list.
 _CMD_CACHE = {}                  # cwd -> {"commands": [...], "ts": float, "warming": bool, "err": str}
 _CMD_CACHE_LOCK = threading.Lock()
 _CMD_TTL = 300.0                 # re-probe a cwd at most this often (the command set rarely changes mid-session)
@@ -15687,15 +15622,16 @@ def _fire_api_retry(sid, be, manual=False):
     # message, force-pinning a junk goal per retry via the never-skip hard guard ("retry — kept on the
     # board…", 71 of them in one API-error storm). The marker makes author_of return 'romp' (ROMP_INJECT_RE)
     # so the echo + transcript render gray and the planner skips a work-less retry instead of minting a goal.
-    delivered = be.send(sid, RETRY_MSG)
+    delivered = _user_send(be, sid, RETRY_MSG) if manual else be.send(sid, RETRY_MSG)   # the Retry click is the user's (T315)
     _note_retry_sent(sid, manual=manual)
     # the send's own verdict, for the manual route's reply (review find, 2026-09-08): SdkBackend.send and
     # CodexBackend.send return False for a session they cannot reach (no live registry row, no client);
-    # TmuxBackend.send always True. Only an explicit False is a refusal; a backend answering None sent.
+    # the unowned route (_UnownedBackend.send) refuses with False too. Only an explicit False is a refusal; a
+    # backend answering None sent.
     return delivered is not False
 
 
-def _auto_retry_tick(now, tmux):
+def _auto_retry_tick(now, live_map):
     """KERNEL-side driver for the transient-api-error auto-retry (the user 2026-08-11). The ladder, the
     episode gate and every suppression were already the kernel's — but the clock that ASKED lived in each
     open dashboard (apiRetryTick, ui/webview/render.ts), so a session that died on a transient error with
@@ -15706,10 +15642,10 @@ def _auto_retry_tick(now, tmux):
     _fire_api_retry is idempotent against double-asking, and an older kernel still needs the client).
     Dormant sessions are skipped — a dead CLI's api-error is settled history, and reviving a session is
     the nudge machinery's call, not a retry's."""
-    for s in _alive_sessions(now, tmux):
+    for s in _alive_sessions(now, live_map):
         sid = s["sid"]
         try:
-            if tmux.get(sid) is None:
+            if live_map.get(sid) is None:
                 continue                                  # dormant CLI → nothing live to retry into
             if not _api_error(s["path"]):
                 continue                                  # (mtime-cached) not api-blocked → nothing to do
@@ -15720,7 +15656,7 @@ def _auto_retry_tick(now, tmux):
             sys.stderr.write("auto-retry (session %s): %s\n" % (sid or "?", traceback.format_exc()))
 
 
-def _idle_queue_drive_tick(now, tmux):
+def _idle_queue_drive_tick(now, live_map):
     """KERNEL-side driver for self-scheduled wake signals stuck in an idle SDK session's CLI queue
     (the user 2026-08-18 — the full story on _undelivered_wake_tail). In the CLI's STUCK regime it
     only enqueues; romp drives the turn that delivers, the way boot reconcile already does for its
@@ -15749,15 +15685,15 @@ def _idle_queue_drive_tick(now, tmux):
         background-agent completion notice, which the CLI delivers itself in EVERY regime) is the
         CLI's own to deliver, and romp re-sending it would double-deliver.
     The backend owns the rest (open turn, compaction, ended/cut sessions, the per-watermark latch,
-    the dormant-spawn stagger) — see SdkBackend.drive_idle_queue. tmux sessions are skipped by
-    ownership: their CLI is interactive and delivers its own queue."""
+    the dormant-spawn stagger) — see SdkBackend.drive_idle_queue. Codex sessions are skipped by
+    ownership: the drive is the SDK backend's own, over its own queue."""
     be = _sdk()
     if be is None or not hasattr(be, "drive_idle_queue"):
         return
     if _retry_paused_on():
         return
     cands = []
-    for s in _alive_sessions(now, tmux):
+    for s in _alive_sessions(now, live_map):
         sid = str(s.get("sid") or "")
         path = s.get("path")
         try:
@@ -15843,7 +15779,7 @@ def _picker_mid_series(sid):
     Event, not a timer: the loop hands us the exact "question i of n" on the live ask (ask_question_to_live
     stamps ask['progress'] = {i, n} only when n > 1). Read BEFORE answering — current_ask still holds the
     sub-question being answered — and treat i < n as "more coming". None/absent progress (single question,
-    a permission Allow/Deny, tmux with no stored ask) → False, so the flip fires exactly as before."""
+    a permission Allow/Deny, a backend with no stored ask) → False, so the flip fires exactly as before."""
     try:
         ca = Sessions.backend_for(sid).current_ask(sid)
     except Exception:
@@ -15888,7 +15824,7 @@ _FOREIGN_OP_VERB = {"sendMessage": "message", "askFollowUp": "reply", "askText":
                     "moveSession": "move"}
 
 
-def _refuse_drive(client, op, sid, msg):
+def _refuse_drive(client, op, sid, msg, why=None):
     """Refuse an op for a session this kernel doesn't have — and make the refusal impossible to miss. THREE
     places, because a silent drop here costs the user typed work they cannot get back (the user 2026-07-29):
       1. a MODAL in the pane that fired it — not the `warn` toast, which fades in 12s and can be missed
@@ -15909,10 +15845,12 @@ def _refuse_drive(client, op, sid, msg):
                                  "itemId": msg.get("itemId") or "", "text": text}) + "\n")
     except OSError:
         pass
-    sys.stderr.write("undeliverable %s: this kernel has no session %s — %r\n" % (op, sid, text[:200]))
-    detail = ("Nothing was sent. This romp kernel has no session with id %s, so it could not deliver your %s "
-              "— on a board showing more than one machine, that means the pane addressed the wrong kernel. "
-              "Your text is saved verbatim in undelivered.jsonl under romp's state directory." % (sid, what))
+    sys.stderr.write("undeliverable %s: %s %s — %r\n" % (op, why or "this kernel has no session", sid, text[:200]))
+    detail = ("Nothing was sent. %s, so it could not deliver your %s. "
+              "Your text is saved verbatim in undelivered.jsonl under romp's state directory."
+              % ((why + " (session %s)" % sid) if why else
+                 ("This romp kernel has no session with id %s — on a board showing more than one machine, that "
+                  "means the pane addressed the wrong kernel" % sid), what))
     try:
         # `sid` rides along so the shell's error-center entry carries the session it was meant for, the way
         # every card-badge entry does — the bell is a log you read later, and "which one?" is the first thing
@@ -15932,12 +15870,12 @@ def _drive(msg, client):
     end / follow-up — to whichever backend OWNS the sid (Sessions.backend_for(sid)), and return True. UI /
     navigation ops (tab hide, reveal, hovers, createSession, …) return False and fall through to _dispatch_ws;
     they're backend-agnostic. This is the ONE place a webview action becomes a backend call: no backend is
-    named, nothing shells tmux. tmux is keyed by NAME, the SDK by sid, but the backend hides that — the
-    dispatch speaks sids. (the user 2026-06-26: tmux + SDK behind one session API.)"""
+    named, nothing drives a session but its backend. Whatever handle a backend keys on, it hides that — the
+    dispatch speaks sids. (the user 2026-06-26: every backend behind one session API.)"""
     if not isinstance(msg, dict):
         return False
     t = msg.get("type")
-    ID_OPS = ("sendMessage", "rewindSend", "rewindDelete", "interrupt", "compactSession", "dismissDialog", "answerAsk", "navAsk", "toggleAsk", "submitAsk",
+    ID_OPS = ("sendMessage", "rewindSend", "rewindDelete", "interrupt", "compactSession", "answerAsk", "toggleAsk", "submitAsk",
               "addCustomAsk", "cancelAsk", "askText", "cancelQueued", "dismissEcho", "apiRetry", "editQueued", "holdQueued", "setModel", "setEffort", "setMode", "setFast",
               "setAuth", "endSession", "renameSession", "moveSession", "stopTask", "rewindFiles", "mcpAction", "forkSession",
               "commentCreate", "commentReply", "commentResolve", "commentDelete", "commentSeen", "commentPromote",
@@ -15957,9 +15895,10 @@ def _drive(msg, client):
     else:
         return False                                      # not a drive op (UI/nav) → _dispatch_ws handles it
     # A drive op for a session THIS kernel has never heard of is undeliverable — refuse it here, loudly.
-    # backend_for() falls through to tmux for any unrecognized sid, and TmuxBackend.send then types at a pane
-    # named after the sid; when no such pane exists the keystrokes evaporate with nothing raised and nothing
-    # logged. That silence swallowed real user messages (the user 2026-07-29): a federated dashboard sent a
+    # backend_for() used to fall through to the tmux backend for any unrecognized sid, whose send typed at a
+    # pane named after the sid; when no such pane existed the keystrokes evaporated with nothing raised and
+    # nothing logged (the unowned route refuses by name now, 2026-09-11, and this check still says WHY first).
+    # That silence swallowed real user messages (the user 2026-07-29): a federated dashboard sent a
     # card reply here that belonged to another machine's kernel, and it simply ceased to exist — no bubble,
     # no error, no record. Per the fail-loudly rule, an op we cannot deliver must SAY so instead of degrading
     # into a no-op. `_kernel_knows` is the registry, not liveness: a dead-but-ours session still resolves, so
@@ -15975,7 +15914,9 @@ def _drive(msg, client):
         if _route_meta_command(be, sid, str(msg["text"]), client):
             _push_soon()
         else:
-            _send_or_park(be, sid, str(msg["text"]), echo="human", qid=_client_qid(msg, sid, be)); _push_soon()  # idle → instant echo; SDK busy → queued bubble forwarded mid-turn + folded (but a SLASH COMMAND parks to fire alone at turn end — mid-turn it would land as text, not execute); tmux busy → held + merged at turn end
+            if _send_or_park(be, sid, str(msg["text"]), echo="human", qid=_client_qid(msg, sid, be), user=True) is None:
+                client["send"](json.dumps({"type": "warn", "text": "the message was not delivered: no running backend owns this session"}))
+            _push_soon()  # idle → instant echo; SDK busy → queued bubble forwarded mid-turn + folded (but a SLASH COMMAND parks to fire alone at turn end — mid-turn it would land as text, not execute); a backend that cannot forward, busy → held + merged at turn end
     elif t == "rewindSend" and msg.get("uuid") and msg.get("text"):
         # Edit a past message (SDK sessions): rewind the conversation to just before it and send the
         # edited text as the branch's next turn. NO optimistic kernel echo — the edit lands mid-chat
@@ -16015,7 +15956,7 @@ def _drive(msg, client):
         # /model, /effort, /fast → the setters (mid-compaction → parked); `floating` is the lane
         # submenu's Latest row (forget the family's pin)
         if not _route_meta_command(be, sid, cmd, client, floating=bool(msg.get("floating"))):
-            _send_or_park(be, sid, cmd)   # mid-compaction → parked as a queued command
+            _send_or_park(be, sid, cmd, user=True)   # mid-compaction → parked as a queued command; the user typed it
     elif t == "askFollowUp":
         iid = str(msg.get("itemId") or "")
         # QUOTE the ask being followed up above the user's text so the recipient has context, and ride the
@@ -16037,15 +15978,14 @@ def _drive(msg, client):
         text = (CONTINUE_TEXT + "\n\n<!-- romp-canned: continue -->") if msg.get("cont") else str(msg["text"])
         body = (_followup_body(iid, msg.get("title"), text, injected=bool(msg.get("nudge")))
                 if iid else text)
-        # Optimistic echo for a tmux follow-up/nudge (the user 2026-06-29): without it, a follow-up sent while
-        # the session is WORKING showed as a queued bubble that VANISHED in the dequeue→landed gap (the queue-op
-        # record resolves before the real user atom lands). The echo + the while-working queued fold keep it
-        # visible across that gap, then prune when the atom lands. author "romp" for a nudge → gray bubble even
-        # in the brief idle-send case; "human" for a typed follow-up → blue. Mid-compaction the whole send is
-        # PARKED instead (queued bubble; delivered when compaction ends — _send_or_park).
-        _send_or_park(be, sid, body,
-                      echo=("romp" if msg.get("nudge") else "human") if be is _TMUX else None,
-                      qid=_client_qid(msg, sid, be))
+        # Mid-compaction the whole send is PARKED (queued bubble; delivered when compaction ends — _send_or_park);
+        # the backend echoes the send for itself.
+        if _send_or_park(be, sid, body, qid=_client_qid(msg, sid, be),
+                         user=not msg.get("nudge")) is None:   # a follow-up is the user's; a nudge is romp's
+            # the feed predicted the move on the click; the err frame carrying op + itemId is what it reverts
+            # on (_refuse_drive's shape), so the card comes back at once with the reason, not on the backstop
+            _refuse_drive(client, t, sid, msg, why="No running backend owns this session")
+            return True                                   # consumed, refused: no cue, no reopen, no note
         if iid:                                           # optimistic: reopen the card NOW, before the judge pass
             _predict_working("followup", ids=[iid])       # instant cue to every feed view (chat-typed citation
             #                                               follow-ups included) — the reopen below is what the
@@ -16092,8 +16032,6 @@ def _drive(msg, client):
         else:
             _ask_lost(sid, client)
         _mark_views_dirty()
-    elif t == "navAsk" and msg.get("target") is not None:
-        be.on_ask(sid, "focus", msg["target"])            # cursor only, no select → ↑/↓ steps the preview
     elif t == "toggleAsk" and msg.get("target") is not None:
         be.on_ask(sid, "toggle", msg["target"])
     elif t == "submitAsk":
@@ -16237,15 +16175,6 @@ def _drive(msg, client):
         be.dismiss_echo(sid, uuid=str(msg.get("uuid") or "") or None,
                         t=int(_et) if isinstance(_et, (int, float)) and not isinstance(_et, bool) else None)
         _push_soon()
-    elif t == "dismissDialog":
-        # Dismiss the CLI's spend-cap modal (the chat card's tmux-only affordance): the backend VERIFIES
-        # the dialog is actually up in the pane, then sends Esc — cancel, never a billing change. A
-        # refusal (already dismissed / SDK session) warn-toasts instead of pretending (fail loudly).
-        ok, derr = (be.dismiss_dialog(sid) if hasattr(be, "dismiss_dialog")
-                    else (False, "only tmux sessions show a terminal dialog to dismiss"))
-        if not ok:
-            client["send"](json.dumps({"type": "warn", "text": derr}))
-        _push_soon()
     elif t == "apiRetry":
         # ONE retry decision, all of it kernel state — see _fire_api_retry (shared with the kernel's own
         # _auto_retry_tick, which drives recovery unattended since 2026-08-11; this route remains for the
@@ -16263,7 +16192,7 @@ def _drive(msg, client):
         # forget the family's remembered pin and send the alias
         _set_model_or_park(be, sid, str(msg["value"]), floating=bool(msg.get("floating"))); _push_soon()
     elif t == "setEffort" and msg.get("value"):
-        _set_effort_or_park(be, sid, str(msg["value"])); _push_soon()   # tmux: /effort; SDK: reconnect with --effort; mid-compaction → parked
+        _set_effort_or_park(be, sid, str(msg["value"])); _push_soon()   # SDK: reconnect with --effort; Codex: its engine's level at the next turn; mid-compaction → parked
     elif t == "setFast" and msg.get("value") in ("on", "off"):
         # the chat's fast badge — /fast on|off delivered like any slash command; mid-compaction → parked.
         # LOUD on refusal (fail loudly, never degrade silently): a dormant SDK session has no live CLI to
@@ -16273,23 +16202,22 @@ def _drive(msg, client):
                                        "text": "Couldn't toggle fast mode — the session isn't connected right now."}))
         _push_soon()
     elif t == "setMode" and msg.get("value"):
-        # LOUD on refusal (fail loudly, never degrade silently): a tmux session reaches its permission
-        # mode only through the shift+tab cycle, so Bypass — which the picker offers on SDK sessions —
-        # has no keystroke there. Without this the badge just sat on the old mode with no reason given.
+        # LOUD on refusal (fail loudly, never degrade silently): without this the badge just sat on the
+        # old mode with no reason given. The Codex backend refuses mid-turn; a session no backend owns
+        # refuses outright (the unowned route).
         if not be.set_mode(sid, str(msg["value"])):
             text = ("Codex mode changes require an idle session. Choose Sandboxed or Auto "
                     "after the current turn finishes." if be is _codex_backend else
-                    "A terminal session can only reach the modes in its "
-                    "shift+tab cycle — Normal, Accept, Auto, Plan.")
+                    "The permission mode could not be changed: no running backend owns this session.")
             client["send"](json.dumps({"type": "warn", "text": text}))
         _push_soon()
     elif t == "setAuth" and msg.get("value") in ("login", "key"):
         # per-session billing (login vs the manager env's API key) — SDK-only, applied via reconnect
-        # like /effort; mid-compaction → parked in the same FIFO. LOUD on refusal (fail loudly): tmux
+        # like /effort; mid-compaction → parked in the same FIFO. LOUD on refusal (fail loudly): Codex
         # sessions and a keyless manager can't apply it, and a silent swallow leaves a dead control.
         if not _set_auth_or_park(be, sid, str(msg["value"])):
             # the backend names the reason it refused (no login signed in / no apiKeyHelper / a managed
-            # helper: auth_unavailable_why) when it had one; the generic text covers the rest (a tmux
+            # helper: auth_unavailable_why) when it had one; the generic text covers the rest (a Codex
             # session, an unknown sid)
             why = str(getattr(be, "auth_unavailable_why", lambda v: "")(str(msg["value"])) or "")
             client["send"](json.dumps({"type": "warn",
@@ -16300,7 +16228,7 @@ def _drive(msg, client):
         _push_soon()
     elif t == "stopTask" and msg.get("taskId"):
         # the SDK's designed stop_task control request, addressed by the id the bg-task box shows.
-        # LOUD on refusal (fail loudly, never degrade silently): unknown task / dead client / tmux
+        # LOUD on refusal (fail loudly, never degrade silently): unknown task / dead client / no task control
         if not be.stop_task(sid, str(msg["taskId"])):
             client["send"](json.dumps({"type": "warn",
                                        "text": "Couldn't stop that background task — it may have already finished."}))
@@ -16444,7 +16372,7 @@ def _drive(msg, client):
             # before be.rename — a running session's name, or one being created right now, is refused
             # aloud; the session's own name is an ack with nothing written; a backend that declines
             # is said too, where it used to answer nothing
-            ok, refusal = _rename_claimed(be, sid, new)   # live → tmux rename hook / SDK reg; dead → names file
+            ok, refusal = _rename_claimed(be, sid, new)   # live → the owning backend's rename; dead → names file
             if refusal:
                 client["send"](json.dumps({"type": "warn", "text": refusal}))
             elif ok:
@@ -16477,9 +16405,13 @@ def _reveal_or_confirm(sid, focus_msg, client=None):
     Where a CLIENT is in scope (every WS op that calls this), the reveal is aimed at that dashboard
     alone: a jump into a transcript is one viewer's navigation, and broadcasting it dragged every open
     dashboard to the same turn (the user 2026-07-29). No client → the old broadcast."""
-    if sid and sid not in _tmux_sessions():
+    if sid and sid not in _live_map():
         _reveal_chat_for(client, {"type": "confirmRevive", "id": sid, "name": _name_of(sid) or sid})
     else:
+        # a LIVE session's anchored focus also carries the anchor turn's own moment for the chat's reveal progress line
+        # (T336), resolved here and only here: a dead session's card never pays for it (the confirm goes out without it)
+        if focus_msg.get("anchor") and "anchorEventT" not in focus_msg:
+            focus_msg = dict(focus_msg, anchorEventT=_anchor_event_t(sid, focus_msg["anchor"]))
         _reveal_chat_for(client, focus_msg)
 
 
@@ -16641,10 +16573,10 @@ def _open_or_revive(sid, live=False, client=None):
     the one click-op the per-viewer fix (2026-07-29) missed — its guard test counted _reveal_chat_for
     call sites and the other branches satisfied the count — so every feed/fleet/picker tap kept
     switching the chat in EVERY open window (the user 2026-08-16)."""
-    if sid in _tmux_sessions():
+    if sid in _live_map():
         be = _sdk()
         if be:
-            be.connect(sid)   # SDK: eager-connect on OPEN (idempotent; no-op for tmux/unknown sids) so the
+            be.connect(sid)   # SDK: eager-connect on OPEN (idempotent; no-op for Codex/unknown sids) so the
                               # model / permission-mode publish from the init message right away AND the model
                               # is changeable BEFORE the first message — not only after one (the user 2026-06-24:
                               # opening an SDK session showed no model/effort until a message was sent).
@@ -16662,8 +16594,8 @@ def _revive_session(sid, client=None):
     collision with itself). A name another live session has taken since this one died, or one being
     registered right now, refuses with a reviveFailed to the asker — the failure shape every other revive
     refusal takes — instead of bringing up a second session under a name every by-name surface resolves
-    to one of them. The claim holds through _revive_session_inner (resume writes the reg alive, or the
-    tmux session comes up, so the next snapshot lists it) and is released either way."""
+    to one of them. The claim holds through _revive_session_inner (resume writes the record alive, so the
+    next snapshot lists it) and is released either way."""
     name = _name_of(sid) or sid
     refusal = _claim_session_name(name, "revive", sid, own=sid)
     if refusal:
@@ -16686,10 +16618,11 @@ def _revive_session_inner(sid, client=None):
     of the dashboard that clicked Revive (`client`), not every open window's (the per-viewer rule; the
     reviveFailed notice is aimed the same way, since only the asker has a revive loader up). SDK-owned
     (registry entry exists) → SdkBackend.resume + connect: alive again, resuming its newest transcript
-    (lastSid) with history intact. Otherwise tmux → `romp <name> --resume <sid> --detach` in the session's
-    recorded dir (dir resolution, picker-grace via bin/romp's own picker-check). Runs in a thread off the
-    WS recv loop — the ~seconds-long resume must not block it; the sid is unchanged, so the focus lands on
-    the same tab once the pusher delivers it. (the user 2026-06-16.)
+    (lastSid) with history intact; a dead Codex session → CodexBackend.resume. A session neither backend
+    holds a record of (a terminal session from before the tmux backend's removal, 2026-09-11) cannot be
+    revived, and the reviveFailed says so. Runs in a thread off the WS recv loop — the ~seconds-long resume
+    must not block it; the sid is unchanged, so the focus lands on the same tab once the pusher delivers
+    it. (the user 2026-06-16.)
 
     FAILURE IS LOUD (the user 2026-07-05): this used to shell `romp-postal-service revive`, a subcommand
     2b5e181 removed (live-only addressing) — the CLI printed 'unknown command' and EXITED 0, output was
@@ -16706,8 +16639,8 @@ def _revive_session_inner(sid, client=None):
             ok = bool(be.resume(name, sid) and be.connect(sid))
             detail = "" if ok else "the SDK backend could not resume it (see the kernel log)"
         elif cx is not None and cx._session(sid) is not None:
-            # a DEAD Codex session: owns() is live-only by design, so the tmux fallback would build
-            # `claude --resume` for it — resume it through the Codex backend instead (docs/codex.md)
+            # a DEAD Codex session: owns() is live-only by design, so the routing above passes it by —
+            # resume it through the Codex backend (docs/codex.md)
             if not _codex_ready():
                 detail = (getattr(cx, "_client_err", "") or CODEX_SETUP_HINT)
             else:
@@ -16718,14 +16651,9 @@ def _revive_session_inner(sid, client=None):
                     # any known sid), which opens the same /models consult as the create door's spawn
                     _models_changed()
         else:
-            cwd = _cwd_of(sid)
-            workdir = cwd if cwd and os.path.isdir(cwd) else os.path.expanduser("~")
-            r = subprocess.run([str(BIN / "romp"), "resume", sid, "--name", name, "--detach"],
-                               cwd=workdir, capture_output=True, text=True, timeout=40,
-                               env=dict(os.environ))
-            ok = r.returncode == 0
-            if not ok:
-                detail = (r.stderr or r.stdout or "romp exited %d" % r.returncode).strip()[:200]
+            detail = ("no backend can revive this session: neither the Claude Code nor the Codex backend "
+                      "holds a record of it (a terminal session from before the tmux backend's removal "
+                      "is history; start a new session for the work)")
     except Exception as e:
         ok, detail = False, str(e)[:200]
     if not ok:
@@ -16746,645 +16674,75 @@ def _revive_session_inner(sid, client=None):
         _reveal_chat_for(client, {"type": "focus", "id": sid})
 
 
-# ─────────────────────────── TmuxBackend: the ONE place that shells tmux ───────────────────────────
-# Every raw `tmux` invocation lives inside this class — the tmux-specific format strings (@claude-* / @romp
-# vars), list-sessions, send-keys, paste-buffer, capture-pane, set, rename/kill-session. Higher layers
-# (build_*, control handlers, the postal bus) speak the SessionBackend API and never shell tmux; a guard
-# test (tests/test_session_api.py) asserts no `["tmux"` / send-keys / @claude- / list-sessions outside this
-# class so the leak can't reappear. tmux is keyed by session NAME, so the sid-keyed ABC methods map
-# sid→name via _name_of/_tmux_name_of internally. (the user 2026-06-26: tmux + SDK behind one session API.)
-class TmuxBackend(sb.SessionBackend):
-    # tmux -F format strings (the only place @claude-*/@romp vars are named):
-    LANE_FMT = ("#{@romp}|#{@romp-session-id}|#{@claude-state}|#{@claude-state-since}|"
-                "#{@claude-model}|#{@claude-effort}|#{@claude-context}|#{@claude-compact-pct}|#{@identity-bg}|"
-                "#{@claude-permission-mode}")
-    NAME_FMT = "#{@romp-session-id}\t#{session_name}"
-    BADGE_TTL = int(os.environ.get("ROMP_POSTAL_BADGE_TTL", "300"))   # auto-clear the status-bar mail badge after N s
-    PEER_CAP = 10                                                     # max peers on the status-bar "talking to" line
-
-    # ── the SOLE raw-tmux primitives ──
-    @staticmethod
-    def _tmux_argv(args):
-        """['tmux', ...] with the per-kernel server socket when ROMP_TMUX_SOCKET is set
-        (plans/multi-kernel.md phase 2): an aux kernel runs its sessions on its OWN tmux server
-        (-L), so two kernels never see or nudge each other's panes — and since that server is
-        started by this kernel, its sessions inherit the profile env (ROMP_STATE_DIR /
-        CLAUDE_CONFIG_DIR) for free. Read at call time, not import, so tests can flip it. Unset →
-        the default server, exactly as before. WHERE that server's socket lives is the environment's
-        TMUX_TMPDIR, which the kernel resolved at import (tmux_socket.export_tmux_tmpdir, T325): under
-        the user's runtime directory when there is one, so no /tmp event can take it away."""
-        sock = os.environ.get("ROMP_TMUX_SOCKET")
-        return (["tmux", "-L", sock] if sock else ["tmux"]) + list(args)
-
-    @staticmethod
-    def available():
-        """Is the tmux backend usable on this host — i.e. is there a tmux to shell? A machine with no
-        tmux installed (a fresh Linux box, the user 2026-07-27) is a supported configuration: the SDK
-        backend is what `romp new` uses, so romp runs fully without tmux and the terminal backend just
-        stays DISABLED until tmux appears. Every primitive below short-circuits on this, so a
-        tmux-less host spends no subprocess spawns per producer tick and logs no failures.
-
-        Deliberately NOT cached: shutil.which is a PATH stat, far cheaper than the spawn it replaces,
-        and re-probing per call means `apt install tmux` goes live on the next tick with no kernel
-        restart and no expiry timer (the repo's event-over-time-heuristic rule).
-
-        ROMP_TMUX_AVAILABLE overrides the probe ("0"/"" → off, anything else → on). It is mainly a
-        TEST SEAM: the tmux-behaviour tests stub subprocess.run to record argv, and without this they
-        would pass or fail on whether the machine running them happens to have tmux installed. It
-        doubles as the way to force the backend off on a host that has tmux but shouldn't use it."""
-        ov = os.environ.get("ROMP_TMUX_AVAILABLE")
-        if ov is not None:
-            return ov not in ("", "0")
-        return shutil.which("tmux") is not None
-
-    def _run(self, args, t=3):
-        if not self.available():
-            return None
-        try:
-            return subprocess.run(self._tmux_argv(args), capture_output=True, text=True, timeout=t)
-        except Exception:
-            return None
-
-    def _fire(self, args, t=3):                          # fire-and-forget (no captured output needed)
-        if not self.available():
-            return
-        try:
-            subprocess.run(self._tmux_argv(args), timeout=t)
-        except Exception:
-            pass
-
-    def list_lines(self, fmt, t=2.5):
-        r = self._run(["list-sessions", "-F", fmt], t)
-        return r.stdout.splitlines() if (r and r.returncode == 0) else []
-
-    def alive_sids(self, t=3):
-        """The set of romp session ids the tmux SERVER answers for right now — the death writers'
-        corroboration primitive (2026-08-13). Identity-true: reads @romp-session-id, the key every
-        sid-keyed contract method resolves through — never a NAME (same-named generations coexist,
-        which is the whole reason kill-by-name is refused; a name probe would read a dead session as
-        alive whenever a different generation currently bears its name). None ONLY on a real probe
-        failure (exec error/timeout): a death writer must stand down then — never inherit
-        list_lines' error→[] collapse, which would read the whole board as dead. A NONZERO exit
-        whose stderr names a missing server IS the authoritative zero-sessions answer (verified:
-        `list-sessions` with no server exits 1 with 'error connecting … No such file or directory')
-        — the mass-death/reboot shape, and the boot backfill's normal world."""
-        r = self._run(["list-sessions", "-F", "#{@romp-session-id}"], t)
-        if r is None:
-            return None
-        if r.returncode != 0:
-            err = (r.stderr or "").lower()
-            if "no server running" in err or "error connecting" in err:
-                return set()
-            return None
-        return {ln.strip() for ln in r.stdout.splitlines() if ln.strip()}
-
-    def send_keys(self, name, *keys, t=3):
-        self._fire(["send-keys", "-t", name, *keys], t)
-
-    def set_var(self, name, var, val, t=3):
-        self._fire(["set", "-t", name, var, val], t)
-
-    def capture(self, name, join=False, colour=False, t=2.5):
-        # colour=True (-e) keeps the SGR escapes the deliver-time prompt-box parse needs (dim ghost-suggestion
-        # spans, the "stashed" indicator); join=True (-J) un-wraps long lines for the image-path wait.
-        args = ["capture-pane", "-p"] + (["-J"] if join else []) + (["-e"] if colour else []) + ["-t", name]
-        r = self._run(args, t)
-        return r.stdout if (r and r.returncode == 0) else ""
-
-    def pane_in_mode(self, name, t=2):
-        r = self._run(["display-message", "-p", "-t", name, "#{pane_in_mode}"], t)
-        return bool(r and r.stdout.strip() == "1")
-
-    def display(self, name, fmt, t=2.5):                   # read tmux -F vars for ONE session (status-bar chrome)
-        r = self._run(["display-message", "-t", name, "-p", fmt], t)
-        return r.stdout if (r and r.returncode == 0) else ""
-
-    def show_var(self, name, var, t=2.5):                  # read a single @-var (badge token / msg-peer)
-        r = self._run(["show", "-t", name, "-v", var], t)
-        return r.stdout if (r and r.returncode == 0) else ""
-
-    def refresh_client(self):
-        self._fire(["refresh-client", "-S"])
-
-    def fire(self, args, t=3):                             # a batched tmux command line (status-bar chrome uses `;`)
-        self._fire(args, t)
-
-    def set_buffer(self, text):
-        self._run(["set-buffer", "-b", "rompkernel", text])
-
-    def paste_buffer(self, name):
-        self._run(["paste-buffer", "-b", "rompkernel", "-d", "-p", "-t", name])
-
-    # CHECKED variants of the three paste-critical primitives: the same argv as their forgiving twins,
-    # but the exit code is READ. _run/_fire swallow exec errors and ignore nonzero exits — right for the
-    # read-side chrome, fatal for the steps that ARE a delivery: a tmux server that died after
-    # _tmux_send's clear made set-buffer, paste-buffer and the submitting Enter silent no-ops while the
-    # send looked complete. tmux's exit codes are a sane contract for all three (verified on tmux 3.4:
-    # dead server → 1 "no server running" / "error connecting", dead session → 1 "can't find pane",
-    # missing buffer → 1 "no buffer"; success → 0). True iff tmux itself answered 0; an exec failure, a
-    # timeout, a missing tmux, or a nonzero exit all read as NOT done. Other callers keep the forgiving
-    # twins on purpose (_inject verifies its paste landed by re-reading the box).
-    def set_buffer_checked(self, text):
-        r = self._run(["set-buffer", "-b", "rompkernel", text])
-        return r is not None and r.returncode == 0
-
-    def paste_buffer_checked(self, name):
-        r = self._run(["paste-buffer", "-b", "rompkernel", "-d", "-p", "-t", name])
-        return r is not None and r.returncode == 0
-
-    def send_keys_checked(self, name, *keys, t=3):
-        r = self._run(["send-keys", "-t", name, *keys], t)
-        return r is not None and r.returncode == 0
-
-    def kill_by_name(self, name, t=4):
-        self._fire(["kill-session", "-t", name], t)
-
-    def rename_by_name(self, old, new, t=5):
-        """True when tmux took the rename — _rename_session publishes the names/ entry on that answer
-        alone, so a name tmux refused is never published (fail loudly, 2026-09-08). Through _tmux_argv
-        like every other primitive here: as a bare argv it went to the DEFAULT tmux server, so with a
-        per-kernel socket (ROMP_TMUX_SOCKET) a live rename asked a server that had never heard of the
-        session — tmux refused, the rename did not take, and nothing said why."""
-        if not self.available():          # no tmux → nothing to rename; stay inert like every primitive above
-            return False
-        try:
-            r = subprocess.run(self._tmux_argv(["rename-session", "-t", old, new]), timeout=t,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return getattr(r, "returncode", 1) == 0
-        except Exception:
-            sys.stderr.write("tmux rename '%s': %s\n" % (old, traceback.format_exc()))
-            return False
-
-    def record_permission_mode(self, name, mode):
-        """Persist the permission mode we just cycled to in @claude-permission-mode — CC doesn't expose it in
-        statusLine JSON, so there's no event source to self-heal from; we caused the change, so we record it.
-        (Keeps the @claude-* var name inside the class — the higher cycle helper stays tmux-string-free.)"""
-        self.set_var(name, "@claude-permission-mode", mode)
-
-    def record_state(self, name, state):
-        """Persist a @claude-state value we derived externally (the revive-picker watcher's 'picker', which
-        blocks before any Claude hook can fire). Keeps the @claude-* var name inside the class."""
-        self.set_var(name, "@claude-state", state)
-
-    # ── the sid-keyed SessionBackend contract (maps sid→tmux NAME internally; tmux is name-keyed) ──
-    # Each method is a thin wrapper over the module-level helpers; the kernel + postal drive a tmux session
-    # ONLY through these (never by shelling tmux), so the SessionBackend API is the single seam.
+# ───────────────────── the unowned route: what answers for a sid no backend owns ─────────────────────
+# Sessions.backend_for used to fall through to the tmux backend for every sid neither the SDK nor the Codex
+# backend owned, and tmux's send "accepted" anything (a missing session was reported only on stderr, in its
+# own thread). With the tmux backend gone (2026-09-11) the fall-through is an EXPLICIT refusal: every op on
+# an unowned sid answers the ABC's refusing value (send False, busy None, an empty tail, no ask), so a caller
+# learns the session has no backend instead of a shell that never existed taking its message. A DEAD tab
+# keeps the two things that never needed a running backend: its names-file rename (_rename_session) and its
+# working note (the kernel's own store). Nothing here runs anything.
+class _UnownedBackend(sb.SessionBackend):
     def owns(self, sid):
-        return _tmux_name_of(sid) is not None        # True iff a LIVE tmux session currently carries this sid
+        return False
 
     def live_sessions(self):
-        """Live lane metadata from the tmux @claude-* vars (state/model/effort/context%/compaction%/since/
-        identity color/mode), keyed by romp-session-id. Sessions.live() MERGES this with the SDK backend's
-        live_sessions for the fleet-wide view. Canonical @claude-state values: working | waiting | idle |
-        permission | compacting (hooks/tmux-status.sh). Best-effort {} when tmux is absent (headless run)."""
-        out = {}
-        for line in self.list_lines(self.LANE_FMT):
-            p = line.split("|")
-            if len(p) < 9 or p[0] != "1" or not p[1]:        # p[0]=@romp tag (1 = a romp session)
-                continue
-            out[p[1]] = {"state": p[2].strip(), "since": _num(p[3]), "model": p[4].strip(),
-                         "effort": p[5].strip(), "context": _num(p[6]), "compactPct": _num(p[7]),
-                         "color": p[8].strip() if p[8].startswith("#") else None, "backend": "tmux",
-                         "mode": p[9].strip() if len(p) > 9 else ""}   # @claude-permission-mode (shift+tab cycle)
-        return out
+        return {}
 
-    # The @claude-state words this backend answers for, split by what a paste into the pane would do right
-    # now. Writers: hooks/tmux-status.sh (UserPromptSubmit / PostToolUse → working, Stop / SessionStart →
-    # waiting, PostCompact → waiting after a manual compaction and working after an auto one — that turn
-    # goes on —, the permission_prompt notification → permission, idle_prompt → idle) and record_state (the
-    # revive watcher's picker). compacting is deliberately in NEITHER tuple: busy() answers None for it, so
-    # _working_now falls to the cached parse and _compacting_now owns that gate, with the escape that
-    # disbelieves a stuck row (an open turn or a compact_boundary since the row's since). Any other word —
-    # "" before the first hook publish, an unknown spelling — is likewise no answer, never a hold.
-    BUSY_STATES = ("working", "permission", "picker")
-    QUIET_STATES = ("waiting", "idle")
-    corroborates_with_transcript = True   # busy() below may be overruled by the cached parse → the drain keeps
-    #                                       it current for a parked sid before reading busy() (_refresh_parked_parse)
-
-    def busy(self, sid):
-        """AUTHORITATIVE 'is a turn in flight' for a tmux session: the hook-maintained @claude-state,
-        corroborated against the cached transcript parse by EVENT ORDER (review finds on #904 and on this
-        change's first cut, 2026-09-03).
-
-        Why the row: before it this backend answered None and _working_now fell to the CACHED transcript
-        parse — which is None whenever the transcript's (mtime, size) moved since the last parse, and None
-        reads as idle. A tmux session MID-TURN therefore read as quiet the moment its transcript grew, and
-        the parked-op drain (every pusher cycle, ahead of the push that refreshes the cache) fired the op
-        behind into the open turn: a parked slash command landed as text. UserPromptSubmit flips the row to
-        working the instant the CLI accepts a prompt — no transcript write, no parse, no lag.
-
-        Why not the row alone: Claude Code fires NO hook on an Esc-interrupt (hooks/tmux-status.sh says
-        so), so an interrupted session's row reads working until the next pane prompt. Trusted alone, every send
-        typed after a Stop parked for minutes; the cached parse had corrected exactly this, because the
-        CLI's interrupt record (or the kernel's own idle record, _record_idle) ENDS the turn. So the two
-        sources are ordered by the events they record, the way _compacting disbelieves a compacting row: the
-        row carries `since` (@claude-state-since, rewritten on every hook write); when the cached parse
-        matches the file on disk (_parse_cached is not None — the transcript has NOT moved since it was
-        parsed) AND the last turn's newest record is NEWER than `since`, the transcript spoke after the
-        hook and its verdict wins (_session_working); otherwise the hook wins. "Newest record" is the
-        largest atom `t` of the last turn — never turn["end"], which for an idle span at the tail is the
-        PARSE time and would outrank every hook write; an idle atom's `t` is a real event (a states-file
-        record: the Stop hook's waiting, the kernel's interrupt idle). The two shapes:
-          * a turn just STARTED — row working with a fresh since, the transcript not yet written (the cache
-            matches the file; the last turn ended BEFORE since) → the hook wins → True. The gap stays shut.
-          * an Esc-INTERRUPT — row working with an old since; the interrupt record (or the idle record)
-            ends the turn AFTER since → the parse wins → False. Sends deliver.
-        The same rule runs for permission and picker (a phantom or answered prompt strands those rows the
-        same way), and in the other direction for waiting / idle: a row older than an open turn's newer
-        records reads True — which also narrows the gap after an auto-compaction, whose PostCompact once
-        wrote waiting into a turn that went on. A parse that cannot be consulted — None (the file moved
-        since the last parse, or was never parsed) or a row without `since` — leaves the hook standing:
-        the transcript has not spoken since, or cannot be dated against the row. TIES (the same second)
-        go to the hook, deliberately: a hook fires after the record it reports on (Stop after the final
-        assistant record; the permission notification after the tool_use) or before any record exists
-        (UserPromptSubmit, before the prompt is written), so a same-second row is the later word. The one
-        sticky exception is accepted: a PostToolUse rewrite and an Esc in the same second leave working
-        standing until the next pane prompt.
-
-        This never parses — it also serves the WS handler, which must stay cheap — so headless (no chat or
-        timeline client, or every session after a kernel restart until one connects) nothing would fill
-        the cache and the row would stand verbatim; the drain (_apply_pending_ops) re-parses a parked sid's
-        moved transcript (_refresh_parked_parse) right before the gate that reads busy() — after the account
-        hold, so a session held by a usage limit is not re-parsed for a verdict nothing reads.
-
-        None when there is no answer: no tmux row for the sid (the hook is not installed, or the pane is
-        gone), a row another backend owns, a state no hook has published yet, an unknown word, or
-        compacting (see BUSY_STATES). Never "hold on unknown": a tmux session whose cache nobody refreshes
-        would otherwise never drain. The row is read through _tmux_sessions() — inside a pusher cycle the
-        cycle's one liveness snapshot, no fork; outside a cycle a fresh Sessions.live(), one tmux fork per
-        user gesture (tens of ms), accepted."""
-        row = _tmux_sessions().get(str(sid))
-        if not row or row.get("backend") != "tmux":
-            return None
-        st = (row.get("state") or "").strip()
-        if st in self.BUSY_STATES:
-            hook = True
-        elif st in self.QUIET_STATES:
-            hook = False
-        else:
-            return None
-        since = row.get("since")
-        path = _path_of(str(sid))
-        turns = ((_parse_cached(path) if path else None) or {}).get("turns") or []
-        if not since or not turns:
-            return hook                                   # the transcript has not spoken since, or cannot be dated
-        last = turns[-1]
-        newest = max([a.get("t") or 0 for a in (last.get("atoms") or [])] + [last.get("t") or 0])
-        if newest <= since:
-            return hook                                   # the row is the later word (a tie goes to the hook — see above)
-        return _session_working(turns)                    # the transcript spoke after the hook: its verdict
-
-    # control — map sid→name, delegate to the existing injectors. send() does NOT echo: the kernel adds the
-    # optimistic input echo for a composer send (see _optimistic_echo), matching today's split where the
-    # command sends (/compact, /model, follow-ups) don't echo on tmux.
     def send(self, sid, text):
-        _tmux_send(_name_of(sid) or sid, text)
-        return True
+        sys.stderr.write("send to %s refused: no backend owns this session\n" % sid)
+        return False
 
     def interrupt(self, sid):
-        _interrupt(_name_of(sid) or sid)                  # Esc to stop + clear the restored prompt
-        _record_idle(str(sid), int(time.time()), by="interrupt")   # Esc writes no end_turn → settle idle (was done in the
-        return True                                       #   dispatch; here so tmux+SDK interrupt both settle idle)
+        return False
 
-    def dismiss_dialog(self, sid):
-        """Dismiss the CLI's spend-cap modal with Esc — the ONLY unblock for a session parked on it
-        (see _spend_dialog_showing: the menu eats keystrokes, so Retry can never land there; the user
-        2026-07-16). VERIFIES the dialog is actually up first, so a stale click can't fire Esc into a
-        normal prompt (where it could wipe typed input). Esc CANCELS the dialog and changes no billing
-        setting — never Enter, which would confirm whatever menu row is selected (e.g. "Adjust monthly
-        spend limit: Unlimited", a real account change). tmux-only by nature: the SDK backend's CLI runs
-        headless print-mode and shows no menu (its spend-cap failure is a plain retryable-after-you-fix-it
-        error); the kernel gates the drive op on this method's presence, mirroring `unqueue`."""
-        name = _name_of(sid) or sid
-        if not _spend_dialog_showing(self.capture(name)):
-            return False, "no spend-limit dialog is showing in that terminal — it may already be dismissed"
-        self.send_keys(name, "Escape")
-        return True, ""
+    def busy(self, sid):
+        return None
 
     def set_model(self, sid, value):
-        _tmux_send(_name_of(sid) or sid, "/model " + value, model_cmd=True)   # /model opens a confirm → the 2nd Enter accepts it for the user
-        return True
+        return False
 
     def set_mode(self, sid, mode):
-        # Only the CYCLE modes are reachable here: shift+tab is the only handle the TUI gives us, so a
-        # mode outside _MODE_CYCLE (bypassPermissions, dontAsk) has no keystroke that reaches it.
-        # _cycle_mode already declined those — but this returned True anyway, so the caller was told a
-        # permission mode had been set when nothing had happened. Say no instead (the user 2026-08-15,
-        # on the picker gaining Bypass: the SDK's own control channel takes it, this backend cannot).
-        if _mode_presses((_tmux_sessions().get(str(sid)) or {}).get("mode") or "default", mode) is None:
-            return False
-        _cycle_mode(_name_of(sid) or sid, str(sid), mode)                     # shift+tab cycle to the target mode
-        return True
+        return False
 
     def set_effort(self, sid, value):
-        _tmux_send(_name_of(sid) or sid, "/effort " + value)
-        return True
+        return False
 
     def set_fast(self, sid, value):
-        if value not in ("on", "off"):
-            return False
-        _tmux_send(_name_of(sid) or sid, "/fast " + value)   # args form applies directly (no picker/confirm)
-        return True
+        return False
 
-    # lifecycle — tmux sessions are launched by bin/romp (not the kernel) and revived via romp-postal, so
-    # spawn/resume aren't backend primitives here; the kernel uses _spawn_session/_revive_session for those.
-    def spawn(self, name, cwd, bg="", fg="", sid=None, auth=""):
+    def spawn(self, name, cwd, bg="", fg="", sid=None, *a, **kw):
         return None
 
     def resume(self, name, sid, cwd=None):
         return False
 
     def kill(self, sid):
-        nm = _name_of(sid)
-        if nm:
-            self.kill_by_name(nm)
-        return True
+        return False
 
     def rename(self, sid, new_name):
-        # live → tmux rename + names file; dead → names file. False (None below) only when there is no
-        # names entry to rewrite; a names-file FAULT raises through, so the door says the errno
         return _rename_session(str(sid), new_name) is not None
 
-    def move(self, sid, cwd):
-        # No relocation primitive exists for a TUI session: /cd is interactive and romp would have to
-        # type it blind, with no answer to read and no transcript move to verify. The ABC default's
-        # honest refusal, worded for the terminal case so the user learns what to do instead.
-        return ("this session runs in a terminal (tmux), which has no way to move a running session — "
-                "start a new session in that folder instead")
+    def deliver(self, sid, text):
+        return False
 
-    # chat tail — the kernel-side input echo store (_tmux_echo) is tmux's live_atoms; queued msgs are folded
-    # event-based from the transcript's queue-operation records.
     def pending_queued(self, sid):
-        p = _path_of(str(sid))
-        return _pending_queued(p) if p else []
-
-    def pending_queued_meta(self, sid):
-        p = _path_of(str(sid))
-        return _pending_queued_meta(p) if p else []
+        return []
 
     def live_atoms(self, sid):
-        return _tmux_echo_atoms(str(sid))
-
-    def live_rev(self, sid):
-        """The sid's echo-store revision (_tmux_echo_rev): the chat-build signature's live-tail component for
-        a tmux session, the twin of SdkBackend.live_rev. 0 until the first echo, one more per change."""
-        return _tmux_echo_rev.get(str(sid), 0)
+        return []
 
     def prune_live(self, sid, tx_uuids, tx_user_texts=(), human_floor=0):
-        # The floor never PRUNES a plain tmux echo: it must SURVIVE a later turn to keep a dropped send
-        # visible, so retirement stays text/uuid-only. It does SETTLE it — an echo the transcript has
-        # overtaken is marked dropped (the "never delivered" treatment), which is what keeps a two-day-old
-        # loss from posing as a pending queued message (_tmux_echo_settle). The settle also sees what the
-        # queue ledger still OWES (pending_queued is mtime-cached, so the read is free on a quiet
-        # transcript): a send still listed there is waiting, not lost.
-        _tmux_echo_prune(str(sid), tx_uuids, tx_user_texts)
-        _tmux_echo_settle(str(sid), human_floor, still_queued=self.pending_queued(sid))
-
-    def dismiss_echo(self, sid, uuid=None, t=None):
-        """Drop ONE settled echo on the user's ✕ (the chat's echodismiss), by synthetic uuid or send time.
-        Without this the "never delivered" bubble's dismiss button was a fake affordance on tmux — the
-        kernel's drive op is gated on hasattr(be, "dismiss_echo"), so the click acknowledged and the bubble
-        came straight back on the next push. Only a DROPPED echo is dismissible: an in-flight send is not
-        the user's to clear, and mirroring sdk_backend.dismiss_echo keeps one rule across both backends.
-        Matched exactly as sdk_backend.dismiss_echo matches — store key first, else the echo's send time,
-        as an OR so a client whose handle came from a different paint still lands. Returns the dismissed
-        text (idempotent: None when it's already gone)."""
-        d = _tmux_echo.get(str(sid))
-        if not d:
-            return None
-        for k, a in list(d.items()):
-            if not (a.get("_echo_text") and a.get("dropped")):
-                continue
-            if (uuid is not None and k == uuid) or (t is not None and int(a.get("t") or 0) == t):
-                d.pop(k, None)
-                _tmux_echo_bump(str(sid))                 # the dismissal is a change to the tail
-                if not d:
-                    _tmux_echo.pop(str(sid), None)
-                return a.get("_echo_text")
         return None
 
-    # ask picker — translate a webview action into pane keystrokes (AskDriver); current_ask SCRAPES the pane
-    # (the SDK answers its own callback / reads its stored ask instead).
     def on_ask(self, sid, kind, payload=None):
-        name = _name_of(sid) or str(sid)
-        fn = {"answer": _ask_answer, "focus": _ask_focus, "toggle": _ask_toggle, "submit": _ask_submit,
-              "custom": _ask_add_custom, "cancel": _ask_cancel, "text": _ask_send_text}.get(kind)
-        if not fn:
-            return False
-        if kind in ("submit", "cancel"):
-            _ask_thread(fn, name)
-        elif kind in ("custom", "text"):
-            _ask_thread(fn, name, str(payload))
-        else:                                             # answer / focus / toggle carry a target index
-            _ask_thread(fn, name, payload)
-        return True
+        return False
 
     def current_ask(self, sid):
-        name = _name_of(sid)
-        if not name:
-            return None
-        try:
-            return ap.parse_ask_pane(self.capture(name))
-        except Exception:
-            return None
-
-    # delivery — the deliver-time WAKE for a tmux session: live-inject a postal banner into the pane,
-    # preserving any draft (ported from the postal bus's _push/_inject so the bus never shells tmux).
-    def deliver(self, sid, text):
-        """Inject `text` (a postal banner) into the session's prompt and submit/queue it, preserving any draft.
-        True iff injected. False — leaving the mail for the maildir-drain backstop — when the pane isn't at a
-        live ❯ prompt, is stuck in copy-mode, or holds a draft we can't safely stash."""
-        name = _name_of(sid)
-        if not name:
-            return False
-        state = (self.live_sessions().get(str(sid)) or {}).get("state", "")
-        if state not in ("waiting", "idle", "working"):
-            return False                                  # permission / unknown / picker → drain later
-        # Inbox-socket leg first (Claude Code ≥ 2.1.224): one JSON line to the CLI's own inbox
-        # socket — wakes an idle session, queues mid-turn, and never touches the composer, so
-        # every pane hazard below (copy-mode, no ❯ prompt, drafts) doesn't exist on this path.
-        # Gated on @romp-inbound-accept, the tag bin/romp writes at the same launch that passes
-        # the CLI --settings '{"crossSessionInbound":"accept"}': without that setting the CLI's
-        # inbound gate can HOLD an unverifiable sender's message and silently expire it after
-        # ~5min, and the socket sends no ack — a held-then-dropped banner would read as delivered
-        # here. The tag is written by the exact event that makes holds impossible, so it can
-        # never flap; untagged (old launch, old CLI) sessions keep pane injection unchanged.
-        try:
-            if self.show_var(name, "@romp-inbound-accept").strip() == "1":
-                sock = _messaging_socket_for(jd._sdk_last_sid(sid) or str(sid))
-                if sock and _socket_deliver(sock, text):
-                    return True
-        except Exception:
-            pass                                          # any socket hiccup → the pane path below
-        if self.pane_in_mode(name):                       # scrolled up = copy-mode, where a paste's Enter is eaten
-            self.send_keys(name, "-X", "cancel")          # exit it (drop to the live prompt) or bail
-            if not _deliver_wait(lambda: not self.pane_in_mode(name), 1.0):
-                return False
-        cap = self.capture(name, colour=True)
-        if not _is_prompt_box(cap):
-            # not at a ❯ prompt. An IDLE session on a dismissible slash-command modal (/usage, /help, …) over
-            # the prompt: Esc once to close it + recheck (mail pulls it out instead of stranding). NOT when
-            # working (an AskUserQuestion/ExitPlanMode Esc would cancel), at a permission dialog (state already
-            # excluded), or on the resume picker (left as a needs-input signal).
-            if state in ("waiting", "idle") and not _picker_tier(cap):
-                self.send_keys(name, "Escape")
-                _deliver_wait(lambda: bool(_is_prompt_box(self.capture(name, colour=True))), 1.0)
-                cap = self.capture(name, colour=True)
-            if not _is_prompt_box(cap):
-                return False
-        has_draft = bool(_box_text(cap))
-        if has_draft and (state == "working" or _is_stashed(cap)):
-            return False                                  # can't clear safely → drain later
-        return self._inject(name, text, has_draft)
-
-    def _inject(self, name, text, has_draft):
-        """Type `text` into `name`'s prompt and submit it, preserving any draft via the Ctrl+S stash toggle.
-        False if the paste never lands (caller leaves the mail for the drain). A multi-line paste collapses to
-        a "[Pasted text +N lines]" placeholder, so "landed" = the box is no longer empty (not that the banner
-        text itself is visible)."""
-        if has_draft:
-            self.send_keys(name, "C-s")                   # stash the draft away
-            _deliver_wait(lambda: not _box_text(self.capture(name, colour=True)), 1.5)
-        self.set_buffer(text)
-        self.paste_buffer(name)                           # bracketed paste (no submit)
-        if not _deliver_wait(lambda: bool(_box_text(self.capture(name, colour=True))), 2.0):
-            if has_draft:
-                self.send_keys(name, "C-s")               # un-stash before bailing
-            return False
-        self.send_keys(name, "Enter")                     # submit (idle) / queue (working)
-        if has_draft:                                     # restore once the banner clears
-            if _deliver_wait(lambda: not _box_text(self.capture(name, colour=True)), 3.0):
-                self.send_keys(name, "C-s")
-            else:
-                sys.stderr.write("deliver: box did not clear for %s; draft left safely in stash\n" % name)
-        return True
-
-    # status-bar chrome — the tmux mail badge / peer "talking to" chips / top-line message indicator (ported
-    # from the postal bus so it never shells tmux). All of it paints @-vars and is a no-op for an SDK session
-    # with no tmux status bar: each entry point resolves sid→name and skips when there's none. Chips are
-    # stored in @-vars keyed by NAME, by their stable peer SID. (the user 2026-06-26.)
-    def _expire_badge(self, name, token):
-        time.sleep(self.BADGE_TTL)
-        try:
-            if self.show_var(name, "@romp-mail-token").strip() == token:   # still the same badge → clear it
-                for v in ("@romp-mail-from", "@romp-mail-bg", "@romp-mail-fg", "@romp-mail-token"):
-                    self.set_var(name, v, "")
-                self.refresh_client()
-        except Exception:
-            pass
-
-    def mail_badge(self, sid, from_name, from_id):
-        """Paint a sender-coloured "📬 from X" segment into the recipient's tmux status bar (no-op if the
-        recipient has no tmux session). Cleared by the client-session-changed hook, or after BADGE_TTL."""
-        name = _name_of(sid)
-        if not name:
-            return
-        bg, fg = _identity_of(from_id)
-        if not bg:
-            bg, fg = "#888888", "white"                   # unknown sender → neutral grey
-        token = str(int(time.time() * 1000))
-        try:
-            self.set_var(name, "@romp-mail-from", from_name or "?")
-            self.set_var(name, "@romp-mail-bg", bg)
-            self.set_var(name, "@romp-mail-fg", fg or "white")
-            self.set_var(name, "@romp-mail-token", token)
-            self.refresh_client()
-        except Exception:
-            sys.stderr.write("mail-badge %s: %s\n" % (name, traceback.format_exc()))
-            return
-        threading.Thread(target=self._expire_badge, args=(name, token), daemon=True).start()
-
-    def _peer_get(self, name):
-        """Current peer chips of a session as [(id, name, bg, fg)] (oldest first), keyed by the stable peer SID."""
-        fmt = "|".join("#{@romp-peer%d-id}\t#{@romp-peer%d}\t#{@romp-peer%dc}\t#{@romp-peer%df}" % (i, i, i, i)
-                       for i in range(1, self.PEER_CAP + 1))
-        res = []
-        for part in self.display(name, fmt).rstrip("\n").split("|"):
-            f = (part.split("\t") + ["", "", ""])[:4]
-            if f[1].strip():
-                res.append((f[0].strip(), f[1].strip(), f[2].strip(), f[3].strip()))
-        return res
-
-    def _peer_write(self, name, chips):
-        """Write the chip list (oldest→newest) into the slots + set status to 2 lines (or 1 when empty). One
-        batched tmux call."""
-        cmds = ["set", "-t", name, "status", "2" if chips else "on"]
-        for i in range(1, self.PEER_CAP + 1):
-            pid, nm, cl, fgc = chips[i - 1] if i <= len(chips) else ("", "", "", "")
-            cmds += [";", "set", "-t", name, "@romp-peer%d-id" % i, pid,
-                     ";", "set", "-t", name, "@romp-peer%d" % i, nm,
-                     ";", "set", "-t", name, "@romp-peer%dc" % i, cl,
-                     ";", "set", "-t", name, "@romp-peer%df" % i, fgc]
-        self.fire(cmds)
-
-    def _update_peers(self, name, peer_id, peer_name, color, fg):
-        """Record peer (by SID) as a correspondent of `name` — newest at the END, deduped by id, capped."""
-        if not name or not peer_id or not peer_name:
-            return
-        try:
-            chips = [t for t in self._peer_get(name) if t[0] != peer_id]
-            chips.append((peer_id, peer_name, color or "#888888", fg or "white"))
-            self._peer_write(name, chips[-self.PEER_CAP:])
-        except Exception:
-            sys.stderr.write("peers %s: %s\n" % (name, traceback.format_exc()))
-
-    def _msg_prefix(self, name, arrow, peer, bg, fg, body, mid):
-        """The top-line message indicator: a pill "<arrow> <peer>" in the PEER's colour + the message text.
-        @romp-msg-id-cur stashes the message id for the timeline daemon's Haiku swap-in. Cleared on the next
-        non-message prompt by the tmux-status hook."""
-        if not name or not peer:
-            return
-        s = " ".join((body or "").split())[:120]
-        try:
-            self.fire(["set", "-t", name, "@romp-msg-dir", arrow,
-                       ";", "set", "-t", name, "@romp-msg-peer", peer,
-                       ";", "set", "-t", name, "@romp-msg-bg", bg or "#888888",
-                       ";", "set", "-t", name, "@romp-msg-fg", fg or "white",
-                       ";", "set", "-t", name, "@romp-msg-summary", s,
-                       ";", "set", "-t", name, "@romp-msg-id-cur", mid or "",
-                       ";", "refresh-client", "-S"])
-        except Exception:
-            sys.stderr.write("msg-prefix %s: %s\n" % (name, traceback.format_exc()))
-
-    def deliver_chrome(self, recip_id, recip_name, sender_id, sender_name, body, mid):
-        """Both ends of a delivery learn of each other (peer chips) + get the top-line message indicator.
-        Keyed by sid; resolves each to its tmux name (no-op for an end with no tmux session)."""
-        rname, sname = _name_of(recip_id) or recip_name, _name_of(sender_id) or sender_name
-        sb, sf = _identity_of(sender_id)
-        rb, rf = _identity_of(recip_id)
-        self._update_peers(rname, sender_id, sname, sb, sf)
-        self._update_peers(sname, recip_id, rname, rb, rf)
-        self._msg_prefix(rname, "←", sname, sb, sf, body, mid)   # receiver: ← from sender (sender's colour)
-        self._msg_prefix(sname, "→", rname, rb, rf, body, mid)   # sender:   → to recipient (its colour)
-
-    def reconcile_peers(self):
-        """On every live TMUX session: drop chips whose peer SID is no longer live, refresh each surviving
-        chip's display name from that SID's CURRENT name, and drop a stale top-line "←/→ peer:" prefix. Peer
-        validity is checked against ALL live sessions (a chip may reference a live SDK peer); only tmux
-        sessions hold chips."""
-        name_of = {sid: _name_of(sid) for sid in Sessions.live()}    # all backends — a chip may point at an SDK peer
-        name_of = {sid: nm for sid, nm in name_of.items() if nm}
-        live_names = set(name_of.values())
-        for sid in self.live_sessions():                            # only tmux sessions have chips
-            name = _name_of(sid)
-            if not name:
-                continue
-            cur = self._peer_get(name)
-            new = [(pid, name_of[pid], c, f) for (pid, nm, c, f) in cur if pid in name_of]
-            mp = self.show_var(name, "@romp-msg-peer").strip()
-            drop_mp = bool(mp) and mp not in live_names
-            if new == cur and not drop_mp:
-                continue
-            try:
-                self._peer_write(name, new)
-                if drop_mp:
-                    self.fire(["set", "-t", name, "@romp-msg-dir", "", ";", "set", "-t", name, "@romp-msg-peer", "",
-                               ";", "set", "-t", name, "@romp-msg-id-cur", ""])
-            except Exception:
-                sys.stderr.write("reconcile %s: %s\n" % (name, traceback.format_exc()))
+        return None
 
 
-_TMUX = TmuxBackend()
+_UNOWNED = _UnownedBackend()
 
 
 def _unify_model_labels(rows):
@@ -17414,11 +16772,174 @@ def _unify_model_labels(rows):
             r["model"] = next(iter(v))
 
 
+_LIVE_READ_FAILS = {"count": 0, "last": {}}   # the liveness stand-down's tally: count since boot, and per backend the
+#                                               text of the failure said last (one stderr line per episode); /version
+#                                               carries the count as liveReadFailures
+_LIVE_LAST_ROWS = {}                           # backend name -> the rows its last SUCCESSFUL read produced
+_VANISHED_SAID = set()                         # sids whose reg vanished by hand while other regs stood: said once each
+
+
+def _sdk_reg_exists(sid):
+    """True / False for the SDK reg file's presence; None when the check itself cannot be made (an
+    unlistable sdk/ makes Path.exists RAISE EACCES rather than answer), which every death writer reads
+    as blindness, never as absence."""
+    try:
+        return (jd.SDKDIR / (str(sid) + ".json")).exists()
+    except OSError:
+        return None
+
+
+def _sdk_records_blind(rows=None):
+    """True when the SDK backend's registry DIRECTORY cannot be read right now while something says SDK
+    sessions exist. sdk_backend.list_regs answers [] for a MISSING sdk/ by design (a fresh root before the
+    first write) and serves its cache on a listing fault, so a registry renamed aside, unmounted, or a
+    state root moved under a running kernel reads to the kernel as "no session", the collapse decisions
+    (b) and (d) of the tmux backend's removal promise to stand down on. The kernel checks the directory
+    ITSELF (never the SDK module, which stays untouched): blind when sdk/ is missing, not a directory, or
+    cannot be listed, AND either the last successful SDK read had rows (_LIVE_LAST_ROWS) or names/ holds an
+    entry no Codex record explains. The boot pass creates sdk/ (_death_boot_pass), so a missing directory
+    after boot is the only missing that means blind; a fresh install with no sdk/ and no such names is
+    genuine emptiness. A directory that READS is never blind: a reg that vanished from it is judged PER SID
+    (a live thread is alive, recent life stands the death writers down, neither is an end), so no verdict
+    over the whole map can latch on one sid's reg (the earlier collapse rule did, review find 2026-09-11).
+    `rows` is accepted for the callers that hand the read over; the directory check needs none."""
+    d = jd.SDKDIR
+    try:
+        if d.is_dir():
+            os.listdir(d)
+            return False
+    except OSError:
+        pass                                         # unreadable: blind if anything below says sessions exist
+    if _LIVE_LAST_ROWS.get("sdk"):
+        return True
+    try:
+        names = [f.name for f in jd.NAMES.iterdir()]
+    except OSError:
+        return False
+    if not names:
+        return False
+    cx = _codex()
+    return any(cx is None or cx._session(sid) is None for sid in names)
+
+
+def _sdk_session_snapshot(sid):
+    """The live row of the SDK session `sid` this kernel runs right now — the session's own snapshot(), the
+    same shape live_sessions reports for it — or None when no live driver thread exists for it. Read
+    kernel-side from the backend's session table (the SDK module is not touched). The row a running
+    session keeps past its vanished reg (_backend_rows) is THIS, taken every tick, never a frozen copy of
+    the previous read: a copy frozen at 'permission' or 'retrying' would read needs-you or retrying for
+    the rest of the thread's life (review find, 2026-09-11)."""
+    be = _sdk()
+    try:
+        sess = getattr(be, "sessions", None) if be else None
+        s = sess.get(str(sid)) if isinstance(sess, dict) else None
+        if s is None or not s.thread.is_alive():
+            return None
+        snap = s.snapshot()
+        return snap if isinstance(snap, dict) else None
+    except Exception:
+        return None
+
+
+def _sdk_thread_alive(sid):
+    """Whether this kernel's SDK backend runs a live driver thread for `sid` right now, read kernel-side from
+    the backend's own session table (SdkBackend.sessions: sid -> a session whose .thread drives the CLI; the
+    SDK module is not touched). The one fact that outranks a missing reg: a reg deleted by hand under a
+    RUNNING session (a user mistake mid-turn) leaves the session alive, and no writer may call it ended."""
+    be = _sdk()
+    try:
+        sess = getattr(be, "sessions", None) if be else None
+        s = sess.get(str(sid)) if isinstance(sess, dict) else None
+        return bool(s is not None and s.thread.is_alive())
+    except Exception:
+        return False
+
+
+def _recent_life(sid, now):
+    """Whether `sid` shows life within discover's 48-hour horizon (jd.WINDOW), read from what the kernel
+    itself holds: the newest states row, or the session's lease file (a live SDK session holds one; a crash
+    leaves it). Never the goal store: the dead-wait block writes it, and a writer's own mark must not hold
+    its stand-down (the death writer's own idle row is kept out the same way: _death_stamp_due is asked
+    first). A names sid with recent life and no reg, whatever other regs the registry holds, is a registry
+    moved aside (a backup rename, a partial restore) or a reg deleted by hand, never dead history: a real
+    end leaves alive:False or a gone marker, never a vanished reg, so the death writers stand down on it,
+    per sid and counted, until its reg reappears or its life ages out of the horizon (review find,
+    2026-09-11). A sid with none — a terminal-era entry, a session long over — is dead history and stamps."""
+    floor = now - jd.WINDOW
+    row = _last_states_row(sid)
+    if row is not None and int(row.get("t") or 0) >= floor:
+        return True
+    try:
+        if (jd.STATE / "leases" / (sid + ".json")).stat().st_mtime >= floor:
+            return True
+    except OSError:
+        pass
+    return False
+
+
+def _live_stand_down(name, why):
+    """Count and, once per episode, say a liveness stand-down for backend `name` (_backend_rows)."""
+    _LIVE_READ_FAILS["count"] += 1
+    if _LIVE_READ_FAILS["last"].get(name) != why:
+        _LIVE_READ_FAILS["last"][name] = why
+        sys.stderr.write("liveness: the %s backend's read failed (%s) — serving its previous rows; %d "
+                         "failure(s) since boot\n" % (name, why, _LIVE_READ_FAILS["count"]))
+    return _LIVE_LAST_ROWS.get(name) or {}
+
+
+def _backend_rows(name, be):
+    """One backend's live_sessions() for Sessions.live(), with the stand-down (decision (b) of the tmux
+    backend's removal, 2026-09-11). A read that returns {} is authoritative: no session of that backend is
+    running. A read that RAISES, or whose registry directory has gone unreadable under it
+    (_sdk_records_blind), is not an empty world — the backend's registry is a local file, and an
+    unreadable one must neither blank every surface nor let the death sweep see every session depart at
+    once — so the backend's LAST successful rows are served for this read, the failure is counted
+    (_LIVE_READ_FAILS, on /version) and said once per episode on stderr. The other backend's rows stay
+    fresh: the stand-down is per backend, never a freeze of the whole map."""
+    try:
+        rows = be.live_sessions()
+    except Exception:
+        return _live_stand_down(name, (traceback.format_exc().strip().splitlines() or ["?"])[-1])
+    if name == "sdk":
+        if _sdk_records_blind(rows):
+            # the SDK module answers {} for a missing or unlistable registry directory (its own contract for a
+            # fresh root); with sessions on record that is a read that FAILED, not a world with no session
+            return _live_stand_down(name, "the registry directory %s is missing or cannot be read" % jd.SDKDIR)
+        # A reg the previous read listed that the directory no longer holds (the SDK backend never unlinks a
+        # reg; a real end leaves alive:False or a gone marker): a session whose driver thread runs is ALIVE
+        # and keeps its row (a reg deleted by hand under a running session); one with no thread leaves the
+        # map — its death writers decide by recent life, never by the missing file alone. Said once per sid.
+        for sid in list(_LIVE_LAST_ROWS.get("sdk") or {}):
+            if sid in rows or not (jd.NAMES / sid).is_file():
+                continue
+            present = _sdk_reg_exists(sid)
+            snap = _sdk_session_snapshot(sid)
+            if snap is not None:
+                # its reg vanished, or came back gutted (the backend's next routine write re-created a
+                # {sid, field} reg with no alive bit, which live_sessions skips): the driver runs, so alive,
+                # and its row is the session's OWN snapshot this tick, never the previous read's copy
+                rows = dict(rows); rows[sid] = snap
+                if ("alive", sid) not in _VANISHED_SAID:
+                    _VANISHED_SAID.add(("alive", sid))
+                    sys.stderr.write("liveness: the SDK reg of %s vanished while its session runs — kept alive\n" % sid)
+            elif present is not False:
+                continue                             # a reg that stands (alive False, or gutted) is the backend's own verdict
+            elif sid not in _VANISHED_SAID:
+                _VANISHED_SAID.add(sid)
+                sys.stderr.write("liveness: the SDK reg of %s vanished — the session leaves the live map; its death "
+                                 "writers decide by recent life\n" % sid)
+    _LIVE_LAST_ROWS[name] = rows
+    _LIVE_READ_FAILS["last"].pop(name, None)
+    return rows
+
+
 class Sessions:
     """The kernel's backend-agnostic session API. backend_for(sid) routes a per-sid op to whichever backend
-    drives the sid (the SDK backend if it owns sid, else the tmux backend); live() is the fleet-wide liveness
-    merge across both backends. Everything above the backend speaks THIS — never a backend object directly,
-    never tmux. (the user 2026-06-26: tmux + SDK behind one session API.)"""
+    drives the sid: the SDK backend if it owns sid, else the Codex backend if it does, else the unowned
+    route (_UNOWNED), whose every op is an explicit refusal — never a backend that "accepts anything"
+    (decision (c) of the tmux backend's removal, 2026-09-11). live() is the liveness merge across the
+    backends. Everything above the backend speaks THIS — never a backend object directly. (the user
+    2026-06-26: every backend behind one session API.)"""
     @staticmethod
     def backend_for(sid):
         be = _sdk()
@@ -17428,19 +16949,20 @@ class Sessions:
         cx = _codex()
         if cx is not None and cx.owns(sid):
             return cx                          # the Codex backend owns it (docs/codex.md)
-        return _TMUX
+        return _UNOWNED                        # nobody: every op refuses, by name (see _UnownedBackend)
 
     @staticmethod
     def live():
-        """Live lane metadata, MERGING tmux sessions with the SDK backend's live sessions so SDK-backed
-        (non-tmux) sessions appear alongside tmux ones everywhere the kernel reads liveness/state. tmux stays
-        authoritative for tmux sessions; the SDK backend reports its own (state/model/effort/mode, event-based).
-        A headless box with no tmux still surfaces SDK sessions. SDK rows have no context%/compaction% → None."""
-        out = _TMUX.live_sessions()
+        """Live lane metadata across the backends: the SDK backend's live sessions merged with the Codex
+        backend's, keyed by sid — the map every surface reads liveness and state from. Each backend reports
+        its own rows (state/model/effort/mode, event-based); a sid's absence is the session not running,
+        and an EMPTY map is authoritative (_alive_sessions). A backend whose read raises is stood down on
+        per backend, loudly and counted (_backend_rows). Every row carries "backend"."""
+        out = {}
         be = _sdk()
         if be:
             try:
-                for sid, st in be.live_sessions().items():
+                for sid, st in _backend_rows("sdk", be).items():
                     ctx = st.get("ctx")   # SDK context-fill % from usage (None until a turn lands / while dormant)
                     out[sid] = {"state": st.get("state", ""), "since": _num(str(st.get("since") or "")),
                                 "model": st.get("model", ""), "effort": st.get("effort", ""),
@@ -17480,7 +17002,7 @@ class Sessions:
         cx = _codex()
         if cx:
             try:
-                for sid, st in cx.live_sessions().items():
+                for sid, st in _backend_rows("codex", cx).items():
                     # the Codex backend reports the fields it truly has; everything Claude-only
                     # (fast, auth, compaction %) stays absent rather than faked (plan doc)
                     out[sid] = {"state": st.get("state", ""), "since": _num(str(st.get("since") or "")),
@@ -17498,8 +17020,8 @@ class Sessions:
         """The revision of the sid's live tail (the atoms live_atoms merges ahead of the transcript) as a
         value that changes on every change to the tail (an add, a prune, a settle mark, a dismiss, a flag
         write, a reworded echo) and only then, so the chat-build signature can key a tab on its tail
-        without hashing the atoms per cycle. The SDK and tmux backends count (SdkBackend.live_rev via
-        _touch_live; TmuxBackend.live_rev via _tmux_echo_bump). A backend with no counter (the Codex
+        without hashing the atoms per cycle. The SDK backend counts (SdkBackend.live_rev via
+        _touch_live). A backend with no counter (the Codex
         backend, whose live_atoms builds fresh dicts from a short per-session list; a test fake) answers
         with the tail's serialized value instead: exact, and small for the list-shaped tails those keep.
         `be`: the owning backend when the caller already resolved it (the chat-build signature)."""
@@ -17512,7 +17034,7 @@ class Sessions:
 
     # coordination — the working-note ("what I'm working on" ownership claim list_agents shows) lives in ONE
     # backend-agnostic kernel store (working/<sid> files), so both backends publish it and the postal bus
-    # reads/writes it through the kernel, never tmux. (the user 2026-06-26.)
+    # reads/writes it through the kernel, never a backend. (the user 2026-06-26.)
     @staticmethod
     def working_note(sid):
         p = _working_note_path(sid)
@@ -17526,20 +17048,9 @@ class Sessions:
         _set_working_note(sid, text)
 
 
-def _tmux_name_of(sid):
-    """The LIVE tmux session NAME for a romp sid (keyed by @romp-session-id), or None when the session
-    isn't running. Needed to target `tmux rename-session`, since tmux is keyed by name, not by sid."""
-    for line in _TMUX.list_lines(_TMUX.NAME_FMT):
-        p = line.split("\t")
-        if len(p) == 2 and p[0] == sid:
-            return p[1]
-    return None
-
-
 def _set_name(sid, name):
     """Rewrite a session's names-registry DISPLAY name (1st tab field), preserving its dir + identity
-    color. Used for a DEAD (read-only) tab, which has no tmux session for the rename hook to sync, and
-    right after a LIVE tmux rename (so the live snapshot answers the new name before the claim frees).
+    color. Used for a DEAD (read-only) tab, which has no running backend to carry the rename.
     Returns True once the file is published; a names/ entry that cannot be read (absent, or not text)
     or a publish that fails RAISES, the way _atomic_write already does — the old silent `return` on an
     unreadable entry, and the unchecked write, let _rename_session answer the accepted name over a
@@ -17557,64 +17068,36 @@ def _set_name(sid, name):
 
 
 def _rename_session(sid, name):
-    """Apply a renameSession from the chat tab strip (the browser's host is THIS kernel — VS Code's host
-    is the extension, so this path only existed there before; the browser's rename silently no-op'd).
-    A LIVE session is renamed in tmux, and the names file is rewritten HERE, synchronously, as well
-    (2026-09-08): the after-rename-session hook (`romp _renamed`) resyncs it and Claude's pill later,
-    detached, and the rename door releases its name claim the moment this returns — between that
-    release and the hook's write the live snapshot still lacked the new name, so a second claimant
-    could create a session under it. The hook's later write is idempotent. A rename tmux refused is
-    reported (None) and publishes nothing, where it used to read as renamed. A DEAD (read-only) tab
-    has no tmux session, so only the names file is written — a names file that could not be rewritten
-    (ENOSPC, EROFS, a permission fault) RAISES through the backend, so the doors say the errno, the
-    same words the SDK backend's failure gets — a dead Codex tab's registry/names fault included; only
-    an entry that does not exist (or a Codex row the backend no longer knows) is reported as None
-    (nothing known to rename — the doors' "is that session known" question is then the right one).
-    Both used to read as renamed with nothing written. When tmux DID rename but the names file could
-    not follow, every surface still reads the old name, so neither "renamed" nor "did not take" is
-    true: a _RenameOutcome tells the asker exactly that, with the cause, and the log claims the
-    after-rename hook's later rewrite only when there is an entry for it to rewrite (bin/romp's hook
-    returns early on an absent one). The names-file change is what _producer_sig watches, so the new
-    name re-pushes to every surface. Returns the accepted name, or None if rejected (bad chars, tmux
-    declined, or no entry to rewrite). Split out so it's unit-testable. (the user 2026-06-16)"""
+    """Apply a renameSession for a session no running backend owns — a DEAD (read-only) tab (the running
+    backends rename their own sessions: SdkBackend.rename, CodexBackend.rename). The names file is the
+    record every surface reads, so it is rewritten HERE, synchronously; a names file that could not be
+    rewritten (ENOSPC, EROFS, a permission fault) RAISES through the backend, so the doors say the errno,
+    the same words the SDK backend's failure gets — a dead Codex tab's registry/names fault included; only
+    an entry that does not exist (or a Codex row the backend no longer knows) is reported as None (nothing
+    known to rename — the doors' "is that session known" question is then the right one). Both used to
+    read as renamed with nothing written (2026-09-08). The names-file change is what _producer_sig watches,
+    so the new name re-pushes to every surface. Returns the accepted name, or None if rejected (bad chars,
+    or no entry to rewrite). Split out so it's unit-testable. (the user 2026-06-16)"""
     name = (name or "").strip()
     if not NAME_RE.match(name):
         return None
-    live = _tmux_name_of(sid)
-    if live:
-        if live != name and not _TMUX.rename_by_name(live, name):
-            return None                                # tmux declined: nothing renamed, nothing published
-        try:
-            _set_name(sid, name)                       # publish now — the live snapshot answers before the claim frees
-        except Exception as e:
-            why = _errno_text(e) if isinstance(e, OSError) else (str(e) or type(e).__name__)
-            absent = isinstance(e, FileNotFoundError)    # no entry: nothing for the hook to rewrite, no old name on file
-            sys.stderr.write("rename '%s' → '%s': tmux renamed the session but names/%s could not be rewritten "
-                             "(%s)%s\n" % (live, name, sid, why,
-                                           "; there is no entry for the after-rename hook to rewrite either"
-                                           if absent else "; the after-rename hook rewrites it later"))
-            raise _RenameOutcome(("the terminal session was renamed, but there is no name on file for it here "
-                                  "to update (%s)" if absent else
-                                  "the terminal session was renamed, but its name on file could not be updated "
-                                  "(%s) — it keeps its old name here until that write lands") % why) from e
-    else:
-        cx = _codex()
-        if cx is not None and cx._session(sid) is not None:
-            # a DEAD Codex tab (owns() is False, so the doors route it here): the Codex registry's durable
-            # name first (docs/codex.md), so a revive wears the new name. A FAULT — its registry save or
-            # its names write; the backend compensates and re-raises — propagates like every other
-            # backend's, so the asker hears the errno; the old catch mapped it to None and so to "is that
-            # session known", a false cause. False is the one "nothing to rename" answer: the row was
-            # there a moment ago and the backend no longer knows it.
-            if not cx.rename(sid, name):
-                sys.stderr.write("codex rename '%s': the Codex backend no longer knows %s — nothing renamed\n"
-                                 % (name, sid))
-                return None
-        try:
-            _set_name(sid, name)                       # dead tab → names file directly; a FAULT raises through
-        except FileNotFoundError:
-            sys.stderr.write("rename '%s': no names/%s entry to rewrite — nothing renamed\n" % (name, sid))
-            return None                                # nothing known to rename: the doors ask if the session is known
+    cx = _codex()
+    if cx is not None and cx._session(sid) is not None:
+        # a DEAD Codex tab (owns() is False, so the doors route it here): the Codex registry's durable
+        # name first (docs/codex.md), so a revive wears the new name. A FAULT — its registry save or
+        # its names write; the backend compensates and re-raises — propagates like every other
+        # backend's, so the asker hears the errno; the old catch mapped it to None and so to "is that
+        # session known", a false cause. False is the one "nothing to rename" answer: the row was
+        # there a moment ago and the backend no longer knows it.
+        if not cx.rename(sid, name):
+            sys.stderr.write("codex rename '%s': the Codex backend no longer knows %s — nothing renamed\n"
+                             % (name, sid))
+            return None
+    try:
+        _set_name(sid, name)                       # dead tab → names file directly; a FAULT raises through
+    except FileNotFoundError:
+        sys.stderr.write("rename '%s': no names/%s entry to rewrite — nothing renamed\n" % (name, sid))
+        return None                                # nothing known to rename: the doors ask if the session is known
     return name
 
 
@@ -17623,22 +17106,23 @@ def _num(x):
     return int(x) if x.lstrip("-").isdigit() else None
 
 
-# One liveness snapshot per PUSHER CYCLE (the 2026-08-10 CPU fix). Every Sessions.live() read forks
-# `tmux list-sessions` and sweeps the SDK reg registry — and the reads hide at every depth of the
-# build stack (_push, the tick jobs, _bg_live_norm, _compacting_now, build_feed's per-session gate…),
-# so one cycle was paying DOZENS of forks+sweeps: profiling attributed the pusher as the kernel's
+# One liveness snapshot per PUSHER CYCLE (the 2026-08-10 CPU fix). Every Sessions.live() read sweeps the
+# SDK reg registry (and, until 2026-09-11, forked `tmux list-sessions`) — and the reads hide at every depth
+# of the build stack (_push, the tick jobs, _bg_live_norm, _compacting_now, build_feed's per-session gate…),
+# so one cycle was paying DOZENS of sweeps: profiling attributed the pusher as the kernel's
 # hottest thread, ~50-90% of a core sustained. The scope is the EVENT (one cycle), not a TTL, and it
 # is THREAD-CONFINED: only the thread that opened the scope (the pusher, for exactly one cycle) reads
-# its snapshot; a WS handler or backend thread calling _tmux_sessions() concurrently still gets a
+# its snapshot; a WS handler or backend thread calling _live_map() concurrently still gets a
 # fresh read. Within a cycle the jobs always saw a snapshot aged by whatever ran before them — the
 # scope makes that one honest snapshot instead of dozens of marginally-different ones.
 _live_scope = threading.local()   # .snapshot = the current cycle's liveness map, else absent
 
 
-def _tmux_sessions():
-    """Live lane metadata across both backends — the fleet-wide liveness merge. Thin delegator kept for its
-    ~20 call sites; the impl is Sessions.live() (tmux @claude-* vars + the SDK backend's live_sessions).
-    Inside a pusher cycle (this thread's _live_scope), the cycle's one snapshot is served instead."""
+def _live_map():
+    """Live lane metadata across the backends — the liveness merge every read takes, keyed by sid. Thin
+    delegator kept for its call sites; the impl is Sessions.live() (the SDK backend's live_sessions merged
+    with the Codex backend's). Inside a pusher cycle (this thread's _live_scope), the cycle's one snapshot
+    is served instead. (Named _tmux_sessions until the tmux backend's removal, 2026-09-11.)"""
     snap = getattr(_live_scope, "snapshot", None)
     return snap if snap is not None else Sessions.live()
 
@@ -20473,15 +19957,11 @@ def _pr_watch_deliver(sid, text):
     (_send_or_park's None: be.send returned False for a session it no longer holds) or raised. The
     watch ticks keep their row on False and retry; the PR tick classifies the refusal from the
     backend's own record (_pr_watch_refusal), so it never retries forever against a session that
-    has ended. A uuid-shaped sid is never handed to tmux, whichever way it got there (the record
-    read said nothing, or a reader's fault left it unread): SDK and Codex sids are uuids and tmux
-    sids are names, so a uuid the router disowns is a session no record-holding backend holds — tmux
-    would "accept" the notice for a shell that never existed. It reads as refused instead, and the
-    caller classifies it from the records."""
+    has ended. A sid no backend owns routes to the unowned backend, whose send REFUSES by name (the
+    tmux backend, which "accepted" a notice for a shell that never existed, left romp 2026-09-11), so
+    it reads as refused here and the caller classifies it from the records."""
     try:
         be = Sessions.backend_for(sid)
-        if be is _TMUX and _PR_WATCH_UUID_RE.fullmatch(str(sid)):
-            return False
         return _send_or_park(be, sid, text) is not None
     except Exception:
         return False
@@ -20493,11 +19973,11 @@ _PR_WATCH_UNREAD = "unread"      # _pr_watch_end_marker: a record reader raised 
 
 def _pr_watch_record_backends():
     """The backends that keep a DURABLE record of their sessions — the SDK backend (regs on disk) and
-    the Codex backend (its registry and dead marks) — whichever are built. tmux keeps none: a tmux
-    session's identity is its NAME, held by tmux itself. Read directly, never through
-    Sessions.backend_for: ownership routes by owns(), and owns() is False for exactly the records that
-    decide a landing mail's fate — an SDK reg that is absent or unreadable, a Codex session marked
-    dead — so those sids fall to tmux, whose send accepts anything."""
+    the Codex backend (its registry and dead marks) — whichever are built (the tmux backend kept none:
+    a session's identity was its NAME, held by tmux itself; it left 2026-09-11). Read directly, never
+    through Sessions.backend_for: ownership routes by owns(), and owns() is False for exactly the records
+    that decide a landing mail's fate — an SDK reg that is absent or unreadable, a Codex session marked
+    dead — so those sids route to the unowned backend, which refuses and holds no record."""
     return [b for b in (_sdk(), _codex()) if b]
 
 
@@ -20505,13 +19985,15 @@ def _pr_watch_end_marker(sid):
     """What the durable records say about `sid`, independent of ownership. True from the first
     backend whose record is an explicit end marker (an SDK reg with alive=false, a Codex session
     marked dead — both written at session end); False when a record says the session stands; None
-    when no backend holds a record (no reg file at all, or a name-shaped tmux sid), a durable fact:
+    when no backend holds a record (no reg file at all, or a name-shaped sid from before the tmux
+    backend's removal), a durable fact:
     the SDK backend never unlinks a reg, and a reg that exists but would not read is RAISED by its
     reader, never answered None (review find, 2026-09-08);
     _PR_WATCH_UNREAD when a reader raised and no other backend answered — a reader's fault can
     neither end nor clear a watch. A durable end marker IS authority, where a liveness probe is not,
     so the tick reads it BEFORE any send: a notice addressed to a uuid no backend holds live must
-    never fall to tmux and read as accepted."""
+    never read as accepted (until 2026-09-11 it fell to the tmux backend, whose send took anything; the
+    unowned route refuses, and the records still decide first)."""
     sid = str(sid)
     raised = False
     for be in _pr_watch_record_backends():
@@ -20530,8 +20012,8 @@ def _pr_watch_end_marker(sid):
 
 def _pr_watch_refusal(r, sid):
     """Classify a send that `sid`'s backend just REFUSED by return: ("ended", why) or ("wait", why),
-    from the durable records (_pr_watch_end_marker), never from a liveness probe: a slow `tmux
-    list-sessions` or a swallowed live_sessions error reads as an EMPTY live set, and an empty set
+    from the durable records (_pr_watch_end_marker), never from a liveness probe: a slow or failed
+    live_sessions() read can read as an EMPTY live set, and an empty set
     must never end a watch or divert its mail. An explicit end marker → ended. A record that says
     alive → wait (the refusal was something else). No record → ended, on the first read: an absent
     reg is a durable fact (the backend never unlinks one), and the three-check count that once stood
@@ -20551,13 +20033,14 @@ def _pr_watch_refusal(r, sid):
 
 def _pr_watch_contact_sid(target):
     """The escalation contact's sid, or "" when `target` cannot be resolved this tick. A sid is taken
-    as-is (a uuid, or a tmux session name the names registry knows). A NAME resolves first through
+    as-is (a uuid, or a name-shaped sid from before the tmux backend's removal that the names registry
+    knows). A NAME resolves first through
     _sid_of — which for an SDK/Codex session reads the LIVE SET, the probe this module distrusts —
     and, when that hands the name back unchanged, through the durable record the SDK backend keeps:
     its regs carry the session's name (SdkBackend.sid_for_name: exactly one alive reg with that name,
     else nothing). Unresolved is "": the caller WAITS and says so once, and never counts it toward
     ending — a name the live set failed to list is not a session that ended, and a send to a bare
-    name would fall to tmux, whose send accepts anything."""
+    name reaches no backend (until 2026-09-11 it fell to the tmux backend, whose send took anything)."""
     try:
         tsid = _sid_of(target)
     except Exception:
@@ -20604,15 +20087,18 @@ def _pr_watch_deliver_stamped(r, verdict, detail, now=None):
     Then the durable records (_pr_watch_end_marker, every record-holding backend, ownership aside):
     an explicit end marker means the registrant has ENDED — no send, straight to the contact leg.
     No record at all splits on the sid's SHAPE, a structural fact of the backends: SDK and Codex
-    sids are uuids, tmux sids are session NAMES. A uuid nobody holds is not sent — routed to tmux it
-    would be "accepted" by a shell that never existed — and has ENDED, decided on the first read: no
+    sids are uuids; the tmux backend's sids were session NAMES, and its registrants are still in the
+    names/ registry. A uuid nobody holds is not sent — routed to the tmux backend it was "accepted" by a
+    shell that never existed; the unowned route refuses it — and has ENDED, decided on the first read: no
     reg file is a durable fact (the SDK backend never unlinks one), and a reg that exists but would
     not read is a reader's fault its reader RAISES, so the three-check count that once stood here
     approximated an event the readers now report (review find, 2026-09-08). A name-shaped sid with no
-    record is a tmux registrant and is sent as ever; tmux's send never refuses (a missing session is
-    reported only on stderr, in its own thread), so a dead tmux registrant's notice still reads as
-    accepted — the gap that stood before this change stands, stated, and a liveness probe is not its
-    fix. Otherwise the SEND goes first — the backend's own send path handles what no live set can show
+    record is a registrant from the tmux backend's time and is sent as ever; that backend's send never
+    refused (a missing session was reported only on stderr, in its own thread), so a dead registrant's
+    notice read as accepted — the gap that stood before this change stands, stated, and a liveness probe
+    is not its fix; since the backend's removal (2026-09-11) the unowned route refuses such a send, so
+    it reads as refused and is classified from the records like any other. Otherwise the SEND goes first
+    — the backend's own send path handles what no live set can show
     (a dormant reg it wakes, a comment thread that SdkBackend.live_sessions never lists) — and only a
     send REFUSED by return is classified (_pr_watch_refusal): "wait" keeps the stamp and the row for
     the next tick, said once per reason on the Log, with no repeat warning (a known failure, nothing
@@ -20626,7 +20112,7 @@ def _pr_watch_deliver_stamped(r, verdict, detail, now=None):
     name is waited on, said once, with the awaiting box showing the mail pending (a name the live set
     failed to list is not a session that ended), and the wait is BOUNDED (review find, 2026-09-08): a
     name that never resolves (mistyped, or a box default naming a session nobody starts again) kept
-    the row armed forever, one tmux fork per tick with the once-said Log row its only trace. The wait
+    the row armed forever, one liveness read per tick with the once-said Log row its only trace. The wait
     starts at the first unresolved tick (runtime, like _fails: a restart re-arms it, which only
     lengthens the wait) and ends at PR_WATCH_ESCALATE_S, the bound this module already keeps for
     waiting on the named contact. Only when the registrant has ended AND no contact can take it (none
@@ -22557,7 +22043,7 @@ def _recent_restart_audit(window=90, now=None, started=None):
         stop that noted before it killed) and only from inside the window and this kernel's lifetime, and
         one aimed at another kernel pid is not about us;
       - a row with no action is skipped, never taken as the answer. The CLI's `romp refresh` writes its
-        caller-attribution row with no action field ({t, ppid, parent, sid, name, tty, tmux}), and taking
+        caller-attribution row with no action field ({t, ppid, parent, sid, name, tty}), and taking
         that row's empty label as the verdict would file every deploy as an unrequested signal; the
         manager's note written after it is what names a refresh (a writer that does carry an action names
         its request directly). The exception is an unlabeled `when: quiet` row (`romp refresh --quiet`):
@@ -23061,20 +22547,20 @@ def _tunnel_supervisor():
 
 
 def _session_rows():
-    """Every LIVE romp session (tmux + SDK) with the fields external tools need: id (sid), name, claude-state,
+    """Every LIVE romp session (every backend) with the fields external tools need: id (sid), name, claude-state,
     working dir, identity bg/fg, the set_working ownership note, and which backend drives it. Served at GET
     /sessions so a plugin (the Obsidian Cmd+M picker / diff chips) AND the postal bus read sessions through the
-    kernel WITHOUT shelling tmux — the kernel owns the backend query: Sessions.live() enumerates BOTH backends
-    (TmuxBackend for tmux liveness, the SDK registry for SDK sessions). Replaces the tmux-only
-    _tmux_session_list (the user 2026-06-26: tmux + SDK behind one session API). Best-effort [] if no backend
-    responds. NB: 0-arg, distinct from the picker's _session_list(now, tmux) — they once collided (the user
+    kernel WITHOUT asking a backend — the kernel owns the backend query: Sessions.live() enumerates every backend
+    (the SDK registry for SDK sessions, the Codex registry for Codex ones). Replaced the tmux-only
+    _tmux_session_list (the user 2026-06-26: every backend behind one session API). Best-effort [] if no backend
+    responds. NB: 0-arg, distinct from the picker's _session_list(now, live_map) — they once collided (the user
     2026-06-22); keep the names distinct."""
-    notes = _working_notes()                                # {sid: working-note} (tmux @romp-working; P3 adds SDK)
+    notes = _working_notes()                                # {sid: working-note} (the kernel-side store)
     # ONE transcript-path sweep for the WHOLE listing: _path_of per row re-ran discover()'s
     # fingerprint validity check (3 stats × every names entry + a stat per discovered transcript)
     # for every live session — ~30 rows × ~280 syscalls a request, measured at ~71% of this route's
     # handler time on a loaded kernel (py-spy 2026-08-31, the /sessions p90-3.3s complaint). Same
-    # hoist idiom as the pusher cycle's _tmux_sessions() snapshot (2026-08-10) and the tm= param.
+    # hoist idiom as the pusher cycle's _live_map() snapshot (2026-08-10) and the tm= param.
     try:
         paths = {s["sid"]: s["path"] for s in _sessions(time.time())}
     except Exception:
@@ -23200,317 +22686,121 @@ def _thread_name_refusal(nm, names, kind="create"):
 # on an older CLI has no registry row, so callers fall through to pane injection.
 
 
-def _claude_sessions_dir():
-    return os.environ.get("ROMP_CLAUDE_SESSIONS_DIR") or os.path.expanduser("~/.claude/sessions")
-
-
-def _messaging_socket_for(fsid):
-    """The inbox-socket path registered for CLI session id `fsid` (a romp row's lastSid), or None.
-    Rows are per-PID: a dead pid's row can linger (the CLI prunes lazily), and a resumed conversation
-    leaves the old pid's row behind with the same session id — so prefer a row whose pid is alive,
-    newest first. The real liveness proof stays the connect in _socket_deliver."""
-    fsid = str(fsid or "")
-    if not fsid:
-        return None
-    base = _claude_sessions_dir()
-    try:
-        names = os.listdir(base)
-    except OSError:
-        return None
-    rows = []
-    for n in names:
-        if not n.endswith(".json"):
-            continue
-        try:
-            with open(os.path.join(base, n)) as f:
-                d = json.load(f)
-        except Exception:
-            continue                                      # malformed/foreign row → skip
-        if not isinstance(d, dict) or d.get("sessionId") != fsid:
-            continue
-        sock = d.get("messagingSocketPath")
-        if isinstance(sock, str) and sock:
-            rows.append(d)
-    if not rows:
-        return None
-    rows.sort(key=lambda d: (bool(_pid_alive(d["pid"])) if isinstance(d.get("pid"), int) else False,
-                             d.get("startedAt") or 0), reverse=True)
-    return rows[0]["messagingSocketPath"]
-
-
-def _socket_deliver(sock_path, text, timeout=3.0):
-    """Post one user message down a session's inbox socket; True iff the write completed. Fire-and-
-    forget by design — the CLI acks nothing for a plain send. Returning True is still an honest
-    "injected": the caller only takes this path for sessions launched with the inbound-accept
-    setting (see TmuxBackend.deliver), where an accepted write cannot be held or dropped."""
-    try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        try:
-            s.settimeout(timeout)
-            s.connect(sock_path)
-            s.sendall((json.dumps({"type": "user", "message": {"role": "user", "content": str(text)}})
-                       + "\n").encode("utf-8"))
-        finally:
-            s.close()
-        return True
-    except OSError:
-        return False
-
-
-# ── deliver-time prompt-box parsing (ported from the postal bus; PURE — operate on a captured pane) ──
-# Relied-on Claude Code TUI invariants: the input box sits between the last two ─── rules; the live prompt
-# carries a ❯ glyph; a ghost auto-suggestion is rendered DIM (\e[2m) while a real draft is not; a "› stashed"
-# indicator means a draft is already stashed; after Enter the box clears asynchronously.
-PROMPT_GLYPH = "❯"
-_SGR_RE = re.compile(r"\x1b\[[0-9;]*m")                      # any SGR colour code
-_DIM_RE = re.compile(r"\x1b\[2m.*?(?:\x1b\[(?:0|22)m|$)")    # a dim (ghost-suggestion) span
-_RULE_RE = re.compile("─{10,}")                              # the box's ───… borders
-_PICKER_STRICT = ("resume from summary", "resume full session as-is")   # Claude's resume-picker option labels
-_PICKER_LOOSE = re.compile(r"summ", re.I)                   # the picker is the only pre-prompt screen with a "summary"
-
-
-def _deliver_wait(pred, timeout, interval=0.12):
-    waited = 0.0
-    while waited < timeout:
-        if pred():
-            return True
-        time.sleep(interval)
-        waited += interval
-    return pred()
-
-
-def _box_region(cap):
-    """The raw lines of the prompt box (between its last two ─── rules), or None if it can't be located — in
-    which case the caller must NOT inject (it can't tell whether a draft is present)."""
-    lines = cap.split("\n")
-    rules = [i for i, l in enumerate(lines) if _RULE_RE.search(l)]
-    if len(rules) < 2:
-        return None
-    return lines[rules[-2] + 1:rules[-1]]
-
-
-def _is_prompt_box(cap):
-    """True ONLY when the box between the last two rules is the live Claude INPUT prompt (the ❯ glyph) — not a
-    resume/loading screen or the session picker, which also draw rule-bordered boxes but carry no ❯ (injecting
-    into those would consume the mail into a dead screen and lose it)."""
-    region = _box_region(cap)
-    return bool(region) and any(PROMPT_GLYPH in l for l in region)
-
-
-def _picker_tier(cap):
-    """Which tier matched Claude's resume picker, or None (STRICT exact labels beats the LOOSE /summ/ fallback)."""
-    txt = _SGR_RE.sub("", cap or "")
-    if any(s in txt.lower() for s in _PICKER_STRICT):
-        return "strict"
-    return "loose" if _PICKER_LOOSE.search(txt) else None
-
-
-def _box_text(cap):
-    """The prompt-box contents with ghost-suggestions + colour codes stripped — '' = empty (ready to inject)."""
-    region = _box_region(cap)
-    if region is None:
-        return ""
-    out = []
-    for raw in region:
-        seg = raw.split(PROMPT_GLYPH, 1)[1] if PROMPT_GLYPH in raw else raw
-        seg = _DIM_RE.sub("", seg)        # drop dim ghost-suggestion spans
-        seg = _SGR_RE.sub("", seg)        # drop remaining colour codes
-        out.append(seg)
-    return "\n".join(out).strip()
-
-
-def _is_stashed(cap):
-    return "stashed" in _SGR_RE.sub("", cap)
-
-
-_NORMAL_STATES = ("waiting", "working", "idle", "permission")          # any real @claude-state → past the picker
-_PICKER_GRACE = int(os.environ.get("ROMP_POSTAL_PICKER_GRACE", "10"))  # secs to watch a revive for the resume picker
-
-
-def _picker_check(sid):
-    """Surface a REVIVED session stuck on Claude's resume picker (it blocks before the session starts, so NO
-    Claude hook fires while it's up). Poll up to _PICKER_GRACE: if the session reaches a normal @claude-state
-    or a real ❯ prompt, it's fine (past/no picker); if the picker is visibly up (no ❯ + a 'summary' option),
-    set @claude-state=picker and append a 'picker' state event so the feed shows it as NEEDS INPUT. We do NOT
-    answer the picker (the user clears it; the normal hooks overwrite the state next transition). Ported from
-    the postal bus's cli_picker_check so the bus never shells tmux. (the user 2026-06-26.)"""
-    name = _name_of(sid)
-    if not name:
-        return
-    deadline = time.time() + _PICKER_GRACE
-    while time.time() < deadline:
-        if (_TMUX.live_sessions().get(str(sid)) or {}).get("state", "") in _NORMAL_STATES:
-            return                                            # real state reached → past/no picker
-        cap = _TMUX.capture(name, colour=True)
-        if _is_prompt_box(cap):
-            return                                            # real prompt up → fine
-        tier = _picker_tier(cap)
-        if tier:                                              # confirmed blocking picker → surface it
-            _TMUX.record_state(name, "picker")
-            try:
-                sdir = jd.STATE / "states"
-                sdir.mkdir(parents=True, exist_ok=True)
-                with open(sdir / (str(sid) + ".jsonl"), "a") as fh:
-                    # tier is additive to tmux-status.sh's {t,state} schema (consumers ignore it); lets us
-                    # spot CLI label drift (only-loose-ever-fires).
-                    fh.write(json.dumps({"t": int(time.time()), "state": "picker", "tier": tier}) + "\n")
-            except Exception:
-                sys.stderr.write("picker-check log failed for %s: %s\n" % (name, traceback.format_exc()))
-            return
-        time.sleep(0.5)
-
-
-# Ctrl+U kills ONE line of the CLI's input box, and a multi-line box takes TWO presses per line (the text,
-# then the emptied line itself), so the clear below presses until the box READS empty. Bounded so a box that
-# will not empty — a keystroke the pane never applies, a CLI that stopped honoring the binding — ends as a
-# refusal instead of a spin: 40 presses covers a 20-line draft, far past anything typed at a prompt.
-_CLEAR_KILL_PRESSES = 40
-# …and the outer bound is not the one that normally fires. A press that moves nothing means the binding
-# isn't landing, and pressing on cannot fix that — so two consecutive no-change presses end it. Two, not
-# one, because a single slow repaint is not evidence of a dead binding.
-_CLEAR_UNCHANGED_GIVE_UP = 2
-
-
-def _clear_pane_input(name):
-    """Empty the pane's input box, returning True ONLY when it is provably empty. The romp composer and the
-    tmux pane must agree on the input: when a turn is INTERRUPTED (Esc), Claude Code RESTORES the in-progress
-    prompt into the input — invisible to the web composer — and a paste APPENDS, so Stop → type-and-send in
-    the composer concatenated the recalled prompt and the new message into ONE submission (the user
-    2026-06-19). Clearing first makes a paste REPLACE, never append.
-
-    This used to send Ctrl+A + Backspace, on the understanding that Ctrl+A selects the whole input and
-    Backspace deletes the selection. Measured against Claude Code 2.1.223 (a scratch CLI in tmux, 2026-08-26)
-    that is NOT what happens: Ctrl+A does not select, and the Backspace deletes exactly ONE character — so
-    for two months the clear was a silent no-op on any non-empty input, and every composer send into a pane
-    holding text was concatenated onto it. The damage is worse than a cosmetic one: the joined submission
-    carries BOTH texts, so the delivered message never matches what romp echoed, and the CLI answers a
-    prompt the user never wrote. Ctrl+U measurably empties the box (the killed text stays in the CLI's own
-    kill ring — Ctrl+Y — so this destroys nothing the human cannot get back).
-
-    Verified EVENT-BASED per press (the box REGION changing), never a fixed sleep; an empty box costs one
-    capture and zero keystrokes, so the ordinary send is cheaper than it was before. False when the box
-    cannot be READ at all (no locatable prompt box) — the caller must not paste on a maybe — and false
-    once presses stop moving the box, which is the shape the Ctrl+A regression itself had.
-
-    The change detector compares the RAW box region (lines, count included), never the stripped text: a
-    press that pops an emptied or blank LINE moves the region but not the text, so the stripped compare
-    read two structural pops in a row — any draft holding a blank line — as a dead binding and refused a
-    perfectly clearable box (PR-741 review, 2026-08-27). Raw-region compares also return the instant a
-    pop lands instead of burning the full wait on an 'unchanged' press, so a multi-line clear is fast
-    again."""
-    if not name:
-        return False
-    unchanged = 0
-    for _ in range(_CLEAR_KILL_PRESSES):
-        cap = _TMUX.capture(name, colour=True)
-        region = _box_region(cap)
-        if region is None:
-            return False                                            # can't see the box → can't claim it's clear
-        if not _box_text(cap):
-            return True
-        held = list(region)
-        _TMUX.send_keys(name, "C-u")
-        if _deliver_wait(lambda: _box_region(_TMUX.capture(name, colour=True)) != held, 1.0):
-            unchanged = 0
-        else:
-            unchanged += 1
-            if unchanged >= _CLEAR_UNCHANGED_GIVE_UP:
-                return False
-    return False
-
-
-# One lock per pane serializing the read-decide-keystroke sequences: _interrupt's post-Esc wipe and
-# _tmux_send's clear+paste+Enter ran as unserialized daemon threads on the same pane, so an interrupt's
-# kill loop still draining a restored prompt could read a send's JUST-PASTED message as leftover and
-# C-u it away inside the pre-Enter gap — Enter then submitted an empty box (PR-741 review, 2026-08-27:
-# Stop, then Send within the drain window). Whichever sequence acquires second now rules on the pane's
-# true state instead of a snapshot the other thread is mid-way through changing. Never pruned — a lock
-# is a few bytes and the key space is the live session list.
-_pane_io_locks = {}
-_pane_io_locks_guard = threading.Lock()
-
-
-def _pane_io_lock(name):
-    with _pane_io_locks_guard:
-        return _pane_io_locks.setdefault(str(name), threading.Lock())
-
-
-def _interrupt(name, _async=True):
-    """Stop the current turn (Esc) AND wipe the prompt Claude Code restores into the input on interrupt, so
-    the pane matches the (empty) romp composer instead of silently holding recalled text — which the next
-    injected message would otherwise concatenate, and a stray Enter could resubmit (the user 2026-06-19).
-    Threaded so the brief restore-then-clear beat doesn't block the WS recv loop."""
-    if not name:
-        return
-
-    def go():
-        # Esc itself rides OUTSIDE the pane lock: stopping the turn must not wait behind a send mid-paste
-        # (the user's Stop is the higher-priority gesture), and the restore beat gives the lock a window.
-        _TMUX.send_keys(name, "Escape")
-        time.sleep(0.15)                              # let Claude Code restore the recalled prompt before we wipe it
-        with _pane_io_lock(name):
-            if not _clear_pane_input(name):           # loud, but nothing is pasted here — the next send's own
-                #                                       guard is what refuses to concatenate onto the leftover
-                sys.stderr.write("interrupt: %s still holds the recalled prompt after the input clear\n" % name)
-    threading.Thread(target=go, daemon=True).start() if _async else go()
-
-
 _prev_live_sids = [None]   # last cycle's live-map sids — the set-diff death TRIGGER; corroboration decides
 
 
-def _death_sweep_tick(now, tmux):
-    """Stamp deaths as they happen: a sid that LEFT the live map since the last cycle is a candidate,
-    and the liveness OWNER answers before anything is written (per-batch TmuxBackend.alive_sids —
-    identity-true; probe failure → loud no-op, never a stamp). SDK-owned sids are skipped here: their
-    death event is the kill gesture (reg alive:False partitions ownership — alive:True is
-    revivable/crash-looped and must NEVER be stamped, the boot-resume contract rides on that bit)."""
-    cur = set(tmux or {})
+def _death_sweep_tick(now, live_map):
+    """Stamp deaths as they happen: a sid that LEFT the live map since the last cycle is a candidate, and
+    the OWNER's durable record answers before anything is written (a death is certified by an affirmative
+    answer, never by silence). SDK-owned sids (a registry row exists) are skipped here: their death event
+    is the kill gesture (reg alive:False partitions ownership — alive:True is revivable/crash-looped and
+    must NEVER be stamped, the boot-resume contract rides on that bit). A Codex sid is stamped when its
+    backend's registry marks it dead. A departed sid with a names entry and no record anywhere is dead
+    history (decision (f)) and stamps; one no record can answer for while the Codex registry cannot be
+    read is stood down on, loudly and counted. The map's own stand-down (_backend_rows) already keeps an
+    unreadable registry from emptying it, so a mass departure here is a real one."""
+    cur = set(live_map or {})
     prev = _prev_live_sids[0]
     _prev_live_sids[0] = cur
     if prev is None:
         return
-    departed = [sid for sid in prev - cur if not (jd.SDKDIR / (sid + ".json")).exists()]
-    scan = None
-    for sid in departed:
+    cx = _codex()
+    blind = _codex_records_blind(cx)
+    sdk_blind = _sdk_records_blind()
+    stood = stood_sdk = stood_life = 0
+    for sid in prev - cur:
+        present = _sdk_reg_exists(sid)
+        if present:
+            continue                                 # an SDK death is the kill gesture's to stamp
         if not _death_stamp_due(sid):
             continue
-        if scan is None:
-            scan = _TMUX.alive_sids() if _TMUX.available() else set()
-            if scan is None:
-                sys.stderr.write("death-sweep: liveness probe failed — no stamps this tick\n")
-                return
-        if sid in scan:
-            continue                                 # the owner says alive — our snapshot blinked, not the session
+        if sdk_blind or present is None:
+            stood_sdk += 1                           # its reg may sit behind the unreadable directory: stand down
+            _prev_live_sids[0].add(sid)              # …and stays a departure the next tick re-asks
+            continue
+        if blind:
+            stood += 1                               # a Codex sid and dead history look alike until the registry reads
+            _prev_live_sids[0].add(sid)
+            continue
+        if cx is not None and cx._session(sid) is not None:
+            if cx.owns(sid):
+                continue                             # the Codex registry says alive — our snapshot blinked, not the session
+        elif _sdk_thread_alive(sid):
+            continue                                 # its reg went, its driver runs: alive (the liveness read keeps it)
+        elif _recent_life(sid, now):
+            stood_life += 1                          # no reg, no thread, but life within the horizon: a registry moved
+            _prev_live_sids[0].add(sid)              # aside, not an end — stand down, per sid, and re-ask every tick
+            continue                                 # so the stamp lands the tick its life ages out, not at the next boot
         _record_death(sid, now, "gone")
+    if stood_life:
+        _LIVE_READ_FAILS["count"] += stood_life
+        sys.stderr.write("death-sweep: %d departed sid(s) hold no reg but show recent life — stood down, not stamped "
+                         "(a registry moved aside?)\n" % stood_life)
+    if stood_sdk:
+        sys.stderr.write("death-sweep: the SDK registry directory cannot be read — %d departed sid(s) not stamped this tick\n" % stood_sdk)
+    if stood:
+        sys.stderr.write("death-sweep: the Codex registry cannot be read — %d departed sid(s) not stamped this tick\n" % stood)
 
 
 def _death_boot_pass(now=None):
-    """One boot walk over the names/ registry (every romp session ever, tmux included — reg-less tmux
-    sids live only here): stamp the deaths no kernel was up to see. Same gate as the tick writer, so
-    it also covers re-deaths-after-revival that happened while the kernel was down, and the whole
-    upgrade backfill. SDK-owned sids stamp only on reg alive:False; tmux sids only when the fresh
-    identity scan lacks them; a failed probe stands down loudly."""
+    """One boot walk over the names/ registry (every romp session ever): stamp the deaths no kernel was up
+    to see. Same gate as the tick writer, so it also covers re-deaths-after-revival that happened while
+    the kernel was down, and the whole upgrade backfill. An SDK-owned sid stamps only on reg alive:False
+    (an unreadable reg stands down); a Codex sid on its registry's dead mark; a names entry with NO
+    registry row anywhere is dead history and stamps (decision (f) of the tmux backend's removal,
+    2026-09-11: a terminal session from before the removal is exactly this, and no backend can revive
+    it). While the Codex registry cannot be read (_codex_records_blind), or the SDK registry directory
+    cannot (_sdk_records_blind: a reg-less sid may be an SDK session whose reg sits behind the unreadable
+    directory), every reg-less sid is skipped, loudly: a session the kernel merely cannot see must not be
+    stamped over."""
     now = int(now or time.time())
+    try:
+        jd.SDKDIR.mkdir(parents=True, exist_ok=True)   # the kernel owns the directory's existence: from here on
+    except OSError:                                    # a MISSING sdk/ is a vanished one, never a fresh root's
+        pass                                           # (the blindness guard below reads the failure)
     if not jd.NAMES.is_dir():
         return
-    scan = _TMUX.alive_sids() if _TMUX.available() else set()   # headless: no server IS zero-alive
-    if scan is None:
-        sys.stderr.write("death-boot: liveness probe failed — tmux sids skipped this boot\n")
+    cx = _codex()
+    blind = _codex_records_blind(cx)
+    if _sdk_records_blind():
+        sys.stderr.write("death-boot: the SDK registry directory cannot be read — reg-less sids skipped this boot\n")
+        blind = True
+    elif blind:
+        sys.stderr.write("death-boot: the Codex registry cannot be read — reg-less sids skipped this boot\n")
     n = 0
+    stood = 0
     for f in sorted(jd.NAMES.iterdir()):
         sid = f.name
         reg = jd.SDKDIR / (sid + ".json")
-        if reg.exists():
+        present = _sdk_reg_exists(sid)
+        if present is None:
+            continue                                 # the check itself failed (an unlistable sdk/): stand down
+        gutted = False
+        if present:
             try:
-                if bool(json.loads(reg.read_text()).get("alive")):
+                reg_d = json.loads(reg.read_text())
+                if bool(reg_d.get("alive")):
                     continue                         # revivable/crash-looped: the resume contract owns it
+                gutted = "alive" not in reg_d        # re-created with no alive bit: no verdict of its own
             except Exception:
+                continue                             # unreadable reg: stand down (re-asked next boot)
+        if not present or gutted:
+            if blind:
+                continue                             # a registry cannot be read: stand down
+            if cx is not None and cx._session(sid) is not None:
+                if cx.owns(sid):
+                    continue                         # the Codex registry says alive
+            elif not _death_stamp_due(sid):
+                continue                             # already stamped (the writer's own idle row is not life)
+            elif _recent_life(sid, now):
+                stood += 1                           # a live session whose registry went aside, not history
                 continue
-        else:
-            if scan is None or sid in scan:
-                continue                             # probe failed (stand down) or genuinely alive
         if _record_death(sid, now, "boot"):
             n += 1
+    if stood:
+        _LIVE_READ_FAILS["count"] += stood
+        sys.stderr.write("death-boot: %d names sid(s) hold no reg but show recent life — stood down, not stamped "
+                         "(a registry moved aside?)\n" % stood)
     if n:
         sys.stderr.write("death-boot: recorded %d session death(s) from before this kernel\n" % n)
 
@@ -23571,7 +22861,7 @@ def _end_on_idle_save(reqs):
     _atomic_write(jd.STATE / "end-on-idle.json", json.dumps(sorted(reqs)))
 
 
-def _end_on_idle_sweep(now, tmux):
+def _end_on_idle_sweep(now, live_map):
     """Kill each end-on-idle sid once its turn settles — the same clean path as the dashboard × /
     the immediate /end route (intentional death, no reviver, tab closed). A sid already dead by any
     other path just retires its request."""
@@ -23580,7 +22870,7 @@ def _end_on_idle_sweep(now, tmux):
         return
     changed = False
     for sid in sorted(reqs):
-        if tmux.get(sid) is None:                    # already dead → the request is spent
+        if live_map.get(sid) is None:                    # already dead → the request is spent
             reqs.discard(sid); changed = True
             continue
         try:
@@ -23648,69 +22938,6 @@ def _record_idle(sid, now, by=""):
             f.write(json.dumps(rec) + "\n")
     except Exception:
         pass
-
-
-def _tmux_send(name, text, model_cmd=False, _async=True):
-    """Inject text into a session's tmux pane — clear the input, then set-buffer + bracketed paste-buffer +
-    Enter, the old TmuxBackend.send sequence (a 250ms gap lets the bracketed paste land before Enter
-    submits). name = the tmux session name. Drives the chat composer, /compact, and the model/effort
-    pickers. Runs in a daemon thread so the WS recv loop isn't blocked by the gaps. model_cmd: /model opens
-    a confirm that needs a second Enter. A delivery step that tmux answers nonzero (set-buffer, paste-buffer,
-    the submitting Enter) aborts the send with a line on stderr — see the checked primitives."""
-    if not name or not text:
-        return
-
-    def go():
-      # The whole clear→paste→Enter sequence holds the pane lock: an interrupt's kill loop running beside
-      # it read the just-pasted message as leftover and C-u'd it away in the pre-Enter gap, so Enter
-      # submitted an empty box (PR-741 review, 2026-08-27). Under the lock the paste cannot be sniped.
-      with _pane_io_lock(name):
-        if _TMUX.pane_in_mode(name):
-            _TMUX.send_keys(name, "-X", "cancel", t=2)              # exit copy-mode so paste+Enter land
-        # Leftover in the box (an interrupt-restored prompt, or text typed straight into the terminal) must
-        # be GONE before the paste, which appends. Pasting anyway is not a lesser evil: the CLI receives the
-        # two texts joined, answers a prompt nobody wrote, and the delivered text no longer matches romp's
-        # echo — which is then indistinguishable from a lost send. So a clear that cannot finish REFUSES the
-        # send, loudly; the echo stays on screen and settles as never-delivered, which is the truth.
-        if not _clear_pane_input(name):
-            sys.stderr.write("tmux send: %s holds input that would not clear — NOT pasting, the message "
-                             "would have been concatenated onto it\n" % name)
-            return
-        # The three steps that ARE the delivery run CHECKED: the forgiving primitives swallow exec errors and
-        # ignore exit codes, so a tmux server or session that died after the clear made set-buffer,
-        # paste-buffer and the submitting Enter silent no-ops while the send looked complete — the message
-        # vanished with no trace. Any failure aborts here, loudly, in the same shape as the clear-guard
-        # refusal above (exit codes verified sane on tmux 3.4 — see the checked variants). Success-path
-        # sequencing and timing are unchanged.
-        if not _TMUX.set_buffer_checked(text):
-            sys.stderr.write("tmux send: %s's set-buffer failed — the message was never staged\n" % name)
-            return
-        if not _TMUX.paste_buffer_checked(name):                    # bracketed (-p), delete buf (-d)
-            sys.stderr.write("tmux send: %s's paste-buffer failed — the message never reached the input\n"
-                             % name)
-            return
-        paths = _injected_img_paths(text)
-        if paths:
-            # Claude Code reads each pasted image PATH asynchronously and rewrites it to "[Image #N]" in the
-            # input. Submitting before that settles races the read and DROPS the surrounding text (intermittent
-            # — the user 2026-06-17). Wait until the raw path(s) leave the input (≤4s) before Enter, then a
-            # last beat for the input to settle. Event-based, not a fixed gap (-J joins wrapped path lines).
-            for _ in range(40):
-                time.sleep(0.1)
-                cap = _TMUX.capture(name, join=True)
-                if all(p not in cap for p in paths):
-                    break
-            time.sleep(0.2)
-        else:
-            time.sleep(0.25)
-        if not _TMUX.send_keys_checked(name, "Enter"):
-            sys.stderr.write("tmux send: %s's submitting Enter failed — the message was pasted but never "
-                             "submitted\n" % name)
-            return
-        if model_cmd:
-            time.sleep(0.85)
-            _TMUX.send_keys(name, "Enter")                          # accept the hookless /model confirm
-    threading.Thread(target=go, daemon=True).start() if _async else go()
 
 
 # The most a POST body may carry. Every POST this kernel serves is a JSON control request -- a /send
@@ -23902,201 +23129,6 @@ def _sid_of(who):
     return th[0] if th else who               # the THREAD (T223) — not a phantom sid spelled like a name
 
 
-def _optimistic_echo(sid, text, author="human"):
-    """Show a composer send INSTANTLY. The SDK backend already adds its own input echo inside send() (its
-    _live store), so this only adds the kernel-side tmux echo for a tmux sid. Either way the echo is pruned
-    once the transcript's real user atom lands (or, for a dropped tmux send, it persists so the loss shows).
-    `author` is "human" for a typed send (blue) or "romp" for a nudge/follow-up (gray)."""
-    be = _sdk()
-    if be and be.owns(str(sid)):
-        return                                       # SDK send() already echoed (its own store)
-    _tmux_echo_add(str(sid), text, author=author)
-
-
-# The permission mode has NO slash command — it's the shift+tab cycle (mirrored from the terminal UI,
-# the user 2026-06-16). Set an absolute mode by sending shift+tab (BTab) the right number of times,
-# stepping forward from the session's CURRENT mode (the live @claude-permission-mode var) to the target.
-# The shift+tab cycle, in order (the user 2026-06-16): auto, default (a.k.a. normal), acceptEdits, plan
-# — adjacency gives the usual default→acceptEdits→plan with `auto` as the fourth. dontAsk/bypass are
-# flag-only (not cycled). The cycle is circular, so only the relative order matters for the press count.
-_MODE_CYCLE = ["auto", "default", "acceptEdits", "plan"]
-
-
-def _mode_presses(cur, target):
-    """shift+tab presses to cycle from `cur` to `target`; None if target isn't a cycle mode. A flag-only
-    current mode (auto/dontAsk/bypass…) is treated as `default` (step forward from there)."""
-    if target not in _MODE_CYCLE:
-        return None
-    if cur not in _MODE_CYCLE:
-        cur = "default"
-    return (_MODE_CYCLE.index(target) - _MODE_CYCLE.index(cur)) % len(_MODE_CYCLE)
-
-
-def _cycle_mode(name, sid, target):
-    if not name:
-        return
-    cur = (_tmux_sessions().get(sid) or {}).get("mode") or "default"
-    presses = _mode_presses(cur, target)
-    if not presses:
-        return
-
-    def go():
-        for _ in range(presses):
-            _TMUX.send_keys(name, "BTab")
-            time.sleep(0.18)                                        # let each cycle land before the next
-        # Record the mode we just cycled to. Unlike model/effort/context, the permission mode is NOT in
-        # Claude Code's statusLine JSON, so @claude-permission-mode has NO event source to self-heal from
-        # (statusline.sh can't republish what CC never exposes). Without this, the var stayed frozen at its
-        # launch value: the chat label never updated AND the next _cycle_mode computed its press count from
-        # a stale `cur`. We caused the change, so we know the new mode is `target` — write it. (A switch made
-        # directly in the terminal TUI still can't be observed; that's a CC-exposure gap, not ours.) (2026-06-18.)
-        _TMUX.record_permission_mode(name, target)
-        _push_soon()                                                # re-render so the chat mode label flips now
-    threading.Thread(target=go, daemon=True).start()
-
-
-# ───────────────── live AskUserQuestion picker: tmux pane → webview → keystrokes ─────────────────
-# The interactive picker exists only in the live TUI pane (until answered). _ask_poll scrapes it
-# (ap.parse_ask_pane) and pushes it to the chat webview, which already renders it + posts answer clicks;
-# the driver below translates those clicks back into tmux keystrokes.
-# Navigation sends ONE arrow at a time, re-reading the pane
-# between presses (the TUI drops rapidly-batched arrows). Each action runs in a daemon thread so the WS
-# recv loop never blocks on the ~110ms gaps. NOTE: end-to-end behavior needs live tmux verification — a
-# real picker — since a static-pane unit test can't model the cursor moving in response to the keys.
-def _capture_pane(name):
-    return _TMUX.capture(name)
-
-
-def _send_keys(name, keys):
-    _TMUX.send_keys(name, *keys)
-
-
-def _send_literal(name, text):
-    _TMUX.send_keys(name, "-l", "--", text)
-
-
-def _nav_key(cur, target):
-    """One arrow toward `target` from cursor `cur` (None when already there) — pure, unit-tested."""
-    return None if cur == target else ("Down" if cur < target else "Up")
-
-
-def _ask_parse(name):
-    try:
-        return ap.parse_ask_pane(_capture_pane(name))
-    except Exception:
-        return None
-
-
-def _ask_step_nav_to(name, target, kind_ok, act, budget=16):
-    """Move the picker cursor to `target` one arrow at a time, re-reading the pane between presses, then
-    act(). Aborts if the screen changes kind or the cursor is lost. Mirrors AskDriver.stepNavTo."""
-    while budget > 0:
-        budget -= 1
-        p = _ask_parse(name)
-        if not p or not kind_ok(p):
-            return
-        if not p.get("cursorFound"):
-            time.sleep(0.11); continue
-        k = _nav_key(p["cursor"], target)
-        if k is None:
-            act(); return
-        _send_keys(name, [k])
-        time.sleep(0.11)
-
-
-def _ask_when_ready(name, ready, act, tries=8, gap=0.08):
-    for _ in range(tries):
-        if ready(_ask_parse(name)):
-            act(); return
-        time.sleep(gap)
-
-
-def _ask_answer(name, target):
-    p = _ask_parse(name)
-    if not p or p.get("kind") == "multi" or not p.get("cursorFound"):
-        return
-    _ask_step_nav_to(name, target, lambda q: bool(q) and q.get("kind") != "multi",
-                     lambda: _send_keys(name, ["Enter"]))
-
-
-def _ask_focus(name, target):
-    """Move the picker cursor to `target` WITHOUT selecting — so the chat's ↑/↓ steps the focused option's
-    scraped preview, mirroring the terminal (the user 2026-06-22). Single-select only (multi has no preview);
-    the act() is a no-op (position only), and the next pane scrape pushes target's preview."""
-    p = _ask_parse(name)
-    if not p or p.get("kind") == "multi" or not p.get("cursorFound"):
-        return
-    _ask_step_nav_to(name, target, lambda q: bool(q) and q.get("kind") != "multi", lambda: None)
-
-
-def _ask_toggle(name, target):
-    p = _ask_parse(name)
-    if not p or p.get("kind") != "multi" or not p.get("cursorFound"):
-        return
-    _ask_step_nav_to(name, target, lambda q: bool(q) and q.get("kind") == "multi",
-                     lambda: _send_keys(name, ["Space"]))
-
-
-def _ask_submit(name):
-    parsed = _ask_parse(name)
-    if not parsed:
-        return
-
-    def commit():
-        p = _ask_parse(name)
-        if not p or p.get("kind") != "submit" or not p.get("options"):
-            return
-        sub = next((o for o in p["options"] if re.search(r"submit\b", o["label"], re.I)), p["options"][0])
-        _ask_step_nav_to(name, sub["n"], lambda q: bool(q) and q.get("kind") == "submit",
-                         lambda: _send_keys(name, ["Enter"]))
-
-    if parsed.get("kind") == "multi":
-        first = parsed["options"][0]["n"] if parsed.get("options") else 1
-
-        def after_first():
-            _send_keys(name, ["Right"])                          # cross to the Submit tab
-            _ask_when_ready(name, lambda p: bool(p) and p.get("kind") == "submit", commit)
-
-        _ask_step_nav_to(name, first, lambda q: bool(q) and q.get("kind") == "multi", after_first)
-    elif parsed.get("kind") == "submit":
-        commit()
-
-
-def _ask_add_custom(name, text):
-    if not (text or "").strip():
-        return
-    parsed = _ask_parse(name)
-    if not parsed or parsed.get("kind") == "submit":
-        return
-    slot = next((o for o in parsed.get("options", []) if re.match(r"\s*type something", o["label"], re.I)), None)
-    if not slot:
-        return
-    kind = parsed.get("kind")
-
-    def act():
-        _send_literal(name, text)
-        time.sleep(0.17); _send_keys(name, ["Enter"])           # commit the typed answer
-        if kind == "multi":
-            time.sleep(0.18); _send_keys(name, ["Space"])       # re-check it (Enter toggled it off)
-
-    _ask_step_nav_to(name, slot["n"], lambda q: bool(q) and q.get("kind") == kind, act)
-
-
-def _ask_cancel(name):
-    _send_keys(name, ["Escape"])
-
-
-def _ask_send_text(name, text):
-    if not text:
-        return
-    _send_literal(name, text)
-    time.sleep(0.12); _send_keys(name, ["Enter"])
-
-
-def _ask_thread(fn, *a):
-    threading.Thread(target=fn, args=a, daemon=True).start()
-
-
 # Messages the user submitted while a session was busy/compacting and Claude Code hasn't dequeued yet —
 # read EVENT-BASED from the transcript's queue-operation records (NOT pane-scraped, which silently broke
 # with >1 queued message). Cached by the transcript's (mtime, size) like _parse, since build_session calls
@@ -24203,42 +23235,14 @@ def _split_followup(text):
     return goal, body, True, ctx
 
 
-def _pending_queued(path):
-    """Still-pending queued messages, folded from the transcript's queue-operation records
-    (type:"queue-operation"; operation enqueue/dequeue/remove/popAll; content on enqueue, and usually on a
-    remove/popAll too). enqueue appends; a content-bearing `remove` discards exactly the entry carrying that
-    text (the CLI's removes are content-addressed single-item discards — measured live 2026-08-18, see
-    _undelivered_wake_tail, which resolves this same ledger for the idle-queue drive); a content-less remove
-    and every `dequeue` resolve the OLDEST pending entry; a `popAll` is the whole queue recalled at once, so
-    it clears everything pending. The unresolved genuine tail is what's still queued, in submission order.
-    Claude Code writes these the instant a message is queued (while busy/compacting), so they show before
-    reaching the turn DAG — the archive's foldQueue, event-based instead of pane-scraped (the pane scrape
-    mis-parsed a second queued message and dropped both — the user 2026-06-16).
-
-    popAll WAS UNHANDLED until 2026-08-26, and an unrecognized clear is no harmless no-op: its enqueues
-    stayed pending forever, so every later dequeue resolved an entry one slot too old and the newest
-    DELIVERED message sat in the chat as a queued bubble for good — a session showed a slash command it had
-    already finished running, and the same phantom held the queue-aware nudge gate (_backend_queued) shut.
-    Content-addressed removes land in the same pass for the same reason: the FIFO pairing is the fragile
-    part, and one missing or extra resolution shifts every later one (the failure that made the event model
-    drop this ledger for placement altogether — see event_model._absorbed).
-
-    One DELIBERATE divergence from _undelivered_wake_tail: a content-bearing remove naming text that isn't
-    pending here (this fold credits dequeues, so a dequeue may already have taken it) still resolves the
-    oldest, where the drive's reader resolves nothing. The two failure directions are not symmetric for a
-    DISPLAY — an unresolved entry is a bubble that never leaves, the bug this whole pass exists to end,
-    while an over-resolved one self-heals at the next record — and the case is vanishingly rare besides
-    (live corpus: one such remove in 305, and it is where a credited dequeue had already taken the entry)."""
-    # A queue LEDGER: a dequeue resolves the OLDEST entry, which can predate any window, so this folds
-    # append-incrementally over the whole record list (_fold_records) with the pending list carried.
-    return [m["md"] for m in _pending_queued_meta(path)]
-
-
 def _queue_ledger_step(pending, o):
-    """One transcript record folded onto the CLI queue ledger's pending list — _pending_queued's rules (its
-    docstring): enqueue appends, a content-bearing remove discards exactly that entry, an anonymous remove
-    or a dequeue resolves the oldest, popAll clears. Shared by the display fold (_pending_queued_meta) and
-    the SDK echo settle's owed read (_pending_ledger), so the two read one ledger the same way."""
+    """One transcript record folded onto the CLI queue ledger's pending list (type:"queue-operation";
+    operation enqueue/dequeue/remove/popAll; content on enqueue, and usually on a remove/popAll too): enqueue
+    appends, a content-bearing remove discards exactly that entry (the CLI's removes are content-addressed
+    single-item discards — measured live 2026-08-18, see _undelivered_wake_tail), an anonymous remove or a
+    dequeue resolves the oldest, popAll clears (unhandled until 2026-08-26, when a pending entry that never
+    left made every later dequeue resolve one slot too old). The reader is the SDK echo settle's owed read
+    (_pending_ledger); the display fold that read it for the tmux backend left with that backend (2026-09-11)."""
     if o.get("type") != "queue-operation":
         return pending
     op = o.get("operation")
@@ -24255,31 +23259,12 @@ def _queue_ledger_step(pending, o):
 
 
 def _pending_ledger(path):
-    """Every text the CLI's queue ledger still lists as pending, UNFILTERED — _pending_queued's fold without
-    its _genuine_queued cut. The "still owed" read the SDK echo settle takes (sdk_backend.settle_echoes,
+    """Every text the CLI's queue ledger still lists as pending, UNFILTERED (no _genuine_queued cut: a
+    romp-authored nudge waiting in the queue counts as waiting). The "still owed" read the SDK echo settle takes (sdk_backend.settle_echoes,
     2026-09-11): there a romp-authored echo (a nudge) waiting in the CLI's queue must count as waiting like
-    any other, where the display fold drops it on purpose (it is not the user's queued input). Same cache
-    as the display fold, so the read is free on a quiet transcript."""
+    any other, where the display fold drops it on purpose (it is not the user's queued input). Cached by the transcript's (mtime, size), so the read is free on a quiet transcript."""
     return [c.strip() for c, _ts in _fold_records(_queued_parse_cache, path, list, _queue_ledger_step, ckpt="queueLedger")
             if isinstance(c, str) and c.strip()]
-
-
-def _pending_queued_meta(path):
-    """_pending_queued's copies with what the CLI's ledger knows about each (T252c): the enqueue record's
-    stamp (`qts`, epoch ms) and NO id. The ledger carries none, the kernel's tmux echo is minted before the
-    CLI writes the enqueue record, and the kernel never sees the CLI take a copy — so nothing else in the
-    chain could share an id the ledger copy wore, and an id the chat latched from it would make it reject
-    the echo and the landing as another send's (the review of the first cut). The chat reads this route
-    by text; `qid` is None on every copy."""
-    pending = _fold_records(_queued_parse_cache, path, list, _queue_ledger_step, ckpt="queueLedger")
-    out = []
-    for text, ts in pending:
-        if not _genuine_queued(text):
-            continue
-        t = em.parse_z(ts) if isinstance(ts, str) else None
-        qts = int(t * 1000) if isinstance(t, (int, float)) and t else None
-        out.append({"md": text.strip(), "qid": None, "qts": qts})
-    return out
 
 
 # ── Idle-queue drive: wake signals stuck in an idle SDK CLI's queue (the user 2026-08-18) ──
@@ -24306,7 +23291,7 @@ def _pending_queued_meta(path):
 # ids) are the CLI's own to deliver in EVERY regime — verified even in the stuck session — so they
 # are never wake signals
 # (carve-out below). Event-based otherwise, no new polling: these records are the same
-# queue-operations _pending_queued folds for the chat's queued chip (whose _genuine_queued filter the
+# queue-operations _pending_ledger folds for the SDK echo settle (whose _genuine_queued filter the
 # SDK queued-bubble build now applies too, so a driven wrapper never shows as the USER'S queued
 # input); the parse below rides the normal push cadence, and the parse IS the event.
 _WAKE_DRIVE_FLOOR_S = 60.0    # ~400x the delivering regime's p90 (0.126s); a rounding error against
@@ -24332,7 +23317,7 @@ def _undelivered_wake_tail(path):
     CLI actually writes (measured live 2026-08-18 — the comment block above):
       * a `remove` carrying content discards exactly the entry with that text (the CLI's removes are
         content-addressed single-item discards, routinely of a NON-oldest entry while others stay
-        pending); a content-less remove discards the oldest, matching _pending_queued's fold;
+        pending); a content-less remove discards the oldest, matching _queue_ledger_step's fold;
       * a `popAll` discards EVERY pending entry — the whole queue withdrawn in one record, so none of it
         is still owed a turn (unhandled until 2026-08-26: a recalled queue went on reading as undriven
         signals indefinitely, one session holding twelve of them);
@@ -24357,7 +23342,7 @@ def _undelivered_wake_tail(path):
     in every regime and which therefore behave like bare user/postal enqueues: they ride along for
     the drive's log count only, never qualify candidacy, and are never re-sent. A missing or
     otherwise-shaped id keeps wrapper=True — under-delivering is the original bug; the carve-out is
-    only for the one class the CLI provably owns. Cached by (mtime, size) like _pending_queued,
+    only for the one class the CLI provably owns. Cached by (mtime, size) like _pending_ledger,
     since the drive tick asks every push cycle."""
     # A per-entry LEDGER (an enqueue is resolved by a much later record), so it folds append-incrementally
     # over the whole record list (_fold_records) with the pending tail carried. `pos` is the entry's
@@ -24385,7 +23370,7 @@ def _undelivered_wake_tail(path):
                     if i is not None:                        # content-addressed single-item discard —
                         del tail[i]                          # the CLI's call on THAT entry only
                 elif tail:
-                    del tail[0]                              # content-less: the oldest, as _pending_queued folds
+                    del tail[0]                              # content-less: the oldest, as _queue_ledger_step folds
             elif op == "popAll":                             # the whole queue recalled at once: every entry is
                 tail.clear()                                 # withdrawn, so nothing here is owed a turn any more
             #      a `dequeue` clears nothing — its delivery evidence is the user record it produces
@@ -24863,7 +23848,7 @@ def _awaiting_live_rows(sid, path, live):
     (agents, commands, watch): the agent rows (the backend snapshot's live subagents ⋈ the pending agent
     launches — one row per agent, matched on agentId), the command rows (the pending shell / Monitor
     launches) and _watch_awaiting's dict (the armed kernel watches; None when there are none). `live` is
-    the session's backend snapshot (_tmux_sessions().get(sid)) or None for a dormant one.
+    the session's backend snapshot (_live_map().get(sid)) or None for a dormant one.
     Factored out of _session_awaiting on 2026-09-06 so the chat's #bg-tasks box can list the SAME rows
     while the turn is open: with the rows gated on idleness alongside the chip, the box swapped between
     the grouped rows and the legacy tasks list at every turn boundary of a session with agents in flight
@@ -24877,7 +23862,7 @@ def _awaiting_live_rows(sid, path, live):
     # the overlay's stale-supersede heuristic reads ANY later 'working' state row as proof awaiting ended —
     # but a turn interleaving mid-wait (the auto-nudge asking for status) writes exactly that row while the
     # agents are still running, falsely clearing the verdict; the API-error floor then painted a red
-    # "API error" + "stalled" card over a session with two agents mid-flight. Tmux sessions carry no
+    # "API error" + "stalled" card over a session with two agents mid-flight. A row with no
     # subagents field → None → fall through unchanged.
     tm = live or {}
     agents, commands = [], []
@@ -25043,24 +24028,24 @@ def _session_background_items(sid, path):
     is open. [] when nothing runs. This is what the session-scoped surfaces ship as awaitingItems while
     the session works (2026-09-06; see _awaiting_items_payload); peer waits and timers exist only through
     the idle-gated arms, so they simply do not appear mid-turn."""
-    live = _tmux_sessions().get(str(sid))
+    live = _live_map().get(str(sid))
     agents, commands, watch = _awaiting_live_rows(sid, path, live)
     return _awaiting_join_items(agents, commands, watch)
 
 
 class _serve_live(object):
-    """Serve `tmux` — a liveness map the caller already took — to every _tmux_sessions() read on this thread
+    """Serve `live_map` — a liveness map the caller already took — to every _live_map() read on this thread
     for the block: the pusher cycle's own one-snapshot mechanism (_live_scope, the 2026-08-10 CPU fix), lent
     to a build that was HANDED a snapshot outside a cycle (a WS handler's build_session / build_timeline), so
-    the nested reads underneath (_bg_live_norm's row lookup, the awaiting sources) never fork tmux or sweep
-    the registry again — tests/test_kernel_pusher_snapshot.py: a provided snapshot is enough. A scope already
+    the nested reads underneath (_bg_live_norm's row lookup, the awaiting sources) never sweep the
+    registry again — tests/test_kernel_pusher_snapshot.py: a provided snapshot is enough. A scope already
     active (the cycle's) is left alone; None means the caller holds none, and the block reads fresh as before."""
-    def __init__(self, tmux):
-        self.tmux, self.set = tmux, False
+    def __init__(self, live_map):
+        self.live_map, self.set = live_map, False
 
     def __enter__(self):
-        if self.tmux is not None and getattr(_live_scope, "snapshot", None) is None:
-            _live_scope.snapshot = self.tmux
+        if self.live_map is not None and getattr(_live_scope, "snapshot", None) is None:
+            _live_scope.snapshot = self.live_map
             self.set = True
         return self
 
@@ -25070,19 +24055,19 @@ class _serve_live(object):
         return False
 
 
-def _awaiting_items_payload(aw, sid, path, tmux=None):
+def _awaiting_items_payload(aw, sid, path, live_map=None):
     """The rows a session-scoped surface (the chat status, the timeline lane) ships as `awaitingItems`:
     the wait's own rows when the session is idle-awaiting (`aw` = _session_awaiting's answer — for a
     live-source wait these ARE the live rows; for a stamp, its peers; for an overlay row, nothing), else
     everything in flight regardless of the turn. One expression, so the two surfaces can never disagree on
     the set, and so the client contract holds under ONE key in both turn states: the box renders the rows
-    the same way either way and only its header follows awaitingWhy. `tmux` is the caller's liveness map
+    the same way either way and only its header follows awaitingWhy. `live_map` is the caller's liveness map
     (build_session's / build_timeline's), served to the mid-turn read's nested lookups (_serve_live) so a
     build handed a snapshot takes no fresh liveness read — the working path never did before this read
     existed, and the pusher-snapshot test holds it to that."""
     if aw:
         return list(aw.get("items") or [])
-    with _serve_live(tmux):
+    with _serve_live(live_map):
         return _session_background_items(sid, path)
 
 
@@ -25121,12 +24106,13 @@ def _session_awaiting(sid, path, idle, stamp=False):
          for the launching turn rather than a launch-shape heuristic (the user 2026-07-24: mkdocs serve
          wore 'Waiting on task' — the task is the session's furniture, not something any goal waits on).
       0.75 the TRANSCRIPT's own launch↔notification pairing (_bg_scan_cached) — the DURABLE twin of 0.5,
-         consulted only for a LIVE CLI that carries no lifecycle set (a tmux session, whose CLI outlives
-         kernel restarts and has no SDK task stream; an SDK backend gap mid-reattach). Ghost-gated by the
+         consulted only for a LIVE CLI that carries no lifecycle set (an SDK backend gap mid-reattach; the
+         tmux backend's CLIs, which outlived kernel restarts and had no SDK task stream, until 2026-09-11).
+         Ghost-gated by the
          CLI spawn stamp when one exists. A DORMANT session never reaches it: its tasks died with its CLI,
          so the death notice — not awaiting — is the truth there. Same pending-only rule as 0.5 (the
          scan rows carry the same launching tool_use id the lifecycle set does).
-      1. the states/<sid>.jsonl AWAITING OVERLAY — {"awaiting":bool,"why":…} the SDK/tmux Stop hooks write.
+      1. the states/<sid>.jsonl AWAITING OVERLAY — {"awaiting":bool,"why":…} the SDK backend's Stop hook writes.
          POSITIVE rows only: an awaiting:false row contributes nothing and falls through (the Stop hook
          writes false unconditionally at every turn end, so a false row is ambient, not an answer).
       2. the JUDGE's durable ⏳ stamp (_session_stamp_full), OPT-IN via stamp=True — the closer's awaiting
@@ -25148,7 +24134,7 @@ def _session_awaiting(sid, path, idle, stamp=False):
     MORE than the feed does. Postal peer-waits otherwise stay build_feed's."""
     if not idle:
         return None
-    live = _tmux_sessions().get(str(sid))    # None = not a live CLI (dormant); {}-like = live snapshot
+    live = _live_map().get(str(sid))    # None = not a live CLI (dormant); {}-like = live snapshot
     # Sources 0, 0.5/0.75 and 0.9 are COMBINED into rows (2026-09-05; see _awaiting_from_items): each
     # contributes what it knows, and the one answer is derived from all of them — the old first-source-
     # wins short-circuit is what made one situation read "agents" or "tasks" by accident of ordering.
@@ -25173,7 +24159,7 @@ def _session_awaiting(sid, path, idle, stamp=False):
     # awaiting badge visibly vanished fleet-wide (the user 2026-07-27). A negative from one layer
     # falls through to the next; only a POSITIVE short-circuits.
     # Source 2 — the JUDGE's durable ⏳ stamp (restart-proof), OPT-IN. Only for a LIVE CLI (`live is not None`
-    # means a backend snapshot exists, tmux or SDK; a dormant session never resurrects off a stale stamp) AND
+    # means a backend snapshot exists; a dormant session never resurrects off a stale stamp) AND
     # only when the caller asked (stamp=True): the session-scoped display surfaces want it, the per-goal feed
     # scopes it itself. This is what carries a genuinely-awaiting session's rail chip + timeline lane across a
     # restart, the same read the feed card floors to per goal via _goal_awaiting_stamp.
@@ -25236,7 +24222,7 @@ def _bg_live_norm(sid, path):
     """A session's LIVE background tasks, normalized to {tid, desc, t, type} (+ agentId on agent rows)
     across BOTH sources: the backend snapshot's lifecycle set (source 0.5 — toolUseId/desc/since; a
     present-but-empty set is authoritative, never overridden) or, for a live CLI carrying no lifecycle set
-    (tmux; SDK mid-reattach), the transcript's launch↔notification pairing ghost-gated by the CLI spawn
+    (SDK mid-reattach), the transcript's launch↔notification pairing ghost-gated by the CLI spawn
     stamp (source 0.75 — id/summary/launch t). [] for a dormant session: its tasks died with its CLI.
     `agentId` is the agent's own id — the join key _session_awaiting uses to fold a stream row into the
     SubagentStart hook's row for the same agent. It comes from the row's OWN record of the launch: the
@@ -25244,7 +24230,7 @@ def _bg_live_norm(sid, path):
     transcript ack names it (`agentId`). Both are designed fields; the sidecar meta map is only the
     fallback (its key is the ORIGINAL launch's toolUseId, which a resumed agent's task no longer carries —
     the 2026-09-06 duplicate rows were exactly the agents that fallback could not resolve)."""
-    live = _tmux_sessions().get(str(sid))
+    live = _live_map().get(str(sid))
     if live is None:
         return []
     if "bgTasks" in live:
@@ -25639,8 +24625,8 @@ def _states_awaiting_overlay(sid):
     nudge tick, the timeline lanes, build_session, the feed, the background-work read and GET /sessions:
     per idle session, per site, per cycle, on a file that had not changed. The identity gate is the shared
     reader's: (st_mtime, st_size) plus the tail compare on growth, a full re-fold on a shrink or a same-size
-    new mtime. Every states writer appends (sdk_backend's append helpers, the kernel's own markers, the tmux
-    status hook), so an append is the only change the file sees and the gate is exact for it. One difference
+    new mtime. Every states writer appends (sdk_backend's append helpers, the kernel's own markers), so an
+    append is the only change the file sees and the gate is exact for it. One difference
     from that walk: a complete final record still waiting for its newline is stepped provisionally onto a
     copy of the carried state, as the other readers of this file already read it (_fold_eof_fragment), and
     for good once its newline lands; the walk over the incremental reader skipped it until then. Every
@@ -25767,8 +24753,8 @@ def _session_retrying(sid, tm):
     `since` = the start of the CURRENT contiguous retrying stretch in the states log (event-based: the
     first retrying row after the last non-retrying state row — a recovery in between ends the stretch, so
     a re-entered storm dates from its own start, not the morning's). None when no retrying row has landed
-    yet (the snapshot can lead the log by a beat) → the chip renders without a time. SDK-only: a tmux
-    row's state is never "retrying", so this is None there and the transcript-based _api_error path is
+    yet (the snapshot can lead the log by a beat) → the chip renders without a time. SDK-only: no other
+    backend's row reads "retrying", so this is None there and the transcript-based _api_error path is
     unchanged."""
     if not tm or tm.get("state") != "retrying":
         return None
@@ -25827,8 +24813,8 @@ def _retry_recoveries(sid):
     """Durable recovery markers from states/<sid>.jsonl — {"t":…,"retriesRecovered":N} lines the SDK backend
     writes when a stalled api_retry turn resumes real output (append_retry_recovered). Returns
     [{"t":epoch,"retries":N}, …] oldest first, so build_session can interleave a persistent "Recovered after N
-    retries" note at the recovered turn. SDK-only — tmux has no api_retry signal, so its state files carry no
-    such records and this is []."""
+    retries" note at the recovered turn. SDK-only — no other backend reports api_retry, so its state files
+    carry no such records and this is []."""
     return sorted((dict(r) for r in _states_notes(sid)["recoveries"]), key=lambda r: r["t"])   # one folded pass serves
     #                                                                                  all five; oldest first
 
@@ -25869,7 +24855,8 @@ def _effort_changes(sid):
     """Durable effort-applied markers from states/<sid>.jsonl — {"t":…,"effortApplied":"high"} lines the SDK
     backend writes when an /effort reconnect lands (append_effort_applied). Returns [{"t":epoch,"effort":str}, …]
     oldest first, so build_session can interleave a persistent "effort set to X" note at the moment it took
-    effect. SDK-only — tmux applies /effort in-band (a real command turn), so it needs no synthetic marker."""
+    effect. SDK-only — the marker exists because the SDK's effort reconnect leaves no record of its own in the
+    transcript, where a command typed into a CLI is a real command turn."""
     return sorted((dict(r) for r in _states_notes(sid)["efforts"]), key=lambda r: r["t"])   # one folded pass serves
     #                                                                                  all five; oldest first
 
@@ -25879,8 +24866,8 @@ def _cmd_gestures(sid):
     SDK backend writes the moment a /model-/effort-/auth-style pick is made (append_cmd_gesture). Returns
     [{"t":epoch,"cmd":str}, …] oldest first, so build_session can interleave a persistent right-side gesture
     chip once prune_live retires the synthesized live one (the user 2026-08-14: the user's side of the history
-    keeps what they did; the applied note keeps that it happened). SDK-only — tmux commands are real
-    transcript turns already."""
+    keeps what they did; the applied note keeps that it happened). SDK-only — a command typed into a CLI is a
+    real transcript turn already; the SDK gesture is not."""
     return sorted((dict(r) for r in _states_notes(sid)["gestures"]), key=lambda r: r["t"])   # one folded pass serves
     #                                                                                  all five; oldest first
 
@@ -26112,8 +25099,8 @@ def _bg_tasks(path, spawned_at=None, live=None):
     `live` (an SDK session's backend bg-task set — the CLI's task lifecycle stream, terminal-status-cleared)
     is the AUTHORITATIVE liveness gate when present: a scan row survives only while its tool_use id is in the
     live set, so a finished/killed task drops the instant its terminal event lands — no transcript write
-    needed. `spawned_at` is the pre-lifecycle fallback gate (tmux sessions, a backend mid-restart with no
-    snapshot): it drops still-'running' tasks launched BEFORE the current CLI spawned — they died with the
+    needed. `spawned_at` is the pre-lifecycle fallback gate (a session with no snapshot: a backend
+    mid-restart): it drops still-'running' tasks launched BEFORE the current CLI spawned — they died with the
     previous CLI and their completions can never land, so they'd count as running forever — the ghost '25
     background tasks' that read as a wedged session (nimbus, the user 2026-07-10). Both filters run after
     the cache, since they change without the transcript changing."""
@@ -26378,7 +25365,8 @@ def _agent_alive(row, agent_id, tm, spawned_at):
     passes a synthetic running row) — the transcript's own pairing says whether a result has landed. The
     live gate then says whether the CLI that would deliver one is still around: an SDK session's snapshot
     carries the SubagentStart/Stop set (agent ids) and the task-lifecycle set (tool-use ids) — the agent is
-    alive iff either names it; a tmux or dormant session falls to the spawned-at ghost gate _bg_tasks
+    alive iff either names it; a session without those sets (dormant, or on a backend that publishes none)
+    falls to the spawned-at ghost gate _bg_tasks
     applies (a launch older than the current CLI epoch died with the previous CLI). Never a clock."""
     if not row or row.get("status") != "running":
         return False
@@ -26484,7 +25472,7 @@ def _chat_agents_moved(agents, path, tm, spawned_at):
     return False
 
 
-def build_subagent(sid, agent_id, now, tmux=None):
+def build_subagent(sid, agent_id, now, live_map=None):
     """The {type:"subagent"} viewer frame for one agent of session `sid`: its sidecar meta, whether it is
     still running, and its transcript rendered through build_session's override mode — the SAME renderer
     the chat uses, in sidechain mode (no parent side-store notes) — as a capped tail. FAIL LOUDLY (the
@@ -26492,7 +25480,7 @@ def build_subagent(sid, agent_id, now, tmux=None):
     base = {"type": "subagent", "id": sid, "agentId": agent_id}
     if not _AGENT_ID_RE.match(str(agent_id or "")):
         return {**base, "error": "That is not a subagent id, so there is no transcript to open."}
-    tmux = _tmux_sessions() if tmux is None else tmux
+    live_map = _live_map() if live_map is None else live_map
     ppath = _path_of(sid, now)
     if not ppath:
         return {**base, "error": "This session's transcript can't be found, so its agents can't be opened."}
@@ -26501,32 +25489,32 @@ def build_subagent(sid, agent_id, now, tmux=None):
         return {**base, "error": "The transcript file for agent %s is missing beside this session's transcript "
                                  "(subagents/agent-%s.jsonl), so it can't be shown." % (agent_id, agent_id)}
     meta = _subagent_meta(ppath, agent_id)
-    full = build_session(sid, now, tmux, path_override=str(apath), sidechain=True, meta_path=ppath)
+    full = build_session(sid, now, live_map, path_override=str(apath), sidechain=True, meta_path=ppath)
     if not full:
         return {**base, "error": "This session isn't known to romp any more, so its agent can't be shown."}
     evs = full.get("events") or []
     return {**base,
             "meta": {"agentType": meta.get("agentType") or "", "description": meta.get("description") or "",
                      "spawnDepth": meta.get("spawnDepth"), "toolUseId": meta.get("toolUseId") or ""},
-            "running": _agent_running_for(ppath, meta.get("toolUseId"), agent_id, tmux.get(str(sid)), _sdk_spawned_at(sid)),
+            "running": _agent_running_for(ppath, meta.get("toolUseId"), agent_id, live_map.get(str(sid)), _sdk_spawned_at(sid)),
             "events": evs[-SUBAGENT_EVENT_CAP:], "truncated": len(evs) > SUBAGENT_EVENT_CAP}
 
 
-def _subagent_frame_cached(sid, agent_id, now, tmux=None):
+def _subagent_frame_cached(sid, agent_id, now, live_map=None):
     """(frame, serialized) for an OPEN viewer, rebuilt only when its change key moved: the agent file's
     (mtime, size), the running flag, and whether the sidecar exists. Shared across clients; the per-client
     dedup slot ("subagent", sid, agentId) absorbs an unchanged re-send."""
-    tmux = _tmux_sessions() if tmux is None else tmux
+    live_map = _live_map() if live_map is None else live_map
     ppath = _path_of(sid, now)
     apath = _subagent_file(ppath, agent_id) if ppath else None
     meta = _subagent_meta(ppath, agent_id) if ppath else {}
-    running = (_agent_running_for(ppath, meta.get("toolUseId"), agent_id, tmux.get(str(sid)), _sdk_spawned_at(sid))
+    running = (_agent_running_for(ppath, meta.get("toolUseId"), agent_id, live_map.get(str(sid)), _sdk_spawned_at(sid))
                if ppath else False)
     key = (ppath, _chat_stat_key(str(apath)) if apath is not None else None, running, bool(meta))
     hit = _SUBAGENT_FRAMES.get((sid, agent_id))
     if hit is not None and hit[0] == key:
         return hit[1], hit[2]
-    fr = build_subagent(sid, agent_id, now, tmux)
+    fr = build_subagent(sid, agent_id, now, live_map)
     pre = json.dumps(fr)
     if len(_SUBAGENT_FRAMES) > 64:
         _SUBAGENT_FRAMES.clear()
@@ -26534,14 +25522,14 @@ def _subagent_frame_cached(sid, agent_id, now, tmux=None):
     return fr, pre
 
 
-def _push_subagents(clients, now, tmux):
+def _push_subagents(clients, now, live_map):
     """Re-push every OPEN subagent viewer on these chat clients (client["subagents"], set by openSubagent,
     cleared by closeSubagent or the socket going away). Rides the pusher's existing per-cycle chat pass —
     no polling loop of its own — and costs a stat per open viewer when nothing changed."""
     for c in clients:
         for (ssid, aid) in list((c.get("subagents") or {}).keys()):
             try:
-                fr, pre = _subagent_frame_cached(ssid, aid, now, tmux)
+                fr, pre = _subagent_frame_cached(ssid, aid, now, live_map)
             except Exception:
                 sys.stderr.write("subagent frame failed for %s/%s: %s\n" % (ssid, aid, traceback.format_exc()))
                 continue
@@ -26612,17 +25600,6 @@ def _is_auth_error(text):
 def _is_refusal_text(text):
     low = (text or "").lower()
     return "safeguards flagged" in low or "anthropic.com/legal/aup" in low
-
-
-def _spend_dialog_showing(pane):
-    """Is the CLI's spend-cap MODAL currently up in this pane capture? When a tmux session hits the
-    monthly cap MID-TURN the CLI drops into an interactive menu ("What do you want to do? / Adjust
-    monthly spend limit / Wait for limit to reset / …") that eats every keystroke as navigation — an
-    injected "retry" lands in the MENU and vanishes, which is why Retry could never unblock such a
-    session (the user 2026-07-16). Requires the menu TITLE plus a menu-chrome line, so conversation
-    text that merely MENTIONS the phrase can't match a dialog that isn't there."""
-    return ("Adjust monthly spend limit" in pane
-            and ("What do you want to do?" in pane or "Enter to confirm" in pane))
 
 
 # _api_error's scan window. Its answer depends ONLY on the records from the LAST DECIDING one
@@ -26852,9 +25829,10 @@ def _api_last_output_t(path):
 
 
 def _suppress_kernel_driven_ask(sid, ask, now=None):
-    """True if this live ask is the CLI's own /model picker popped by a KERNEL-driven model switch (tmux:
-    we type /model, the TUI picker opens, our confirm Enter lands a beat later — the user 2026-07-06, FRO:
-    'something popped up and then disappeared'). That picker is romp's own action mid-flight, not a decision
+    """True if this live ask is the CLI's own /model picker popped by a KERNEL-driven model switch (the tmux
+    backend typed /model, the TUI picker opened, and the confirm Enter landed a beat later — the user
+    2026-07-06, who saw something pop up and vanish; the guard stays for any backend whose switch pops the
+    CLI's own picker). That picker is romp's own action mid-flight, not a decision
     the human owes, so flashing it as an actionable card is a false interrupt. Suppress a MODEL-titled ask
     while the switch is pending (the same 20s-capped _model_switch_pending stamp the badge dots ride):
     anything else — a real permission prompt racing the switch — still surfaces, and if the confirm never
@@ -26866,19 +25844,20 @@ def _suppress_kernel_driven_ask(sid, ask, now=None):
 
 def _ask_poll():
     """Surface each live session's in-flight AskUserQuestion/permission prompt to chat. ONE check per session
-    per ~1.2s tick. tmux sessions are pane-SCRAPED; SDK sessions have no pane, so we read the ask the SDK
-    backend stored in _emit_ask (be.current_ask) instead — WITHOUT this, the scrape returned nothing and we
-    pushed askLiveClear, clobbering a blocked SDK session's prompt every tick (the user 2026-06-24). Per-client
+    per ~1.2s tick. Each backend answers current_ask from its own store (the SDK: the ask it stored in
+    _emit_ask). The tmux backend scraped the pane, until its removal 2026-09-11 — and before the SDK read
+    existed, the scrape returned nothing for an SDK session and we pushed askLiveClear, clobbering a
+    blocked SDK session's prompt every tick (the user 2026-06-24). Per-client
     dedup (_send_client) means an unchanged picker isn't re-sent and a fresh client gets the current one; the
-    webview renders the active tab. (Queued messages are read event-based from the transcript by _pending_queued.)"""
+    webview renders the active tab. (Queued messages are the owning backend's pending_queued.)"""
     while True:
         try:
             with _clients_lock:
                 chat_clients = [c for c in _clients if c["app"] == "chat"]
             if chat_clients:
-                for sid in list(Sessions.live()):
-                    # the owning backend resolves the live ask: tmux SCRAPES its pane, the SDK reads the ask it
-                    # stored in _emit_ask (no pane). One uniform call — no backend fork here.
+                for sid in list(_live_map()):
+                    # the owning backend resolves the live ask (the SDK reads the ask it stored in _emit_ask;
+                    # the Codex backend its own). One uniform call — no backend fork here.
                     ask = Sessions.backend_for(sid).current_ask(sid)
                     if _suppress_kernel_driven_ask(sid, ask):
                         ask = None                     # romp's own /model picker mid-switch — not the human's
@@ -27001,8 +25980,8 @@ def _split_reminders(text):
 # `/\.(png|jpe?g|gif|webp)$/i` (Claude Code 2.1.261 bundle) — the paths it reads and rewrites to
 # "[Image #N]" before the submit. No bmp, no svg: the wider set this carried until 2026-09-06 claimed
 # extractions the CLI never performs (a `.svg` send waited for a rewrite that never came). Twin of
-# sdk_backend._IMG_PATH_RE; tests/test_kernel_fed_echo_absorbed.py pins both to that set. Its reader is
-# the one that WAITS ON the CLI's rewrite: _injected_img_paths (the tmux pre-Enter wait). The bare-path
+# sdk_backend._IMG_PATH_RE; tests/test_kernel_fed_echo_absorbed.py pins both to that set (its one reader,
+# the tmux backend's pre-Enter wait, left with that backend on 2026-09-11). The bare-path
 # PREVIEW in _user_images is romp's own feature and reads _PREVIEW_IMG_RE (beside _IMG_MIME) instead —
 # it never claims a CLI extraction, so it is not bound to the CLI's set.
 _IMG_PATH_RE = re.compile(r"(?:^|[\s'\"`(])((?:~/|/)[^\s'\"`()]+\.(?:png|jpe?g|gif|webp))\b", re.I)
@@ -27029,13 +26008,6 @@ def _user_images(blocks, text, human):
             if len(imgs) >= 4:
                 break
     return imgs
-
-
-def _injected_img_paths(text):
-    """The image file paths in an OUTGOING message (the user 2026-06-17). _tmux_send waits for Claude Code
-    to finish reading these (it rewrites each to "[Image #N]" async) before pressing Enter, so the submit
-    doesn't race the read and drop the surrounding text."""
-    return [m.group(1) for m in _IMG_PATH_RE.finditer(text or "")]
 
 
 # ───────────────────────── postal hydration ─────────────────────────
@@ -28713,7 +27685,7 @@ def _chat_sig_deps(sid, deps):
     return (touts, tuple(pl), postal)
 
 
-def _chat_build_sig(sess, tm=None, now=None, tmux=None, deps=None):
+def _chat_build_sig(sess, tm=None, now=None, live_map=None, deps=None):
     """The chat-build cache's signature: one component per input build_session reads that can change a
     tab's payload, in _CHAT_SIG_LABELS order (tests/test_chat_build_sig_inputs.py maps every read
     build_session makes to one of them). Every tab, the watched one included, is served from _built_chat
@@ -28727,8 +27699,8 @@ def _chat_build_sig(sess, tm=None, now=None, tmux=None, deps=None):
     with a start-keyed dirty watermark for the in-memory stamps neither key named; the proxy and the
     second key are gone and the inputs are named.
 
-    `tm` is the session's liveness row (the push hands the row it holds; None reads it from `tmux`),
-    `tmux` the liveness map the build will read (None reads the thread's snapshot, else a fresh one) and
+    `tm` is the session's liveness row (the push hands the row it holds; None reads it from `live_map`),
+    `live_map` the liveness map the build will read (None reads the thread's snapshot, else a fresh one) and
     `now` the push's clock. The map is served to every nested liveness read for the duration (_serve_live),
     so the row, the task rows and the awaiting sources read the same snapshot the build will. `deps` is the
     cached build's dependency record (_chat_build_deps; None reads the tab's own entry): the three trailing
@@ -28748,14 +27720,14 @@ def _chat_build_sig(sess, tm=None, now=None, tmux=None, deps=None):
     fsid = os.path.basename(path).rsplit(".", 1)[0]   # transcript filename stem == the fsid
     if now is None:
         now = int(time.time())
-    if tmux is None:
-        tmux = _tmux_sessions()
+    if live_map is None:
+        live_map = _live_map()
     if tm is None:
-        tm = tmux.get(sid)
+        tm = live_map.get(sid)
     # the handed map is served to every nested liveness read for the duration (_bg_live_norm, the awaiting
     # sources, the watch rows), so the components read the snapshot the build will; a pusher cycle's own
     # scope is already set and left alone
-    with _serve_live(tmux):
+    with _serve_live(live_map):
         shared = getattr(_live_scope, "chat_shared", None) or _chat_sig_shared()
         if deps is None:
             _hit = _built_chat.get(sid)
@@ -28807,8 +27779,9 @@ def _chat_build_sig(sess, tm=None, now=None, tmux=None, deps=None):
         # row: the liveness row the build reads (state, since, model, effort, mode, the badges, the live
         # subagent and task sets, spawning, retry info), minus snapT (a per-snapshot stamp that moves every
         # cycle) and interrupting (read only through _interrupting, whose boolean is folded below); with
-        # whether the map holds anything at all (the no-tmux fallback status when the row is missing).
-        sig.append(({k: v for k, v in tm.items() if k not in ("snapT", "interrupting")} if tm else None, bool(tmux)))
+        # whether the map holds anything at all (the row-missing status once turned on it — the no-tmux
+        # fallback, gone 2026-09-11 — and the key keeps it).
+        sig.append(({k: v for k, v in tm.items() if k not in ("snapT", "interrupting")} if tm else None, bool(live_map)))
         # clock: the booleans the clock decides, so the signature moves exactly at each crossing and at no
         # other tick: the interrupt stamp's 120 s cap and its settle (_interrupting, which pops the stamp
         # exactly as the build's call would), the model-switch stamp's 20 s cap (_model_pending_now), the
@@ -28823,8 +27796,7 @@ def _chat_build_sig(sess, tm=None, now=None, tmux=None, deps=None):
                     _idle_faded("ready", (tm or {}).get("since"), now),
                     _compacting_optimistic(sid, _pz, now) if _c0 is not None else False))
         # backend: the owning backend's in-memory state the build reads by value: the compacting and
-        # clearing brackets, the queue (the SDK's in-memory list; the tmux fold is over the transcript, so
-        # for tmux this repeats a component already held) with each copy's identity beside its text (the
+        # clearing brackets, the queue (the backend's in-memory list) with each copy's identity beside its text (the
         # qid and enqueue stamp the build ships on the queued bubble, pending_queued_meta; a pop and an
         # append of an equal text leave the texts equal and move the ids, so the texts alone would serve a
         # bubble wearing another copy's id), whether a queued bubble is still recallable, and the CLI's
@@ -28846,16 +27818,18 @@ def _chat_build_sig(sess, tm=None, now=None, tmux=None, deps=None):
         sig.append((ops, tuple(sorted((_park_holds.get(sid) or {}).items()))))   # + the parked holds (T306): a held send reads "editing"
         # limit: the account-level hold the queued bubble names (_limit_hold: usage windows and their reset
         # clock, the spend pause, a limit-shaped launch error), by value, read whenever the build can render
-        # a queued bubble: something queued or parked, or on a tmux backend an input echo still in flight,
-        # which the build folds into the queue while the session is busy. None otherwise, and the build
-        # never asks.
+        # a queued bubble: something queued or parked, or on a backend without unqueue an input echo still in
+        # flight (the tmux backend's kernel-side echo was folded into the queue while the session was busy;
+        # the read stays for a backend that echoes without a queue of its own). None otherwise, and the
+        # build never asks.
         _echoes = bool(be.live_atoms(sid)) if not hasattr(be, "unqueue") else False
         sig.append(_limit_hold(sid) if (queued or ops or _echoes) else None)
         # retry: the per-session auto-retry state the status carries (suppressed; the ladder's count and
         # next-attempt time).
         sig.append((_session_retry_suppressed(sid),) + tuple(_retry_gate_state(sid)))
         # bg: the live background-task rows the awaiting sources and the task box read (_bg_live_norm: the
-        # row's task set joined with the reg's launch ledger, the transcript's pairing for a tmux CLI, each
+        # row's task set joined with the reg's launch ledger, the transcript's pairing for a CLI with no
+        # lifecycle set, each
         # row gone once em._bg_expired says its deadline passed, a clock crossing this fold carries).
         sig.append(tuple((r.get("tid"), r.get("desc"), r.get("t"), r.get("type"), r.get("deadline"), r.get("agentId"))
                          for r in _bg_live_norm(sid, path)))
@@ -29009,11 +27983,11 @@ def _rewind_send(sid, user_uuid, text, now=None):
     branches from just before it, the old tail is abandoned). Validates against the transcript
     (_rewind_target), then hands the cut point + edited text to the SDK backend, whose one-shot
     --resume-session-at reconnect does the rest. Returns an error string for the warn toast, or None.
-    SDK sessions only: the tmux CLI owns its own rewind UI (Esc Esc), and driving it by keystroke
-    injection is exactly the fragility the backend seam exists to avoid."""
+    SDK sessions only: a CLI in a terminal owns its own rewind UI (Esc Esc), and driving it by keystroke
+    injection is exactly the fragility the backend seam exists to avoid (the tmux backend never did)."""
     be = Sessions.backend_for(sid)
     if not hasattr(be, "rewind"):
-        return "editing past messages needs a Claude Code session — this one runs in a terminal (use Esc Esc there)"
+        return "editing past messages needs a Claude Code session — " + _not_claude_code_reason(be)
     if _ops_gate(sid):
         return "the session is busy — wait for the current turn to finish, then edit"
     now = now or time.time()
@@ -29058,7 +28032,7 @@ def _rewind_rollback(sid, user_uuid, now=None):
     error string for the warn toast, or None."""
     be = Sessions.backend_for(sid)
     if not hasattr(be, "rollback"):
-        return "deleting past messages needs a Claude Code session — this one runs in a terminal (use Esc Esc there)"
+        return "deleting past messages needs a Claude Code session — " + _not_claude_code_reason(be)
     # NO busy gate here (delete-while-busy, the user 2026-08-29): the backend decides — a bare
     # delete on an in-flight turn interrupts it and arms the rewind at the turn's actual end;
     # compacting and queued-strangers keep their honest refusals inside _arm_rewind.
@@ -29506,14 +28480,14 @@ def _warm_fleet_bg(now):
     def go():
         parsed_any = False
         try:
-            tmux = _tmux_sessions()
-            for s in _alive_sessions(now, tmux):         # live sessions first
+            live_map = _live_map()
+            for s in _alive_sessions(now, live_map):         # live sessions first
                 if _has_parsing_client():                 # a chat/timeline tab just opened → it'll warm the rest
                     break
                 # T323 stage 1: only a session that MOVED since this kernel booted (its transcript or state log
                 # appended) or is working right now is worth a cold parse here; the rest cost O(file bytes)
                 # each for working dots nobody's card will show differently, and the cache fills on demand
-                if not _warm_wanted(s, tmux.get(s["sid"])):
+                if not _warm_wanted(s, live_map.get(s["sid"])):
                     continue
                 _parse(s["path"], s["sid"], now)          # warm the kernel parse cache
                 parsed_any = True
@@ -29626,7 +28600,7 @@ _interrupt_clicked = {}       # sid -> ts; event-cleared the moment the turn is 
 # A /model pick WE just sent, from EITHER surface (the chat statusline's setModel WS message and the
 # timeline lane's sendCommand both funnel through _set_model_or_park) → ONE server-side pending signal
 # both surfaces read (the user 2026-07-03: switching from the timeline showed dots there but NOT in chat,
-# and chat only caught up once the next tmux poll happened to report the new name — because each surface
+# and chat only caught up once the next liveness poll happened to report the new name — because each surface
 # used to track "pending" with its OWN local click state, so whichever UI's click didn't fire had no cue
 # and no shared urgency to refresh). sid -> {"target": alias, "until": ts}; the SDK backend also reports
 # its own (more precise, event-resolved) modelPending — _model_pending_now ORs the two so a session on
@@ -29648,8 +28622,8 @@ def _interrupting(sid, session, now, tm):
       BEFORE the '[Request interrupted by user]' record lands, so keying on the tail dropped us to 'working'
       mid-interrupt — the reported bug). When the snapshot exposes it, trust it: True → interrupting; False →
       settled → clear.
-    - tmux (no such flag): the CLI's stop record ('[Request interrupted by user]') at/after the click IS the
-      settle. int(t0) so a record in the same second as the click still counts; a record from a PRIOR
+    - a snapshot with no such flag: the CLI's stop record ('[Request interrupted by user]') at/after the click
+      IS the settle. int(t0) so a record in the same second as the click still counts; a record from a PRIOR
       interrupt, seconds earlier, correctly does not.
 
     Earlier this ALSO cleared on `not open_now` — meant to fall to honest 'ready' when the stop landed with
@@ -29664,14 +28638,14 @@ def _interrupting(sid, session, now, tm):
     t0 = _interrupt_clicked.get(sid)
     if t0 is None:
         return False
-    inflight = (tm or {}).get("interrupting")     # SDK exposes True/False; tmux has no such key → None
+    inflight = (tm or {}).get("interrupting")     # SDK exposes True/False; a row without the key → None
     # A snapshot TAKEN BEFORE the click carries no verdict on it (the user 2026-08-04): the push loop
     # snapshots every backend once and then builds for a while, so a stop clicked mid-loop reaches this
     # function with a PRE-click interrupting:False — which used to pop the stamp and eat the whole
     # in-flight window (the chip read Interrupting…, fell to Working until the real settle, then Ready;
     # later builds saw the flag True but no stamp, which deliberately paints nothing). Evidence older
     # than the click stands down: fall through to the transcript path below, and the next FRESH snapshot
-    # settles it properly. A snapshot without snapT (tmux, older fixtures) is treated as current.
+    # settles it properly. A snapshot without snapT (older fixtures) is treated as current.
     snap_t = (tm or {}).get("snapT")
     if inflight is not None and not (snap_t is not None and snap_t < t0):
         if not inflight or now - t0 > 120:
@@ -29689,7 +28663,7 @@ def _interrupting(sid, session, now, tm):
 def _alias_reflects(live_pretty, alias):
     """Does the LIVE model display name reflect the chosen ALIAS — i.e. the switch has taken effect?
     Duplicated from romp_sdk_backend._model_reflects_alias (kept tiny + dependency-free here so it works
-    even when the SDK module isn't loaded — a tmux-only box has no romp_sdk_backend import at all)."""
+    even when the SDK module isn't loaded — a box without the SDK dependency has no romp_sdk_backend import at all)."""
     if not live_pretty:
         return False
     if not alias or alias == "default":
@@ -29712,7 +28686,7 @@ def _mark_model_pending(sid, value):
 def _model_pending_now(sid, tm):
     """The ONE modelPending signal both build_session (chat) and build_timeline read: the SDK backend's own
     (precise, event-resolved the instant its live model reflects the pick) OR'd with the kernel's own stamp
-    from _mark_model_pending (covers tmux, which tracks nothing itself) — cleared here the instant the live
+    from _mark_model_pending (covers a backend that tracks nothing itself) — cleared here the instant the live
     model reflects the target, with a 20s cap so a switch that never resolves can't trap the dots forever."""
     if tm and tm.get("modelPending"):
         return True
@@ -29829,9 +28803,9 @@ def _mark_compacting(sid):
 
 
 def _compacting_optimistic(sid, session, now):
-    """True if we just sent /compact to this session and it hasn't finished yet. The compacting badge is
-    otherwise derived from a fleeting tmux @claude-state caught only by the 4s diff-push, which a reload or
-    a too-brief flip can miss entirely; since the kernel ITSELF sends /compact it knows the start exactly,
+    """True if we just sent /compact to this session and it hasn't finished yet. The compacting badge was
+    otherwise derived from the tmux backend's fleeting @claude-state, caught only by the 4s diff-push, which a
+    reload or a too-brief flip could miss entirely; since the kernel ITSELF sends /compact it knows the start exactly,
     so it shows 'compacting' immediately on chat + timeline + badges. Cleared EVENT-BASED the instant a
     compact_boundary lands at/after the click; 180s safety cap covers a cancelled compaction (2026-06-16)."""
     t0 = _compact_clicked.get(sid)
@@ -29849,17 +28823,18 @@ def _compacting_optimistic(sid, session, now):
 
 
 def _compacting(sid, st, session, now, since):
-    """Whether the session is REALLY compacting — corroborating the tmux @claude-state / the optimistic flag
-    against the EVENT MODEL. The compacting state is STICKY in the hook (PreCompact latches it; ONLY
-    PostCompact ends it), so a MISSED PostCompact — a kernel restart-storm, an interrupted or auto
-    compaction — pins @claude-state='compacting' forever even as the session resumes working, desyncing the
-    chip (compacting) from the feed/transcript (working). So compaction is OVER the instant the transcript
-    shows an OPEN working turn OR a compact_boundary atom at/after the compaction start (@claude-state-since);
-    only then do we trust the live 'compacting' signal (the user 2026-06-24)."""
+    """Whether the session is REALLY compacting — corroborating the live row's compacting state / the
+    optimistic flag against the EVENT MODEL. The rule comes from the tmux backend's hook (removed 2026-09-11),
+    where the state was STICKY (PreCompact latched it; ONLY PostCompact ended it), so a MISSED PostCompact — a
+    kernel restart-storm, an interrupted or auto compaction — pinned @claude-state='compacting' forever even
+    as the session resumed working, desyncing the chip (compacting) from the feed/transcript (working). So
+    compaction is OVER the instant the transcript shows an OPEN working turn OR a compact_boundary atom
+    at/after the compaction start (the row's since); only then do we trust a live 'compacting' signal that
+    is not the backend's own bracket (the user 2026-06-24)."""
     # AUTHORITATIVE first (the user 2026-07-14): a backend that brackets its own compaction (the SDK, via the
     # /compact-delivery → boundary/settle events) is the ground truth — no optimistic 180s cap that stranded
-    # parked ops when /compact found nothing to compact. None → this backend has no such signal (tmux) → the
-    # @claude-state + optimistic corroboration below, unchanged.
+    # parked ops when /compact found nothing to compact. None → this backend has no such signal → the
+    # row-state + optimistic corroboration below, unchanged.
     try:
         be = Sessions.backend_for(sid)
         bc = be.compacting(sid) if be is not None else None
@@ -29907,8 +28882,8 @@ def _session_chip(sid, path, session, tm, now):
             "awaitingBg" if awaiting_why else "ready")
 
 
-# ANY drive op requested WHILE the session compacts is PARKED (the user 2026-07-01 for /model — tmux
-# keystrokes land in the compacting UI and derail it; generalized 2026-07-02 to messages AND /effort, as
+# ANY drive op requested WHILE the session compacts is PARKED (the user 2026-07-01 for /model — the tmux
+# backend's keystrokes landed in the compacting UI and derailed it; generalized 2026-07-02 to messages AND /effort, as
 # ONE FIFO queue): whatever sequence of messages and slash commands you send during a compaction, the
 # chat renders them as queued bubbles IN THAT ORDER and _apply_pending_ops delivers them IN THAT ORDER
 # the moment compaction ends. A repeated model/effort pick REPLACES its earlier parked op in place (last
@@ -29925,7 +28900,7 @@ _PENDING_OPS_FILE = Path(jd.STATE) / "pending-ops.json"
 # mutations ONLY: no backend call ever runs under it (CodexBackend.send can synchronously spawn and
 # initialize `codex app-server` with no request timeout; SdkBackend.busy/turn_seq take the backend's own
 # lock), and a handler evaluates only the queue-presence check under it (_park_behind_queue) — its
-# expensive gates (_compacting_now / _working_now / _limit_hold: a tmux fork, a discover sweep, the usage
+# expensive gates (_compacting_now / _working_now / _limit_hold: a liveness read, a discover sweep, the usage
 # file) run outside. So a holder owns it for a dict read, a list append or pop, and the mirror write —
 # microseconds. Re-entrant, because _park_op and _save_pending_ops take it and are called from under it.
 # The drain takes it NON-BLOCKING at the top of its walk (_apply_pending_ops). No backend thread ever takes
@@ -29989,7 +28964,7 @@ def _compacting_now(sid, tm=None, path=_PATH_UNRESOLVED):
     transcript", exactly _path_of's miss."""
     sid = str(sid)
     if tm is None:
-        tm = _tmux_sessions().get(sid)
+        tm = _live_map().get(sid)
     if path is _PATH_UNRESOLVED:
         path = _path_of(sid)
     session = (_parse_cached(path) if path else None) or {"turns": []}
@@ -29998,9 +28973,9 @@ def _compacting_now(sid, tm=None, path=_PATH_UNRESOLVED):
 
 def _clearing_now(sid):
     """Is this session mid-/clear RIGHT NOW — the backend's authoritative bracket (SDK: set on /clear
-    delivery, cleared by the lastSid-flipping init / the turn's settle). No optimistic/tmux derivation
-    exists: a tmux TUI /clear surfaces as a fork lane with no observable bracket (the accepted gap in
-    plans/clear-episodes.md), so None reads False."""
+    delivery, cleared by the lastSid-flipping init / the turn's settle). No optimistic derivation exists (a
+    TUI /clear on the tmux backend surfaced as a fork lane with no observable bracket, the gap
+    plans/clear-episodes.md accepted), so None reads False."""
     try:
         be = Sessions.backend_for(str(sid))
         return bool(be.clearing(str(sid))) if be is not None else False
@@ -30012,8 +28987,8 @@ def _working_now(sid):
     """Is the session's turn OPEN right now. Prefer the backend's AUTHORITATIVE busy signal (SDK inflight)
     — the CACHED parse below LAGS a just-started turn (transcript-not-yet-written), which raced the drive-op
     gate: a /compact pressed while a turn was truly in flight saw 'not working', skipped the FIFO, and fired
-    immediately, out of press-order (the user 2026-07-14). tmux answers from the hook-maintained
-    @claude-state, corroborated against the cached parse by event order (TmuxBackend.busy, 2026-09-03);
+    immediately, out of press-order (the user 2026-07-14). Codex answers from its own turn state; a backend
+    that answered from a hook row corroborated against the cached parse left with the tmux backend (2026-09-11);
     None — no row, no published state, compacting — falls to the cached event-model parse. Both are cheap
     enough for the WS handler + the pusher's drain."""
     try:
@@ -30118,7 +29093,7 @@ def _ops_gate(sid):
     sid = str(sid)
     return (_compacting_now(sid) or _working_now(sid) or bool(_pending_ops.get(sid))
             or sid in _moving or _limit_hold(sid) is not None)   # a move in flight holds the queue too
-    # ^ EXPENSIVE (a tmux fork, a discover sweep, the usage file, the backend's busy()) — the handlers call
+    # ^ EXPENSIVE (a liveness read, a discover sweep, the usage file, the backend's busy()) — the handlers call
     #   it OUTSIDE _pending_ops_lock; its queue read is advisory, and the one that decides is the locked
     #   re-check in _park_behind_queue (_gate_or_park). A backend must never be called under that lock.
 
@@ -30127,7 +29102,7 @@ def _gate_or_park(sid, op):
     """The park-or-hand-over decision every drive op except a send takes (a send composes its own gates in
     _send_or_park, same shape). Returns True when PARKED — the caller answers "queued" — and False when the
     caller should hand the op to the backend now. Two steps, in this order (2026-09-05): the EXPENSIVE gates
-    (_ops_gate) run outside the queue lock, since they fork tmux, sweep discover, read the usage file and
+    (_ops_gate) run outside the queue lock, since they read liveness, sweep discover, read the usage file and
     call the backend's busy() — none of which a lock that the pusher's drain also takes may wait on; then
     the CHEAP queue-presence check and the park run as ONE locked step (_park_behind_queue), so an op never
     slips past a queue that another handler filled between the two reads."""
@@ -30222,10 +29197,11 @@ _MOVE_BUSY_RETRIES = 3           # CLI-side `busy` answers retried without waiti
                                  # retry first waits out _MOVE_BUSY_RETRY_S (_hold_drain — see there for why).
 _MOVE_BUSY_RETRY_S = 3.0         # the spacing between those retries: the judge producer's pass cadence, which
                                  # spaced them by accident until the drain moved to the pusher (2026-09-03)
-_TMUX_PROMPT_HOLD_S = 3.0        # the prompt hold's clock FALLBACK: after the drain hands a session a turn-opening
+_PROMPT_HOLD_S = 3.0        # the prompt hold's clock FALLBACK: after the drain hands a session a turn-opening
                                  # op and busy() did not read True inside send(), the sid holds until busy() is
-                                 # OBSERVED True (tmux: the UserPromptSubmit hook's flip) — or, if no flip ever comes
-                                 # (a paste tmux refused, a builtin that opens no prompt turn), until this many seconds
+                                 # OBSERVED True (a backend whose send() does not close its own busy gate: the tmux
+                                 # backend's UserPromptSubmit flip, until 2026-09-11) — or, if no flip ever comes
+                                 # (a paste refused, a builtin that opens no prompt turn), until this many seconds
 _drain_hold: dict = {}           # sid -> (time.monotonic() deadline, until_busy); _apply_pending_ops skips the sid
                                  # while the hold is open (_drain_hold_open)
 # T306 (the user 2026-09-10): a parked SEND whose editor is open is HELD — sid -> {key: owner}, the key the copy's id
@@ -30453,7 +29429,6 @@ def _release_client_holds(client):
         _mark_views_dirty()
         _wake_kernel()
     return n
-_refresh_parse_failures: dict = {}   # sid -> consecutive cycles its parked-parse refresh raised (_refresh_parked_parse)
 _inflight_ops: dict = {}         # sid -> the HEAD op the drain has handed to the backend, lock released, and not yet
                                  # popped (2026-09-05; never a cwd op — a move hands nothing over while its turn_seq
                                  # is read, so a ✕ on a waiting move must still succeed). It stays the visible head
@@ -30476,18 +29451,19 @@ def _hold_drain(sid, seconds, until_busy=False):
         event to key on, so this one is a clock — `seconds` (_MOVE_BUSY_RETRY_S, the judge producer's old
         3 s cadence, which spaced the retries by accident before), named as one;
       * a send / command / compact just handed to a backend whose busy() did not read True inside send()
-        (_after_turn_opening). tmux: the paste is a daemon thread that clears the box, pastes and presses
-        Enter over ~0.3 s, and the row flips to working only when the CLI accepts the prompt and the
-        UserPromptSubmit hook runs — a cycle inside that window reads the row as still waiting, and the op
-        behind would fire into the opening turn, the mis-delivery the SEND-ends-the-drain contract exists
-        to prevent. Nothing in that path emits an event the kernel can see BEFORE the hook's flip, so the
+        (_after_turn_opening). The case this was built for is the tmux backend's (removed 2026-09-11): its
+        paste was a daemon thread that cleared the box, pasted and pressed Enter over ~0.3 s, and the row
+        flipped to working only when the CLI accepted the prompt and the UserPromptSubmit hook ran — a
+        cycle inside that window read the row as still waiting, and the op behind would have fired into the
+        opening turn, the mis-delivery the SEND-ends-the-drain contract exists to prevent. Nothing in that
+        path emitted an event the kernel could see BEFORE the hook's flip, so the
         hold is keyed on the flip itself: `until_busy` holds the sid until busy() has been OBSERVED True
         once after the delivery (the flip, seen in a later cycle's snapshot), whereupon the working gate
         owns the sid as for any open turn — the turn's Stop flip delivers the op behind; or until the sid
         reads compacting (a delivered /compact: the compaction IS the event, and the compacting gate holds
         the op behind until it is corroborated over — a compacting row gives no busy answer). `seconds`
-        (_TMUX_PROMPT_HOLD_S) is only the loud fallback for a flip that never comes — a paste tmux
-        refused, a builtin the CLI runs without a prompt turn — and its release is logged, so a queue that
+        (_PROMPT_HOLD_S) is only the loud fallback for a flip that never comes — a paste the CLI
+        refused, a builtin it runs without a prompt turn — and its release is logged, so a queue that
         drained on the clock is on the record.
     The SDK and Codex backends need neither: their send() enqueues under the session lock, so busy() reads
     True before it returns and _after_turn_opening arms nothing."""
@@ -30528,8 +29504,9 @@ def _after_turn_opening(be, sid, remaining):
     evaluated or removed it) and fired the fallback line when a later op parked for an unrelated reason.
     A backend whose send() closed its own busy gate synchronously (SDK, Codex: the turn is pending under
     the session lock before send() returns) reads busy() True right here, and the op behind waits for the
-    turn's end by itself. Any other answer — tmux's row still says waiting until the UserPromptSubmit hook
-    runs; a backend with no busy() at all — arms the until_busy hold: the sid waits until busy() has been
+    turn's end by itself. Any other answer — a row that says waiting until a hook flips it (the tmux
+    backend's, until 2026-09-11); a backend with no busy() at all — arms the until_busy hold: the sid
+    waits until busy() has been
     observed True, or the fallback clock runs out (_hold_drain)."""
     if not remaining:
         return
@@ -30538,7 +29515,7 @@ def _after_turn_opening(be, sid, remaining):
     except Exception:
         closed = False
     if not closed:
-        _hold_drain(sid, _TMUX_PROMPT_HOLD_S, until_busy=True)
+        _hold_drain(sid, _PROMPT_HOLD_S, until_busy=True)
 
 
 def _move_or_park(be, sid, path, client=None):
@@ -30849,8 +29826,8 @@ def _queue_recallable(be, sid):
 def _forwards_sends(be):
     """True if this backend forwards its own composer sends (SDK — see SessionBackend.forwards_sends), so the
     kernel hands a send straight over even mid-turn instead of parking + merging it. getattr-guarded: a
-    backend / test fake without the capability reads as False (tmux-like: hold while a turn runs, merge on
-    delivery)."""
+    backend / test fake without the capability reads as False (the tmux backend's regime: hold while a turn
+    runs, merge on delivery)."""
     fn = getattr(be, "forwards_sends", None)
     try:
         return bool(fn()) if fn else False
@@ -30931,6 +29908,14 @@ def _client_qid(msg, sid, be):
     return q
 
 
+def _op_user(op) -> bool:
+    """Whether a parked send or command is the USER's (its fifth slot, _send_or_park; T315): the replay hands
+    the backend user=True for it, the word that retries a stood-down attach, and nothing for a machine op (a
+    watch notice, a nudge, a re-delivery, a record from a mirror written before the slot existed). Length-
+    guarded like every reader of an optional slot; the fourth slot is None when no id rode."""
+    return op[0] in ("send", "command") and len(op) > 4 and op[4] is True
+
+
 def _op_qid(op):
     """The press-time id a parked send or command carries (its fourth slot, _send_or_park), or None: a kernel-
     parked op (a re-delivery, a nudge, a three-slot record from a mirror written before the slot existed) has
@@ -30941,10 +29926,11 @@ def _op_qid(op):
 
 def _takes_qid(fn):
     """True when a backend method receives the copy's id as `qid`: SdkBackend.send and SdkBackend.unqueue do;
-    TmuxBackend.send (the CLI holds its queue, whose copies carry stamps and no id), CodexBackend.send and a
-    stand-in with the older signature do not. Read from the signature, so the gate is the parameter that takes
-    the id and never a neighbouring capability (tmux exposes pending_queued_meta for the chat's stamps and takes
-    no id). None, or a signature that cannot be read, reads as not taking it: the text goes alone."""
+    CodexBackend.send and a stand-in with the older signature do not (nor did the tmux backend's, whose CLI
+    held its queue with stamps and no id). Read from the signature, so the gate is the parameter that takes
+    the id and never a neighbouring capability (a backend may expose pending_queued_meta for the chat's stamps
+    and take no id, as the tmux backend did). None, or a signature that cannot be read, reads as not taking
+    it: the text goes alone."""
     if fn is None:
         return False
     try:
@@ -30953,31 +29939,60 @@ def _takes_qid(fn):
         return False
 
 
-def _send_with_id(be, sid, text, qid=None):
-    """be.send, with the copy's press-time id when one rode and the backend's send takes it (_takes_qid:
-    SdkBackend, whose queued copy and echo then wear the id the chat's bubble already has). A send that takes
-    no id (tmux, whose echo is the kernel's and whose queue is the CLI's; Codex; a stand-in) gets the text
-    alone, as before."""
-    if qid and _takes_qid(be.send):
-        return be.send(sid, text, qid=qid)
+def _takes_user(fn) -> bool:
+    """Whether a backend's send takes the `user` keyword (SdkBackend.send: the text is a message the USER typed,
+    the one word that retries an attach the session stood down from, T315). Read from the signature like
+    _takes_qid; a send without it (Codex, a stand-in) is called as before."""
+    if fn is None:
+        return False
+    try:
+        return "user" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _user_send(be, sid, text):
+    """be.send for a message the USER typed, with user=True when the backend's send takes it."""
+    if _takes_user(be.send):
+        return be.send(sid, text, user=True)
     return be.send(sid, text)
 
 
-def _send_or_park(be, sid, text, echo=None, qid=None):
-    """Deliver `text` now — or PARK it in the sid's FIFO. Park when: (a) the session is COMPACTING (the user
+def _send_with_id(be, sid, text, qid=None, user=False):
+    """be.send, with the copy's press-time id when one rode and the backend's send takes it (_takes_qid:
+    SdkBackend, whose queued copy and echo then wear the id the chat's bubble already has). A send that takes
+    no id (Codex; a stand-in) gets the text alone, as before. `user`: a message the user typed (the composer, the phone, a user's `romp send`, a parked
+    user send replayed), passed on when the send takes it (T315: the word that retries a stood-down attach)."""
+    kw = {}
+    if qid and _takes_qid(be.send):
+        kw["qid"] = qid
+    if user and _takes_user(be.send):
+        kw["user"] = True
+    return be.send(sid, text, **kw)
+
+
+def _send_or_park(be, sid, text, echo=None, qid=None, user=False):
+    """`user` (T315): the text is the USER's (the composer, the phone, an untagged `romp send`, a typed command),
+    handed to the backend as its word to retry a stood-down attach and remembered on a parked op's fifth slot for the
+    replay; a machine caller (a watch notice, a nudge, a tagged `romp send`) passes nothing and is queued behind a
+    stand-down instead. Classified by the caller that knows who speaks, never by the route.
+
+    Deliver `text` now — or PARK it in the sid's FIFO. Park when: (a) the session is COMPACTING (the user
     2026-07-02: a mid-compaction send's live-tail echo opened a turn that KILLED the 'compacting' cue — a
     parked send lands no echo atom, so the cue stays and the send shows as a queued bubble in park order);
     (b) a kernel FIFO already EXISTS for this sid (a parked drive op / earlier held send is ahead — stay
     behind it in press order); (b2) the ACCOUNT can't serve a request at all (_limit_hold — a usage limit
     or spend cap, the user 2026-07-24: sending into one just buys a red API-error card, and a
     forwards_sends backend would hand it straight over, so this arm has to sit ahead of that check); or
-    (c) the backend can't forward its own sends AND a turn is open (tmux: hold
-    while working, and _apply_pending_ops MERGES the held run into one message at turn end). Otherwise hand
+    (c) the backend can't forward its own sends AND a turn is open (the tmux backend's regime, until
+    2026-09-11: hold while working, and _apply_pending_ops MERGES the held run into one message at turn
+    end). Otherwise hand
     it over NOW — a forwards_sends backend (SDK) takes a send even mid-turn and forwards it at the next tool
     boundary, folds several queued sends into one turn, and holds them across an interrupt (the user
     2026-07-17: "get user messages in as soon as possible; we don't have to interrupt but get them in"); the
     still-waiting message renders as a queued bubble (its echo is suppressed) until it forwards. `echo` is
-    the _optimistic_echo author stamped when the send actually fires (None = the backend echoes for itself).
+    the parked op's author slot, kept for the op's on-disk shape (the SDK and Codex backends echo for
+    themselves inside send(); no kernel-side echo exists since the tmux backend's removal, 2026-09-11).
 
     EXCEPTION to the forward-now rule: a typed SLASH COMMAND ("/autocompact auto") parks whenever a turn is
     open, even on a forwards_sends backend (the user 2026-08-13): the CLI only EXECUTES a slash command
@@ -30993,7 +30008,7 @@ def _send_or_park(be, sid, text, echo=None, qid=None):
     its own turn otherwise read 'ok' and had no way to know the command was waiting for that turn to end
     (2026-09-03, a /clear that then never fired).
 
-    THE LOCK (2026-09-05): the gates above are EXPENSIVE — _compacting_now and _working_now fork tmux or
+    THE LOCK (2026-09-05): the gates above are EXPENSIVE — _compacting_now and _working_now read liveness or
     sweep discover and call the backend's busy(), _limit_hold reads the usage file — so they run OUTSIDE
     _pending_ops_lock, on this handler thread, as they always did (the queue read among them is advisory).
     What runs under the lock is the cheap queue-presence re-check and the park, as ONE step
@@ -31008,15 +30023,20 @@ def _send_or_park(be, sid, text, echo=None, qid=None):
     kernel's own echo form; _client_qid admits it): parked, it rides the op as its fourth slot (_op_qid), so the
     chip and its ✕ name the copy before the drain, and the drain hands the same id to the backend; handed over
     now, it goes to a send that takes it (_send_with_id: SdkBackend, whose queued copy and echo then wear it) and
-    is left off for one that does not (tmux, whose queue is the CLI's; the copy is read by text). The op stays
+    is left off for one that does not (Codex; the copy is read by text). The op stays
     the three-slot record when no id rides, so a mirror written before the slot existed and every reader that
     indexes the first three slots are unchanged. Without it the copy was identified where it entered the
     backend's queue, so a send parked during compaction, a usage-limit hold or behind a queue carried no id
     until the drain and the chat read it by text."""
+    if be is _UNOWNED:
+        be.send(sid, text)                               # says why on stderr; nothing is parked for a session nobody runs
+        return None                                      # (a dead session's open turn would otherwise park it forever)
     cmd = _is_slash_command(text)
     op = ("command", text, echo) if cmd else ("send", text, echo)
     if qid:
         op = op + (qid,)
+    if user:
+        op = op + (None,) * (4 - len(op)) + (True,)     # the fifth slot: the user's words (_op_user); the fourth stays the id or None
     if _compacting_now(sid) or _pending_ops.get(sid) or _limit_hold(sid):
         _park_op(sid, op)
         return True
@@ -31025,10 +30045,8 @@ def _send_or_park(be, sid, text, echo=None, qid=None):
         return True
     if _park_behind_queue(sid, op):
         return True
-    if _send_with_id(be, sid, text, qid) is False:
+    if _send_with_id(be, sid, text, qid, user=user) is False:
         return None                                      # refused by the backend: not parked, not delivered
-    if echo:
-        _optimistic_echo(sid, text, author=echo)
     return False
 
 
@@ -31040,7 +30058,8 @@ def _compact_or_park(be, sid):
     tells its caller which ("compacting now" vs "queued")."""
     if _gate_or_park(sid, ("compact",)):
         return True
-    be.send(sid, "/compact")
+    if _user_send(be, sid, "/compact") is False:        # the click is the user's (T315); a refusal shows no cue
+        return None
     _mark_compacting(sid)
     return False
 
@@ -31100,8 +30119,8 @@ def _set_model_or_park(be, sid, value, floating=False):
     # OWN word, _model_switches_live, NOT forwards_sends: forwarding a plain send mid-turn says nothing about
     # how a backend applies a model change — Codex forwards sends (they STEER the live turn) but its
     # set_model lands at the NEXT turn_start, so a pick fired there mid-turn would let the send typed after
-    # it steer the OLD model first, the exact inversion the press-order rule forbids; tmux's set_model TYPES
-    # /model into the pane, never mid-turn; and the SDK says no for now too, because the CLI mis-parents a
+    # it steer the OLD model first, the exact inversion the press-order rule forbids; and the SDK says no
+    # for now too, because the CLI mis-parents a
     # mid-turn switch's transcript breadcrumbs and the rest of the turn is lost as a rewound branch (the
     # evidence and the conditions for flipping it live in SdkBackend.model_switches_live; review fold,
     # 2026-09-04). Every OTHER park reason stands, and each is a case no control channel can answer: a
@@ -31179,8 +30198,8 @@ def _route_meta_command(be, sid, text, client=None, floating=False, state=None):
     what parks the change mid-compaction. Returns True when it took the command. Whichever surface
     typed it — the composer, the lane menu, POST /send — the command is one gesture with one outcome;
     how the setter then LANDS it is the backend's: an SDK session switches model live but reconnects
-    to apply an effort change (SdkBackend.set_effort), a tmux session gets the CLI's own command typed
-    into its pane with /model's confirmation accepted for the user (TmuxBackend.set_model) — the
+    to apply an effort change (SdkBackend.set_effort), a Codex session applies either at its next turn
+    (CodexBackend.set_model / set_effort) — the
     SessionBackend.set_model / set_effort docstrings hold the split. Anything else — another slash
     command, a bare "/model" (the CLI's own picker), plain text that merely contains one — is the
     caller's to send verbatim: the CLI owns what executes. A refused fast toggle is told to
@@ -31190,7 +30209,7 @@ def _route_meta_command(be, sid, text, client=None, floating=False, state=None):
     command exactly as for a text send (2026-09-03: a parked /model read as plain 'ok'). The effort/fast
     setters report whether they parked under _gate_or_park (the one _ops_gate evaluation those two pay),
     the model setter has its own rule (_set_model_or_park), and this route never evaluates _ops_gate
-    itself: a read here cost every command a tmux fork, discover pass and usage read for a value nothing
+    itself: a read here cost every command a liveness read, discover pass and usage read for a value nothing
     used (#986, the review of #954, removed it; the #923 merge restored it)."""
     head, _, rest = (text or "").strip().partition(" ")
     value = rest.strip()
@@ -31200,6 +30219,19 @@ def _route_meta_command(be, sid, text, client=None, floating=False, state=None):
     # ours to swallow: it stays the CLI's, verbatim, and the user sees the CLI's own error.
     if not value or len(value.split()) != 1:
         return False
+    is_meta = ((head == "/model" and _vouched_model(value)) or (head == "/effort" and value in _EFFORT_VALUES)
+               or (head == "/fast" and value in ("on", "off")))
+    if is_meta and be is _UNOWNED:
+        # a session no running backend owns takes no setting: refuse before any stamp (the switching dots
+        # on a dead lane) or park (an op the drain could never deliver, surviving restarts) — the same
+        # words the send routes use (review find, 2026-09-11)
+        why = "no running backend owns this session — the command was not delivered"
+        if state is not None:
+            state["refused"] = why
+        if client:
+            client["send"](json.dumps({"type": "warn", "text": why}))
+        sys.stderr.write("meta command %s for %s refused: no backend owns this session\n" % (head, sid))
+        return True
     if head == "/model" and _vouched_model(value):
         # the model setter has its OWN rule (an open turn fires it live only on a backend that declares
         # model_switches_live — none shipped does yet, so the SDK still parks; #923), so its verdict is
@@ -31219,6 +30251,12 @@ def _route_meta_command(be, sid, text, client=None, floating=False, state=None):
     return True
 
 
+def _not_claude_code_reason(be):
+    """The tail of a refusal for an op only the Claude Code backend performs: which backend has the
+    session instead (Codex), or that none does (the unowned route)."""
+    return "this one runs in Codex" if (be is not None and be is _codex()) else "no running backend owns this one"
+
+
 def _vouched_model(value):
     """A model value the kernel will stand behind persisting: a family alias, 'default', a catalog or
     learned version id, or any well-formed first-party id of a known family (the CLI validates the
@@ -31234,66 +30272,21 @@ def _vouched_model(value):
 def _deliver_send_batch(be, sid, run):
     """Deliver a run of consecutive parked ('send', text, echo) ops AT ONCE (the user 2026-07-17: a pile of
     queued messages should all go in together, not one turn each). A backend that forwards its own sends
-    (SDK) enqueues each — its inputs() folds them into ONE turn; a backend that can't (tmux) has no fold, so
-    MERGE them into a single message (the user okayed merging for tmux). Each fired send stamps its optimistic
-    echo (a no-op on the SDK, which echoes inside send(); the kernel-side tmux echo otherwise)."""
+    (SDK, Codex) enqueues each — the SDK's inputs() folds them into ONE turn; a backend that can't (none
+    today; the tmux backend, until its removal 2026-09-11) has no fold, so MERGE them into a single message
+    (the user okayed merging for that backend). Nothing is echoed here: every backend echoes inside send()
+    (the kernel-side echo left with the tmux backend)."""
     if not run:
         return
     if _forwards_sends(be):
         for op in run:
-            _send_with_id(be, sid, op[1], _op_qid(op))   # under the id the press minted, when one rode the park
-            if op[2]:
-                _optimistic_echo(sid, op[1], author=op[2])
+            _send_with_id(be, sid, op[1], _op_qid(op), user=_op_user(op))   # under the id the press minted, when one rode the park
         return
-    merged = "\n\n".join(op[1] for op in run)          # tmux: one message, blank-line separated between turns
-    be.send(sid, merged)
-    author = next((op[2] for op in run if op[2]), None)
-    if author:
-        _optimistic_echo(sid, merged, author=author)
-
-
-def _refresh_parked_parse(sid, now):
-    """For ONE sid the drain is about to gate: re-parse its transcript when it HOLDS PARKED OPS and its cached
-    parse has gone stale (second review of the tmux busy change, 2026-09-03). TmuxBackend.busy corroborates the
-    hook row against the CACHED parse and can overrule a stranded row (an Esc fires no hook) only when
-    _parse_cached returns a session — and _parse_cached never parses. The cache is filled by client builds
-    (build_session, build_timeline), the client-gated warmer, and a few gesture paths; headless — no chat or
-    timeline client, or every session after a kernel restart until one connects — every live tmux session's
-    cache is None from its first transcript write on, so busy() was the hook verbatim, and after a pane Esc
-    every `romp send` parked until the next pane prompt cleared the row: a regression
-    the parent did not have, whose stale-cache read was idle. A cache miss IS the event "the transcript
-    moved since we last read it", and this job answers it with the evidence the corroboration needs,
-    bounded four ways: only sids whose backend DECLARES that its busy() may be overruled by the transcript
-    (SessionBackend.corroborates_with_transcript — tmux; the SDK and Codex answer busy() and compacting()
-    authoritatively, so no drain gate reads their cache, and re-parsing an SDK transcript here would have
-    run on every cycle of a streaming turn, whose every atom moves the file AND wakes the pusher — load the
-    parent did not have), only sids with parked ops (the only sids the drain gates this cycle), once per
-    cycle, and only when the file moved (_parse_cached None). A sid with no backend is skipped too. busy()
-    itself stays parse-free — it also serves the WS handler, which must stay cheap. The consequence to
-    know: a headless `romp send` typed right after a pane Esc parks ONCE (at that instant the hook is all
-    busy() has), and the next cycle's refresh lets the drain deliver it — within the 0.5 s backstop instead
-    of ~2 minutes."""
-    try:
-        be = Sessions.backend_for(sid)
-    except Exception:
-        be = None
-    if be is None or not getattr(be, "corroborates_with_transcript", False):
-        return                                        # its busy() is the whole truth: nothing here reads its cache
-    try:                                              # per sid: one sid whose parse raises must not starve the
-        path = _path_of(sid)                          # OTHER parked sids' refresh, cycle after cycle (review find,
-        if path and _parse_cached(path) is None:      # 2026-09-04) — that sid stays held on its hook row, and the
-            _parse(path, sid, now)                    # failure is on the record
-        _refresh_parse_failures.pop(sid, None)        # a parse that came back clears its count
-    except Exception:
-        # the failing sid is retried every cycle (a parse that raises writes nothing to _parse_cache), so the
-        # line is count-gated like _chat_fold_warned: the first with its traceback, then at 10, 100, 1000
-        n = _refresh_parse_failures.get(sid, 0) + 1
-        if len(_refresh_parse_failures) > 256:
-            _refresh_parse_failures.clear()
-        _refresh_parse_failures[sid] = n
-        if n in (1, 10, 100, 1000):
-            sys.stderr.write("parked-parse refresh %s (failure %d): %s\n"
-                             % (sid, n, traceback.format_exc() if n == 1 else repr(sys.exc_info()[1])))
+    merged = "\n\n".join(op[1] for op in run)          # one message, blank-line separated between turns
+    if any(_op_user(op) for op in run):
+        _user_send(be, sid, merged)
+    else:
+        be.send(sid, merged)
 
 
 def _apply_pending_ops(now=None):
@@ -31304,7 +30297,8 @@ def _apply_pending_ops(now=None):
     but a SEND or /COMPACT ends the pass — its turn/compaction must finish before the next op fires, so
     "compact, then two messages, then a model pick" lands as pressed. A leading RUN of consecutive sends
     is delivered together, not one turn each (_deliver_send_batch — the user 2026-07-17, who wanted them sent all at
-    once; the SDK folds the run into one turn, tmux merges it). Event-gated throughout (_compacting
+    once; the SDK folds the run into one turn; a backend that cannot forward gets them merged).
+    Event-gated throughout (_compacting
     + the event-model open-turn signal, both off cached parses refreshed by turn-end pokes, plus
     _limit_hold's account gate — a queue held by a usage limit drains on the cycle after the API's own
     reset stamp passes, so the whole sequence goes in at the reset in the order it was typed); a dead
@@ -31360,7 +30354,7 @@ def _apply_pending_ops(now=None):
     op waiting on its turn_seq) must not re-wake the thread it runs on, or the backstop becomes a hot loop.
     Two sids are skipped even when they read quiet — a move the CLI answered busy (a clock: its window
     emits no event), and a session just handed a turn-opening op whose busy gate has not yet been SEEN
-    closed (until its backend reads busy — tmux's UserPromptSubmit flip — or the fallback clock passes) —
+    closed (until its backend reads busy or the fallback clock passes) —
     see _hold_drain.
 
     COST ORDER (2026-09-05): `now` is the drain's clock — the pusher calls it bare and it stamps its own
@@ -31368,11 +30362,9 @@ def _apply_pending_ops(now=None):
     scope. usage.json and the retry-pause file are read ONCE per drain, not once per held session (an
     account limit parks every session's input for hours — that re-read was most of a 46 ms drain on a
     seventeen-session board); and each sid's gates run cheapest first: the move and hold windows, then the
-    account hold, and only for a sid that passes those the transcript refresh a tmux busy() needs and the
-    compacting/working reads — a held session's transcript is not re-parsed for a verdict nothing reads.
-    The one hold that READS busy() — an until-busy drain hold (_hold_drain) — gets the refresh first, so a
-    tmux row the transcript overrules can still release it (review find 2026-09-05). The gates, and so the
-    refresh — a full transcript parse when the cache is stale, seconds on a large file — run OUTSIDE
+    account hold, and only for a sid that passes those the compacting/working reads. (Until the tmux
+    backend's removal on 2026-09-11 a transcript refresh sat here too, for a busy() that corroborated a hook
+    row against the cached parse; no backend's busy() needs one now.) The gates run OUTSIDE
     _pending_ops_lock, as this walk's gates always have: the lock guards the queue's reads and pops only
     and is never held across anything slow. A cycle the lock yields to a handler reads nothing at all."""
     now = int(time.time()) if now is None else now
@@ -31405,14 +30397,11 @@ def _apply_pending_ops(now=None):
                 continue                              # a move is mid-flight: its relocation must finish first
             hold = _drain_hold.get(sid)
             if hold is not None:
-                if hold[1]:                           # an until-busy hold READS busy(), which a tmux backend
-                    _refresh_parked_parse(sid, now)   # corroborates against the cached parse: keep it current
-                if _drain_hold_open(sid, hold):       # for that read (only a held sid pays; the refresh below
-                    continue                          # finds the cache fresh). Window still open → next cycle.
+                if _drain_hold_open(sid, hold):       # window still open → next cycle
+                    continue
                 _drain_hold.pop(sid, None)
             if _limit_hold(sid):
                 continue                              # the account can't serve a request yet: no parse, no gates
-            _refresh_parked_parse(sid, now)           # a stranded hook row can be overruled by what the transcript says
             if _compacting_now(sid) or _working_now(sid):
                 continue
             changed = False                               # a real mutation below → save the mirror + wake the pusher
@@ -31437,6 +30426,7 @@ def _apply_pending_ops(now=None):
                                 run.append(ops.pop(k))
                         elif op[0] != "cwd":
                             _inflight_ops[sid] = op       # (a move hands nothing over below: not recorded)
+                    refused = False
                     if op[0] == "send":
                         changed = True
                         _deliver_send_batch(be, sid, run)
@@ -31457,9 +30447,9 @@ def _apply_pending_ops(now=None):
                         # send batch (or forwarded mid-turn) it reaches the model as text instead of executing
                         # (the user 2026-08-13: /autocompact absorbed mid-turn got a polite reply and no
                         # setting change). Echo stamped at fire time, like a delivered send.
-                        _send_with_id(be, sid, op[1], _op_qid(op))
+                        refused = _send_with_id(be, sid, op[1], _op_qid(op), user=_op_user(op)) is False
                     elif op[0] == "compact":
-                        be.send(sid, "/compact")
+                        refused = _user_send(be, sid, "/compact") is False   # a parked compact click is the user's too (T315)
                     elif op[0] == "model":
                         be.set_model(sid, op[1])
                     elif op[0] == "effort":
@@ -31485,11 +30475,18 @@ def _apply_pending_ops(now=None):
                         _fire_move(be, sid, op[1], tries, _move_askers.pop(sid, ""))
                         break
                     if op[0] in ("command", "compact"):
+                        if refused:
+                            # the backend refused the handover (a session it no longer holds): no echo for a command the
+                            # session never got, no compacting cue for a compaction that never started, and the refusal
+                            # is visible (the commit-14 review's third item); the op is popped, never replayed forever
+                            what = "/compact" if op[0] == "compact" else str(op[1])[:60]
+                            sys.stderr.write("pending ops apply: %s refused %r for %s\n" % (type(be).__name__, what, sid[:8]))
+                            _send_to_app("chat", {"type": "warn", "id": sid,
+                                                  "text": "%s was not delivered: the session's backend refused it" % what})
+                            continue
                         # the backend HAS a turn-opening op: its cue, the hold and the end of this pass follow
                         # regardless of `took` (which is always True here — a ✕ on an in-flight op is refused and
                         # these kinds are never replaced in place)
-                        if op[0] == "command" and len(op) > 2 and op[2]:
-                            _optimistic_echo(sid, op[1], author=op[2])
                         if op[0] == "compact" or op[1].strip().split()[0] == "/compact":
                             _mark_compacting(sid)         # a TYPED /compact gets the same instant cue as the button's op
                         _after_turn_opening(be, sid, _pending_ops.get(sid) or [])
@@ -31901,7 +30898,7 @@ def _git_branch(cwd):
     `rev-parse --show-toplevel` to name — the branch its HEAD names, through the same HEAD-mtime memo
     (_git_head_file knows the shape; the direct per-build query this replaced answered there, so a
     session registered in a bare clone kept its branch). '' when in neither / detached / unavailable.
-    Applies to BOTH backends (a never-run tmux session shows it too). Going through _tree_of means a
+    Applies to every backend (a never-run session shows it too). Going through _tree_of means a
     session cwd that is a SUBDIRECTORY of its tree is memoized like the toplevel — with no `.git` of its
     own to key on it forked `git rev-parse` on every build — and a directory outside every tree costs
     the evidence walk plus two stats for the bare shape, never a fork."""
@@ -32119,73 +31116,16 @@ def _echo_landed_in(text, tx_texts):
     (sb.echo_keys: the plain key, and the command key when the echo is a slash send, whose record parses
     to "/name args", which equals the typed text only when the typed whitespace already matches; the sets
     carry that form). The membership test every kernel-side echo reader uses: build_session's queued
-    count, _merge_live_atoms' display dedup and _tmux_echo_prune; the thread's held count (_comments_frame)
+    count and _merge_live_atoms' display dedup; the thread's held count (_comments_frame)
     asks the same keys against per-atom sets it builds once per frame. The SDK backend's prune_live and its
     landing scan ask the same keys on their side."""
     return any(k in tx_texts for k in sb.echo_keys(text))
 
 
-# Optimistic input echo for TMUX sends. The SDK backend echoes a composer message instantly via its own
-# _live store; tmux sends had NO echo, so a tmux send whose Enter dropped at the pane prompt was INVISIBLE
-# in the web chat — the user thought they'd replied (the user via bugs 2026-06-25). Mirror the SDK shape
-# kernel-side: a synthetic human user atom, merged ahead of disk and pruned by text once the real user
-# turn lands. A SUCCESSFUL send's echo prunes when the turn writes; a DROPPED send's echo PERSISTS, so the
-# lost message stays visible (no response) instead of vanishing silently.
-_tmux_echo = {}                                       # sid -> {key -> synthetic user atom}
-_tmux_echo_rev = {}                                   # sid -> the store's revision, advanced by _tmux_echo_bump at
-#                                                       every change to the sid's echoes (an add, a prune, a settle
-#                                                       mark, a dismiss): the chat-build signature's live-tail
-#                                                       component for tmux sids (Sessions.live_rev), the twin of
-#                                                       SdkBackend._touch_live
-
-
-def _tmux_echo_bump(sid):
-    """Advance the sid's echo-store revision (_tmux_echo_rev), after the write it records. Only a change calls
-    it (an add, a pop, a `dropped` mark); a prune or settle that touched nothing leaves the revision alone,
-    so a chat build's own merge never moves the signature under it (the SDK backend's _touch_live rule)."""
-    _tmux_echo_rev[sid] = _tmux_echo_rev.get(sid, 0) + 1
-
-
-def _tmux_echo_add(sid, text, author="human"):
-    key = "echo:" + uuid.uuid4().hex
-    _tmux_echo.setdefault(sid, {})[key] = {
-        "type": "user", "uuid": key, "session_id": sid, "t": int(time.time()), "parentUuid": None,
-        # author drives the bubble: "human" → blue (a typed message), "romp" → gray (a nudge/auto-follow-up).
-        # Matches the real transcript atom's author so the optimistic echo reads identically until it lands.
-        "author": author, "_echo_text": text,
-        "message": {"role": "user", "content": [{"type": "text", "text": text}]}}
-    _tmux_echo_bump(sid)
-
-def _tmux_echo_atoms(sid):
-    return list(_tmux_echo.get(sid, {}).values())
-
-def _tmux_echo_prune(sid, tx_uuids, tx_texts):
-    """Drop an echo once the transcript has its real user atom (by uuid or text); pop the sid when empty.
-    The text side compares under sb.echo_text_key — `tx_texts` are the keys _atom_user_texts built (outer
-    whitespace stripped), and the echo stores the send's text verbatim, so a raw comparison never matched a
-    trailing-newline send (`romp send` passes its argument verbatim): the delivered echo stayed, hidden by
-    the display dedup, and the settle then marked it `dropped` once a later human turn landed — a "never
-    delivered" bubble for a message the transcript holds (2026-09-06)."""
-    d = _tmux_echo.get(sid)
-    if not d:
-        return
-
-    def _landed(a):
-        return a.get("uuid") in tx_uuids or _echo_landed_in(a.get("_echo_text"), tx_texts)
-    gone = [k for k, a in d.items() if _landed(a)]
-    for k in gone:
-        d.pop(k, None)
-    if gone:
-        _tmux_echo_bump(sid)                              # the tail changed; a prune that retired nothing is no change
-    if not d:
-        _tmux_echo.pop(sid, None)
-
-
 def _human_turn_floor(session):
     """The newest GENUINE-HUMAN user atom's timestamp in the parsed session, or 0. The one event that says
     "the transcript has moved past anything typed before this": read by sdk_backend.prune_live (to retire
-    stale command-feedback atoms — since 2026-09-06 it floors no echo), by the tmux echo's settle below,
-    and by the queued fold.
+    stale command-feedback atoms — since 2026-09-06 it floors no echo) and by the SDK echo's settle.
 
     EXCLUDES the interrupt record (the user 2026-07-07): it authors 'human' but is a STOP event, not a
     message that landed and processed the echo. When a just-sent message hadn't hit disk yet, the
@@ -32205,56 +31145,6 @@ def _echo_overtaken(atom, human_floor):
     return bool(atom.get("_echo_text")) and bool(human_floor) and human_floor > atom.get("t", 0)
 
 
-def _tmux_echo_settle(sid, human_floor, still_queued=()):
-    """Mark every overtaken tmux echo `dropped`, so the chat draws the shipped "never delivered" treatment
-    (dashed bubble + restore/dismiss, renderQueued's sibling) instead of an ordinary sent bubble, and the
-    queued fold stops enlisting it as a pending message (the user 2026-08-26: a session's queued header
-    counted sends from two days earlier, which it had long since answered — one of them genuinely lost at
-    the pane, two delivered under text the transcript recorded differently, all three indistinguishable
-    from a message actually waiting in the CLI's queue).
-
-    Marking, NOT pruning: a tmux echo is the only record of a send the pane dropped, and that loss must
-    stay on screen — the whole reason the echo outlives a later turn (see TmuxBackend.prune_live). The one
-    exception is an IMAGE-PATH echo: a tmux send is a paste into the composer, whose paste hook reads a
-    pasted image path and rewrites the token to "[Image #N]" (sdk_backend._IMG_PATH_RE names the hook's
-    extension set), so the echo's text can fail the match STRUCTURALLY and "overtaken" is not evidence of
-    loss — that flavor is retired rather than labelled a loss it may not be. The predicate is borrowed
-    from the SDK module (sdk_backend._path_bearing, kept for this reader: the SDK route itself floors no
-    echo since 2026-09-06, because stream-json input never reaches the hook). With that module
-    unavailable the predicate is unavailable too, and marking (the visible, reversible outcome) covers
-    every echo.
-
-    STANDS DOWN for an echo whose text the queue ledger still lists as pending (`still_queued`,
-    2026-08-27): the floor is a per-SESSION clock, so an OLDER queued sibling delivering raises it past
-    a younger send still genuinely waiting in the CLI's queue — overtaken by the floor, but not lost.
-    Marking it would have /diag/sendvis call one message both pending and dropped, the exact
-    misdiagnosis the dropped field exists to prevent. The queue ledger is the authoritative "still
-    owed" record, so it outranks the floor here; once the ledger releases the text (delivery or
-    recall), the next settle rules on it normally."""
-    d = _tmux_echo.get(sid)
-    if not d:
-        return
-    owed = {t.strip() for t in still_queued if isinstance(t, str)}
-    path_bearing = getattr(sys.modules.get("romp_sdk_backend"), "_path_bearing", None)
-    changed = False
-    for k in list(d.keys()):
-        a = d[k]
-        if not _echo_overtaken(a, human_floor):
-            continue
-        if (a.get("_echo_text") or "").strip() in owed:
-            continue                                     # still owed by the queue ledger → waiting, not lost
-        if path_bearing is not None and path_bearing(a.get("_echo_text") or ""):
-            d.pop(k, None)
-            changed = True
-        elif not a.get("dropped"):
-            a["dropped"] = True
-            changed = True                               # a mark already made is no change
-    if changed:
-        _tmux_echo_bump(sid)
-    if not d:
-        _tmux_echo.pop(sid, None)
-
-
 def _sendvis_diag(sid):
     """Send-visibility snapshot for /diag/sendvis (the user 2026-07-20): the exact inputs the chat build
     consults to render an in-flight send. When a sent message is invisible, this names the layer that
@@ -32266,7 +31156,7 @@ def _sendvis_diag(sid):
     try:
         sdk = _sdk()
         be = Sessions.backend_for(sid)
-        out["backend"] = "sdk" if (sdk is not None and be is sdk) else "tmux"
+        out["backend"] = "sdk" if (sdk is not None and be is sdk) else ("codex" if (be is not None and be is _codex()) else "unowned")
         out["sdkOwns"] = bool(sdk and sdk.owns(sid))
     except Exception as e:
         out["backend"] = "error: %s" % e
@@ -32284,11 +31174,6 @@ def _sendvis_diag(sid):
                             for a in (be.live_atoms(sid) if be else [])]
     except Exception as e:
         out["liveAtoms"] = "error: %s" % e
-    # `dropped` is the whole diagnosis for a stale echo (the user 2026-08-26): without it a settled loss and
-    # a genuinely in-flight send read identically here, which is how three days-old echoes went unexplained.
-    out["tmuxEchoes"] = [{"t": a.get("t"), "echo": (a.get("_echo_text") or "")[:120],
-                          "dropped": bool(a.get("dropped"))}
-                         for a in _tmux_echo_atoms(sid)]
     try:
         out["compacting"] = bool(_compacting_now(sid))
     except Exception as e:
@@ -32348,19 +31233,21 @@ def _merge_tx_sets(session, sid):
 def _merge_live_atoms(session, sid, shown_texts=()):
     """Merge in-memory LIVE-TAIL atoms into the parsed session, AHEAD of the transcript on disk, so messages
     appear instantly (the stream / a composer send leads the disk write). NON-MUTATING — `session` is the
-    _parse cache, so this returns a shallow copy with the last turn's atoms extended. Two sources: the SDK
-    backend's _live (stream + its own input echo) for SDK sids, and the kernel-side tmux input echo
-    (_tmux_echo) for tmux sids. Dedup: drop any live atom the transcript already has, by uuid (stream
+    _parse cache, so this returns a shallow copy: the last turn's atoms extended by the fresh tail, and a
+    STALE echo placed by its send time into an earlier turn or a synthetic turn of its own (T344, the
+    placement comment below; the copy carries `_placed`, the fold's key for those). The source is the
+    owning backend's live tail (the SDK backend's _live: stream + its own input echo; the Codex backend's
+    list). Dedup: drop any live atom the transcript already has, by uuid (stream
     messages: SDK uuid == transcript uuid) or by text (an optimistic input echo carries a synthetic uuid).
 
     `shown_texts` are messages ALREADY surfaced by another path this build — the kind:"queued" indicator
-    (_pending_queued / the SDK queue), which shows a send that's queued behind a busy turn. An input echo
+    (the backend's pending_queued), which shows a send that's queued behind a busy turn. An input echo
     whose text is queued is SUPPRESSED from display so it doesn't double-show alongside the queued bubble;
     the event-based queued indicator owns that case. The echo is only HIDDEN, not pruned — once the message
     leaves the queue and its real user atom lands, the normal text-prune retires the echo. So the echo only
     ever shows a NON-queued send: the brief gap before an idle send's real atom lands, and a DROPPED send
     that never reached the queue or the transcript (the visibility win — the user 2026-06-25)."""
-    be = Sessions.backend_for(sid)             # the owning backend (SDK or tmux) — its live store + prune
+    be = Sessions.backend_for(sid)             # the owning backend — its live store + prune
     live = be.live_atoms(sid)
     if not live:
         return session
@@ -32386,13 +31273,12 @@ def _merge_live_atoms(session, sid, shown_texts=()):
     # An SDK input echo the transcript has OVERTAKEN — a genuine-human turn stamped strictly later than its
     # send (_echo_overtaken), its text landed nowhere — is a LOSS, and the backend flags it `dropped` so the
     # chat draws "never delivered" with its ✕ instead of a sent bubble riding above every newer message
-    # (sdk_backend.settle_echoes, 2026-09-11; TmuxBackend.prune_live settles its own echoes the same way).
+    # (sdk_backend.settle_echoes, 2026-09-11; the tmux backend's prune_live settled its own the same way).
     # Guarded on a pure pass over the snapshot, so the CLI's queue ledger is read only when there is
-    # something to rule on. The ledger is handed over here because the two backends keep their queues in
-    # different places: the tmux settle reads the transcript's queue-operation fold AS its queue, while an
-    # SDK session's queue view is the backend's in-memory list and the CLI's ledger is the second place a
-    # fed message can wait (a message fed into a running turn sits there until the splice) — a send still
-    # listed in either is waiting, not lost.
+    # something to rule on. The ledger is handed over here because an SDK session's queue view is the
+    # backend's in-memory list and the CLI's ledger is the second place a fed message can wait (a message
+    # fed into a running turn sits there until the splice) — a send still listed in either is waiting, not
+    # lost (the tmux settle read the transcript's queue-operation fold AS its queue instead).
     settle = getattr(be, "settle_echoes", None)
     if settle is not None and any(_echo_overtaken(a, human_floor) and not a.get("dropped") and not a.get("_landed")
                                   for a in live):
@@ -32423,16 +31309,119 @@ def _merge_live_atoms(session, sid, shown_texts=()):
     if not turns:
         turns = [{"id": "live", "trigger": None, "t": fresh[0]["t"], "end": fresh[-1]["t"],
                   "ended": not live_work, "atoms": []}]
-    turns[-1] = dict(turns[-1])
-    turns[-1]["atoms"] = sorted(list(turns[-1]["atoms"]) + fresh, key=lambda a: (a.get("t", 0), a.get("_seq", 0)))
-    # Extend the turn's window over the appended tail (the user 2026-07-02): segments() spans [turn.t,
-    # turn.end], so a live atom past the disk turn's end (a /model invocation minutes after the last work)
-    # otherwise falls OUTSIDE every segment — its timeline dot then appeared only retroactively, once the
-    # disk write moved the real end past it.
-    turns[-1]["end"] = max(turns[-1].get("end") or 0, max(a.get("t", 0) for a in fresh))
-    if live_work:
-        turns[-1]["ended"] = False
-    return {**session, "turns": turns}
+    # A STALE echo is placed by its send time, never among later rows (T344, the user 2026-09-11, who saw
+    # a 10:28 PM row between 7:05 AM rows): an echo stamped before the last turn's start is a send the
+    # transcript has moved past (a romp notice that never landed, reseeded at boot from the registry's
+    # echoes), and appended to the last turn it sat among today's rows wearing yesterday's clock, which
+    # the chat's day walk read as a day boundary. _place_stale_echoes puts each such echo into the turn
+    # whose window holds it, or into a closed turn of its own in the gap where it was sent, so the rows
+    # the chat reads are in time order and the day walk needs no special case. A pending send is always
+    # stamped after the last turn's start and takes the tail below, as before.
+    last_start = turns[-1].get("t") or 0
+    stale = [a for a in fresh if a.get("_echo_text") and a.get("t", 0) < last_start]
+    if stale:
+        # Only a send NOBODY still owes is stale: a held copy (T306) keeps its send stamp while the queue
+        # behind it feeds, so on release it is older than the last turn's start yet still a pending
+        # message, and it must ride the tail until it lands. Owed = queued behind a busy turn
+        # (`shown_texts`, the backend's pending_queued) or listed by the CLI's own queue ledger
+        # (_pending_ledger, the settle's "still owed" read); read only when a candidate exists.
+        p = _path_of(sid)
+        owed = {sb.echo_text_key(t) for t in shown_texts if t} | {sb.echo_text_key(t) for t in (_pending_ledger(p) if p else ())}
+        stale = [a for a in stale if not _echo_landed_in(a["_echo_text"], owed)]
+    placed = ()
+    if stale:
+        # `placed` is what the chat fold keys its sealed prefix on (build_session, the "echo" refold): a placed
+        # echo sits in a turn the fold seals, and its state moves without a parse change (dismissed, flagged
+        # dropped, landed), so the fold compares this tuple build to build instead of re-reading the turns.
+        turns, placed = _place_stale_echoes(turns, stale)
+        stale_ids = {id(a) for a in stale}
+        fresh = [a for a in fresh if id(a) not in stale_ids]
+    if fresh:
+        turns[-1] = dict(turns[-1])
+        # An in-flight input ECHO — the kernel's copy of a send the model has not read yet — sorts AFTER every atom the
+        # turn holds, whatever its send time (T252d for every other window, 2026-09-11). The model reads a mid-turn
+        # send only at its next tool boundary, so the steps that streamed after the send ran BEFORE it was read; sorted
+        # by time the echo drew the message above them in every window but the sender's own, whose tail bubble hides
+        # the echo (render.ts hiddenByPending) — one session in two split columns read as one column behind the other
+        # (the user 2026-09-10). The landing (the queued_command attachment, event_model._absorbed) takes the
+        # boundary's own time, the same tail region, so nothing moves when it lands. A never-delivered echo (dropped)
+        # is a record of a loss and keeps its time, as does a landed-but-unpruned one and the CLI's command feedback.
+        # (A stale echo nobody owes never reaches this sort: _place_stale_echoes put it by its send time above, T344.)
+        def _order(a):
+            tail = 1 if (a.get("_echo_text") and not a.get("command") and not a.get("dropped") and not a.get("_landed")) else 0
+            return (tail, a.get("t", 0), a.get("_seq", 0))
+        turns[-1]["atoms"] = sorted(list(turns[-1]["atoms"]) + fresh, key=_order)
+        # Extend the turn's window over the appended tail (the user 2026-07-02): segments() spans [turn.t,
+        # turn.end], so a live atom past the disk turn's end (a /model invocation minutes after the last work)
+        # otherwise falls OUTSIDE every segment — its timeline dot then appeared only retroactively, once the
+        # disk write moved the real end past it.
+        turns[-1]["end"] = max(turns[-1].get("end") or 0, max(a.get("t", 0) for a in fresh))
+        if live_work:
+            turns[-1]["ended"] = False
+    return {**session, "turns": turns, "_placed": placed}
+
+
+def _turn_activity_end(turn):
+    """When the turn's RECORDED activity ended: the latest non-idle atom's time. Never the turn's `end`: a
+    finished SDK turn carries a synthesized idle atom (event_model.synthesize_idle) whose end is the NEXT
+    state row, and _finalize_turn takes the max end, so a turn that ended at 22:01 reads as ending when the
+    next turn began. A window decided on that would swallow every notice sent while the session sat idle."""
+    return max((a.get("t") or 0 for a in turn.get("atoms") or [] if a.get("type") != "idle"),
+               default=turn.get("t") or 0)
+
+
+def _place_stale_echoes(turns, echoes):
+    """Place echo atoms stamped before the last turn's start where their send time belongs (T344). Each echo
+    joins the turn whose ACTIVITY window holds it, [turn.t, _turn_activity_end(turn)]; an echo that falls in
+    the gap between two turns' activity, or before the first, goes into a closed synthetic turn at that place
+    (trigger None, like the turn a transcript-less session gets), one turn per gap holding every echo sent in
+    it, sorted, so two notices sent together stay a run. The synthetic turn's id derives from its first echo's
+    uuid, so the same echo yields the same turn build after build. Returns (turns, placed): a new turns list
+    (the caller's turn dicts are copied before a write; the parse cache is never mutated) and the fold's key,
+    a tuple of (destination turn index, uuid, dropped) per echo, read off the destinations rather than by a
+    scan of every atom (three merges per push cycle while a dropped echo exists)."""
+    out = list(turns)
+    key = lambda a: (a.get("t", 0), a.get("_seq", 0))
+    gaps = {}                                   # insertion index in `turns` → the echoes sent in that gap
+    dest = []                                   # (the destination turn dict, echo) per echo, resolved to indexes below
+    for a in sorted(echoes, key=key):
+        t = a.get("t", 0)
+        i = None                                # the last turn starting at or before the echo
+        for k, turn in enumerate(out):
+            if (turn.get("t") or 0) <= t:
+                i = k
+            else:
+                break
+        if i is not None and t <= _turn_activity_end(out[i]):
+            out[i] = dict(out[i])
+            out[i]["atoms"] = sorted(list(out[i]["atoms"]) + [a], key=key)
+            out[i]["placedEchoes"] = list(out[i].get("placedEchoes") or []) + [a.get("uuid")]
+            dest.append((out[i], a))
+        else:
+            gaps.setdefault(0 if i is None else i + 1, []).append(a)
+    for idx in sorted(gaps, reverse=True):      # back to front, so earlier indices stay valid
+        atoms = sorted(gaps[idx], key=key)
+        turn = {"id": "live-" + str(atoms[0].get("uuid") or atoms[0].get("t", 0)), "trigger": None,
+                "t": atoms[0].get("t", 0), "end": atoms[-1].get("t", 0), "ended": True, "atoms": atoms,
+                "echoTurn": True, "placedEchoes": [a.get("uuid") for a in atoms]}
+        out.insert(idx, turn)
+        dest.extend((turn, a) for a in atoms)
+    index_of = {id(turn): k for k, turn in enumerate(out)}
+    placed = tuple(sorted((index_of[id(turn)], a.get("uuid"), bool(a.get("dropped"))) for turn, a in dest))
+    return out, placed
+
+
+def _turn_sans_placed_echoes(turn):
+    """The turn without the stale echoes _place_stale_echoes put into it (`placedEchoes`), for the
+    segmenters: a judged turn's segments and their ids must mirror the judge's own parse, which never
+    sees an echo, so a placed echo (a user atom, hence a segment input) must not split the turn's bar or
+    re-key its captions. A turn with nothing placed is returned as is; the tail's live echoes are not
+    placed and keep splitting the last turn as before."""
+    placed = turn.get("placedEchoes")
+    if not placed:
+        return turn
+    placed = set(placed)
+    return {**turn, "atoms": [a for a in turn.get("atoms") or [] if a.get("uuid") not in placed]}
 
 
 def _sdk_transcript_path(sid):
@@ -32615,7 +31604,7 @@ def _archive_roots(sid):
 
 
 # A slash command that fires lifecycle hooks (e.g. /compact) echoes each one back in its output as
-# "PreCompact [~/.claude/hooks/tmux-status.sh] completed successfully" — internal plumbing the user never
+# "PreCompact [~/.claude/hooks/some-hook.sh] completed successfully" — internal plumbing the user never
 # wants to see (the user 2026-06-30, who asked what the pre-compact thing was). Strip those notices from a command's
 # OUTPUT text; the meaningful event (a compaction) is already marked by the ✦ Compacted boundary. Shape is
 # invariant: "<HookName> [<path>] completed successfully".
@@ -32728,7 +31717,7 @@ def _stamp_interrupt_causes(events):
     return events
 
 
-def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, sidechain=False, meta_path=None, floor=None, page=None):
+def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, sidechain=False, meta_path=None, floor=None, page=None):
     """A {type:"session"} message the render.js bundle consumes: the event tree reshaped to
     ChatEvent[], plus the TOC ledger (archiver headline + turn captions) and a status chip.
 
@@ -32753,16 +31742,16 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
     asks for by uuid; a few turns past hi are stepped too, so a tool result or Skill payload that landed there
     fills the page's own card, and their own events are dropped. Equal, page by page, to the whole build's
     slice (tests/test_chat_pages.py)."""
-    if tmux is None:
-        tmux = _tmux_sessions()
+    if live_map is None:
+        live_map = _live_map()
     sess = next((s for s in _sessions(now) if s["sid"] == sid), None)
     if not sess:
         be = _sdk()
         if be and be.owns(sid):            # SDK session with no transcript on disk yet → build from live tail/empty
             sess = _sdk_sess(sid, now)
-    if not sess and sid in tmux:
-        # A LIVE tmux session discovery can't see yet — brand-new, the TUI hasn't written its first
-        # transcript record (a ~7s boot window). Returning None here left the session FRAMELESS: no
+    if not sess and sid in live_map:
+        # A LIVE session discovery can't see yet (a Codex thread before its first materialized record; the
+        # SDK path above covers its own). Returning None here left the session FRAMELESS: no
         # session frame exists, so nothing can carry its input echo or queued bubble, and the first
         # message typed into a just-created session was invisible until the transcript appeared (the
         # user 2026-07-20: the UI must respond even when the kernel can't get the session going yet).
@@ -32776,8 +31765,8 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
     if path_override:
         sess = dict(sess)
         sess["path"] = str(path_override)
-    # Messages QUEUED in the TUI (submitted while busy/compacting) — folded EVENT-BASED by the owning backend:
-    # the transcript's queue-operation records (tmux) or the SDK's in-memory queue. Computed HERE, before the
+    # Messages QUEUED (submitted while busy/compacting) — folded EVENT-BASED by the owning backend (the SDK's
+    # in-memory queue; the Codex backend's registry queue). Computed HERE, before the
     # live-atom merge, so the optimistic input echo can SUPPRESS any text already shown as queued — the
     # event-based queued indicator owns that case, so no double-show. The kind:"queued" event is appended at
     # the bottom later.
@@ -32788,35 +31777,9 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
     be = Sessions.backend_for(sid)
     queued = [] if path_override else be.pending_queued(sid)   # override = a closed episode; nothing is live
     parsed = _parse(sess["path"], sid, now)
-    # Optimistic queued echo (TMUX only): a composer send while the session is BUSY (a working turn OR a
-    # compaction in progress) gets queued by Claude Code, but its queue-operation record only lands in the
-    # transcript ~1s later — so _pending_queued can't see it yet. Without this, the input echo would flash as a
-    # SENT (solid blue) bubble and then flip to the DOTTED queued bubble once the record lands (the user
-    # 2026-06-29). So while the session is busy, fold any not-yet-landed, not-yet-queued tmux echo INTO `queued`
-    # now → it renders dotted from the first push, and dedups against the real queue record when it arrives.
-    # COMPACTING must count too: a /compact runs no open assistant turn, so _session_working is False the whole
-    # time — without the compacting arm a message typed mid-compaction showed solid blue (the user 2026-06-29).
-    # (SDK queues in memory → pending_queued is instant, no gap; its echoes are skipped here via the unqueue
-    # discriminator.) Keys on the EVENT MODEL (_session_working / _compacting), never the tmux pane state — and
-    # an echo-only merge keeps the turn's real ended state.
-    tm0 = tmux.get(sid)
+    tm0 = live_map.get(sid)
     compacting_now = (False if path_override else
                       _compacting(sid, (tm0 or {}).get("state", ""), parsed, now, (tm0 or {}).get("since")))
-    busy = not path_override and (_session_working(parsed["turns"]) or compacting_now)
-    # The fold takes only echoes STILL IN FLIGHT — one the transcript has already overtaken with a later
-    # genuine-human turn is a loss, not a pending message, and enlisting it here was how sends from days
-    # earlier kept inflating the queued header on a busy session (the user 2026-08-26). _echo_overtaken is
-    # the same event TmuxBackend.prune_live settles them on, read directly rather than off the `dropped`
-    # mark, since the mark is written by the merge BELOW this fold (one build later would be one build of
-    # phantom).
-    if not hasattr(be, "unqueue") and busy:
-        already = {q.strip() for q in queued}
-        tx_user = {t for turn in parsed["turns"] for a in turn["atoms"] for t in _atom_user_texts(a)}
-        echo_floor = _human_turn_floor(parsed)
-        for a in be.live_atoms(sid):
-            et = sb.echo_text_key(a.get("_echo_text"))
-            if et and et not in already and not _echo_landed_in(et, tx_user) and not _echo_overtaken(a, echo_floor):
-                queued = queued + [et]; already.add(et)
     session = parsed if path_override else _merge_live_atoms(parsed, sid, shown_texts=queued)
     events, by_tool = [], {}                  # by_tool: tool_use_id → its tool event (fill output later)
     uuid2seg, seg_anchors = {}, {}            # atom uuid → seg id; seg id → (promptId, workId) for the dot/bar split
@@ -32911,6 +31874,7 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
         _floor = max(0, min(int(floor), _cut))
         if getattr(_live_scope, "chat_floor0", None) is not None:
             _RENDER_FLOOR[sid] = _floor       # the pusher's build is the authority the other builders follow
+    _placed = tuple(session.get("_placed") or ())    # stale echoes placed into sealable turns (T344): the fold's "echo" key
     _n_pref = len(_turns) - 1                 # candidate prefix: every turn but the last
     _fk, _fe, _fold_ok, _fold_why = _floor, None, False, None
     _pref_len = 0
@@ -32949,6 +31913,8 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
                 _fold_why = "turnfp"                  # an earlier turn's atoms moved (a states-row atom, a heal)
             elif _fe["seams"] != _seams_sig:
                 _fold_why = "seam"                    # seg ids → tlId / deep-link anchors of old events
+            elif _fe.get("placed", ()) != _placed:
+                _fold_why = "echo"                    # a stale echo placed into the prefix was dismissed, flagged or landed (T344)
             elif _fe["floor"] != (_note_floor, len(_epi_rows_for_notes)):
                 _fold_why = "episode"                 # a /clear moved the durable-note floor
             elif _fe["notes"] != tuple(tuple(tuple(sorted(_x.items())) for _x in _lst
@@ -33260,8 +32226,8 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
                                 ev["preamble"] = preamble
                             # the identity of the queued copy this record lands (T252c): the fed ledger pairs
                             # it FIFO per text, at or after the feed — so the chat retires and places its
-                            # pending bubble by id, never by text. None on the tmux route or for a record
-                            # from before this kernel's life; the chat falls back to text then.
+                            # pending bubble by id, never by text. None on a backend without the ledger pairing
+                            # (Codex) or for a record from before this kernel's life; the chat falls back to text then.
                             if hasattr(be, "qids_for_landing") and not a.get("_echo_text") and not str(a.get("uuid") or "").startswith("echo:"):
                                 # per text BLOCK: a record the CLI wrote from several queued sends is one landing per
                                 # block; the kernel's own echo atom is skipped — its uuid IS the copy's id
@@ -33317,9 +32283,10 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
                             if prompt.strip().startswith("[Request interrupted by user"):
                                 ev["interruptMarker"] = True
                             # A send that never made the transcript (the backend's dropped-echo marking:
-                            # an SDK echo whose CLI died holding it, or a tmux echo the session moved past
-                            # — a pane-dropped keystroke, or a delivery the transcript recorded under
-                            # different text; the population widened 2026-08-26): the client renders
+                            # an SDK echo whose CLI died holding it, or one the session moved past — a
+                            # delivery the transcript recorded under different text; the population widened
+                            # 2026-08-26, when the tmux backend's pane-dropped keystrokes were the other
+                            # case): the client renders
                             # "never delivered" with restore/dismiss instead of a sent-looking bubble that
                             # poses as history (the user 2026-07-29). echoT is the dismiss handle that
                             # survives kernel restarts — the echo uuid regenerates on every boot reseed;
@@ -33595,7 +32562,7 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
                     "fps": [_chat_turn_fp(_turns[_i]) for _i in range(_np)],
                     "events": events[:_b],
                     "seg": tuple(_seg_pref), "cursors": _cur, "last_t": _lt, "last_model": _lm,
-                    "seams": _seams_sig,
+                    "seams": _seams_sig, "placed": _placed,
                     "floor": (_note_floor, len(_epi_rows_for_notes)),
                     "notes": (tuple(tuple(sorted(_x.items())) for _x in recoveries[:_cur[0]]),
                               tuple(tuple(sorted(_x.items())) for _x in gaveups[:_cur[1]]),
@@ -33674,7 +32641,7 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
     # in the chat FLOW (not only the statusline/tab) — appended BEFORE the queued bubble so a message sent
     # mid-compaction stacks BELOW it instead of clobbering it. Event-based: it vanishes the instant compaction
     # ends, when the transcript's boundary lands as the "✦ Context compacted" divider (kind:"compact") it
-    # visually becomes. Corroborated `_compacting` signal (same one the chip/timeline use), never raw tmux.
+    # visually becomes. Corroborated `_compacting` signal (same one the chip/timeline use), never the raw row.
     if compacting_now:
         events.append({"kind": "compacting"})
     # Live CLEARING indicator (the user 2026-07-27): while a /clear is in flight — from the delivery until
@@ -33697,8 +32664,8 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
     # NOTHING in the chat ("the border says retrying but the chat shows no sign"). Show an animated "API
     # retrying…" element here, a sibling of the compacting/reconnecting ones, carrying the live attempt count.
     # Event-based: it clears the instant real output flows again (the SDK backend drops 'retrying'); the
-    # recovery then lands as the persistent "Recovered after N retries" note above. SDK-only (tmux has no
-    # api_retry signal). Appended before the queued bubble so a mid-retry message stacks below it.
+    # recovery then lands as the persistent "Recovered after N retries" note above. SDK-only (no other
+    # backend reports api_retry). Appended before the queued bubble so a mid-retry message stacks below it.
     if (tm0 or {}).get("state") == "retrying":
         events.append({"kind": "retrying", "retries": int((tm0 or {}).get("retryCount") or 0),
                        "info": (tm0 or {}).get("retryInfo") or None})   # attempt/max, the error, next-attempt epoch (the user 2026-07-10)
@@ -33708,7 +32675,8 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
         # romp goal-context quote + the comment markers, carrying just the body + the goal title (the user
         # 2026-06-27). Same _split_followup the landed human turns use, so pending + landed match.
         # CANCELABLE only when romp OWNS the queue — the SDK backend holds _pending in memory (exposes
-        # unqueue); tmux's queue lives inside Claude Code (no recall), so those bubbles aren't clickable.
+        # unqueue); a backend whose queue lives inside its CLI (no recall) has no unqueue, so those bubbles
+        # aren't clickable.
         # AND only while a recall can still WIN (queue_recallable, the user 2026-07-20): during a running
         # un-held turn the SDK forwards a queued send into the CLI within milliseconds, and once it's
         # there no recall exists — a ✕ on that bubble was a lie that ended in a silent fake-delete. The
@@ -33716,7 +32684,7 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
         _cbe = Sessions.backend_for(sid)
         cancelable = hasattr(_cbe, "unqueue") and _queue_recallable(_cbe, sid)
         # each copy's IDENTITY beside its text (T252c): the backend's per-copy id + enqueue stamp, when it
-        # keeps them (an SDK session that is running; a tmux ledger's stamps) — None for a restored queue
+        # keeps them (an SDK session that is running) — None for a restored queue
         _metas = None
         if queued and hasattr(_cbe, "pending_queued_meta"):
             try:
@@ -33734,15 +32702,15 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
             if not _genuine_queued(t):
                 # A harness wrapper in the SDK queue — the idle-queue drive enqueues <task-notification>
                 # texts through the same _pending the user's messages ride — must not render as the
-                # user's queued input (the 2026-06-30 regression, till now guarded only on the tmux
-                # transcript fold at _pending_queued). Skipped, not filtered upstream: `queued` doubles
+                # user's queued input (the 2026-06-30 regression, till then guarded only on the
+                # backend's pending_queued). Skipped, not filtered upstream: `queued` doubles
                 # as shown_texts for echo suppression, and a surviving bubble's idx must keep naming its
                 # backend _pending position for cancelQueued.
                 continue
             goal, body, fu, ctx = _split_followup(t)
             m = {"md": body, "idx": i, "cancelable": cancelable, **_queued_romp_flags(t)}   # idx ↔ the backend's _pending position (cancelQueued)
             if _metas and isinstance(_metas[i], dict):          # the copy's identity and stamp: each rides on its own
-                if _metas[i].get("qid"):                          # (a tmux copy has a stamp and no id — third review)
+                if _metas[i].get("qid"):                          # (a copy may carry a stamp and no id — third review)
                     m["qid"] = _metas[i]["qid"]
                 if isinstance(_metas[i].get("qts"), int) and not isinstance(_metas[i].get("qts"), bool):
                     m["qts"] = _metas[i]["qts"]
@@ -33826,7 +32794,7 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
     # tasks list, so the box swapped presentations at every turn boundary of a session with agents in
     # flight. Watches ride awaitingItems mid-turn like everything else now, and awaitingWhy means one
     # thing on every surface: idle and waiting on these — the chip's Awaiting.
-    _aw_items = _awaiting_items_payload(_aw, sid, sess["path"], tmux)
+    _aw_items = _awaiting_items_payload(_aw, sid, sess["path"], live_map)
     # API error → the session is BLOCKED until retried: a bottom card (renderApiError, a RED dot) AND the chip
     # flips to "blocked" below. Detected event-based from the transcript (isApiErrorMessage), so the exact
     # text (500 / timeout / model-not-found) doesn't matter (the user 2026-06-16). GATED on the session NOT
@@ -33884,7 +32852,7 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
     # ── the ledger memo (2026-09-09): the tree walk and the live roots below are a function of exactly these
     # inputs, each in the key or held by identity: the parse (seg_trig and seg_work come from it; by the parsed
     # object's identity, and only while no live atoms were merged, since the merge reshapes the last turn's
-    # segments); the store's seams (_seams_sig, from the store this build's seg maps were cut with: the
+    # segments and, since T344, places a stale echo into an earlier turn); the store's seams (_seams_sig, from the store this build's seg maps were cut with: the
     # build loads the store twice, once at the top for the seg ids and once here for the nodes, and a
     # publish landing between the two loads pairs the old seams' seg maps with the new store object, so
     # the seams stay a key component beside the store's identity or that build's tree would serve next
@@ -34066,21 +33034,21 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
     # working, else the last activity; None when unknown (render then shows no timer).
     work_start = last_turn["t"] if (open_now and last_turn) else last_t
     since_ms = int(work_start * 1000) if work_start else None
-    tm = tmux.get(sid)
+    tm = live_map.get(sid)
     if tm:
         # WORKING comes from the event model (open turn, no idle atom) — a stable, transcript-derived
         # signal — NOT @claude-state, which lags/flips between hook events (the user saw the chip go
-        # blue mid-work + flicker). tmux supplies only what the transcript can't see: permission
+        # blue mid-work + flicker). The live row supplies only what the transcript can't see: permission
         # (awaiting) and compacting, plus the model/effort/ctx metadata.
         # COMPACTING wins over blocked (API error). The classic case: the context fills, the turn dies with
         # an API error, and that is EXACTLY when the user clicks Compact to recover — so _compacting (incl.
         # the optimistic just-clicked cue) is the in-flight ACTION resolving the error and MUST surface. With
         # blocked checked first, the click gave zero feedback and the chip sat on "blocked" the whole
-        # compaction (the user 2026-06-29; worst on SDK sessions, which have no tmux @claude-state='compacting'
-        # so the chip rides entirely on the optimistic flag). Flipping off "blocked" also halts the render-side
+        # compaction (the user 2026-06-29; worst on SDK sessions, whose row then said nothing about compaction,
+        # so the chip rode entirely on the optimistic flag). Flipping off "blocked" also halts the render-side
         # auto-retry loop while we compact; the API-error CARD stays put, so its Retry is still there if the
         # compaction stalls. After that, blocked is the strongest signal — the turn ended in an error, so it
-        # beats the live tmux states (the session can't simultaneously be at a permission prompt mid-error).
+        # beats the live row's states (the session can't simultaneously be at a permission prompt mid-error).
         chip = _session_chip(sid, sess["path"], session, tm, now)   # THE shared derivation — identical to the timeline lane (the user 2026-07-03)
         # A session whose transcript DOESN'T EXIST YET reads OPENING while its spawn is IN FLIGHT (the
         # user 2026-08-05: a just-spawned tab said "Working" over a clock with no honest base). The
@@ -34088,17 +33056,17 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
         # not yet; the handshake closes it) — a fresh SDK session writes NO transcript until its first
         # turn, so keying its chip on the file left a fully-up, idle session wearing the opening dots
         # until the user's first message, indefinitely (the user 2026-08-08, who read minutes of dots
-        # as creation still running). tmux: no @claude-state published yet — the statusline hook's
-        # first publish is the matching CLI-up event (2026-08-10; tmux panes and their state vars
-        # outlive kernel restarts, so that leg needs no dormant case). The SDK leg keys on `spawning`,
+        # as creation still running). (The tmux backend's leg, until 2026-09-11: no @claude-state published
+        # yet, the statusline hook's first publish being the matching CLI-up event — 2026-08-10; its panes
+        # and their state vars outlived kernel restarts, so that leg needed no dormant case.) The SDK leg
+        # keys on `spawning`,
         # NOT on `connected` being falsy: a DORMANT created session — every fresh SDK session after a
         # kernel restart, since idle CLIs die with the kernel and boot reconcile leaves them lazy —
         # also reports no `connected`, and reading that as "still opening" kept the dots up for HOURS
         # on a session one message from answering (the user 2026-08-13, whose created-but-unmessaged
         # session "opened" all morning). A dormant row carries no spawning key, so it reads ready — a
         # send wakes it. Never for an override render (a closed episode's path is historical).
-        spawn_inflight = bool(tm.get("spawning")) or \
-            (tm.get("backend") == "tmux" and not (tm.get("state") or "").strip())
+        spawn_inflight = bool(tm.get("spawning"))
         if chip in ("working", "ready") and not path_override and not os.path.exists(sess["path"]) \
                 and spawn_inflight:
             chip = "opening"
@@ -34161,12 +33129,12 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
                   "backend": _session_backend(sid, tm),
                   "model": tm["model"], "effort": tm["effort"], "mode": tm.get("mode", ""),
                   # fast-mode badge (SDK sessions; the CLI's init reports on/off/cooldown, "" = unknown →
-                  # no badge — tmux stays "" until its statusline publishes a fast var). A non-empty
+                  # no badge — a row without the field stays ""). A non-empty
                   # disabled_reason means /fast would refuse, so the chat hides the toggle.
                   "fast": "" if tm.get("fastReason") else tm.get("fast", ""),
                   # which account this session bills ('login'|'key') — ALWAYS reported when the backend
                   # knows it (the user 2026-08-09: the tab hover says Billing even on a one-auth
-                  # machine; tmux sessions report nothing, honestly — their CLI's env is not romp's).
+                  # machine; a row without the field reports nothing, honestly).
                   # The key is labelled 'API key', never any fragment of it (2026-08-08: even a last-4
                   # tail is more key than a label needs); authAcct names WHICH login account.
                   "auth": tm.get("auth", ""),
@@ -34207,11 +33175,8 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
                   # (the tone variant rides in ctxTone above)
                   "ctxColor": (list(cm.ramp(tm["context"] / 100.0, cm.stops_for(_colormap())))
                                if tm["context"] is not None else None)}
-    elif tmux or _has_tmux():                          # tmux usable but this session isn't running → closed
+    else:                                              # not in the live map → closed (an empty map is authoritative)
         status = {"state": "closed", "sinceEpoch": since_ms, "faded": True}
-    else:                                              # no tmux at all (rare headless) → event-model fallback
-        status = {"state": "working" if open_now else "idle", "sinceEpoch": since_ms,
-                  "faded": not open_now}
     # Pinned, collapsed "system context" card at the very top of the chat: the CLAUDE.md instructions in
     # effect + this session's model / cwd / branch / permission-mode / version (NOT the harness prompt —
     # see _claudemd_docs). Only when there's a real transcript to describe AND something to show.
@@ -34299,11 +33264,11 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
             "selfHost": _self_host(),
             "events": events, "status": status, "ledger": ledger,
             # SDK sessions gate the box on the backend's LIVE task set (the CLI's task lifecycle stream —
-            # authoritative, terminal-cleared); the spawned_at heuristic remains the tmux/no-snapshot fallback.
-            # Reads the CALLER's snapshot — a fresh _tmux_sessions() here cost a tmux fork + a reg sweep
+            # authoritative, terminal-cleared); the spawned_at heuristic remains the no-snapshot fallback.
+            # Reads the CALLER's snapshot — a fresh _live_map() here cost a reg sweep
             # per session build, on the pusher's hottest path (the 2026-08-10 CPU fix).
             "bgTasks": _bg_tasks(sess["path"], _sdk_spawned_at(sid),
-                                 live=(tmux.get(str(sid)) or {}).get("bgTasks")),
+                                 live=(live_map.get(str(sid)) or {}).get("bgTasks")),
             # per-session view flags (the user 2026-06-26): the tab right-click menu toggles these too, mirroring
             # the timeline lane's feed checkbox + postal mailbox. Same flags + legacy fallback as build_timeline.
             "hideFromFeed": _session_flag(sid, "hideFromFeed"),
@@ -34318,7 +33283,7 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
             # every other pane, whose payloads dedup correctly, stayed instant.) The spawn time is
             # persisted and fixed; None when genuinely unknown, which the client tolerates — render.ts
             # keeps what it already had (`msg.firstSeen ?? prev.firstSeen`).
-            "firstSeen": session["turns"][0]["t"] if session["turns"] else _sdk_spawned_at(sid)}
+            "firstSeen": next((_t["t"] for _t in session["turns"] if not _t.get("echoTurn")), None) or _sdk_spawned_at(sid)}
 
 
 EPISODE_EVENT_CAP = 200   # events shipped per pre-clear episode expand — bounded, honest about the cut
@@ -35259,7 +34224,7 @@ def _blocked_placeholder(s, name, color, fsid, live, now, perm_state, since):
     if not text:
         # The picker/permission prompt's actual QUESTION is the most useful title — it says WHAT input is being
         # asked for, not just "Awaiting your input" (the user 2026-06-29). Pull it from the live ask the backend
-        # is holding (SDK: the dict stored in _emit_ask; tmux: a pane scrape). Best-effort — falls through to
+        # is holding (SDK: the dict stored in _emit_ask; Codex: its own). Best-effort — falls through to
         # the generic line when there's no readable ask.
         try:
             ask = Sessions.backend_for(fsid).current_ask(fsid)
@@ -35748,7 +34713,7 @@ def _boundary_clear_notices(alive):
     return out
 
 
-def _state_unknown_names(alive, tmux, working, awaiting):
+def _state_unknown_names(alive, live_map, working, awaiting):
     """Sessions the feed LISTS but whose live state it could not read — no row in the merged live
     map (e.g. the headless file-derived fallback). The client draws these a gray ring, so a blank
     pip goes back to meaning exactly one thing: alive and quiet.
@@ -35764,19 +34729,19 @@ def _state_unknown_names(alive, tmux, working, awaiting):
         nm = s["name"]
         if nm in working or nm in awaiting:
             continue                                  # state read: it is working or awaiting
-        if tmux.get(s["sid"]) is None:
+        if live_map.get(s["sid"]) is None:
             out.append(nm)
     return out
 
 
-def build_feed(now, tmux=None):
+def build_feed(now, live_map=None):
     """The {type:"feed"} message the tuned feed.js bundle consumes (ui-parity.md: feed = ADAPT).
     Goals map onto the AskItem/AskTreeNode shape the render already speaks: the goal tree IS the
     card's tree, rolled-up status → the Working/Blocked/Completed column, dead-concept fields
     (relevance/liveness/suspects/openQuestions/decision-briefs) left empty so the render's
     conditional paths hide them — no edits to the tuned card code. Stream = turn captions."""
-    if tmux is None:
-        tmux = _tmux_sessions()
+    if live_map is None:
+        live_map = _live_map()
     cleared = _cleared_ids()
     # Debug mode (the user 2026-07-09): join judge-failure rows onto each card so a rejection is
     # inspectable from the card modal (judge, kind, evidence, and in-debug capture: input + reply).
@@ -35787,7 +34752,7 @@ def build_feed(now, tmux=None):
     heal_total = 0                                    # T319: session-started tops nested this build (logged once per rise)
     hidden_total = 0                                  # T333: skill-load tops with no host, hidden from the feed this build
     bg_services = {}          # session name -> live SERVICE descs (judge-classified, _bg_split) → the neutral chip
-    alive = _alive_sessions(now, tmux)               # hard filter: living sessions only
+    alive = _alive_sessions(now, live_map)               # hard filter: living sessions only
     wmap = _wait_for_graph(now, {s["sid"] for s in alive})   # per-session 'waiting on a live peer' (the user 2026-06-22)
     _stalls = _stalled_goals()                       # goals romp's nudge gate is holding → the card's Stalled section
     _jauth_map = jd._auth_down_map()                 # judge-auth-down latch → the per-session card floor below
@@ -35798,7 +34763,7 @@ def build_feed(now, tmux=None):
         if _session_flag(fsid, "hideFromFeed"):      # muted from the feed (the user 2026-06-19) → timeline-only
             continue
         color = _name_color(fsid)
-        tm = tmux.get(fsid); live = tm is not None
+        tm = live_map.get(fsid); live = tm is not None
         # CACHE-ONLY parse (the user 2026-06-26): the CARDS come from the goal store (cheap) and must paint at
         # once on a cold start, so the working-dot + the deep-link anchors read the parse ONLY if it's already
         # cached — never paying the ~1s cold parse here. _warm_fleet_bg fills the cache + re-pushes; the dots
@@ -35810,7 +34775,7 @@ def build_feed(now, tmux=None):
         else:
             ps = _merge_live_atoms(ps, fsid)         # the same LIVE-MERGED session the chat chip + timeline lane read
             #                                          (the feed was the one surface deriving from the bare cache, 2026-07-05)
-        try:                                             # WORKING from the EVENT MODEL (open turn), not tmux state —
+        try:                                             # WORKING from the EVENT MODEL (open turn), not the row's state —
             who_working = _session_working(ps["turns"]) if ps else False   # one backend-agnostic dot signal
         except Exception:
             who_working = False
@@ -35839,7 +34804,7 @@ def build_feed(now, tmux=None):
         # "interrupting…" badge from the click until it settles, THEN falls to the past-tense "interrupted"
         # badge — never flickering between "working" and "interrupted" while the SDK live-tail retires mid-
         # settle (the user 2026-07-07). Same derivation as the chat chip + timeline lane (_interrupting):
-        # SDK's own in-flight flag for SDK sessions, the stop record for tmux. Safe to call again in this push.
+        # SDK's own in-flight flag for SDK sessions, the stop record for a row without it. Safe to call again in this push.
         sess_interrupting = _interrupting(fsid, ps or {}, now, tm)
         # An api-retry storm INSIDE an open turn (the user 2026-07-09): the live backend state says
         # "retrying" → the working card wears a "retrying since HH:MM" chip. The API-error badge below
@@ -36087,7 +35052,7 @@ def build_feed(now, tmux=None):
             for c in kids:
                 flatten(c, out, ancestor_done=done, boundary=boundary)
             return out
-        # HARD blocked floor: a session stopped RIGHT NOW on a live permission prompt (tmux state)
+        # HARD blocked floor: a session stopped RIGHT NOW on a live permission prompt (the live row's state)
         # floors its ACTIVE-FOCUS card under BLOCKED — the strongest signal, beats the goal's planner
         # status. (The planner's SOFT block, nd["blocked"], is the model's "needs user" verdict; this is
         # the live event.) Gated on the ROLLED-UP status, NOT the raw nodeComplete flag: a focus that is
@@ -36850,7 +35815,7 @@ def build_feed(now, tmux=None):
             "working": working, "awaiting": awaiting,   # awaiting = idle-but-waiting-on-bg-work names → await-green dot (the user 2026-07-13)
             # listed-but-unreadable names → an explicit gray ring, so a BLANK pip means "alive and
             # quiet" and nothing else (see _state_unknown_names)
-            "stateUnknown": _state_unknown_names(alive, tmux, working, awaiting),
+            "stateUnknown": _state_unknown_names(alive, live_map, working, awaiting),
             # session name -> live judge-classified SERVICE descs (a dev server the session keeps around;
             # _bg_split) → the grouped-mode session header's neutral chip, never a waiting state (2026-07-24)
             "bgServices": bg_services,
@@ -36872,7 +35837,7 @@ def build_feed(now, tmux=None):
                           # the chat frame ships, from the SAME directory (_session_cwd: registry, else
                           # the transcript's stamp), memoized, a fixed value across unchanged builds
                           "githubRepo": _github_repo_of(_session_cwd(s["sid"], s.get("path")))}
-                         for s in _chat_tab_sessions(now, tmux)],
+                         for s in _chat_tab_sessions(now, live_map)],
             # /clear boundary settles, newest per session → the bell logs each once (the user 2026-07-27)
             "clearNotices": _boundary_clear_notices(alive),
             # SDK-backend failures → the same bell, one entry per occurrence (the user 2026-07-28)
@@ -36915,7 +35880,7 @@ def _state_intervals(sid, want, now):
     rebuild (the end moved), and an unchanged rebuild sends nothing. `want` is a single state or any
     collection of them (the awaiting band passes both needs-input states). Forward-only — periods
     predating the log don't appear. File-based port of the obsidian timeline's stateIntervals (the kernel
-    reads states/, never tmux).
+    reads states/, never a backend).
     Folds the states log append-incrementally since 2026-09-03 (_fold_records): every timeline
     rebuild used to re-read and re-parse the whole file, twice per session (once per `want`); the
     intervals themselves are cheap."""
@@ -37572,7 +36537,7 @@ def _spend_detail_local(now=None):
     # not a row and not a stack: an all-zero stack with a legend chip says nothing (review find)
     totals = {sid: v for sid, v in totals.items() if v[0] > 0 or v[1] > 0 or v[2] > 0}
     try:
-        live = set(_live_names(_tmux_sessions()).values())
+        live = set(_live_names(_live_map()).values())
     except Exception:
         live = set()
     sessions = []
@@ -37585,7 +36550,7 @@ def _spend_detail_local(now=None):
             row["key"] = {"usd": round(k[0], 4), "tok": k[1], "turns": k[2]}
         sessions.append(row)
     sessions.sort(key=lambda s: (-s["usd"], -s["tok"], s["name"]))
-    # a session the registry never colored (a legacy or tmux one) still needs a color of its own for its
+    # a session the registry never colored (a legacy one) still needs a color of its own for its
     # stack and its row (T247e): a swatch of the active palette — the LEAST-USED one across this payload,
     # so it never wears a color an identity-colored session here already has while a free one remains
     # (the kernel's own picker's rule; review find: a plain hash gave a dead session web's blue), ties
@@ -38413,7 +37378,7 @@ def _segs_seam(turn, store):
     """Seam-aware segmentation — MUST mirror the judge's jd._segs (plans/segment-regrowth.md): seg ids
     the judges place/anchor against a settle-split have to be the same ids the kernel renders/resolves,
     or trails and deep-links written for a tail would silently stop matching."""
-    return jd.apply_seams(em.segments(turn), store or {})
+    return jd.apply_seams(em.segments(_turn_sans_placed_echoes(turn)), store or {})
 
 
 def _atom_prose_chars(a):
@@ -39182,6 +38147,8 @@ def _lane_segments(sid, session, goals, caps, live, bft, full_prompts=None):
     st_turns = session["turns"]
     bars, last_t, seg_ends, nsegs, complained = [], None, {}, 0, False   # seg_ends: seg-start t → work-END t (for completion marks)
     for ti, turn in enumerate(st_turns):
+        if turn.get("echoTurn"):
+            continue        # a stale echo's own turn (T344): a send the transcript never took draws no bar
         turn_open = (live and ti == len(st_turns) - 1 and not turn["ended"]
                      and not any(x["type"] == "idle" for x in turn["atoms"])
                      and not _suspended_after(turn["end"]))   # dead lane (live False) or pre-sleep freeze → not an open bar
@@ -39193,7 +38160,7 @@ def _lane_segments(sid, session, goals, caps, live, bft, full_prompts=None):
             _bars_complain(sid, "seams", e)
             complained = True
             try:
-                segs = em.segments(turn)
+                segs = em.segments(_turn_sans_placed_echoes(turn))
             except Exception:
                 segs = []
         for si, seg in enumerate(segs):
@@ -39914,12 +38881,12 @@ def _nudge_times_step(idx, o):
     return idx
 
 
-def build_timeline(now, tmux=None, with_bars=True, live_only=False):
+def build_timeline(now, live_map=None, with_bars=True, live_only=False):
     """A {type:"timeline"} message the ported timeline bundle consumes (ui-parity.md: timeline =
     ADAPT). Lanes per session; work bars are SEGMENTS [t,end] from the event model (not the deleted
     `romp-events --emit`); prompt dots at segment starts; tooltips from the captioner; awaiting/
     compacting stripes from states/; compaction markers from compact_boundary atoms; usage from
-    usage.json; live state + model/effort/context%/compaction% per lane from tmux @claude-* vars.
+    usage.json; live state + model/effort/context%/compaction% per lane from the backends' live rows.
     Message connectors (need the courier) and cross-pane focus/hover are later increments — emitted
     empty/null so the render's conditional paths hide them.
 
@@ -39930,12 +38897,12 @@ def build_timeline(now, tmux=None, with_bars=True, live_only=False):
     BUILD runs only on the cold live-first connect (no cached full build yet): every warm push projects the
     lanes frame from the cached full build instead (_timeline_skeleton; the WARM note in _push has the
     contract and its lag), so the with_bars=False branches below are the cold-connect path."""
-    if tmux is None:
-        tmux = _tmux_sessions()
-    alive = _timeline_sessions(now, tmux, live_only=live_only)   # living + window-dead (≤12h) lanes; per-session `live` below marks the dead ones (struck). live_only → live sessions only (cold-start first paint)
+    if live_map is None:
+        live_map = _live_map()
+    alive = _timeline_sessions(now, live_map, live_only=live_only)   # living + window-dead (≤12h) lanes; per-session `live` below marks the dead ones (struck). live_only → live sessions only (cold-start first paint)
     if _dismissed_lanes:   # drop lanes the user cleared — but ONLY while still dead; a revived sid reappears and sheds its record (durable set, survives restarts)
-        _undismiss_lanes(s["sid"] for s in alive if tmux.get(s["sid"]) is not None)
-        alive = [s for s in alive if not (s["sid"] in _dismissed_lanes and tmux.get(s["sid"]) is None)]
+        _undismiss_lanes(s["sid"] for s in alive if live_map.get(s["sid"]) is not None)
+        alive = [s for s in alive if not (s["sid"] in _dismissed_lanes and live_map.get(s["sid"]) is None)]
     id2name = {s["sid"]: s["name"] for s in alive}
     sessions, turns, semantic = [], {}, []   # `semantic`: artifact-derived marks (for gloss text); the band's marks are RUN spans, below
     full_prompts = {}                        # bar id -> the whole prompt, for _bind_message_execs; the wire carries the first line (T278b)
@@ -39957,7 +38924,7 @@ def build_timeline(now, tmux=None, with_bars=True, live_only=False):
                 branch_of[_k["sid"]] = {"fromId": _psid, "t": _k["t"], "cut": _k.get("cut") or ""}
     for s in alive:
         sid, name = s["sid"], s["name"]
-        tm = tmux.get(sid)
+        tm = live_map.get(sid)
         live = tm is not None
         hexcol = (tm and tm["color"]) or (_name_color(sid) or {}).get("bg", "#888888")
         goals, gfault = jd.load_goals_shared_or_fault(sid)   # read-only view (seams + judging marks); a FAULT (row
@@ -40003,7 +38970,7 @@ def build_timeline(now, tmux=None, with_bars=True, live_only=False):
         else:
             # SKELETON: NO full transcript parse. A fresh kernel start (the ↻ refresh button) otherwise re-parses
             # every transcript (~1.3s; this 49MB session ~0.5s alone) before the fleet can paint — but the LANES
-            # don't need it. Derive the lane from cheap signals (tmux + the goal store + the transcript mtime) so
+            # don't need it. Derive the lane from cheap signals (the live row + the goal store + the transcript mtime) so
             # the fleet appears AT ONCE; the bars ride the {type:"bars"} build, which does the real parse and
             # refines the lane a beat later. (the user 2026-06-26.)
             session = {"turns": []}; caps = {}; st_turns = []
@@ -40114,8 +39081,8 @@ def build_timeline(now, tmux=None, with_bars=True, live_only=False):
                 with _LANES_LOCK:
                     _lanes_memo.pop(sid, None)
         # Idle fade: the SAME rule the chat tab uses (ready + idle > 1h — see the `faded` beside the chat
-        # chip), keyed on the DERIVED chip `state` computed above, not the raw tmux state. The old form read
-        # tmux's vocabulary and counted "waiting" as active — but "waiting" IS the post-turn idle state, so
+        # chip), keyed on the DERIVED chip `state` computed above, not the raw row state. The old form read
+        # the row's vocabulary and counted "waiting" as active — but "waiting" IS the post-turn idle state, so
         # every live lane stayed active forever and only DEAD lanes ever dimmed (the user 2026-07-22: idle
         # threads dim in the chat but never on the timeline). Dead lanes still fade via `not live`.
         faded = (not live) or (state == "ready" and _idle_faded(state, tm and tm["since"], now))
@@ -40133,7 +39100,7 @@ def build_timeline(now, tmux=None, with_bars=True, live_only=False):
             "id": sid, "name": name, "live": live, "state": state, "awaitingBg": awaiting_bg,
             "awaitingKind": awaiting_kind,
             "awaitingCount": ((_aw_bg or {}).get("count") if isinstance((_aw_bg or {}).get("count"), int) else None),   # the lane badge agrees in number (T228)
-            "awaitingItems": (_awaiting_items_payload(_aw_bg, sid, s["path"], tmux) if live else []),   # the in-flight rows — the same set as the chat box, in both turn states (slice 2; turn-agnostic since 2026-09-06)
+            "awaitingItems": (_awaiting_items_payload(_aw_bg, sid, s["path"], live_map) if live else []),   # the in-flight rows — the same set as the chat box, in both turn states (slice 2; turn-agnostic since 2026-09-06)
             "awaitingPeers": ((_aw_bg or {}).get("peers") or None),   # named identities for a peer wait (2026-08-26)
             # the live bg-task descriptions behind awaitingBg (the user 2026-07-13): the lane draws the
             # idle-but-waiting stretch as a thin dashed segment whose hover lists exactly what's pending
@@ -40185,7 +39152,7 @@ def build_timeline(now, tmux=None, with_bars=True, live_only=False):
             # wrong for the pending flag's liveness leg, which needs the TRUE live set (a dead
             # recipient can never read its mail; a dead-lane sender still draws its old arrows)
             messages = _postal_messages(now, set(id2name), id2name,
-                                        {s for s in id2name if tmux.get(s) is not None})
+                                        {s for s in id2name if live_map.get(s) is not None})
             _bind_message_execs(messages, turns, full_prompts)   # connector exec → the recipient's process-start (real transit)
             # mids STAY on the wire (2026-08-17): the merged-view dmid join (romp-timeline-view.js) re-binds
             # a relayed connector's exec to the recipient turn by bar mids — the 2026-07-07 payload-audit pop
@@ -40707,6 +39674,42 @@ def _cite_for(item_id):
     return {"itemId": iid, "title": title}
 
 
+def _anchor_event_t(sid, anchor, now=None):
+    """The anchor turn's OWN moment (epoch seconds) for the chat's reveal progress line (T336): a card's `t` is the
+    card's newest activity, later than the turn its anchor names, and a fraction of the way back computed over it
+    would read more progress than exists. Read from what is already in hand, never a build (review: a build_session
+    here ran a cold whole-transcript reshape on the WS reader thread for a dead session's card): first the pusher's
+    built payload (_built_chat, the same events the pane was sent, matched by the four selectors the chat itself
+    resolves an anchor by: the event's uuid, a postal message id (mid, mids), an answered question's resultUuid and a
+    settled group's settleUuids), then the cached parse's atoms by uuid (the judges' tree; lazy atoms carry their
+    time with no body read). None when nothing resolves: the chat counts instead of guessing. Never raises."""
+    if not sid or not anchor:
+        return None
+    try:
+        hit = _built_chat.get(sid)
+        evs = (hit[1].get("events") if hit is not None and isinstance(hit[1], dict) else None) or []
+        for e in evs:
+            if not isinstance(e, dict):
+                continue
+            if (e.get("uuid") == anchor or e.get("mid") == anchor or e.get("resultUuid") == anchor
+                    or anchor in (e.get("mids") or []) or anchor in (e.get("settleUuids") or [])):
+                ts = e.get("ts")
+                t = em.parse_z(ts) if isinstance(ts, str) else (ts if isinstance(ts, (int, float)) else e.get("t"))
+                if t:
+                    return int(t)
+        now = int(now if now is not None else time.time())
+        sess = next((s for s in _sessions(now) if s["sid"] == sid), None)
+        if sess is None:
+            return None
+        for turn in _parse(sess["path"], sid, now).get("turns") or []:
+            for a in turn.get("atoms") or []:
+                if a.get("uuid") == anchor and a.get("t"):
+                    return int(a["t"])
+    except Exception:
+        return None
+    return None
+
+
 def _show_on_timeline_focus(msg):
     """A feed showOnTimeline tap → the chat `focus` message. anchorUuid (kernel 996ebd7) is the EXACT turn
     uuid the chat lands on (scrollToAnchor) — fully id-based deep-link, no nearest-time miss. There is no
@@ -41025,8 +40028,8 @@ def _note_ws_drop(c, why, frame_len, key=None):
     if key is None:
         key = c.get("curSlot")
     try:
-        sys.stderr.write("ws: dropping %s client — %s (wid=%s slot=%s queued=%dB frame=%dB)\n"
-                         % (c.get("app"), why, c.get("wid") or "-", _perf_slot(key) if key else "-",
+        sys.stderr.write("ws: dropping %s client — %s (wid=%s col=%s slot=%s queued=%dB frame=%dB)\n"
+                         % (c.get("app"), why, c.get("wid") or "-", c.get("col") or "-", _perf_slot(key) if key else "-",
                             int(c.get("qbytes") or 0), int(frame_len)))
         if "bytes behind" in str(why):
             _WS_DROP_SEQ[0] += 1
@@ -41214,7 +40217,7 @@ def _send_tab_order(c, tab_order, tab_meta, live):
     """The tab strip to one client through the pusher's ("taborder",) dedup slot — built AND enqueued under the
     client's slot lock so the frame's skeleton list and its queue position agree with every release, which
     enqueues under the same lock. Per-client dedup, so a per-client frame costs nothing. `live` is the build's
-    raw liveness map (the tmux/SDK merge), the frame's T258 `live` field — the ONE builder takes it beside the
+    raw liveness map (the backends' merge), the frame's T258 `live` field — the ONE builder takes it beside the
     client, so every emitter's strip carries both the affirmed-live sids and this client's skeleton list."""
     with _client_lock(c):
         sk = c.get("skeleton")
@@ -41785,11 +40788,11 @@ def _chat_history_page(sid, lo, hi, now, sess=None, tmux=None):
     """The rendered events of turns [lo, hi) of `sid` (build_session's page mode), through a bounded LRU keyed on the
     session's whole chat-build signature: any input that would change the render misses. Counted (/perf chatPages)."""
     if tmux is None:
-        tmux = _tmux_sessions()
+        tmux = _live_map()
     if sess is None:
         sess = next((x for x in _sessions(now) if x["sid"] == sid), None)
     try:                                          # the whole chat-build signature, as one digest (its components hold dicts)
-        raw = _chat_build_sig(sess, tmux.get(sid), now, tmux=tmux, deps=False) if sess else None
+        raw = _chat_build_sig(sess, tmux.get(sid), now, live_map=tmux, deps=False) if sess else None
         sig = hashlib.sha1(json.dumps(raw, sort_keys=True, default=str).encode("utf-8")).hexdigest() if raw is not None else None
     except Exception:
         sig = None
@@ -41855,7 +40858,7 @@ def _chat_history_reply(sid, msg, now, base=None):
     turn-aligned, so a client's oldest or newest resident event is a turn's first or last. The reply's `_base` is
     the client's new echat base, popped by the handler."""
     kind = msg.get("type")
-    tmux = _tmux_sessions()
+    tmux = _live_map()
     sess = next((x for x in _sessions(now) if x["sid"] == sid), None)
     if sess is None:
         return None
@@ -42232,7 +41235,7 @@ def _colormap():
 # higher effort. These two rank tables are the ONE place the ordering lives; the chat statusline + timeline
 # lanes just apply the RGB the kernel computes here (mirrors ctxColor). Unknown model/effort → None so the
 # client keeps its default gray. Model is matched by family WORD (the same leading-word the /model picker keys
-# on) so it works whether tmux reports "opus", "claude-opus-4-8", or "Opus 4.8".
+# on) so it works whether a row reports "opus", "claude-opus-4-8", or "Opus 4.8".
 # Ranks are DERIVED from the shared MODEL_CHOICES / EFFORT_CHOICES order so the model+effort vocabulary lives
 # in exactly ONE place (the user 2026-07-02) — add a model/effort to those lists and it ranks here for free.
 # MODEL_CHOICES is ordered most→least capable, so position 0 → 1.0 (brightest); EFFORT_CHOICES is ordered
@@ -42385,12 +41388,6 @@ def _set_distill_effort(v, gt=None): return _set_judge_state("distill-effort", v
 def _set_comment_model(v, gt=None):  return _set_judge_state("comment-model", v, _judge_model_values() | {"session", "default"}, gt=gt)
 def _set_comment_effort(v, gt=None): return _set_judge_state("comment-effort", v, _EFFORT_VALUES | {"session"}, gt=gt)
 def _set_comment_fast(v, gt=None):   return _set_judge_state("comment-fast", v, {"session", "on"}, gt=gt)
-# The tmux backend's OFFER (T288, the user 2026-09-09): "Claude Code (tmux)" appears in the + picker and the
-# gear's Default backend list only while this is "on"; off by default. It gates what the picker offers and
-# nothing else: an existing tmux session keeps working and keeps its label, `romp new -t` still works, the
-# ids and the protocol are unchanged. Rides the judge-knob machinery (validated, stamped, propagated to
-# every linked kernel: the 2026-08-14 gear rule, one value across machines).
-def _set_tmux_backend(v, gt=None):   return _set_judge_state("tmux-backend", v, {"on", "off"}, gt=gt)
 # Fast mode for the judges (the gear's box beside the Triage model picker): "on" runs every judge call whose model is Opus in the CLI's fast
 # mode (jd._judge_cmd adds the flag-settings opt-in per call; a call on any other model is untouched); off by
 # default. Fast mode bills Opus at a premium and draws on fast mode's own rate limits, so it is a deliberate
@@ -42465,7 +41462,6 @@ _JUDGE_SETTING_FIELDS = (("judgeModel", _set_judge_model), ("indexModel", _set_i
                          # /judge-settings is the tunnel-side propagation that already does it
                          ("commentModel", _set_comment_model), ("commentEffort", _set_comment_effort),
                          ("commentFast", _set_comment_fast),
-                         ("tmuxBackend", _set_tmux_backend),   # T288: the tmux backend's offer, "on" | "off"
                          ("judgeFast", _set_judge_fast),       # fast mode per tier, "on" | "off" (T300)
                          ("distillFast", _set_distill_fast), ("indexFast", _set_index_fast))
 
@@ -42519,7 +41515,6 @@ def _apply_judge_settings(body):
             "commentModel": jd._state_str("comment-model", "session"),
             "commentEffort": jd._state_str("comment-effort", "session"),
             "commentFast": jd._state_str("comment-fast", "session"),
-            "tmuxBackend": jd._state_str("tmux-backend", "off"),
             "judgeFast": jd._state_str("judge-fast", "off"),
             "distillFast": jd._state_str("distill-fast", "off"), "indexFast": jd._state_str("index-fast", "off")}
 
@@ -42732,7 +41727,7 @@ def _adopt_peer_settings(host, rver):
 _GT_STORES = ("auto-nudge", "compact-suggest", "file-editing", "update-mode", "thinking-summaries",
               "judge-model", "index-model", "judge-effort", "index-effort", "judge-concurrency",
               "distill-model", "distill-effort", "comment-model", "comment-effort", "comment-fast",
-              "tmux-backend", "judge-fast", "distill-fast", "index-fast")
+              "judge-fast", "distill-fast", "index-fast")
 
 
 def _setting_stored_gt(name):
@@ -43115,7 +42110,7 @@ def _edit_trace_sid(path, sid):
     except Exception:
         return None
     best, best_len = None, 0
-    for cand in _tmux_sessions():
+    for cand in _live_map():
         d = os.path.realpath(_cwd_of(cand) or "") or ""
         if d and (wp == d or wp.startswith(d.rstrip(os.sep) + os.sep)):
             if len(d) > best_len or (len(d) == best_len and cand == sid):
@@ -44026,20 +43021,20 @@ def _chat_sig_ok(sid):
             _chat_sig_faults.pop(str(sid), None)
 
 
-def _push(targets, connect=False, tmux=None):
+def _push(targets, connect=False, live_map=None):
     """Build the payloads once (cached parses) and send each target only the pieces that CHANGED for it.
     Drives both the periodic pusher (all clients) and a fresh connect (one client): a new/reconnecting
     client (empty dedup) gets the full state; steady-state sends only diffs. Builds only the apps the
     targets actually need (no timeline parse with no timeline client). connect=True (a fresh client) serves
     the pusher-warmed feed/timeline WITHOUT rebuilding, so a reload is instant (the user 2026-06-25).
-    `tmux` lets the periodic pusher hand down its cycle's ONE liveness snapshot (see _pusher_cycle);
+    `live_map` lets the periodic pusher hand down its cycle's ONE liveness snapshot (see _pusher_cycle);
     other callers (connect pushes, ad-hoc _push_all) leave it None and pay their own read."""
     if not targets:
         return
     now = int(time.time())
-    tmux = _tmux_sessions() if tmux is None else tmux   # one liveness read per push, shared by all builders
+    live_map = _live_map() if live_map is None else live_map   # one liveness read per push, shared by all builders
     _chat_push_scopes_close()                     # a previous push on this thread that raised inside the chat loop
-    _seen_live.update(tmux)                       # remember who's been alive → keep their tab when they die
+    _seen_live.update(live_map)                       # remember who's been alive → keep their tab when they die
     want_chat = any(c["app"] == "chat" for c in targets)
     # The FLEET connects as its OWN app (the user 2026-06-29) so we build its per-session ledgers EVEN when no
     # chat client is open — previously the fleet rode app=feed and got ledgers only as a side effect of a chat
@@ -44049,7 +43044,7 @@ def _push(targets, connect=False, tmux=None):
     want_tl = any(c["app"] == "timeline" for c in targets)
     chat_clients = [c for c in targets if c["app"] == "chat"]
     try:
-        chat_list = _chat_tab_sessions(now, tmux)   # live + explicitly kept-open (read-only reopened dead) — nothing else
+        chat_list = _chat_tab_sessions(now, live_map)   # live + explicitly kept-open (read-only reopened dead) — nothing else
         tab_order = [s["sid"] for s in chat_list]
         # order audit: a PERMUTED push (survivors swapped slots vs the previous push) is the reorder bug
         # leaving the kernel — log it with the stack. Set churn (a tab appearing/dying) is routine → skipped.
@@ -44075,7 +43070,7 @@ def _push(targets, connect=False, tmux=None):
                                                          "resumeAt": _retry_resume_at(),   # limit reset epoch → the card counts down to the real retry
                                                          "reason": _retry_pause_reason()})   # "spend" → the card says 'raise your cap', no countdown
                 redialed = _resolve_reconnect(c, chat_list)   # a redialing page: fix its skeleton set BEFORE any strip
-                _send_tab_order(c, tab_order, tab_meta, tmux)
+                _send_tab_order(c, tab_order, tab_meta, live_map)
                 if redialed:                             # the redial's first strip stands in for the ready it never posts:
                     _consume_pending_reveal(c, why="the pane's redial")   # a reveal parked for its window lands behind the strip
             active = {c.get("active") for c in chat_clients if c.get("active")}
@@ -44105,9 +43100,9 @@ def _push(targets, connect=False, tmux=None):
             _live_scope.chat_floor0 = _chat_floor0_of(_all_chat)
             for s in build_order:
                 is_active = s["sid"] in active           # the watched tab(s): served like any tab while the key holds
-                _tm = tmux.get(s["sid"])
+                _tm = live_map.get(s["sid"])
                 try:
-                    sig = _chat_build_sig(s, _tm, now, tmux=tmux)
+                    sig = _chat_build_sig(s, _tm, now, live_map=live_map)
                     _chat_sig_ok(s["sid"])               # a signature that was taken ends its fault episode
                 except Exception as e:
                     _chat_sig_fault(s, e)                # once per fault episode: stderr and a bell row
@@ -44123,7 +43118,7 @@ def _push(targets, connect=False, tmux=None):
                     _VIEW_STATS["chatBuildActive" if is_active else "chatBuildBg"] += 1
                     _t0 = time.monotonic()
                     try:
-                        m = build_session(s["sid"], now, tmux)
+                        m = build_session(s["sid"], now, live_map)
                     except Exception as e:
                         # One session's failed chat build costs that session's frame this cycle, not every
                         # client's whole push: the cycle-level catch below ("push build:") would return
@@ -44151,7 +43146,7 @@ def _push(targets, connect=False, tmux=None):
                     _chat_dep_scope.deps = None          # consumed: a reader outside a build must not append to it
                     if sig is not None:
                         try:
-                            post = _chat_build_sig(s, _tm, now, tmux=tmux, deps=False)
+                            post = _chat_build_sig(s, _tm, now, live_map=live_map, deps=False)
                         except Exception:
                             post = None
                     # WHY a tab rebuilt (2026-09-09): the labelled _chat_build_sig components that moved
@@ -44180,7 +43175,7 @@ def _push(targets, connect=False, tmux=None):
                     _clear_empty_build_note(s["sid"])
                 _note_chat_divergence(s["sid"], m.get("name") or "",
                                       ((m.get("status") or {}).get("state") or ""),
-                                      ((tmux.get(s["sid"]) or {}).get("state") or ""), now)
+                                      ((live_map.get(s["sid"]) or {}).get("state") or ""), now)
                 chat_sessions.append(m)
                 # delta-send: diff this build's events against the previous one ONCE, then each client gets
                 # only the changed suffix (chatTail) if it's caught up, else the full session. Keeps the whole
@@ -44253,7 +43248,7 @@ def _push(targets, connect=False, tmux=None):
                 if sid not in keep:
                     _task_fold_memo.pop(sid, None)
             for sid in list(_merge_sets_memo):
-                if sid not in keep and sid not in tmux:
+                if sid not in keep and sid not in live_map:
                     _merge_sets_memo.pop(sid, None)
             _retry_parked_creates()   # lag-parked comment creates ride every pusher cycle (T106)
             # COMMENT THREADS: one {type:"comments"} frame per session that has ever had one (its
@@ -44262,7 +43257,7 @@ def _push(targets, connect=False, tmux=None):
             # an unchanged frame costs nothing on the wire and the chatTail stream stays untouched.
             for s in (chat_list if chat_clients else []):
                 try:
-                    fr = _comments_frame(s["sid"], tmux)
+                    fr = _comments_frame(s["sid"], live_map)
                 except Exception:
                     sys.stderr.write("comments frame failed for %s: %s\n" % (s["sid"], traceback.format_exc()))
                     continue
@@ -44271,14 +43266,14 @@ def _push(targets, connect=False, tmux=None):
                         _send_client(c, ("comments", s["sid"]), fr)
             # OPEN SUBAGENT VIEWERS (plans/subagent-transcripts.md): each rides its own per-client dedup slot
             # like the comment frames, rebuilt only when the agent's file or liveness moved.
-            _push_subagents(chat_clients, now, tmux)
+            _push_subagents(chat_clients, now, live_map)
             _forget_chat_positions({s["sid"] for s in chat_list})   # the per-session wire memos of tabs that left
             _live_scope.chat_floor0 = None            # the decision is the chat loop's alone
             _chat_push_scopes_close()                    # after the threads' signatures, which read the shared components too
         _PERF_STATS.stage("push.chat", time.monotonic() - _t_stage)
         _t_stage = time.monotonic()
-        fsig = _fleet_view_sig(now, tmux) if (want_feed or want_tl) else None
-        feed_src = _cached_feed(now, tmux, fsig, connect) if want_feed else None
+        fsig = _fleet_view_sig(now, live_map) if (want_feed or want_tl) else None
+        feed_src = _cached_feed(now, live_map, fsig, connect) if want_feed else None
         feed = feed_src
         if feed is not None:
             feed = dict(feed_src)                        # copy so the per-push ledger attach never dirties the cache
@@ -44341,15 +43336,15 @@ def _push(targets, connect=False, tmux=None):
             tl_clients = [c for c in targets if c["app"] == "timeline"]
             live_first = connect and _built_timeline[1] is None     # cold start, nothing warmed yet → live only
             if live_first:
-                skel = build_timeline(now, tmux, with_bars=False, live_only=True)
+                skel = build_timeline(now, live_map, with_bars=False, live_only=True)
                 for c in tl_clients:
                     _send_client(c, ("timeline",), {"type": "data", "data": skel})
-                timeline = build_timeline(now, tmux, with_bars=True, live_only=True)   # live bars now (no dead reads)
+                timeline = build_timeline(now, live_map, with_bars=True, live_only=True)   # live bars now (no dead reads)
                 tl_warming = True                                   # this is the PARTIAL cold build — the client keeps its loader up
                 _producer_wake.set()                                # ...if it lands empty (SDK/federation not yet merged), rather than flashing
                 #                                                     "no activity"; a later warmed push (tl_warming False) settles it (the user 2026-07-03)
             else:
-                timeline = _cached_timeline(now, tmux, fsig, connect)
+                timeline = _cached_timeline(now, live_map, fsig, connect)
                 if connect:
                     if _timeline_cache_fresh(fsig):
                         # A CONNECT serves the cached lanes under the CYCLE's clock: the pane anchors its live
@@ -44369,7 +43364,7 @@ def _push(targets, connect=False, tmux=None):
                         # lanes are built fresh here, as every connect did before the projection (no transcript
                         # parse: the skeleton), and the next cycle's rebuild dedups against them when unchanged;
                         # the heavy bars still come from the cache, as they always did on a connect.
-                        frame = {"type": "data", "data": build_timeline(now, tmux, with_bars=False)}
+                        frame = {"type": "data", "data": build_timeline(now, live_map, with_bars=False)}
                     skel_pre, skel_sig = json.dumps(frame), None
                 else:
                     w = _skel_wire                                  # tuple snapshot — rebound whole, never mutated
@@ -44544,10 +43539,10 @@ def _note_drain_armed():
         pass
 
 
-def _push_all(tmux=None):
+def _push_all(live_map=None):
     with _clients_lock:
         clients = list(_clients)
-    _push(clients, tmux=tmux)
+    _push(clients, live_map=live_map)
 
 
 def _push_session_now(sid):
@@ -44572,14 +43567,14 @@ def _push_session_now(sid):
         return
     try:
         now = int(time.time())
-        tmux = _tmux_sessions()
-        chat_list = _chat_tab_sessions(now, tmux)
+        live_map = _live_map()
+        chat_list = _chat_tab_sessions(now, live_map)
         if not any(s["sid"] == sid for s in chat_list):
             return                                   # hidden / raced a teardown — the periodic pusher owns the rest
         tab_order = [s["sid"] for s in chat_list]
         tab_meta = [{"id": s["sid"], "name": s.get("name", ""), "color": _name_color(s["sid"])} for s in chat_list]
         try:
-            m = build_session(sid, now, tmux)
+            m = build_session(sid, now, live_map)
         finally:
             _chat_dep_scope.deps = None              # a targeted push caches nothing: its record is nobody's, and a
         if not m:                                    # later reader on this thread must not append to it
@@ -44591,7 +43586,7 @@ def _push_session_now(sid):
         ms = None                                    # lazy: the first full send materializes it, the rest reuse
         for c in targets:
             redialed = _resolve_reconnect(c, chat_list)   # a redialing page must never see a strip before its set exists
-            _send_tab_order(c, tab_order, tab_meta, tmux)
+            _send_tab_order(c, tab_order, tab_meta, live_map)
             if redialed:                             # this strip is the redial's first: a reveal parked for its window lands behind it
                 _consume_pending_reveal(c, why="the pane's redial")
             ms = _send_chat(c, m, ms, 0, True)       # change_from 0 → always the full-session form (…and releases a skeleton)
@@ -44631,11 +43626,11 @@ def _confirm_close_now(sid):
     tabs-first send, through the same per-client dedup slot — the next cycle's identical send is a no-op.
     `_push_soon()` still follows for everything else the kill changed. Returns whether the fresh set is
     indeed without the id (False = the end did not take; the client's own backstop then says so, honestly).
-    Off-cycle by design: `_tmux_sessions()` outside a pusher cycle is a live Sessions.live() read."""
+    Off-cycle by design: `_live_map()` outside a pusher cycle is a live Sessions.live() read."""
     try:
         now = int(time.time())
-        tmux = _tmux_sessions()
-        chat_list = _chat_tab_sessions(now, tmux)
+        live_map = _live_map()
+        chat_list = _chat_tab_sessions(now, live_map)
         tab_order = [s["sid"] for s in chat_list]
         tab_meta = [{"id": s["sid"], "name": s.get("name", ""), "color": _name_color(s["sid"])} for s in chat_list]
         with _clients_lock:
@@ -44643,7 +43638,7 @@ def _confirm_close_now(sid):
         for c in targets:
             try:
                 redialed = _resolve_reconnect(c, chat_list)   # a confirmation may be the FIRST strip a redialing page sees
-                _send_tab_order(c, tab_order, tab_meta, tmux)
+                _send_tab_order(c, tab_order, tab_meta, live_map)
                 if redialed:                         # ...and then the sender that lands a reveal parked for its window
                     _consume_pending_reveal(c, why="the pane's redial")
             except Exception:
@@ -44785,9 +43780,9 @@ def _next_feed_build_id():
         return _feed_build_id[0]
 
 
-def _fleet_view_sig(now, tmux):
+def _fleet_view_sig(now, live_map):
     """Cheap fingerprint of everything build_feed/build_timeline read. Busts on any transcript/names/states/
-    postal change (_producer_sig), a judge pass (goal/caption via _judge_gen), a live tmux BADGE change
+    postal change (_producer_sig), a judge pass (goal/caption via _judge_gen), a live row BADGE change
     (state/model/context/effort — touches no file), a colormap or session-flags change, a SESSION-ORDER change
     (a tab/lane reorder writes session-order.json — the feed orders its grouped cards by it, so a reorder
     must bust the cache or the reordered cards lag behind the tabs by up to a bucket; the user 2026-07-15),
@@ -44826,12 +43821,12 @@ def _fleet_view_sig(now, tmux):
             sig[k] = os.stat(p).st_mtime
         except OSError:
             pass
-    for s in sorted(tmux):
-        t = tmux[s]
+    for s in sorted(live_map):
+        t = live_map[s]
         # Every row field the lanes and the chat chip derive from, plus the SDK snapshot facts the feed/
         # timeline render that touch no file (a model/effort/auth switch resolving, a retry storm, the
-        # connect and spawn bits; the 2026-09-03 audit). `context` is the row's key (the tmux vars and the
-        # SDK merge both write it); the sig read `ctx`, which no row carries, so a context-% change never
+        # connect and spawn bits; the 2026-09-03 audit). `context` is the row's key (every backend's row
+        # writes it); the sig read `ctx`, which no row carries, so a context-% change never
         # busted the cache and the lane's battery waited on the bucket. Never keyed before: the fast-mode
         # refusal reason (the chip's `fast` blanks on it), the subagent rows (the lane ships the whole
         # list, so a count alone missed a change inside it) and the background-task ids behind the
@@ -44859,7 +43854,7 @@ def _row_ids_sig(tasks):
     return tuple(str(t.get("toolUseId") or "") for t in (tasks or ()) if isinstance(t, dict))
 
 
-def _cached_feed(now, tmux, sig, connect=False):
+def _cached_feed(now, live_map, sig, connect=False):
     # connect (a fresh client) NEVER triggers a rebuild — it serves whatever the pusher has warmed, so startup
     # is instant; the pusher refreshes it within a tick. Else: reuse on an unchanged sig OR a recent rebuild —
     # UNLESS an optimistic kernel-side mutation postdates the build (_views_dirty): that state is invisible
@@ -44882,7 +43877,7 @@ def _cached_feed(now, tmux, sig, connect=False):
     bid = _next_feed_build_id()          # claimed BEFORE the read, so an ack issued during this build outranks it
     started = time.time()                # …and the dirty floor for the NEXT check: mutations after this
     _t0 = time.monotonic()
-    feed = build_feed(now, tmux)         # instant may be invisible to the build below → must rebuild
+    feed = build_feed(now, live_map)         # instant may be invisible to the build below → must rebuild
     _PERF_STATS.build("feed", False, time.monotonic() - _t0)
     feed["buildId"] = bid
     _built_feed[:] = [sig, feed, time.time(), started]
@@ -44965,7 +43960,7 @@ def _pusher_has_feed_audience():
         return _feed_audience(_clients)
 
 
-def _pure_feed(now, tmux):
+def _pure_feed(now, live_map):
     """The feed payload for GET /feed.json: the pusher's warmed copy while the pusher has an audience
     (the feed_src under the panes' payload: their frame is a per-push copy of it with _push's `ledgers`
     attach on top, so this is the board's cards without that attach), else this path's own copy while
@@ -45000,17 +43995,17 @@ def _pure_feed(now, tmux):
         if pf is not None and not _views_dirty[0] > pf[2]:
             if (time.time() - pf[1]) < REBUILD_MIN_S:
                 return _served(pf[0])
-            sig = _fleet_view_sig(now, tmux)
+            sig = _fleet_view_sig(now, live_map)
             if pf[3] == sig:
                 return _served(pf[0])
         _VIEW_STATS["feedJsonBuild"] += 1
         bid = _next_feed_build_id()
         if sig is None:
-            sig = _fleet_view_sig(now, tmux)     # sampled BEFORE the read, as the pusher's fsig is: an input
+            sig = _fleet_view_sig(now, live_map)     # sampled BEFORE the read, as the pusher's fsig is: an input
             #                                      that moves during the build busts the next check
         started = time.time()                # the dirty floor for the next GET: a mutation after this may be missed below
         _t0 = time.monotonic()
-        feed = build_feed(now, tmux)
+        feed = build_feed(now, live_map)
         _PERF_STATS.build("feedJson", False, time.monotonic() - _t0)
         feed["buildId"] = bid
         _PURE_FEED = (feed, time.time(), started, sig)
@@ -45207,7 +44202,7 @@ def _notify_prev_forget_gone(owned):
     it, and the next sweep bounds it. Returns how many cards were forgotten."""
     if not _NOTIFY_PREV[0]:
         return 0
-    known = set(_tmux_sessions()) | set(owned) | set(_kept_open)   # outside the lock: liveness may ask tmux
+    known = set(_live_map()) | set(owned) | set(_kept_open)   # outside the lock: liveness may sweep a registry
     with _notify_prev_lock:
         prev = _NOTIFY_PREV[0]
         gone = {i for i, e in (prev or {}).items() if e.get("sid") not in known}
@@ -45417,8 +44412,8 @@ def _apih_class(status, category="", network_down=None):
     return "offline" if network_down is True else "errors"
 
 
-def _api_health_frame(now, tmux):
-    """The apiHealth shell frame for this cycle (the block comment above says what it reads). `tmux` is
+def _api_health_frame(now, live_map):
+    """The apiHealth shell frame for this cycle (the block comment above says what it reads). `live_map` is
     the cycle's merged live map (Sessions.live()). Every timestamp is an event stamp, a record's time, the
     storm turn's start (SdkSession.since moves once per fresh turn, not per attempt) or the pause's t, never
     the clock, so two cycles over the same world return equal dicts and _api_health_push sends nothing.
@@ -45433,14 +44428,11 @@ def _api_health_frame(now, tmux):
         reason = r if r in ("limit", "spend") else "manual"
         pause_t = int(_retry_pause_ts() or 0)
     rows = []
-    n_tmux = 0
-    live = tmux if isinstance(tmux, dict) else {}
-    for s in _alive_sessions(now, tmux):
+    live = live_map if isinstance(live_map, dict) else {}
+    for s in _alive_sessions(now, live_map):
         sid = str(s.get("sid") or "")
         if not sid:
             continue
-        if Sessions.backend_for(sid) is _TMUX:
-            n_tmux += 1                                # transcript-only coverage: the detail says so
         tm = live.get(sid) or {}
         if tm.get("state") == "retrying":              # the SDK api_retry storm: set per frame, cleared
             info = tm.get("retryInfo") if isinstance(tm.get("retryInfo"), dict) else {}   # when output resumes
@@ -45454,7 +44446,7 @@ def _api_health_frame(now, tmux):
                 continue                               # nothing latched, or an on-you failure (the session's own)
             status = e.get("status")
             # The word follows the LIVE state: a turn open on the retry prompt (romp's own, or a human's) with
-            # no api_retry frame yet, or a tmux session's whole internal retry, reads 'retrying', not
+            # no api_retry frame yet, reads 'retrying', not
             # 'stopped'. The latch only keeps the row counted; since stays the record's time.
             kind = "retrying" if tm.get("state") == "working" else "blocked"
             row = {"kind": kind, "cls": _apih_class(status, e.get("category"), None),
@@ -45483,7 +44475,7 @@ def _api_health_frame(now, tmux):
     return {"type": "apiHealth", "state": state, "cls": cls, "reason": reason, "text": text,
             "waiting": n, "retrying": sum(1 for r in rows if r["kind"] == "retrying"),
             "blocked": sum(1 for r in rows if r["kind"] == "blocked"),
-            "since": since, "tmux": n_tmux, "sessions": rows,
+            "since": since, "sessions": rows,
             # the pause file's write count (_RETRY_PAUSE_SEQ): a press on the detail's pause button writes it,
             # so the frame after the press differs from every frame before it even when the auto-pause put
             # the same state back within the same second; the shell clears its acknowledgment on that
@@ -45503,7 +44495,7 @@ def _api_health_frame(now, tmux):
             "hosts": _api_health_hosts()}
 
 
-_APIH_HOST_KEYS = ("state", "cls", "text", "waiting", "retrying", "blocked", "since", "reason", "tmux", "quiet", "errs")
+_APIH_HOST_KEYS = ("state", "cls", "text", "waiting", "retrying", "blocked", "since", "reason", "quiet", "errs")
 
 
 def _apih_quiet(now):
@@ -45527,7 +44519,7 @@ def _apih_errs(now):
 
 
 def _api_health_hosts():
-    """{host: {state, cls, text, waiting, retrying, blocked, since, reason, tmux, quiet, errs, stale[, fault]}} for
+    """{host: {state, cls, text, waiting, retrying, blocked, since, reason, quiet, errs, stale[, fault]}} for
     every attached machine whose frame the tunnel supervisor has cached (_poll_remote_api_health), and for one
     whose read it refused (`fault`, the HTTP status; the frame keys are then whatever was last heard). `stale`
     marks both a tunnel that is not up and a refused read: the shell names such a machine and gives it no say in
@@ -46322,7 +45314,7 @@ def _push_forward(events):
 # With the master AND the turn switch on, every session's turn end buzzes the subscribed phones:
 # {title: "Romp: <the session's name>" (_notify_title), body: the first line of what it said, sid}. The EVENT is the session's
 # recorded settle — the Stop hook's `lastStopAt` stamp (SDK sessions) or the states/ 'waiting'/'idle'
-# transition the Stop hook writes (tmux) — read per pusher cycle, which the very same settle wakes
+# transition the backend writes at turn end — read per pusher cycle, which the very same settle wakes
 # (/tick, the backend's poke). No timer, no transcript-mtime inference. The first sight of a session
 # is a silent baseline (existing state is status, not news — the _NOTIFY_PREV policy), and a session
 # the user muted (its own bell off) stays quiet here too: the master's "on unless muted" model.
@@ -46344,7 +45336,7 @@ def _push_forward(events):
 # a turn can open: the feeder's pop — a fed text, the human's unless it carries the romp-injected
 # marker — and a stamped user atom the CLI streams while idle), and the tick skips an end whose opener
 # is not the human WITHOUT spending the buzz claim, so a bell event that turn raises keeps its buzz. A
-# registry without the field (an older ledger, a tmux session) reads as the human's: a missing fact
+# registry without the field (an older ledger) reads as the human's: a missing fact
 # never drops the user's buzz.
 _TURN_PREV = {}      # sid -> turn-end key at the last tick; absent = baseline pending
 _PUSH_BUZZED = {}    # sid -> (turn-end key, "turn"|"bell") of the last phone buzz filed for it
@@ -46371,8 +45363,8 @@ def _turn_opener(reg):
     """Who opened the turn `lastStopAt` closed, off the registry entry the Stop hook stamps it on
     beside the settle: "human" (the composer's words, a queued message, a typed follow-up) or
     "injected" (a harness-injected task notification / scheduled prompt / peer message, or romp's own
-    nudge, follow-up, notice or relayed mail). Anything else — the field absent (an older ledger, a
-    tmux session) or a value the hook never writes — reads "human": a missing fact never drops the
+    nudge, follow-up, notice or relayed mail). Anything else — the field absent (an older ledger) or
+    a value the hook never writes — reads "human": a missing fact never drops the
     user's buzz."""
     v = (reg or {}).get("lastTurnOpener") if isinstance(reg, dict) else None
     return v if v in ("human", "injected") else "human"
@@ -46404,14 +45396,14 @@ def _first_line(text, cap=_TURN_BODY_CAP):
     return ""
 
 
-def _turn_notify_tick(now, tmux):
+def _turn_notify_tick(now, live_map):
     """One pusher-cycle pass over the live sessions: a session whose turn-end key MOVED since the
     last pass finished a turn. Fires only with both switches on, the session unmuted, and the turn
     the HUMAN's (_turn_opener — a subagent's task notification or a nudge opening a turn is not news
     to them); every sighting advances the memo regardless, so switching the row on later never
     replays old ends and a silent end is never replayed either."""
     fired = []
-    for s in _alive_sessions(now, tmux):
+    for s in _alive_sessions(now, live_map):
         sid = str(s.get("sid") or "")
         if not sid:
             continue
@@ -46581,7 +45573,7 @@ def _reveal_msg(sid):
         # (plans/federated-push.md) — so hand the focus over as-is, never a confirmRevive minted
         # from the wrong kernel's session list.
         return {"type": "focus", "id": sid, "live": True}
-    if sid and sid not in _tmux_sessions():
+    if sid and sid not in _live_map():
         return {"type": "confirmRevive", "id": sid, "name": _name_of(sid) or sid}
     return {"type": "focus", "id": sid, "live": True}
 
@@ -46689,12 +45681,21 @@ def _consume_pending_reveal(client, why="the pane's ready"):
     _PENDING_REVEAL[0] = None
     print("[reveal] sid=%s wid=%s: consumed — %s" % (str(p["sid"])[:8], str(p["wid"] or "")[:8], why), file=sys.stderr)
     try:
-        client["send"](json.dumps(_reveal_msg(p["sid"])))
+        m = _reveal_msg(p["sid"])
+        m["own"] = True   # addressed to THIS column (split screen, 2026-09-08): one chat client consumes the parked
+        #                   tap, so the pane's column arbitration (render.ts focusIsOurs) must not hand it elsewhere —
+        #                   a consumed park has ONE recipient, and a consumer that deferred to arbitration would lose
+        #                   the tap (a booting split whose second column's ready came first). Known residual
+        #                   (review find, 2026-09-11): a copy already delivered to unproven same-wid panes (`sent`,
+        #                   T312) can land in one column by arbitration and then, before its proof retires the park,
+        #                   in a redialing column too (its socket dead at the tap) — two columns on one session, a
+        #                   state the split allows on purpose, so the rare duplicate is accepted over a lost tap.
+        client["send"](json.dumps(m))
     except Exception:
         pass
 
 
-def _cached_timeline(now, tmux, sig, connect=False):
+def _cached_timeline(now, live_map, sig, connect=False):
     e = _built_timeline
     built = e[1]                # one read: the pusher assigns _built_timeline[:] on its thread while a connect reads here
     if built is not None and (connect or _timeline_cache_fresh(sig)):
@@ -46704,7 +45705,7 @@ def _cached_timeline(now, tmux, sig, connect=False):
     _VIEW_STATS["tlBuild"] += 1
     started = time.time()
     _t0 = time.monotonic()
-    tl = build_timeline(now, tmux)
+    tl = build_timeline(now, live_map)
     _PERF_STATS.build("timeline", False, time.monotonic() - _t0)
     _built_timeline[:] = [sig, tl, time.time(), started]
     return tl
@@ -46769,7 +45770,7 @@ def _producer():
             # segment, an uncaptioned unit, a fresh completion) — so an idle pass costs filesystem stats, not
             # model calls. (_producer_sig stays available but no longer gates triage.)
             tiers = []
-            if _tmux_sessions() and not _retry_paused_on():
+            if _live_map() and not _retry_paused_on():
                 tiers.append(threading.Thread(target=_run_tier, args=(jd.run_index,), name="index"))
                 tiers.append(threading.Thread(target=_run_tier, args=(jd.run_triage,), name="triage"))
             try:                                       # /clear boundaries FIRST (before the snapshot + tiers), so
@@ -46835,8 +45836,8 @@ def _pusher_cycle():
     """ONE pusher cycle: the client push + every tick job, all sharing ONE liveness snapshot. Split out
     of the loop so a test can run a single cycle and count the snapshot reads.
 
-    The snapshot hoist is the 2026-08-10 CPU fix: each _tmux_sessions() forks `tmux list-sessions`
-    (~15ms) and re-reads every SDK reg file (~7ms across a couple hundred), and this cycle used to
+    The snapshot hoist is the 2026-08-10 CPU fix: each liveness read (then _tmux_sessions) forked `tmux
+    list-sessions` (~15ms) and re-read every SDK reg file (~7ms across a couple hundred), and this cycle used to
     take NINE of them — one in _push plus one per tick job — at the 0.5s cadence: ~200-350ms of CPU
     per cycle before any build work, sampled live as the kernel's single hottest thread (~50-90% of a
     core, three quarters of total process CPU). Every job here already took the map as a parameter by
@@ -46844,13 +45845,13 @@ def _pusher_cycle():
     few-hundred-ms staleness by construction — they always saw a snapshot aged by however many jobs
     ran before them."""
     _t_cycle = time.monotonic()
-    _c_cycle = time.thread_time()           # this thread's CPU: the wall above includes the tmux fork and lock waits
+    _c_cycle = time.thread_time()           # this thread's CPU: the wall above includes lock waits and any forked child
     _m_cycle = (_PERF_STATS.marks(), jd._GOAL_IO["saves"], jd._GOAL_IO["writes"])   # idle-cycle marks: see cycle()
     with _clients_lock:
         any_client = bool(_clients)
     now = int(time.time())
-    tmux = _tmux_sessions()               # THE cycle's liveness snapshot — one fork + one reg sweep
-    _live_scope.snapshot = tmux           # …served to every read on THIS thread until the cycle ends,
+    live_map = _live_map()               # THE cycle's liveness snapshot — one fork + one reg sweep
+    _live_scope.snapshot = live_map           # …served to every read on THIS thread until the cycle ends,
     #                                       however deep it hides (_bg_live_norm, _compacting_now,
     #                                       build_feed's per-session gates) — see _live_scope
     try:
@@ -46867,7 +45868,7 @@ def _pusher_cycle():
         #                                       token and per postal card (~38% of pusher wall, py-spy
         #                                       2026-08-31). INSIDE the try: a raise here must still hit
         #                                       the finally, or the liveness scope above leaks set
-        _pusher_cycle_jobs(now, tmux, any_client)
+        _pusher_cycle_jobs(now, live_map, any_client)
     finally:
         _chat_push_scopes_close()
         _live_scope.snapshot = None
@@ -46880,7 +45881,7 @@ def _pusher_cycle():
                           idle=(_PERF_STATS.marks(), jd._GOAL_IO["saves"], jd._GOAL_IO["writes"]) == _m_cycle)
 
 
-def _pusher_cycle_jobs(now, tmux, any_client):
+def _pusher_cycle_jobs(now, live_map, any_client):
     _t_jobs = time.monotonic()            # /perf: this function minus the _push_all below is the `jobs` stage
     _t_push = 0.0
     try:                                  # parked ops deliver on the settle EVENT this cycle was woken for
@@ -46892,7 +45893,7 @@ def _pusher_cycle_jobs(now, tmux, any_client):
     if any_client:
         _t_push = time.monotonic()
         try:
-            _push_all(tmux=tmux)
+            _push_all(live_map=live_map)
         except Exception:                 # _push guards its build and its sends; anything escaping it rode
             #                               _pusher_cycle's finally into _pusher's while-True and ended the
             #                               pusher thread for the process's life (see _push's wire section)
@@ -46901,20 +45902,20 @@ def _pusher_cycle_jobs(now, tmux, any_client):
             _t_push = time.monotonic() - _t_push
             _PERF_STATS.stage("push", _t_push)
     try:                                  # the turn-finished push (bell popover): AFTER the feed build above,
-        _turn_notify_tick(now, tmux)      # so a bell event the same settle produced files its buzz first
+        _turn_notify_tick(now, live_map)      # so a bell event the same settle produced files its buzz first
     except Exception:
         sys.stderr.write("turn-notify: %s\n" % traceback.format_exc())
     # (the WS keepalive lives on its own _heartbeat thread — NOT here — so a slow push can't starve it)
     try:                                  # EXACT retraction first: dispatches returned → the stamp is spent,
-        _lift_spent_awaiting(now, tmux)   # so the nudge tick below never wakes a wait that already ended
+        _lift_spent_awaiting(now, live_map)   # so the nudge tick below never wakes a wait that already ended
     except Exception:
         sys.stderr.write("awaiting-lift: %s\n" % traceback.format_exc())
     try:                                  # death is a recorded EVENT: a sid that left the live map is
-        _death_sweep_tick(now, tmux)      # corroborated with the liveness owner, then stamped (2026-08-13)
+        _death_sweep_tick(now, live_map)      # corroborated with the liveness owner, then stamped (2026-08-13)
     except Exception:
         sys.stderr.write("death-sweep: %s\n" % traceback.format_exc())
     try:                                  # a session that asked to close itself dies at its turn's settle
-        _end_on_idle_sweep(now, tmux)     # (the clean × path — the user 2026-08-15's "close yourself")
+        _end_on_idle_sweep(now, live_map)     # (the clean × path — the user 2026-08-15's "close yourself")
     except Exception:
         sys.stderr.write("end-on-idle: %s\n" % traceback.format_exc())
     try:                                  # deferral records retire on their reasons' own events — BEFORE
@@ -46922,12 +45923,12 @@ def _pusher_cycle_jobs(now, tmux, any_client):
     except Exception:                     # surfaces read these records regardless)
         sys.stderr.write("deferral-sweep: %s\n" % traceback.format_exc())
     try:                                  # Auto Nudge runs server-side even with no browser open; the awaiting
-        _auto_nudge_tick(now, tmux)       # WAKE rides its goal walk (see _wake_goal) and runs even when the
+        _auto_nudge_tick(now, live_map)       # WAKE rides its goal walk (see _wake_goal) and runs even when the
     #                                       nudge is OFF — the toggle scopes the nudge legs, not the dead-man
     except Exception:
         sys.stderr.write("auto-nudge: %s\n" % traceback.format_exc())
     try:                                  # Interrupt → Blocked runs EVERY push, independent of the nudge toggle
-        _interrupt_block_tick(now, tmux)
+        _interrupt_block_tick(now, live_map)
     except Exception:
         sys.stderr.write("interrupt-block: %s\n" % traceback.format_exc())
     try:                                  # the tick jobs' evaluation memo, persisted when a completed evaluation
@@ -46948,31 +45949,31 @@ def _pusher_cycle_jobs(now, tmux, any_client):
         sys.stderr.write("usage-poll: %s\n" % traceback.format_exc())   # sat stale — blinding the judge
     #                                       quota gate and the headroom line
     try:                                  # a monthly spend cap (no readable reset) also engages it — else it storms forever
-        _auto_pause_on_spend_limit(now, tmux)
+        _auto_pause_on_spend_limit(now, live_map)
     except Exception:
         sys.stderr.write("auto-pause-on-spend-limit: %s\n" % traceback.format_exc())
     try:                                  # a paused retry auto-clears once any session serves a request again
-        _auto_resume_retry(now, tmux)
+        _auto_resume_retry(now, live_map)
     except Exception:
         sys.stderr.write("auto-resume-retry: %s\n" % traceback.format_exc())
     try:                                  # the bottom bar's API health cell: built AFTER this cycle's pause
-        _api_health_push(_api_health_frame(now, tmux))   # decisions, every cycle (a connecting shell gets a
+        _api_health_push(_api_health_frame(now, live_map))   # decisions, every cycle (a connecting shell gets a
     except Exception:                     # current frame), sent only when it changed
         sys.stderr.write("api-health-frame: %s\n" % traceback.format_exc())
     try:                                  # a per-session interrupt-suppressed retry re-arms once that thread lands a clean turn
-        _auto_resume_session_retry(now, tmux)
+        _auto_resume_session_retry(now, live_map)
     except Exception:
         sys.stderr.write("auto-resume-session-retry: %s\n" % traceback.format_exc())
     try:                                  # the kernel drives the transient-api-error retry itself (unattended;
-        _auto_retry_tick(now, tmux)       # the dashboard tick is just the countdown + a redundant asker)
+        _auto_retry_tick(now, live_map)       # the dashboard tick is just the countdown + a redundant asker)
     except Exception:
         sys.stderr.write("auto-retry-tick: %s\n" % traceback.format_exc())
     try:                                  # self-scheduled wake signals queued in an idle SDK CLI get their
-        _idle_queue_drive_tick(now, tmux)  # turn driven (crons/monitors/task notices — see the tick)
+        _idle_queue_drive_tick(now, live_map)  # turn driven (crons/monitors/task notices — see the tick)
     except Exception:
         sys.stderr.write("idle-queue-drive: %s\n" % traceback.format_exc())
     try:                                  # expire stale set_working notes once a session goes idle + done (cheap when no notes)
-        _clear_done_working_notes(now, tmux)
+        _clear_done_working_notes(now, live_map)
     except Exception:
         sys.stderr.write("clear-working-notes: %s\n" % traceback.format_exc())
     _PERF_STATS.stage("jobs", (time.monotonic() - _t_jobs) - _t_push)
@@ -46982,8 +45983,9 @@ def _pusher():
     while not _LOOPS_STOP.is_set():
         _pusher_cycle()
         # Event-driven (woken by the SDK live-tail and by /tick on hook events) with a SHORT 0.5s backstop
-        # poll, so tmux sessions — which have no per-message event for mid-turn streaming — still refresh
-        # responsively as the model generates, instead of waiting out a multi-second tick (the user 2026-06-22).
+        # poll, so a session with no per-message event for mid-turn streaming (the tmux backend's, until its
+        # removal 2026-09-11) still refreshes responsively as the model generates, instead of waiting out a
+        # multi-second tick (the user 2026-06-22).
         # Cheap when nothing changed: _parse is cached and _send_client dedups, so a no-change poll sends nothing.
         _woke = _pusher_wake.wait(0.5)    # True: the flag was set (an event); False: the backstop timed out
         _pusher_wake.clear()
@@ -47147,7 +46149,7 @@ def _shim(app, v=0, no_stale=False):
     return """
 %s
 (function(){/*shim-core*/var queue=[],ws=null,everConnected=false;
-var bundleReady=false,readyQueued=false,readyAcked=false,readyProto=0,readyMsg=null;   // the BUNDLE's own {type:"ready"} has passed through send() on this page / is waiting in `queue` for an open (onopen clears it once the flush has carried it) / has been ANSWERED: the kernel's caps frame has arrived on a socket of this page (onmessage), the ready arm's own statement (_send_caps, sent after that arm's pushes) that it processed the bundle's ready and served the page whole ahead of it; the dial's reconnect term (connect) keys on all three
+var bundleReady=false,readyQueued=false,readyAcked=false,readyProto=0,readyMsg=null;   // readyProto/readyMsg: the bundle's ready as sent, for the redial's dial term (&proto=) and for a fresh dial after a ready no caps frame answered (the socket died between the kernel's pushes and its frame): onopen posts it again, so the kernel serves the page whole, answers, and the redials after carry the flag (round 3, C); one the flush just sent is not doubled   // the BUNDLE's own {type:"ready"} has passed through send() on this page / is waiting in `queue` for an open (onopen clears it once the flush has carried it) / has been ANSWERED: the kernel's caps frame has arrived on a socket of this page (onmessage), the ready arm's own statement (_send_caps, sent after that arm's pushes) that it processed the bundle's ready and served the page whole ahead of it; the dial's reconnect term (connect) keys on all three
 var queuedDiag=0,DIAG_QUEUE_MAX=20;   // clientDiag rows waiting in `queue` for a reconnect, capped (an outage must not pile up breadcrumbs); other queued messages are untouched
 var failedConnects=0,firstFailT=0;   // handshakes that never OPENED since the last open: reported as ONE wsconnfail row on the next open, never one wsclose per redial
 // This pane's DASHBOARD id. ?wid= when the host supplies one (the VS Code extension builds its own pane
@@ -47157,6 +46159,12 @@ var failedConnects=0,firstFailT=0;   // handshakes that never OPENED since the l
 // (a focus, a jump) at the dashboard that asked instead of at every one that is open (the user 2026-07-29).
 var wid=new URLSearchParams(location.search).get("wid")||"";
 try{if(!wid)wid=window.sessionStorage.getItem("romp:wid")||"";}catch(e){}
+// This pane's chat COLUMN (split screen, the user 2026-09-08): the shell serves every chat column past the
+// first as /chat?col=N. The column rides the persisted-state key (SK, below) so each column keeps its OWN
+// active tab, drafts and scroll — one blob per column, the first column on the unsuffixed key it always had —
+// and the WS connect, so the kernel can tell one dashboard's columns apart in its logs. "" for the first
+// column, a standalone page and every non-chat pane; the shim is shared, so absent means exactly today.
+var COL=new URLSearchParams(location.search).get("col")||"";if(COL==="1")COL="";
 // This PAGE's instance id — minted once per load, never stored: every connect of this page carries it, so the
 // kernel retires this page's previous socket on a reconnect, and never another page's (a duplicated tab copies
 // sessionStorage, and with it wid; it must not copy this).
@@ -47302,7 +46310,7 @@ function connect(){if(ws&&(ws.readyState===0||ws.readyState===1))return;   // on
 if(returnAt)returnRedialed=true;   // a dial inside a return window (whatever path led here) → the return-fresh row says so
 connT=Date.now();var proto=location.protocol==="https:"?"wss://":"ws://";
 var active="";try{var st0=JSON.parse(localStorage.getItem(SK)||"null");active=(st0&&st0.activeId)||"";}catch(e){}
-ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponent(IID)+(wid?"&wid="+encodeURIComponent(wid):"")+(active?"&active="+encodeURIComponent(active):"")+((everConnected&&bundleReady&&readyAcked&&!readyQueued)?"&reconnect=1&proto="+readyProto:""));   // reconnect=1: this page has held a socket before AND its bundle has said ready AND the kernel's caps frame has answered that ready AND the ready is not still waiting in the queue for this open, so it holds the sessions the kernel served it; the kernel skeletons the tabs it is not looking at (2026-09-07). A socket that opened and died before the bundle said ready held nothing for the page, and neither did one whose bundle said ready only after it died (the ready queued, and flushes onto this socket as the bundle's own); a ready that left on an open socket the kernel never answered (the socket died before its caps frame came back) served the page nothing either: all three redials dial as a fresh page, the last for the page's life, since the bundle posts ready once and no later socket carries one for a caps frame to answer (2026-09-10)
+ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponent(IID)+(wid?"&wid="+encodeURIComponent(wid):"")+(active?"&active="+encodeURIComponent(active):"")+((everConnected&&bundleReady&&readyAcked&&!readyQueued)?"&reconnect=1&proto="+readyProto:"")+(COL?"&col="+encodeURIComponent(COL):""));   // reconnect=1: this page has held a socket before AND its bundle has said ready AND the kernel's caps frame has answered that ready AND the ready is not still waiting in the queue for this open, so it holds the sessions the kernel served it; the kernel skeletons the tabs it is not looking at (2026-09-07). A socket that opened and died before the bundle said ready held nothing for the page, and neither did one whose bundle said ready only after it died (the ready queued, and flushes onto this socket as the bundle's own); a ready that left on an open socket the kernel never answered (the socket died before its caps frame came back) served the page nothing either: all three redials dial as a fresh page, the last for the page's life, since the bundle posts ready once and no later socket carries one for a caps frame to answer (2026-09-10)
 // onopen: flush the queue; a RECONNECT (after a drop) also PROMPTS a reload — the fresh socket resyncs live via
 // the kernel's next push, and the banner offers a full reload for anything a live push doesn't cover. This
 // replaced the old silent location.reload() (the user 2026-07-05: don't foist a reload; let me click). Narrowed by
@@ -47314,7 +46322,7 @@ ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponen
 // socket dropped (the pane's romp loader) needs the socket's RETURN as its event to come back down. The
 // first connect deliberately doesn't fire it — nothing is waiting on it, and the loader must stay up until
 // real content lands.
-ws.onopen=function(){lastRecv=Date.now();openT=lastRecv;openSock=this;netState("up");resumeProvisional=0;var wasReconn=everConnected;everConnected=true;for(var i=0;i<queue.length;i++)ws.send(queue[i]);if(bundleReady&&!readyAcked&&!readyQueued&&readyMsg)ws.send(readyMsg);readyQueued=false;queue=[];queuedDiag=0;   // a ready that left on an earlier socket with no caps frame back (the socket died between the pushes and the frame) is posted again on this fresh dial, so the kernel serves the page whole, answers, and the redials after carry the flag (round 3, C); one the flush just sent is not doubled
+ws.onopen=function(){lastRecv=Date.now();openT=lastRecv;openSock=this;netState("up");resumeProvisional=0;var wasReconn=everConnected;everConnected=true;for(var i=0;i<queue.length;i++)ws.send(queue[i]);if(bundleReady&&!readyAcked&&!readyQueued&&readyMsg)ws.send(readyMsg);readyQueued=false;queue=[];queuedDiag=0;
 try{if(window.__rompReload)window.__rompReload.ended();}catch(e){}   // T265: the flush is the ending event for the "sends" hold — a reload owed while a prompt sat in the queue goes now
 if(failedConnects){send({type:"clientDiag",surface:"pane-shim",what:"wsconnfail",data:{app:APP,attempts:failedConnects,firstFailMs:Date.now()-firstFailT}});failedConnects=0;firstFailT=0;}   // the redials that never opened since the last open, as ONE row: how many, and how long ago the first failed
 if(wasReconn){var ann=restartAnnounced&&Date.now()-restartAnnounced<30000;restartAnnounced=0;   // one-shot: spent here
@@ -47447,7 +46455,7 @@ var touched=kind.indexOf("dictlist:")===0?touchedLanes(c,map.order,order):null;
 last.maps[name]={order:order,items:items};m[name]=assemble(kind,last.maps[name],last.msg[name],touched);}
 last.rev=d.rev;last.msg=m;return m;}
 window.__rompLocalSend=send;window.__rompApp=APP;   // federation.ts (the multi-kernel manager) routes local sends + knows the app through these
-var SK="romp-vscode-state-%s";   // persist webview state to localStorage so UI prefs survive a refresh
+var SK="romp-vscode-state-%s"+(COL?":"+COL:"");   // persist webview state to localStorage so UI prefs survive a refresh — per chat column (split screen 2026-09-08)
 window.acquireVsCodeApi=function(){return{postMessage:function(m){if(window.__rompFed){window.__rompFed.outbound(m);}else{send(m);}},
 getState:function(){try{return JSON.parse(localStorage.getItem(SK)||"null");}catch(e){return null;}},
 setState:function(s){try{localStorage.setItem(SK,JSON.stringify(s));}catch(e){}}};};connect();
@@ -48085,14 +47093,24 @@ var GK='romp-pane-grow',grow={chat:60,fleet:34,feed:40,files:40};
 try{var g=JSON.parse(localStorage.getItem(GK)||'null');if(g)grow=Object.assign(grow,g);}catch(e){}
 function setGrow(k,v){grow[k]=v;row.style.setProperty('--g-'+k,v);}
 for(var k in grow)setGrow(k,grow[k]);
-function key(id){return id==='chat-pane'?'chat':id==='fleet-pane'?'fleet':id==='feed-pane'?'feed':'files';}
+// split chat columns (the user 2026-09-08) are made AFTER this runs: they register here so the grab's
+// normalisation and the fair-grow average see them, and gv-a/gv-b's left neighbour is the RIGHTMOST one.
+var KEYS={};
+window.__rompRegisterPane=function(id,k){KEYS[id]=k;if(PANES.indexOf(id)<0)PANES.splice(PANES.indexOf('fleet-pane'),0,id);};
+window.__rompUnregisterPane=function(id){var k=KEYS[id];delete KEYS[id];var i=PANES.indexOf(id);if(i>=0)PANES.splice(i,1);
+if(k){delete grow[k];row.style.removeProperty('--g-'+k);try{localStorage.setItem(GK,JSON.stringify(grow));}catch(e){}}};
+function lastChat(){return (window.__rompLastChatPane&&window.__rompLastChatPane())||'chat-pane';}
+function key(id){return KEYS[id]||(id==='chat-pane'?'chat':id==='fleet-pane'?'fleet':id==='feed-pane'?'feed':'files');}
 function shown(id){var p=document.getElementById(id);return p&&getComputedStyle(p).display!=='none';}
 // a pane re-shown from the rail gets a grow comparable to the panes already visible, so it never slots back
 // in as a sliver after the others were dragged to extreme widths (grows are stored as px). Timeline is the
 // bottom BAND now (fixed-height var, not a row grow), so it's excluded.
-window.__rompGrowFair=function(k){if(k==='timeline')return;var v=PANES.filter(shown).map(function(id){return grow[key(id)];});
+window.__rompGrowFair=function(k){if(k==='timeline')return;var v=PANES.filter(shown).map(function(id){return grow[key(id)];})
+.filter(function(g){return typeof g==='number'&&isFinite(g);});   // a pane with no grow yet (a split column being made) must not average in as NaN (review find 2026-09-08: the first split opened 0px wide)
 var avg=v.length?v.reduce(function(a,b){return a+b;},0)/v.length:50;setGrow(k,avg);
 try{localStorage.setItem(GK,JSON.stringify(grow));}catch(e){}};
+// a split column keeps the width it was dragged to across reloads: fair only when the store holds nothing for it
+window.__rompGrowFairIfNew=function(k){if(typeof grow[k]==='number'&&isFinite(grow[k])){setGrow(k,grow[k]);return;}window.__rompGrowFair(k);};
 // A drag moves a LANDING LINE and the panes take their widths ONCE, at release. A grow write re-lays out the row
 // and with it every same-origin pane document in that frame, so writing the pair on every mousemove cost one
 // relayout of every pane per pointer step, a cost that grows with what the panes hold (seconds a step once a pane
@@ -48104,7 +47122,11 @@ function gutter(gid,leftPick,rightId){var h=document.getElementById(gid);if(!h)r
 h.addEventListener('mousedown',function(e){e.preventDefault();
 var L=document.getElementById(leftPick()),R=document.getElementById(rightId);if(!L||!R)return;
 document.body.classList.add('drag','dragv');
-PANES.forEach(function(id){if(shown(id))setGrow(key(id),document.getElementById(id).offsetWidth);});
+// read EVERY shown pane's width first, then write: a setGrow re-flows the row, so a width read after it came back
+// at a mixed scale (the first pane in px, the rest still on their small default numbers) and the first drag in a
+// fresh browser ballooned the first column (served-test find, 2026-09-08; the split's fresh columns hit it every time)
+var px={};PANES.forEach(function(id){if(shown(id))px[id]=document.getElementById(id).offsetWidth;});
+Object.keys(px).forEach(function(id){setGrow(key(id),px[id]);});
 var wL=L.offsetWidth,wR=R.offsetWidth,sum=wL+wR,sx=e.clientX,mn=Math.min(120,sum*0.25),nL=wL,lx=L.getBoundingClientRect().left,rr=row.getBoundingClientRect();
 function show(){if(!ghost)return;ghost.style.top=rr.top+'px';ghost.style.height=rr.height+'px';ghost.style.left=(lx+nL)+'px';ghost.style.display='block';}
 function mv(ev){nL=Math.max(mn,Math.min(sum-mn,wL+(ev.clientX-sx)));show();}
@@ -48112,9 +47134,10 @@ function up(){document.body.classList.remove('drag','dragv');if(ghost)ghost.styl
 setGrow(key(L.id),nL);setGrow(key(R.id),sum-nL);try{localStorage.setItem(GK,JSON.stringify(grow));}catch(e){}
 window.removeEventListener('mousemove',mv);window.removeEventListener('mouseup',up);}
 show();window.addEventListener('mousemove',mv);window.addEventListener('mouseup',up);});}
-gutter('gv-a',function(){return 'chat-pane';},'fleet-pane');
-gutter('gv-b',function(){return document.body.classList.contains('po-fleet')?'fleet-pane':'chat-pane';},'feed-pane');
-gutter('gv-c',function(){var c=document.body.classList;return c.contains('po-feed')?'feed-pane':c.contains('po-fleet')?'fleet-pane':'chat-pane';},'files-pane');
+window.__rompGutter=gutter;   // the split's chat|chat gutters are wired through the same code
+gutter('gv-a',function(){return lastChat();},'fleet-pane');
+gutter('gv-b',function(){return document.body.classList.contains('po-fleet')?'fleet-pane':lastChat();},'feed-pane');
+gutter('gv-c',function(){var c=document.body.classList;return c.contains('po-feed')?'feed-pane':c.contains('po-fleet')?'fleet-pane':lastChat();},'files-pane');
 tf&&tf.addEventListener('load',function(){autosize();
 try{new ResizeObserver(autosize).observe(tf.contentDocument.body);}catch(e){}});
 window.addEventListener('resize',autosize);
@@ -48135,17 +47158,21 @@ var TL='f-timeline';                       // the timeline is a bottom BAND unde
 var curFocus='f-chat', lastCol='f-chat';   // for Shift-Up out of the timeline: return to the last column used
 // The active pane gets a focus RING (.pane-focused). Same-origin iframes, so the shell sets it directly on
 // pointerdown / focusin / window-focus — event-based, no polling. Exactly one pane is ringed at a time.
-function setFocus(id){var pid=PANE[id];if(!pid)return;curFocus=id;if(COLS.indexOf(id)>=0)lastCol=id;
-for(var k in PANE){var el=document.getElementById(PANE[k]);if(el)el.classList.toggle('pane-focused',PANE[k]===pid);}}
+var lastChat='f-chat';   // the chat column the user last worked in (split screen 2026-09-08): where shell relays land
+function paneOf(id){return PANE[id]||(window.__rompChatPaneOf?window.__rompChatPaneOf(id):null);}   // split columns are made after this map
+function allCols(){var c=window.__rompChatFrameIds?window.__rompChatFrameIds():['f-chat'];return c.concat(COLS.slice(1));}   // every chat column, then Outline, Feed
+function setFocus(id){var pid=paneOf(id);if(!pid)return;curFocus=id;if(allCols().indexOf(id)>=0)lastCol=id;if(pid.indexOf('chat-pane')===0)lastChat=id;
+Array.prototype.forEach.call(document.querySelectorAll('.pane'),function(el){el.classList.toggle('pane-focused',el.id===pid);});}
+window.__rompFocusedChatId=function(){return document.getElementById(lastChat)?lastChat:'f-chat';};
 // SPATIAL cross-pane keyboard nav (the user 2026-07-01): Alt(Option)+Arrow jumps focus between VISIBLE panes —
 // Alt-Left/Right along the columns (Chat <-> Outline <-> Feed, skipping hidden ones), Alt-Down into the
 // timeline band, Alt-Up back out. Alt (not Shift, which selects text; not Ctrl/Cmd, which macOS uses for
 // Spaces / browser back-forward) — the one modifier free outside a text field. Iframes can't focus each other,
 // but the shell (their parent) can; it then posts {romp:'paneFocus'} so the target pane can arm its own
 // intra-pane arrow nav (feed/outline cards). Configurable later; hardcoded for now (the user 2026-07-01).
-function paneVisible(id){var el=document.getElementById(PANE[id]);if(!el)return false;
+function paneVisible(id){var el=document.getElementById(paneOf(id));if(!el)return false;
 try{return getComputedStyle(el).display!=='none';}catch(e){return true;}}
-function visCols(){return COLS.filter(paneVisible);}
+function visCols(){return allCols().filter(paneVisible);}
 function focusPane(id,dir){var f=document.getElementById(id);if(!f)return;
 try{f.contentWindow.focus();}catch(e){}setFocus(id);
 try{f.contentWindow.postMessage({romp:'paneFocus',dir:dir||'',from:'shell'},'*');}catch(e){}}
@@ -48175,6 +47202,7 @@ f.contentWindow.addEventListener('focus',emit);
 d.addEventListener('keydown',onKey,true);}catch(e){}}   // capture Alt+Arrow before the pane's own handlers
 Object.keys(PANE).forEach(function(id){var f=document.getElementById(id);if(!f)return;
 f.addEventListener('load',function(){wire(f);});wire(f);});   // wire now (already-loaded) + on every (re)load
+window.__rompWireFocus=function(f){f.addEventListener('load',function(){wire(f);});wire(f);};   // a split column made later gets the same
 // ALSO claim Alt+Arrow at the TOP-LEVEL shell document (the user 2026-07-01): a keydown fires in whichever
 // document has focus and does NOT cross the iframe boundary, so the per-iframe handlers miss the case where
 // focus sits on the shell itself (right after load, or after clicking shell chrome) — there Alt+Left fell
@@ -48363,11 +47391,15 @@ window.__rompNotify(m.kind||'error',m.text,
 // loaded), so a blip on a pane you can't even see shouldn't cry wolf while the chat pane you interact
 // through is up. Gate on the pane-enabled body class the toggle sets (po-chat/po-feed/po-timeline/po-fleet).
 // Only the up->down TRANSITION logs an entry; the live red cue rides the state itself.
-var st={};
+var st={},stc={};   // stc: split chat columns (2026-09-08) by column, apart from the first column's `chat` key — one column's 'up' must never mask another's drop
 function shown(k){return document.body.classList.contains('po-'+k);}
-function liveDown(){for(var k in st){if(st[k]==='down'&&shown(k))return true;}return false;}
+function liveDown(){for(var k in st){if(st[k]==='down'&&shown(k))return true;}for(var c in stc){if(stc[c]==='down'&&shown('chat'))return true;}return false;}
+window.__rompColGone=function(c){delete stc[String(c)];paint();};   // a closed column takes its state with it
 var PN=""" + json.dumps(dict(_PANE_ORDER)) + """;   // key → rail label, from _PANE_ORDER (one list with the rail, the tabs and the drop row); timeline key stays internal — the pane outgrew the name (filter, tags, lane controls — the user 2026-08-24)
 window.addEventListener('message',function(e){var m=e&&e.data;if(!m||m.romp!=='wsState')return;
+var col=(m.app==='chat'&&window.__rompColOf)?window.__rompColOf(e.source):'';   // a split column reports under its own key (the sender frame says which)
+if(col){var sc=(m.state==='up')?'up':'down',pc=stc[col];stc[col]=sc;
+if(sc==='down'&&pc!=='down'&&shown('chat'))window.__rompNotify('conn','Kernel connection lost \\u2014 chat split '+col+' (reconnecting)');else paint();return;}
 var s=(m.state==='up')?'up':'down',prev=st[m.app];st[m.app]=s;
 if(s==='down'&&prev!=='down'&&shown(m.app))
 window.__rompNotify('conn','Kernel connection lost \\u2014 '+(PN[m.app]||m.app)+' pane (reconnecting)');
@@ -48426,6 +47458,8 @@ document.addEventListener('keydown',onEsc,true);
 ['f-chat','f-fleet','f-feed','f-files','f-timeline','f-settings'].forEach(function(id){var f=document.getElementById(id);if(!f)return;
 var wire=function(){try{if(f.contentDocument)f.contentDocument.addEventListener('keydown',onEsc,true);}catch(e){}};
 f.addEventListener('load',wire);wire();});
+window.__rompWireEsc=function(f){var wire=function(){try{if(f.contentDocument)f.contentDocument.addEventListener('keydown',onEsc,true);}catch(e){}};
+f.addEventListener('load',wire);wire();};   // a split chat column (2026-09-08) is wired as it is made
 })();
 """
 
@@ -49206,6 +48240,50 @@ window.addEventListener('message',function(e){var m=e.data;if(m&&m.romp==='usage
 # backdrop (#ru-back, one modal at a time).
 # The web shell's rail only, for now; the VS Code strip twin (strip.ts apiCell's sibling, with a --st-retrying
 # token) and the phone's Usage-modal section (no rail on the phone) are named follow-ups.
+_TIMELINE_AXIS_PARTS = (r"^const NICE = \[[^\n]*\];", r"^function clock\(t\) \{[^\n]*\}", r"^function niceStep\(W\) \{[^\n]*\}")
+
+
+_TIMELINE_AXIS_MEMO = [None]   # [(the view file's key, the lifted script)] as ONE tuple: re-read only when the file changes, so an
+#                                edit still goes live while the landing's hot path pays one stat; one slot, so two GETs overlapping an
+#                                edit can never pair a new key with an old lift (review find)
+
+
+def _timeline_axis_js():
+    """The timeline pane's axis formatter and tick rule, lifted VERBATIM from ui/romp-timeline-view.js for the API
+    health histograms' x-axis (T338, the user 2026-09-11: clock times the way the timeline labels its axis, never
+    ages): clock (the local HH:MM), NICE and niceStep (the nice step for a span: eight intervals), published as
+    window.__rompTimelineAxis so the landing's inline script runs the timeline's own functions and an edit to them
+    goes live for both. One formatter, no second copy. A missing file or a moved line publishes null and says so on
+    stderr ONCE per file version (the null is memoized under the same key, a missing file under its own sentinel, so a
+    landing GET never re-reads or re-reports); the histograms then draw their gridlines with no clocks rather than a
+    second, drifting formatter."""
+    p = UI / "romp-timeline-view.js"
+    stat_err = None
+    try:
+        key = p.stat().st_mtime_ns
+    except OSError as e:
+        key, stat_err = "missing", e
+    held = _TIMELINE_AXIS_MEMO[0]
+    if held and held[0] == key:
+        return held[1]
+    try:
+        if stat_err is not None:
+            raise OSError("%s: %s" % (p, stat_err.strerror or stat_err))
+        src = p.read_text()
+        parts = []
+        for p_ in _TIMELINE_AXIS_PARTS:
+            m = re.search(p_, src, re.M)
+            if m is None:
+                raise ValueError("%s: no line matches %s (the view's formatter moved or was reformatted)" % (p, p_))
+            parts.append(m.group(0))
+        out = "window.__rompTimelineAxis=(function(){" + "\n".join(parts) + "\nreturn {NICE:NICE,clock:clock,niceStep:niceStep};})();"
+    except Exception as e:
+        sys.stderr.write("timeline axis lift: the API health histograms draw no clocks: %s\n" % e)
+        out = "window.__rompTimelineAxis=null;"
+    _TIMELINE_AXIS_MEMO[0] = (key, out)
+    return out
+
+
 _LANDING_APIH_JS = """
 (function(){var el=document.getElementById('rail-api');if(!el)return;
 // the merge and reading rules (ui/webview/api-health-merge.ts via api-health-global.ts); absent (a stale dist), the
@@ -49220,9 +48298,10 @@ function armAge(){if(!ageTimer)ageTimer=setInterval(ageTick,60000);}
 function disarmAge(){if(ageTimer){clearInterval(ageTimer);ageTimer=null;}}
 var moving=false;  // the readout is re-parenting the cell (moveApiCell): its blur and focus are not the user's
 var DOTWORD={fine:'fine',errors:'errors',quiet:'no traffic'};
-// the legend (T316, the user's design): vertical and left-justified, a swatch in each bar's colour, 429 on one line and
-// 5xx on its own below it; the gray line only when the range holds a no-connection or other-status failure
-var LEGEND_ROWS=[['r429','429 = the API told us to slow down (rate limit)'],['r5xx','5xx = the API itself failed (server error)'],['none','gray = no connection, or another error']];
+// the legend (T316, the user's design; T340, the user 2026-09-11): vertical and left-justified, no swatches: the class token
+// itself wears its colour and the explanation sits beside it as plain text, 429 on one line and 5xx on its own below it;
+// the other line (no connection, or another error) only when the range holds such a failure
+var LEGEND_ROWS=[['r429','429','rate limit: the API told us to slow down'],['r5xx','5xx','server error: the API itself failed'],['none','other','no connection, or another error']];
 // the histograms' ranges (T316): the hover draws the day; the detail (the dot's click) offers 1 hour, 24 hours and 7 days
 // in the spend modal's range-chip grammar. Each names the ledger tier it reads and how many bins make one bar.
 var RANGES={hour:{tier:'minute',per:1,label:'1 hour',s:3600},day:{tier:'fiveMin',per:3,label:'24 hours',s:86400},week:{tier:'hour',per:1,label:'7 days',s:604800}};
@@ -49230,6 +48309,7 @@ var range='day';
 function SELF(){return (LAST&&LAST.host)||'this machine';}   // this kernel's own name, from its frame (T316)
 var STATE_WORD={thrashing:'rate-limit storm',degraded:'API failing',recovering:'recovering',healthy:'fine',unknown:'quiet'};
 var tip=document.createElement('div');tip.id='ah-tip';tip.style.display='none';
+if(window.ResizeObserver)new ResizeObserver(function(){fitAxisLabels(tip);}).observe(tip);   // the labels' fit follows the tip's width (the pinned detail is min(720px, 92vw))
 tip.setAttribute('role','tooltip');tip.setAttribute('aria-label','API health');tip.tabIndex=-1;document.body.appendChild(tip);
 // what the cell is described by while the hover shows (aria-describedby): a SHORT visually-hidden summary, refreshed
 // when the read lands, never the tip's whole text (the tip runs to hundreds of characters of rows, and at focus time,
@@ -49261,9 +48341,9 @@ var HIST_ROWS=4;   // the State changes list, capped (T301: a glance, not a log)
 function esc(s){return String(s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
 function hm(ep){return new Date(ep*1000).toTimeString().slice(0,5);}
 function hms(ep){return new Date(ep*1000).toTimeString().slice(0,8);}
-// a stamp from another day carries its date (a quiet tail can span days): '09-07 14:02'
+// a stamp from another day carries its date (a quiet tail can span days): '09-07 14:02' (dateWords below, the axis's form too)
 function hmd(ep){var d=new Date(ep*1000),n=new Date();if(d.toDateString()===n.toDateString())return hm(ep);
-return ('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2)+' '+hm(ep);}
+return dateWords(ep)+' '+hm(ep);}
 function dur(s){s=Math.max(0,Math.round(s));if(s<60)return s+' s';var m=Math.round(s/60);if(m<60)return m+' min';
 var h=Math.floor(m/60);m-=h*60;if(h<24)return h+' h'+(m?' '+m+' min':'');var d=Math.floor(h/24);h-=d*24;return d+' d'+(h?' '+h+' h':'');}
 function pl(n,w){n=n||0;return n+' '+w+(n===1?'':'s');}
@@ -49274,8 +48354,11 @@ manual:'Auto-retry and the judges are paused: you stopped them.'};
 var RESUME='Resume all auto-retries',STOP='Stop all auto-retries';   // the chat card's own words
 var NOTSENT='Not sent: the dashboard is disconnected. Try again.';
 var LOST='Connection lost before the answer arrived. When it is back, the button shows the current state.';
-function clsWords(r){if(r.cls==='429')return '429 rate limited';if(r.cls==='529')return '529 overloaded';
-if(r.cls==='offline')return 'offline';return 'error'+(r.status?' '+r.status:'');}
+// a waiting row's class words (T340, the user 2026-09-11): the status code itself wears its class ink, the 5xx magenta for a
+// 529 or any other 5xx, the 429 red for a 429, so the number says what it is; the words beside it stay plain
+function clsWords(r){var st=r.status?esc(r.status):'';
+if(r.cls==='429')return '<span class=ah-c-r429>429</span> rate limited';if(r.cls==='529')return '<span class=ah-c-r5xx>529</span> overloaded';
+if(r.cls==='offline')return 'offline';if(/^5[0-9][0-9]$/.test(st))return 'error <span class=ah-c-r5xx>'+st+'</span>';return 'error'+(st?' '+st:'');}
 // The pause control. A press is acknowledged at once (disabled, flipped label, .romp-acted) and STAYS so across
 // frames until the one that answers it: an in-flight pre-press frame must not repaint an enabled button.
 function btnHTML(m){if(pending!==null)return '<button class="ah-btn romp-acted" disabled data-act=pause data-val='+pending+'>'+(pending?RESUME:STOP)+'</button>';
@@ -49284,7 +48367,7 @@ return '<button class=ah-btn data-act=pause data-val='+v+'>'+(v?STOP:RESUME)+'</
 // A pinned row is a keyboard button too (role, tabindex; Enter / Space run it from the keydown below).
 function rowHTML(r,full){var bg=r.color&&r.color.bg?esc(r.color.bg):'';
 return '<div class="ru-tip-row ah-row'+(full?'':' ah-ro')+'"'+(full?' role=button tabindex=0 data-act=reveal data-sid="'+esc(r.sid)+'"':'')+'>'
-+(bg?'<i class=ah-sw style="background:'+bg+'"></i><span class=ah-nm style="color:'+bg+'">':'<i class=ah-sw></i><span class=ah-nm>')+esc(r.name)+'</span>'
++(bg?'<span class=ah-nm style="color:'+bg+'">':'<span class=ah-nm>')+esc(r.name)+'</span>'   // the name in its colour is the whole cue: no square beside it (T340)
 +'<span class=ah-desc>'+(r.kind==='retrying'?'retrying':'stopped')+' · '+clsWords(r)+(r.since?' · since '+hm(r.since):'')
 +(r.suppressed?' · auto-retry off for this session (you interrupted it)':'')+'</span></div>';}
 // -- History: GET /api-health at show time. The shell authenticates the way its other fetches do (the romp_token
@@ -49332,13 +48415,55 @@ return dup?fam+' · '+(b.auth||key.split('|')[0]):fam;}
 // window counts every attempt once and says how many of them had no status, with the shares' base named beside them:
 // '15 attempts, 7 of them without a status · 25% 429 · 0% 5xx of the other 8'.
 // the histogram (T316, the user's design): one bar per bin, STACKED bottom-up, successes in the accent, 429 attempts in
-// the blocked red, 5xx (529 included) in the 5xx magenta, and a gray band for no-connection and other-status failures
-// only when the range holds any; one ceiling label, no peak text; a tick at each quarter of the span in ago words. The
+// the blocked red, 5xx (529 included) in the 5xx magenta, and the other band (no connection, another status) in a hue of
+// its own only when the range holds any; one ceiling label, no peak text; the timeline's clocks along the bottom. The
 // hover draws the day as 96 quarter-hour bars; the detail draws the chosen range, larger. Colours through the tokens
 // (fallbacks for a var-less harness). EVERY attribute quoted: this goes through innerHTML (the spend chart's lesson).
 var BAR_CLASSES=['ok','rateLimited','serverErrors','noStatus','other'];   // the stack order; each fill is a CSS class per theme (.ah-seg-<class>)
 function niceTopAh(mx){var p=Math.pow(10,Math.floor(Math.log(mx)/Math.LN10)),m=mx/p;return (m<=1?1:m<=2?2:m<=5?5:10)*p;}   // a 1-2-5 ceiling at any magnitude
-function tickWords(sec){if(sec>=86400)return Math.round(sec/86400)+'d';if(sec>=3600)return Math.round(sec/3600)+'h';return Math.round(sec/60)+'m';}
+// the x-axis (T338, the user 2026-09-11): clock times, never ages, by the timeline pane's own formatter and tick rule
+// (romp-timeline-view.js clock + niceStep, lifted verbatim by the kernel into window.__rompTimelineAxis): clock ticks at
+// the nice step for the span (eight intervals; nine ticks when the span starts on a step multiple), each labelled with its
+// local HH:MM, at the timeline's epoch multiples; PLUS a tick at each local midnight the span crosses, carrying that day's
+// date (MM-DD, the State changes rows' own form) in place of a clock, so a day boundary is a gridline of its own and never
+// a clock an hour or two into the day (review find). At a step of a day or more the midnights alone, all dates (a date
+// names a calendar day; the timeline's window never reaches that step, so it had no rule to lend). No 'now' and no span
+// word: the as-of line already says when the read is from. Every label is emitted; which ones stand is decided after the
+// paint from their MEASURED widths (fitAxisLabels), a day's date outranking the clock it collides with, so the guard reads
+// the rendered text and not an estimate of it. With no formatter on the page (the lift found nothing) the gridlines stand
+// at the quarters with no clocks, never a second formatter's guesses.
+var TL=window.__rompTimelineAxis||null;
+function dayKey(ep){var d=new Date(ep*1000);return d.getFullYear()+'/'+d.getMonth()+'/'+d.getDate();}
+function dateWords(ep){var d=new Date(ep*1000);return ('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2);}
+// the local midnights inside (t0, t1], every `days` days: the Date walks calendar days and is re-normalised to 00:00 after
+// each step, so a DST day keeps its boundary and a midnight that does not exist (a spring-forward gap at 00:00) lands on
+// that day's first moment without dragging the days after it
+function midnights(t0,t1,days){var out=[],d=new Date(t0*1000);d.setHours(0,0,0,0);if(d.getTime()/1000<=t0){d.setDate(d.getDate()+1);d.setHours(0,0,0,0);}
+for(;d.getTime()/1000<=t1;d.setDate(d.getDate()+days),d.setHours(0,0,0,0))out.push(d.getTime()/1000);return out;}
+// the tick moments: under a day-step the timeline's epoch multiples (clocks) merged with each local midnight the span
+// crosses (the day's date, a coincident pair being the day tick); at a day or more the midnights alone
+function tickMoments(t0,t1,step){var out=[];
+if(step>=86400){midnights(t0,t1,Math.max(1,Math.round(step/86400))).forEach(function(m){out.push({t:m,day:true});});return out;}
+var mids=midnights(t0,t1,1),mi=0;
+for(var tk=Math.ceil(t0/step)*step;tk<=t1;tk+=step){while(mi<mids.length&&mids[mi]<tk){out.push({t:mids[mi],day:true});mi++;}
+if(mi<mids.length&&mids[mi]===tk){out.push({t:tk,day:true});mi++;}else out.push({t:tk,day:false});}
+while(mi<mids.length){out.push({t:mids[mi],day:true});mi++;}
+return out;}
+function axisTicks(t0,span,W){if(!(span>0))return [];
+if(!TL){var q=[];for(var i=1;i<4;i++)q.push({x:i/4*W,label:'',date:false});return q;}
+var step=TL.niceStep(span),t1=t0+span;
+return tickMoments(t0,t1,step).map(function(k){return {x:(k.t-t0)/span*W,label:k.day?dateWords(k.t):TL.clock(k.t),date:k.day};});}
+// which labels stand, left to right over MEASURED boxes ({x: the centre, w: the width, date}, px): a label that would overlap
+// the last shown one yields, unless it is a day's date, which takes the slot and hides the clock before it (a crossing is
+// always named). Pure, so the rule is unit-tested; fitAxisLabels measures and applies it after each paint.
+function fitLabels(items,gap){var shown=[],lastI=-1;for(var i=0;i<items.length;i++){var it=items[i],ok=lastI<0||it.x-it.w/2>items[lastI].x+items[lastI].w/2+gap;
+if(!ok&&it.date&&lastI>=0&&!items[lastI].date){shown[lastI]=false;ok=true;}
+shown.push(ok);if(ok)lastI=i;}return shown;}
+function fitAxisLabels(root){var rows=root.querySelectorAll('.ru-tip-gx');for(var r=0;r<rows.length;r++){var spans=Array.prototype.slice.call(rows[r].querySelectorAll('span'));
+for(var i=0;i<spans.length;i++)spans[i].hidden=false;   // measure every label in place
+var items=spans.map(function(s){var b=s.getBoundingClientRect();return {x:b.left+b.width/2,w:b.width,date:s.hasAttribute('data-date')};});
+if(!items.length||!items.some(function(it){return it.w>0;}))continue;   // not laid out (display none): nothing to decide yet
+var shown=fitLabels(items,4);for(var j=0;j<spans.length;j++)spans[j].hidden=!shown[j];}}
 function sumArr(a){var t=0;(a||[]).forEach(function(v){t+=v||0;});return t;}
 function barsHTML(led,big){var n=led.ok.length,W=big?560:168,H=big?110:48,tot=[],mx=0;
 for(var i=0;i<n;i++){var v=0;BAR_CLASSES.forEach(function(c){v+=(led[c]||[])[i]||0;});tot.push(v);if(v>mx)mx=v;}
@@ -49349,17 +48474,15 @@ var bars='';
 for(var i=0;i<n;i++){if(!(tot[i]>0))continue;var x=i*slot+gap/2,acc=0;
 BAR_CLASSES.forEach(function(c){var v=(led[c]||[])[i]||0;if(!(v>0))return;var yb=Y(acc),yt=Y(acc+v);acc+=v;var hgt=Math.max(0.6,yb-yt);
 bars+='<rect class="ah-seg ah-seg-'+c+'" x="'+x.toFixed(1)+'" y="'+(yb-hgt).toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+hgt.toFixed(1)+'"></rect>';});}
-var ty=Y(top),grid='<line x1="0" y1="'+ty.toFixed(1)+'" x2="'+W+'" y2="'+ty.toFixed(1)+'" stroke="rgba(255,255,255,0.10)" stroke-width="1" vector-effect="non-scaling-stroke"></line>',xlab='';
-// ticks at round ages for the span (45/30/15 min, 18/12/6 h, 6/4/2 d), the span itself at the left edge, now at the right
-var span=n*(led.binS||60),marks=span>=604800?[6*86400,4*86400,2*86400]:span>=86400?[18*3600,12*3600,6*3600]:[2700,1800,900];
-xlab+='<span style="left:0%">'+tickWords(span)+'</span>';
-marks.forEach(function(ago){if(ago>=span)return;var gx=(1-ago/span)*W;grid+='<line x1="'+gx.toFixed(1)+'" y1="0" x2="'+gx.toFixed(1)+'" y2="'+H+'" stroke="rgba(255,255,255,0.06)" stroke-width="1" vector-effect="non-scaling-stroke"></line>';
-xlab+='<span style="left:'+((1-ago/span)*100).toFixed(1)+'%">'+tickWords(ago)+'</span>';});
-xlab+='<span style="left:100%">now</span>';
+var ty=Y(top),grid='<line class="ah-gridy" x1="0" y1="'+ty.toFixed(1)+'" x2="'+W+'" y2="'+ty.toFixed(1)+'" stroke-width="1" vector-effect="non-scaling-stroke"></line>',xlab='';
+// the clocks: a gridline at every tick of the timeline's nice step over the ledger's real span, its label when it fits
+var span=n*(led.binS||60);
+axisTicks(led.from||0,span,W).forEach(function(k){var gx=k.x;grid+='<line class="ah-gridx" x1="'+gx.toFixed(1)+'" y1="0" x2="'+gx.toFixed(1)+'" y2="'+H+'" stroke-width="1" vector-effect="non-scaling-stroke"></line>';
+if(k.label)xlab+='<span'+(k.date?' data-date="1"':'')+' style="left:'+(gx/W*100).toFixed(1)+'%">'+esc(k.label)+'</span>';});   // every label; fitAxisLabels decides which stand
 return '<div class="ru-tip-graph ah-bars'+(big?' ah-big':'')+'" data-bars="'+n+'"><svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none">'+grid+bars+'</svg>'
 +'<span class=ru-tip-gy style="top:'+(big?ty:ty/H*56).toFixed(0)+'px">'+top+'</span><div class=ru-tip-gx>'+xlab+'</div></div>';}
-function legendHTML(gray){var h='<div class=ah-legend>';LEGEND_ROWS.forEach(function(r){if(r[0]==='none'&&!gray)return;
-h+='<div class=ah-lrow><i class="ah-lsw ah-sw-'+r[0]+'"></i><span>'+r[1]+'</span></div>';});return h+'</div>';}
+function legendHTML(other){var h='<div class=ah-legend>';LEGEND_ROWS.forEach(function(r){if(r[0]==='none'&&!other)return;
+h+='<div class=ah-lrow><span class="ah-lt ah-c-'+r[0]+'">'+r[1]+'</span> <span>'+r[2]+'</span></div>';});return h+'</div>';}
 function rangeHTML(){var h='<div class="rsp-ctl ah-range">';Object.keys(RANGES).forEach(function(k){h+='<button class="rsp-btn'+(range===k?' on':'')+'" data-act="range:'+k+'">'+RANGES[k].label+'</button>';});return h+'</div>';}
 // a machine's line pieces, each class in its colour (the merge's Seg kinds: ok, r429, r5xx, none, plain)
 function partsHTML(parts){return '<span class=ah-desc>'+parts.map(function(p){return '<span class="ah-c-'+esc(p.kind)+'">'+esc(p.text)+'</span>';}).join(' \u00b7 ')+'</span>';}
@@ -49398,12 +48521,12 @@ function histHTML(){var loc=HIST&&HIST[''],R=RANGES[pinned?range:'day'];
 // the read's age: the time since this machine's document LANDED, on this clock alone (the kernel's asOf is another host's clock)
 var ago=(loc&&!loc.error&&!loc.pending&&LANDED&&MERGE)?'<span class="ru-tip-reset ah-ago">'+esc(ageWords())+'</span>':'';
 var h='<div class="ru-tip-win ah-hist"><div class=ru-tip-name><span>History</span>'+ago+'</div>';
-var hs=HIST?Object.keys(HIST).sort(localFirst):[],many=hs.length>1,gray=false;
-// the gray legend line applies when any machine's drawn range OR any machine's counted line holds a no-connection or
+var hs=HIST?Object.keys(HIST).sort(localFirst):[],many=hs.length>1,other=false;
+// the other legend line applies when any machine's drawn range OR any machine's counted line holds a no-connection or
 // other-status failure (the lines count the day whatever the range): known up front
-hs.forEach(function(host){var d=HIST[host];if(!d||d.error||d.pending)return;var l=ledgerOf(d,R);if(l&&sumArr(l.noStatus)+sumArr(l.other)>0)gray=true;
-var rd=READINGS[host];if(rd&&rd.counts&&(rd.counts.none+rd.counts.other)>0)gray=true;});
-if(pinned)h+=rangeHTML()+legendHTML(gray);   // the detail: the chips, then the colours named where the eye starts
+hs.forEach(function(host){var d=HIST[host];if(!d||d.error||d.pending)return;var l=ledgerOf(d,R);if(l&&sumArr(l.noStatus)+sumArr(l.other)>0)other=true;
+var rd=READINGS[host];if(rd&&rd.counts&&(rd.counts.none+rd.counts.other)>0)other=true;});
+if(pinned)h+=rangeHTML()+legendHTML(other);   // the detail: the chips, then the colours named where the eye starts
 if(!HIST)return h+'<div class="rl-dots ah-wait"><i></i><i></i><i></i></div></div>';
 hs.forEach(function(host){var d=HIST[host],name=host||SELF();
 // a machine whose answer is still in flight: its loader line (alone, the section's loader), never a blank
@@ -49413,7 +48536,7 @@ if(many)h+='<div class="ru-tip-row ah-gname"><span class=ah-nm>'+esc(name)+'</sp
 var led=ledgerOf(d,R),bars=led?barsHTML(led,pinned):'',span=(led&&led.older)?'last 15 min (an older kernel)':R.label;
 if(!bars){h+='<div class="ah-line ru-tip-reset">no attempts in the '+esc(span)+'</div>';return;}
 h+=bars;if(led.older)h+='<div class="ah-line ru-tip-reset">the last 15 min: an older kernel serves no longer history</div>';});
-if(!pinned)h+=legendHTML(gray);   // the hover: the legend under the bars
+if(!pinned)h+=legendHTML(other);   // the hover: the legend under the bars
 var tr=(loc&&!loc.error&&!loc.pending)?transRows(loc):'';if(tr)h+='<div class="ru-tip-name ah-hname"><span>State changes'+(many?' \u00b7 '+esc(SELF()):'')+'</span></div>'+tr;
 return h+'</div>';}
 // the cell's description while the hover shows: the state word and its since, then how to reach the rest. Before the
@@ -49466,7 +48589,7 @@ tip.style.top=Math.max(6,r.top-h-8)+'px';}
 // leave the dialog: the same control (by act and sid) takes focus again in the new markup, else the card does.
 function focusKey(n){return (n&&n.getAttribute)?(n.getAttribute('data-act')||'')+'|'+(n.getAttribute('data-sid')||''):'';}
 function render(){if(!LAST)return;var a=document.activeElement,key=(pinned&&a&&a!==tip&&tip.contains(a))?focusKey(a):null;
-tip.innerHTML=html(LAST,pinned);if(!pinned)anchor();desc.textContent=descText();
+tip.innerHTML=html(LAST,pinned);if(!pinned)anchor();fitAxisLabels(tip);desc.textContent=descText();   // the axis labels' fit is read off the paint
 if(key!==null){var n=null,all=tip.querySelectorAll('[data-act]');for(var i=0;i<all.length;i++)if(focusKey(all[i])===key){n=all[i];break;}
 try{if(n)n.focus();if(!n||document.activeElement!==n)tip.focus();}catch(e){}}}
 // The shown, unpinned tip is a TOOLTIP (the role, the cell described by the short summary, no aria-modal): a keyboard
@@ -49615,14 +48738,22 @@ open();};
 window.addEventListener('message',function(e){var m=e.data;if(!m)return;
 if(m.romp==='settings'){document.body.classList.toggle('settings-open',!!m.on);
 // closing hides the iframe that held the keyboard, which drops focus onto the shell body; put it back in the
-// chat (the dashboard's default focus, _LANDING_FOCUS_JS rings it) so the next keystroke lands in a pane
-if(!m.on){var fc=document.getElementById('f-chat');try{fc&&fc.contentWindow&&fc.contentWindow.focus();}catch(e){}}}
+// chat (the dashboard's default focus, _LANDING_FOCUS_JS rings it) so the next keystroke lands in a pane — the
+// split's column last worked in, else the first (2026-09-11: the close handed the keyboard to column 1 whatever
+// column the user was in, and that focus re-aimed every later shell relay at column 1 too)
+if(!m.on){var fid=(window.__rompFocusedChatId&&window.__rompFocusedChatId())||'f-chat';var fc=document.getElementById(fid)||document.getElementById('f-chat');try{fc&&fc.contentWindow&&fc.contentWindow.focus();}catch(e){}}}
 // a pane asking for the gear (the feed's login card, ui/webview/gear-host.ts openGear: the feed page hosts no gear)
 if(m.romp==='openSettings')window.__rompOpenSettings();
 // the gear's "Open log" (T290): the settings modal closes itself first, then asks the shell for the Log panel
 if(m.romp==='openLog'&&window.__rompOpenErrs)window.__rompOpenErrs();
 // the /chat iframe's new-session picker asks the shell to lift it full-window (see body.picker-open CSS)
-if(m.romp==='picker')document.body.classList.toggle('picker-open',!!m.on);
+if(m.romp==='picker'){
+  // the column that asked is the one lifted (split screen 2026-09-08): the sender frame wears .lifted (and its
+  // pane), the CSS lifts by that class; the first column when the sender cannot be told (no split script)
+  var lf=(window.__rompFrameOfWin&&window.__rompFrameOfWin(e.source))||document.getElementById('f-chat');
+  Array.prototype.forEach.call(document.querySelectorAll('.lifted'),function(el){el.classList.remove('lifted');});
+  if(m.on&&lf){lf.classList.add('lifted');if(lf.parentElement)lf.parentElement.classList.add('lifted');}
+  document.body.classList.toggle('picker-open',!!m.on);}
 // A file link clicked in the chat and routed to the FILES pane (ui/webview/file-route.ts fileLinkRoute,
 // decided at the click in render.ts openPath: the pane is on screen, or the gear's "File links open in"
 // names it) posts viewFile up with pane:'pane'. The shell brings that pane forward, the click being the
@@ -49685,6 +48816,7 @@ else if(m.romp==='browseFiles'){var bf=document.getElementById('f-feed');
 // opened for (m.sid beats the active tab there). The chat-hosted viewer posts to its own window and
 // never gets here.
 if(m.type==='editorSelection'&&typeof m.text==='string'){var fc=document.getElementById('f-chat');
+  fc=(window.__rompChatTarget&&window.__rompChatTarget(m.sid))||fc;   // the split column showing that session, else the one last used (2026-09-08)
   // the chat pane may be toggled OFF (hidden by CSS, iframe still loaded): the chip would seed a composer
   // nobody can see, a silent gesture (review find on #970, 2026-09-07). Bring the pane forward first, the
   // way the browseFiles arm does for the feed — desktop only; the phone's one-pane tab swap is untouched.
@@ -50655,7 +49787,8 @@ return (s?s.unsubscribe():Promise.resolve()).then(function(){return ep?post('/pu
 // files it as a client-diag row and the result line says no session was attached, never a silent probe.
 function diag(what,data){try{window.__rompShellDiag&&window.__rompShellDiag(what,data);}catch(e){}}
 function activeSession(){var t=null,why='',n=0;
-try{var f=document.getElementById('f-chat'),d=f&&f.contentDocument,tb=d&&d.querySelector('#tabs');
+try{var f=document.getElementById('f-chat');var fid=window.__rompFocusedChatId&&window.__rompFocusedChatId();   // the split column last worked in (2026-09-08)
+if(fid&&document.getElementById(fid))f=document.getElementById(fid);var d=f&&f.contentDocument,tb=d&&d.querySelector('#tabs');
 if(!f)why='no-frame';else if(!d)why='no-doc';else if(!tb)why='no-tabs';
 else{n=tb.querySelectorAll('.tab[data-id]').length;t=tb.querySelector('.tab.active[data-id]');if(!t)why='none-active';}}catch(e){why='threw';}
 var id=t?String(t.getAttribute('data-id')||''):'';var i=id.indexOf(':');
@@ -51085,6 +50218,85 @@ _LANDING_COLLAPSE_JS = """
 """
 
 
+# SPLIT SCREEN for the chat (the user 2026-09-08, who wanted several sessions open at once instead of tabbing
+# through them). Every chat column past the first is a client-made twin of #chat-pane — <div class="pane
+# chat-col"> around an iframe at /chat?col=N, inserted before gv-a with a .gv.gv-chat gutter ahead of it — so
+# the row reads chat | chat … | outline | feed. Each column is a FULL chat pane: its own tab strip, its own
+# persisted active tab, drafts and scroll (the shim keys its state blob by ?col=), its own socket (the kernel
+# already serves N chat clients per dashboard and builds every watched tab first), its own grow weight
+# (--g-chatN, in the gutters' store). The set of open columns persists per browser (romp-chat-cols); a
+# reopened column number finds its state where it left it. Desktop only: the phone shows one pane at a time.
+# A dashboard-aimed focus (a feed click, a kernel focus, a revive prompt) reaches EVERY column's socket, so the
+# columns ask the shell which of them it belongs to (__rompChatTarget: the column already showing the session,
+# else the one the user last worked in, else the first) and the others stand down — render.ts focusIsOurs.
+_LANDING_SPLIT_JS = """
+(function(){
+var CK='romp-chat-cols',MAX=4,cols=[];   // cols: the open column numbers in ROW order (2, 3, …); MAX counts the first column too
+var row=document.querySelector('.row'),gva=document.getElementById('gv-a');
+if(!row||!gva)return;
+function mobile(){var b=document.getElementById('mtabs');try{return !!b&&getComputedStyle(b).display!=='none';}catch(e){return false;}}
+function save(){try{localStorage.setItem(CK,JSON.stringify(cols));}catch(e){}}
+function paneId(n){return 'chat-pane-'+n;}function frameId(n){return 'f-chat-'+n;}
+function frames(){var out=[document.getElementById('f-chat')];cols.forEach(function(n){out.push(document.getElementById(frameId(n)));});return out.filter(Boolean);}
+function frameOfWin(win){if(!win)return null;var fs=frames();for(var i=0;i<fs.length;i++){try{if(fs[i].contentWindow===win)return fs[i];}catch(e){}}return null;}
+function colOf(win){var f=frameOfWin(win);return f?String(f.getAttribute('data-col')||''):'';}
+function lastPane(){return cols.length?paneId(cols[cols.length-1]):'chat-pane';}
+function activeIn(f){try{var t=f.contentDocument&&f.contentDocument.querySelector('#tabs .tab.active[data-id]');return t?String(t.getAttribute('data-id')||''):'';}catch(e){return '';}}
+function focused(){var id=(window.__rompFocusedChatId&&window.__rompFocusedChatId())||'f-chat';return document.getElementById(id)||document.getElementById('f-chat');}
+// Which column a session-focus belongs to: the column already showing that session, else the column the
+// user last worked in, else the first. The panes ask this before acting on a dashboard-aimed focus.
+function target(sid){var fs=frames();if(sid){for(var i=0;i<fs.length;i++){if(activeIn(fs[i])===sid)return fs[i];}}return focused()||fs[0]||null;}
+function make(n,sid){var have=document.getElementById(frameId(n));if(have)return have;
+var g=document.createElement('div');g.className='gv gv-chat';g.id='gv-chat-'+n;
+var p=document.createElement('div');p.className='pane chat-col';p.id=paneId(n);p.setAttribute('data-col',String(n));
+p.style.flex='var(--g-chat'+n+',60) 1 0';
+var f=document.createElement('iframe');f.id=frameId(n);f.className='chat-col';f.setAttribute('data-col',String(n));f.src='/chat?col='+n;
+var x=document.createElement('div');x.className='col-x';x.title='Close this split';x.setAttribute('role','button');x.textContent='×';
+x.addEventListener('click',function(ev){ev.stopPropagation();close(n);});
+p.appendChild(f);p.appendChild(x);
+row.insertBefore(g,gva);row.insertBefore(p,gva);
+if(window.__rompRegisterPane)window.__rompRegisterPane(p.id,'chat'+n);
+if(window.__rompGrowFairIfNew)window.__rompGrowFairIfNew('chat'+n);else if(window.__rompGrowFair)window.__rompGrowFair('chat'+n);   // a fair width, never a sliver — and a dragged width survives a reload
+if(window.__rompGutter)window.__rompGutter(g.id,function(){var i=cols.indexOf(n);return i>0?paneId(cols[i-1]):'chat-pane';},p.id);
+if(window.__rompWireFocus)window.__rompWireFocus(f);if(window.__rompWireEsc)window.__rompWireEsc(f);
+try{window.dispatchEvent(new CustomEvent('romp-chat-cols',{detail:{frame:f,col:n,open:true}}));}catch(e){}   // palette-main wires its keys
+// opened ON a session: the pane takes a focus before its frames land (render.ts latches it), so the new
+// column shows that session and not whatever its state blob last held. `own` says this focus is addressed
+// to THIS column — the pane's arbitration (focusIsOurs) would otherwise hand it to a column already
+// showing the session, which is exactly the case when a tab is opened in a new split.
+if(sid)f.addEventListener('load',function(){try{f.contentWindow.postMessage({type:'focus',id:sid,own:true},'*');}catch(e){}},{once:true});   // the opening only: a later reload of the frame keeps the tab its own state names
+return f;}
+function canSplit(){return !mobile()&&cols.length+1<MAX;}
+// a refused split says why (the click-acknowledgement rule): the cap, or the phone's one-pane layout
+function refuse(){var why=mobile()?'The phone shows one pane at a time — no split here.':'Four chat columns at most — close one to open another.';
+try{if(window.__rompNotify)window.__rompNotify('warn',why);}catch(e){}return null;}
+function open(sid){if(!canSplit())return refuse();
+try{if(!document.body.classList.contains('po-chat')&&window.__rompPaneToggle)window.__rompPaneToggle('chat',true);}catch(e){}   // a split of a hidden chat group brings the group forward first
+var n=2;while(cols.indexOf(n)>=0)n++;cols.push(n);save();
+var f=make(n,sid||'');try{f.contentWindow.focus();}catch(e){}return f;}
+function close(n){var i=cols.indexOf(n);if(i<0)return;cols.splice(i,1);save();
+var p=document.getElementById(paneId(n)),g=document.getElementById('gv-chat-'+n);
+if(window.__rompUnregisterPane)window.__rompUnregisterPane(paneId(n));
+if(p)p.remove();if(g)g.remove();
+if(window.__rompColGone)window.__rompColGone(String(n));
+try{window.dispatchEvent(new CustomEvent('romp-chat-cols',{detail:{col:n,open:false}}));}catch(e){}
+var pf=document.getElementById(i>0?frameId(cols[i-1]):'f-chat');   // the ring moves to the column before it
+try{pf&&pf.contentWindow.focus();}catch(e){}}
+function closeFocused(){var f=focused(),c=f?colOf(f.contentWindow):'';if(!c&&cols.length)c=String(cols[cols.length-1]);if(c)close(Number(c));}
+window.__rompSplitChat=function(sid){return open(typeof sid==='string'?sid:'');};window.__rompCanSplit=canSplit;
+window.__rompCloseSplit=function(n){if(n===undefined)closeFocused();else close(Number(n));};
+window.__rompChatFrames=frames;window.__rompChatFrameIds=function(){return frames().map(function(f){return f.id;});};
+window.__rompChatPaneOf=function(fid){return fid==='f-chat'?'chat-pane':(String(fid).indexOf('f-chat-')===0?paneId(String(fid).slice(7)):null);};
+window.__rompLastChatPane=lastPane;window.__rompColOf=colOf;window.__rompFrameOfWin=frameOfWin;window.__rompChatTarget=target;
+// a chat pane's tab menu asks for a split holding that session (render.ts "Open in new split")
+window.addEventListener('message',function(e){var m=e&&e.data;if(!m||m.romp!=='openSplit')return;open(typeof m.sid==='string'?m.sid:'');});
+// the columns this browser had open come back, each on its own state
+try{var saved=JSON.parse(localStorage.getItem(CK)||'null');
+if(Array.isArray(saved)&&!mobile())saved.forEach(function(n){n=Number(n);if(n>=2&&n<100&&cols.indexOf(n)<0&&cols.length+1<MAX){cols.push(n);make(n,'');}});}catch(e){}
+})();
+"""
+
+
 def _stale_block(v):
     # the reload core first: the banner script below registers as its refused fallback and announces a reload
     return ("<style>" + _STALE_CSS + "</style>" + _STALE_HTML
@@ -51474,13 +50686,15 @@ def _landing():
             # list. Same bridge as settings: render.ts posts {romp:'picker',on} and the shell lifts the chat
             # iframe over the whole window (body.picker-open) so the overlay fills the screen and the list gets
             # the full height to scroll. Restored on close.
-            "body.picker-open #chat-pane{display:block!important}"
+            # …by CLASS since the split (2026-09-08): the column whose picker is up wears .lifted (the shell marks
+            # the sender frame and its pane), so a picker opened in a later column lifts THAT column, never the first.
+            "body.picker-open .pane.lifted{display:block!important}"
             # Height = --app-h (the shell's live VISIBLE height, fed by the top-level visualViewport),
             # not inset:0: the layout viewport ignores the phone keyboard, so a bottom-anchored lift sat
             # half behind it — and, sized this way, the keyboard opening/closing reaches the iframe as
             # its own resize event, which is what render.ts keys the picker's short-window fold on
             # (the user 2026-08-10, Chrome on a phone).
-            "body.picker-open #f-chat{display:block;position:fixed;left:0;right:0;top:0;height:var(--app-h,100dvh);z-index:200;background:transparent}"   # same transparency as the settings lift above
+            "body.picker-open iframe.lifted{display:block;position:fixed;left:0;right:0;top:0;height:var(--app-h,100dvh);z-index:200;background:transparent}"   # same transparency as the settings lift above
             # ── pane rail (the user 2026-06-24; rotated to a BOTTOM BAR the user 2026-07-05): a thin toolbar with
             # Chat / Timeline / Outline / Feed toggles. It used to be a vertical strip on the far LEFT; it now runs
             # HORIZONTALLY across the bottom of .col, BELOW the timeline band (last child of .col). Each toggle is
@@ -51781,31 +50995,43 @@ def _landing():
             # apart before the first frame and jumped when the dot appeared)
             ".ah-slot{display:contents}"
             # the detail card's own rows, in the tip's font and palette (#ah-tip shares #ru-tip's skin below)
-            ".ah-head{gap:7px}.ah-word{font-weight:700;color:#e8eef5}.ah-since{opacity:.55;margin-left:auto}"
+            ".ah-head{gap:7px}.ah-word{font-weight:700;color:#e8eef5}.ah-since{color:#8b939c;margin-left:auto}"
             ".ah-line{margin-top:4px;max-width:340px}"
             ".ah-btn{margin-top:6px;font:inherit;padding:3px 9px;border-radius:5px;border:1px solid #3a3a3a;background:#2a2a2a;color:#cfd6dd;cursor:pointer}"
             ".ah-btn[disabled]{opacity:.55;cursor:default}#ah-tip .romp-acted{opacity:.6}"
             ".ah-row{cursor:pointer;border-radius:4px;margin:2px -4px 0;padding:1px 4px}"
             ".ah-row:hover{background:rgba(255,255,255,0.06)}"
-            ".ah-sw{width:8px;height:8px;border-radius:2px;background:#6b7a8c;flex:0 0 auto}"
             ".ah-nm{font-weight:600}.ah-desc{opacity:.75}"
+            # a waiting row's words are muted by COLOUR, not opacity (T340 review: the 429/529 tokens inside composited under 4.5:1
+            # at the description's 75%); the tokens keep their inks at full strength
+            ".ah-row .ah-desc{opacity:1;color:#a9b1ba}"
             ".ah-foot{margin-top:7px;padding-top:5px;border-top:1px solid rgba(255,255,255,0.08);gap:12px}"
             ".ah-link{cursor:pointer;color:var(--accent)}"
             # T316: a machine line's pieces in their class colours (successes the accent, 429 the blocked red, 5xx the 5xx
-            # magenta, no connection and other statuses the label gray), the vertical legend with swatches in the bar
-            # colours, the stacked bars (the hover's small, the detail's large), the detail's range chips and width
+            # magenta, no connection and other statuses the other band's hue), the vertical legend with the class tokens in
+            # those inks (T340: no swatches), the stacked bars (the hover's small, the detail's large), the detail's range
+            # chips and width. The other band (T340, the user 2026-09-11): the label gray sat on the accent in the dark; the
+            # band is a pale lime in the dark (#d9f99d) and an indigo in the light (#4f46e5), each at least 8 OKLab CVD units
+            # and 15 normal-vision units from the accent, the 429 red and its ink, the 5xx magenta and its ink, the retrying
+            # amber and the working yellow of its theme (the dataviz validator, all pairs; no one hue clears both themes:
+            # blues and violets fold into the magenta or its pink ink under red-green CVD in the dark, greens fold into the
+            # clay accent, the red and the amber in the light, warm neutrals sit within 15 of the pale accent in the dark)
             # the counts' TEXT inks per theme (review find: the chip colours as text sit under 4.5:1 on the tip; the
             # failure line's precedent is #ef6b6f dark / #B02A1C light): 429 the error-text red, 5xx a lighter magenta in
             # the dark, a deeper one in the light; the swatches and the bars keep the chip colours
             ".ah-c-ok{color:var(--accent,#9cd2ff)}.ah-c-r429{color:#ef6b6f}.ah-c-r5xx{color:#e879f9}"
-            ".ah-c-none{color:#9aa4ad}.ah-mline .ah-desc{opacity:1}.ah-mline .ah-c-plain{opacity:.85}"
+            ".ah-c-none{color:#d9f99d}.ah-mline .ah-desc{opacity:1}.ah-mline .ah-c-plain{color:#a9b1ba}"
             ".ah-win,.ah-ago{margin-left:auto}"
-            ".ah-legend{display:flex;flex-direction:column;align-items:flex-start;gap:3px;margin-top:7px;opacity:.75}"
-            ".ah-lrow{display:flex;align-items:center;gap:6px}.ah-lsw{width:8px;height:8px;border-radius:2px;flex:0 0 auto}"
-            ".ah-sw-r429{background:var(--st-blocked-bg,#e5484d)}.ah-sw-r5xx{background:var(--st-5xx-bg,#c026d3)}.ah-sw-none{background:#9aa4ad}"
-            # the bars' fills, one class per stack segment (the landing defines no --dim, so the gray is written out)
+            # the legend carries no group opacity (T340 review: a descendant cannot exceed its group's, so a faded legend put every
+            # coloured token under 4.5:1); only the explanation span is dimmed, the tokens stand at full strength
+            ".ah-legend{display:flex;flex-direction:column;align-items:flex-start;gap:3px;margin-top:7px}"
+            ".ah-lrow{display:flex;align-items:center;gap:6px}.ah-lt{font-weight:600}.ah-lrow > span:last-child{opacity:.75}"
+            # the bars' fills, one class per stack segment; the other band's hue written out per theme (no token: a class of
+            # this popup alone, not a status the rest of the dashboard names)
             ".ah-seg-ok{fill:var(--accent,#9cd2ff)}.ah-seg-rateLimited{fill:var(--st-blocked-bg,#e5484d)}.ah-seg-serverErrors{fill:var(--st-5xx-bg,#c026d3)}"
-            ".ah-seg-noStatus,.ah-seg-other{fill:#9aa4ad}"
+            ".ah-seg-noStatus,.ah-seg-other{fill:#d9f99d}"
+            # the gridlines as classes too (T338): the ceiling's and the ticks', a hairline the light card can see
+            ".ah-gridy{stroke:rgba(255,255,255,0.10)}.ah-gridx{stroke:rgba(255,255,255,0.06)}"
             ".ah-gname{margin-top:6px}.ah-bars.ah-big svg{height:110px}.ah-bars.ah-big{margin-bottom:12px}"
             ".ah-range{margin:4px 0 6px}"
             "#ah-tip.ru-modal{width:min(720px,92vw)}"
@@ -51821,7 +51047,7 @@ def _landing():
             # pinned card, which scrolls as before.
             ".ah-hword{opacity:.8}.ah-hsub{opacity:.55}.ah-boot .ah-hword{font-style:italic;opacity:.6}"
             # the graph (T301): the usage hover's own .ru-tip-graph grammar; the legend and the machine lines are sub-lines
-            ".ah-legend{opacity:.6;margin-top:4px;max-width:340px}.ah-mline{gap:7px}.ah-mline .ah-desc{opacity:.9}"
+            ".ah-legend{margin-top:4px;max-width:340px}.ah-mline{gap:7px}"
             ".ah-hname{margin-top:6px}.ah-err{color:#ef6b6f}.ah-wait{margin:5px 0 2px}"
             ".ah-row.ah-ro{cursor:default}.ah-row.ah-ro:hover{background:transparent}"
             "#ah-tip:focus{outline:none}#ah-tip{overflow:hidden;box-sizing:border-box}"
@@ -51929,9 +51155,11 @@ def _landing():
             ".ru-tip-graph{position:relative;margin-top:4px}"
             ".ru-tip-graph svg{display:block;width:100%;height:56px;background:rgba(255,255,255,0.04);"
             "border-radius:3px}"
-            ".ru-tip-gy{position:absolute;left:3px;font-size:8px;opacity:.5;line-height:1;"
+            # the graph's small labels (the ceiling, the axis clocks) are muted by COLOUR at opacity 1 (T338 review: at 50% the
+            # clocks sat at 3.85:1 dark and 3.27:1 light); the inks clear 4.5:1 on each card at 8 px
+            ".ru-tip-gy{position:absolute;left:3px;font-size:8px;color:#8b939c;line-height:1;"
             "pointer-events:none;transform:translateY(1px)}"
-            ".ru-tip-gx{position:relative;height:9px;margin-top:1px;font-size:8px;opacity:.5}"
+            ".ru-tip-gx{position:relative;height:9px;margin-top:1px;font-size:8px;color:#8b939c}"
             ".ru-tip-gx span{position:absolute;transform:translateX(-50%);line-height:1}"
             ".ru-tip-track i{display:block;height:100%;border-radius:3px;transition:width .3s ease}"
             # margin-left:auto right-aligns every value to one edge, so the bar rows and the numbers-only
@@ -51957,6 +51185,17 @@ def _landing():
             # off hides it AND the now-orphaned gutters. Fixed order: chat, outline, feed, files. Timeline is the band.
             "#chat-pane{flex:var(--g-chat,60) 1 0}#fleet-pane{flex:var(--g-fleet,34) 1 0}#feed-pane{flex:var(--g-feed,40) 1 0}#files-pane{flex:var(--g-files,40) 1 0}"
             "body:not(.po-chat) #chat-pane{display:none}body:not(.po-fleet) #fleet-pane{display:none}body:not(.po-feed) #feed-pane{display:none}body:not(.po-files) #files-pane{display:none}"
+            # split chat columns (the user 2026-09-08): every column past the first is a client-made .pane.chat-col
+            # (_LANDING_SPLIT_JS) with its own /chat?col=N iframe and its own grow var, set inline. They ride the
+            # chat group's toggle: off hides every column and the chat|chat gutters with it.
+            "body:not(.po-chat) .chat-col,body:not(.po-chat) .gv-chat{display:none}"
+            # a split column's close: a small × in its top-right corner, shown on hover and while the column is
+            # focused, above the iframe and the focus ring (z 6) — the pane rail's action dress, not a new one
+            ".chat-col>.col-x{position:absolute;top:4px;right:6px;z-index:7;width:20px;height:20px;border-radius:5px;"
+            "background:rgba(30,30,30,0.85);color:#8a8a8a;font:600 13px/20px 'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;"
+            "text-align:center;cursor:pointer;user-select:none;opacity:0;transition:opacity .12s,color .1s,background .1s}"
+            ".chat-col:hover>.col-x,.chat-col.pane-focused>.col-x{opacity:1}"
+            ".chat-col>.col-x:hover{color:#fff;background:rgba(255,255,255,0.12)}"
             ".row>.gv{flex:0 0 7px}"
             # gv-a sits chat|outline (only when both shown); gv-b sits (outline|chat)|feed, so it is the chat|feed gutter when
             # the outline is off; gv-c sits (feed|outline|chat)|files, hidden when files is off or no column is shown to its left.
@@ -52029,6 +51268,7 @@ def _landing():
             # the Outline (fleet) rides the tab bar like every other pane (the user 2026-07-11, who couldn't
             # access the outline view in the mobile UI — it was desktop-only before)
             "#chat-pane,#fleet-pane,#feed-pane,#files-pane,#tl-pane{display:contents!important}"
+            ".chat-col,.gv-chat{display:none!important}"   # one pane at a time here: split columns never show (nor are made, see _LANDING_SPLIT_JS)
             # reset the desktop iframe absolute-fill (the bare `iframe` reset below re-flows them as tab panes)
             ".pane>iframe{position:static;inset:auto;width:100%;height:100%}"
             "iframe{position:static;display:none;width:100%;height:100%;border:0}"
@@ -52179,6 +51419,8 @@ def _landing():
             # which silenced the bell's and the network glyph's on-state entirely in the light theme
             # (the user 2026-09-02) — restate `.on` at the winning specificity
             "body.theme-light .rail-act.on{color:var(--accent)}"
+            "body.theme-light .chat-col>.col-x{background:rgba(255,255,255,0.85);color:#5D574E}"
+            "body.theme-light .chat-col>.col-x:hover{color:#1F1E1D;background:rgba(0,0,0,0.06)}"
             "body.theme-light .gv{background:linear-gradient(90deg,transparent 3px,rgba(0,0,0,0.14) 3px,rgba(0,0,0,0.14) 4px,transparent 4px)}"
             "body.theme-light .gh{background:linear-gradient(180deg,transparent 3px,rgba(0,0,0,0.14) 3px,rgba(0,0,0,0.14) 4px,transparent 4px)}"
             "body.theme-light .gv::after,body.theme-light .gh::after{background:rgba(0,0,0,0.22)}"
@@ -52244,13 +51486,15 @@ def _landing():
             # the dark line's #ef6b6f is 3.0:1 there)
             "body.theme-light .ah-err{color:#B02A1C}"
             # T316, the light tip is white: the counts' inks (the clay accent, the light error red, a deep magenta 6.5:1, the
-            # light label gray 7.15:1), the swatches and the bars' fills in the light palette's chip colours
-            "body.theme-light .ah-c-ok{color:#C2410C}body.theme-light .ah-c-r429{color:#B02A1C}body.theme-light .ah-c-r5xx{color:#86198F}body.theme-light .ah-c-none{color:#5D574E}"
-            "body.theme-light .ah-sw-r5xx{background:#A21CAF}body.theme-light .ah-sw-none{background:#5D574E}"
-            "body.theme-light .ah-seg-ok{fill:#C2410C}body.theme-light .ah-seg-serverErrors{fill:#A21CAF}body.theme-light .ah-seg-noStatus,body.theme-light .ah-seg-other{fill:#5D574E}"
+            # other band's indigo 6.3:1) and the bars' fills in the light palette's chip colours (T340: no swatches)
+            "body.theme-light .ah-c-ok{color:#C2410C}body.theme-light .ah-c-r429{color:#B02A1C}body.theme-light .ah-c-r5xx{color:#86198F}body.theme-light .ah-c-none{color:#4f46e5}"
+            "body.theme-light .ah-seg-ok{fill:#C2410C}body.theme-light .ah-seg-serverErrors{fill:#A21CAF}body.theme-light .ah-seg-noStatus,body.theme-light .ah-seg-other{fill:#4f46e5}"
+            "body.theme-light .ah-gridy{stroke:rgba(0,0,0,0.14)}body.theme-light .ah-gridx{stroke:rgba(0,0,0,0.08)}"
             "body.theme-light .ah-word{color:#1F1E1D}"
             "body.theme-light .ah-btn{background:#F1EAE2;border-color:rgba(0,0,0,0.12);color:#1F1E1D}"
             "body.theme-light .ah-row:hover{background:rgba(0,0,0,0.05)}"
+            "body.theme-light .ah-row .ah-desc{color:#5D574E}body.theme-light .ah-mline .ah-c-plain{color:#5D574E}body.theme-light .ah-since{color:#6b6560}"
+            "body.theme-light .ru-tip-gy{color:#6b6560}body.theme-light .ru-tip-gx{color:#6b6560}"
             "body.theme-light .ah-row.ah-ro:hover{background:transparent}"
             "body.theme-light .ah-foot{border-top-color:rgba(0,0,0,0.10)}"
             "body.theme-light .ru-track{background:rgba(0,0,0,0.10)}"
@@ -52526,7 +51770,9 @@ def _landing():
             ("<script src=/dist/api-health-global.js?v=%d></script>" % v) +
             "<script>" + _LANDING_ERRS_JS + "</script>"
             "<script>" + _LANDING_USAGE_JS.replace("__ROMP_LOADER__", json.dumps(_loader_inner())) + "</script>"
-            "<script>" + _LANDING_APIH_JS + "</script>"
+            # the timeline's axis formatter and tick rule, lifted for the histograms' clocks (T338), ahead of the script that
+            # reads it, in the same element (the landing's script count is pinned: no new script element for a helper)
+            "<script>" + _timeline_axis_js() + _LANDING_APIH_JS + "</script>"
             "<script>" + _LANDING_JS + "</script>"
             "<script>" + _LANDING_FOCUS_JS + "</script>"
             "<script>" + _LANDING_ESC_JS + "</script>"
@@ -52542,6 +51788,7 @@ def _landing():
             "<script>" + _LANDING_PUSH_JS + "</script>"
             "<script>" + _LANDING_REVEAL_JS + "</script>"
             "<script>" + _LANDING_COLLAPSE_JS + "</script>"
+            "<script>" + _LANDING_SPLIT_JS + "</script>"   # chat split columns (2026-09-08), after the controller it leans on
             # the command palette (Cmd/Ctrl+P) and the session quick-switcher hotkey (Cmd/Ctrl+O):
             # a dist bundle (ui/webview/palette-main.ts) like age-color-global above. Loaded last —
             # it reads the __romp* globals lazily, at command run time, so order is cosmetic.
@@ -53156,7 +52403,7 @@ class Handler(BaseHTTPRequestHandler):
                 w = max(300, min(w, 30 * 86400))              # clamp 5min .. 30d
                 return self._send(200, json.dumps(_token_analytics(int(time.time()), w)),
                                   "application/json", cache="no-cache")
-            if p == "/sessions":                              # unified romp session list (tmux + SDK) for external tools (the Obsidian plugin, the postal bus)
+            if p == "/sessions":                              # unified romp session list (every backend) for external tools (the Obsidian plugin, the postal bus)
                 rows = _session_rows()
                 if (q.get("threads") or [""])[0] == "1":       # opt-in: comment-thread rows for the postal
                     rows = rows + _thread_rows()               # bus (the user 2026-08-22); every existing
@@ -53185,7 +52432,7 @@ class Handler(BaseHTTPRequestHandler):
                 # — so on a headless kernel a script's GET did all four (2026-09-08). Token-gated
                 # like its stateful siblings; a read that moves none of those four (build_feed's own
                 # housekeeping — an order persist, a views re-stamp — is as on the old path).
-                return self._send(200, json.dumps(_pure_feed(time.time(), _tmux_sessions())),
+                return self._send(200, json.dumps(_pure_feed(time.time(), _live_map())),
                                   "application/json", cache="no-cache")
             if p == "/classify":
                 # One session's LIVE classification as the kernel derives it right now (both teams'
@@ -53203,7 +52450,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(400, json.dumps({"ok": False, "error": "id required"}),
                                       "application/json")
                 now = time.time()
-                tm = _tmux_sessions()
+                tm = _live_map()
                 alive = set(tm)
                 snap = tm.get(sid)
                 st, st_t = _last_state(sid)
@@ -53399,16 +52646,6 @@ class Handler(BaseHTTPRequestHandler):
                 # every case, clamp or not (a stamp made here would be a second number whenever the clamp
                 # fired). /version's `started` is int(_STARTED), the same start in whole seconds:
                 # int(bootAt) == started unless the clamp moved the stamp.
-                # coverage's kernel half: tmux-backed sessions have no SDK stream and sit outside
-                # the signal — the count says how much of the machine the signal does not see. A null
-                # (never a silent 0) when the live enumeration fails. Codex-backed sessions are outside
-                # it too, for a different reason (no Anthropic API traffic), and are counted nowhere.
-                try:
-                    out["coverage"]["tmuxSessionsUncovered"] = sum(
-                        1 for m in Sessions.live().values() if (m or {}).get("backend") == "tmux")
-                except Exception as e:
-                    sys.stderr.write("api-health: tmux coverage count failed: %s\n" % e)
-                    out["coverage"]["tmuxSessionsUncovered"] = None
                 return self._send(200, json.dumps(out), "application/json", cache="no-cache")
             if p == "/session-events":
                 # T304: the session-event ledger for the dashboard's "sessions gone wrong" cue and `romp
@@ -54097,9 +53334,9 @@ class Handler(BaseHTTPRequestHandler):
                 # Event-driven wake: the Stop / UserPromptSubmit / PostCompact hooks (and the postal drain) poke
                 # this the instant a turn ends / a prompt lands / a compaction ends / a message arrives, so the
                 # judges run NOW instead of on the next backstop tick — and the parked-op drain runs on the
-                # event it waits for. It ALSO wakes the chat PUSHER, so a tmux turn completing/landing
+                # event it waits for. It ALSO wakes the chat PUSHER, so a hook-signalled turn completing/landing
                 # appears in the chat immediately (the common 'why hasn't it shown up yet' moment) rather than
-                # waiting out the poll — tmux's per-message event-driven path, the SDK live-tail's analogue.
+                # waiting out the poll — the hooks' event-driven path, the SDK live-tail's analogue.
                 # Cheap + idempotent; the hook authorizes with X-Romp-Token read from the 0600 token file.
                 _producer_wake.set()
                 _pusher_wake.set()
@@ -54123,7 +53360,7 @@ class Handler(BaseHTTPRequestHandler):
                 # Human→agent input channel — the SAME delivery the chat composer's WS
                 # sendMessage uses, exposed as a one-shot POST so an external local tool (the
                 # Obsidian track-changes plugin, romp-postal's delivery) can hand a session
-                # input WITHOUT touching tmux itself: the kernel owns the transport, routing
+                # input WITHOUT touching a backend itself: the kernel owns the transport, routing
                 # to whichever backend drives the session. Body: {"id"|"name": <session>,
                 # "text": <body>}. Local tools authorize like every caller: the serve token
                 # (X-Romp-Token read from the 0600 file, or ?token=).
@@ -54164,9 +53401,24 @@ class Handler(BaseHTTPRequestHandler):
                 be = Sessions.backend_for(sid)
                 meta = {}
                 if _route_meta_command(be, sid, body["text"], state=meta):
+                    if meta.get("refused"):
+                        return self._send(200, json.dumps({"ok": False, "error":
+                            "no running backend owns %s — the command was not delivered" % (body.get("who") or sid)}),
+                                          "application/json")
                     queued = bool(meta.get("queued"))              # a parked /model, /effort or /fast says so too
                 else:
-                    queued = bool(_send_or_park(be, sid, body["text"]))
+                    # who speaks (T315): an untagged `romp send` is treated as the user's words (this is the human
+                    # channel, and the composer's own route); a TAGGED one (`romp send --tag`, the route's marker
+                    # for a machine-sent message: a scheduled or scripted sender) is a machine's, and is queued
+                    # behind a stood-down attach instead of retrying it
+                    res = _send_or_park(be, sid, body["text"], user="<!-- romp-tag: " not in body["text"])
+                    if res is None:
+                        # the backend REFUSED the handover (a session no backend owns, a dead one): said, never
+                        # answered ok — `romp send` prints this and exits non-zero (review find, 2026-09-11)
+                        return self._send(200, json.dumps({"ok": False, "error":
+                            "no running backend owns %s — the message was not delivered" % (body.get("who") or sid)}),
+                                          "application/json")
+                    queued = bool(res)
                 # `queued` says which arm it took (the /compact route's shape): a sender that IS the
                 # target's open turn — an agent running `romp send <self> /clear` from its own Bash tool —
                 # read 'ok' otherwise and could not know the command waits for that turn to end (2026-09-03).
@@ -54252,14 +53504,14 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/new":
                 # Headless session creation (`romp new`, 2026-07-25): the WS createSession op as a
                 # one-shot POST, so a terminal can start a session — SDK by default, the recommended
-                # backend — without a browser. Body: {"name": ..., "dir": ..., "backend": "sdk"|"tmux"},
+                # backend — without a browser. Body: {"name": ..., "dir": ..., "backend": "sdk"|"codex"},
                 # plus optional "model"/"effort" (full ids/levels, applied park-aware and echoed back;
                 # also applied on the existing:true open, so a re-brief re-asserts them — see
                 # _apply_new_session_prefs) and optional "env" (a NAME→value map of per-session env
                 # vars, the user 2026-08-17: born into the SDK spawn, re-asserted the same way).
                 # Same validation and the same no-silent-fallback rule as the WS op: when the SDK
-                # backend is unavailable, say so (ok:false + reason), never hand back a mystery tmux
-                # session. An already-live name is a success (idempotent open), not an error.
+                # backend is unavailable, say so (ok:false + reason), never a session of a backend the
+                # caller did not ask for. An already-live name is a success (idempotent open), not an error.
                 b, berr = _json_object_body(raw_body)
                 if berr:
                     return self._send(400, json.dumps({"ok": False, "error": berr}), "application/json")
@@ -54294,7 +53546,7 @@ class Handler(BaseHTTPRequestHandler):
                 # (_parent_from_request). Echoed back as `tags` (the child's names after both) plus
                 # the positional `tagsRequested`/`tagsApplied` pair (_tag_ack) — the names go to the
                 # store AS SENT, which trims and clamps them, so the echo carries the stored spelling.
-                live = _live_names(_tmux_sessions())
+                live = _live_names(_live_map())
                 psid, perr, pign = _parent_from_request(b, live)
                 if perr:
                     return self._send(400, json.dumps({"ok": False, "error": perr}), "application/json")
@@ -54320,7 +53572,7 @@ class Handler(BaseHTTPRequestHandler):
                 if nm in live:
                     if env_req is not None:
                         # env rides the per-sid flag-settings file, which only the SDK backend hands
-                        # its CLI — a live tmux session can't take it, and dropping it silently would
+                        # its CLI — a live Codex session can't take it, and dropping it silently would
                         # leave this machine believing an env the session never saw.
                         try:
                             _envbe = Sessions.backend_for(live[nm])
@@ -54328,8 +53580,8 @@ class Handler(BaseHTTPRequestHandler):
                             _envbe = None
                         if not hasattr(_envbe, "set_env"):
                             return self._send(200, json.dumps({"ok": False, "error":
-                                'per-session env needs a Claude Code session — "%s" runs in a terminal, whose CLI '
-                                "reads the tmux server's environment" % nm}), "application/json")
+                                'per-session env needs a Claude Code session — "%s" runs on the Codex backend, '
+                                "which takes no per-session environment" % nm}), "application/json")
                     extra = _apply_new_session_prefs(live[nm], b)
                     # the idempotent open never INHERITS (no creation event — the ruling), but an
                     # explicit --in re-asserts like model/effort/env do, and the echo tells the truth
@@ -54371,7 +53623,7 @@ class Handler(BaseHTTPRequestHandler):
                     if env_req is not None:
                         # env rides the per-sid flag-settings file the SDK backend hands its CLI; a
                         # Codex thread runs on the shared app-server and has no per-session
-                        # environment to take it — refuse, like the tmux arm, never a silent drop
+                        # environment to take it — refuse, never a silent drop
                         return self._send(200, json.dumps({"ok": False, "error":
                             "per-session env needs a Claude Code session — a Codex session runs on the "
                             "shared app-server and takes no per-session environment"}), "application/json")
@@ -54408,22 +53660,10 @@ class Handler(BaseHTTPRequestHandler):
                                           "application/json")
                     return self._send(200, json.dumps({"ok": True, "id": sid, "dir": cwd, **pextra, **extra}),
                                       "application/json")
-                if env_req is not None:
-                    return self._send(200, json.dumps({"ok": False, "error":
-                        "per-session env needs a Claude Code session — a terminal session's CLI reads the "
-                        "tmux server's environment"}), "application/json")
-                if psid or tags_req:
-                    # a tmux spawn is threaded and its sid is unknown at ack time, so nothing here could
-                    # tag it — refuse loudly rather than spawn it outside the group it was asked into
-                    return self._send(200, json.dumps({"ok": False, "error":
-                        "tags and parent need a Claude Code or Codex session — a terminal session's id is not "
-                        "known until it starts"}), "application/json")
-                # the claim is taken on THIS thread (kind create), so a taken or in-flight name refuses
-                # the request that asked as a 409 — the launch itself runs threaded, as before
-                refusal = _spawn_session_start(nm, cwd)
-                if refusal:
-                    return self._send(409, json.dumps({"ok": False, "error": refusal}), "application/json")
-                return self._send(200, json.dumps({"ok": True, "pending": True, "dir": cwd}),
+                # any other backend value: refused by name (the tmux backend left romp 2026-09-11; there is
+                # no third arm, and an unknown word must never pick one silently)
+                return self._send(400, json.dumps({"ok": False, "error":
+                    'unknown backend "%s": "sdk" (Claude Code, the default) or "codex"' % be_req}),
                                   "application/json")
             if u.path == "/fork":
                 # Headless session fork (`romp fork`, the user 2026-08-19 via lab_manager): the WS
@@ -54442,7 +53682,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not parent or not nm:
                     return self._send(400, json.dumps({"ok": False, "error": "parent and name required"}),
                                       "application/json")
-                live = _live_names(_tmux_sessions())
+                live = _live_names(_live_map())
                 if nm in live:
                     # a second session under one name would poison every by-name surface (postal,
                     # romp send, this very route's post-fork lookup) — refuse, never overload
@@ -54463,7 +53703,7 @@ class Handler(BaseHTTPRequestHandler):
                 if err:
                     return self._send(200, json.dumps({"ok": False, "error": err}), "application/json")
                 # be.fork registered the name synchronously above, so the live store answers by ack time
-                fsid = _live_names(_tmux_sessions()).get(nm) or ""
+                fsid = _live_names(_live_map()).get(nm) or ""
                 return self._send(200, json.dumps({"ok": True, "id": fsid, "name": nm}),
                                   "application/json")
             if u.path == "/rename":
@@ -54485,7 +53725,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not NAME_RE.match(nm):
                     return self._send(200, json.dumps({"ok": False, "error":
                         "session names use letters, digits, . _ - only"}), "application/json")
-                live = _live_names(_tmux_sessions())
+                live = _live_names(_live_map())
                 tsid = live.get(target) or ""
                 if not tsid and re.fullmatch(r"[0-9a-fA-F-]{32,36}", target):
                     tsid = target
@@ -54530,7 +53770,7 @@ class Handler(BaseHTTPRequestHandler):
                 path, derr = _resolve_create_dir(raw_dir)
                 if derr:
                     return self._send(200, json.dumps({"ok": False, "error": derr}), "application/json")
-                live = _live_names(_tmux_sessions())
+                live = _live_names(_live_map())
                 tsid = live.get(target) or ""
                 if not tsid and re.fullmatch(r"[0-9a-fA-F-]{32,36}", target):
                     tsid = target
@@ -54565,7 +53805,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not target or not bg:
                     return self._send(400, json.dumps({"ok": False, "error": "target and bg required"}),
                                       "application/json")
-                live = _live_names(_tmux_sessions())
+                live = _live_names(_live_map())
                 tsid = live.get(target) or ""
                 if not tsid and re.fullmatch(r"[0-9a-fA-F-]{32,36}", target):
                     tsid = target
@@ -54709,7 +53949,7 @@ class Handler(BaseHTTPRequestHandler):
                                           "application/json")
                     _mark_views_dirty()
                     return self._send(200, json.dumps(ans), "application/json")
-                live = _live_names(_tmux_sessions())
+                live = _live_names(_live_map())
                 # this kernel's own label for each attached kernel's sids — the HOME-frame
                 # resolution of a bare sid an edit routed here from a third kernel (federation v1:
                 # viewer C adds kernel-B's session to THIS kernel's tag; C cannot know our name for
@@ -54770,7 +54010,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, json.dumps({"ok": True, "tag": t, "group": t}), "application/json")
             if u.path == "/working":
                 # Publish/clear a session's working-note in the backend-agnostic store, so the postal bus's
-                # set_working goes through the kernel (no tmux @romp-working) and an SDK session can publish a
+                # set_working goes through the kernel (no backend-side variable) and an SDK session can publish a
                 # note too. Body: {"id": <sid>, "text": <note|"">}. (the user 2026-06-26.)
                 body, berr = _json_object_body(raw_body)
                 if berr:
@@ -54786,10 +54026,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, json.dumps({"ok": True}), "application/json")
             if u.path == "/deliver":
                 # Live-deliver a postal banner to a session — the deliver-time WAKE. The bus drains its maildir
-                # and hands the banner here; the kernel injects it into the pane (tmux, draft-preserving) or
-                # enqueues it (SDK). {id, text} → {injected: bool}; the bus re-delivers to the maildir if false.
-                # Runs synchronously (the tmux inject polls the pane up to a few seconds) — fine on the
-                # threaded server. (the user 2026-06-26.)
+                # and hands the banner here; the kernel enqueues it on the session's backend
+                # (SdkBackend.deliver). {id, text} → {injected: bool}; the bus re-delivers to the maildir if false.
+                # Runs synchronously — fine on the threaded server. (the user 2026-06-26.)
                 body, berr = _json_object_body(raw_body)
                 if berr:
                     return self._send(400, json.dumps({"ok": False, "error": berr}), "application/json")
@@ -54811,38 +54050,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, json.dumps({"ok": True, "injected": bool(res and res.get("injected"))}), "application/json")
                 injected = bool(Sessions.backend_for(sid).deliver(sid, text))
                 return self._send(200, json.dumps({"ok": True, "injected": injected}), "application/json")
-            if u.path == "/picker-check":
-                # Surface a revived tmux session stuck on Claude's resume picker (it blocks before any hook
-                # fires). The bus's `romp-postal picker-check` (run by romp on resume) calls this so it never
-                # shells tmux. {id}. Synchronous poll up to _PICKER_GRACE — fine on the threaded server.
-                body, berr = _json_object_body(raw_body)
-                if berr:
-                    return self._send(400, json.dumps({"ok": False, "error": berr}), "application/json")
-                sid = str(body.get("id") or "")
-                if not sid:
-                    return self._send(400, json.dumps({"ok": False, "error": "id required"}), "application/json")
-                _picker_check(sid)
-                return self._send(200, json.dumps({"ok": True}), "application/json")
-            if u.path in ("/mail-badge", "/deliver-chrome", "/reconcile-peers"):
-                # tmux status-bar chrome the postal bus used to paint itself (the mail badge, the peer "talking
-                # to" chips, the top-line message indicator). The bus POSTs the SEMANTIC data; the kernel sets
-                # the @romp-* vars (no-op for an SDK session with no tmux status bar) so the bus never shells
-                # tmux. (the user 2026-06-26.)
-                try:
-                    body = json.loads(raw_body or b"{}")
-                except Exception:
-                    body = None
-                if not isinstance(body, dict):
-                    body = {}
-                if u.path == "/mail-badge":
-                    _TMUX.mail_badge(str(body.get("id") or ""), body.get("from_name") or "", body.get("from_id") or "")
-                elif u.path == "/deliver-chrome":
-                    _TMUX.deliver_chrome(str(body.get("recip_id") or ""), body.get("recip_name") or "",
-                                         str(body.get("sender_id") or ""), body.get("sender_name") or "",
-                                         body.get("body") or "", body.get("mid") or "")
-                else:
-                    _TMUX.reconcile_peers()
-                return self._send(200, json.dumps({"ok": True}), "application/json")
+            # /picker-check, /mail-badge, /deliver-chrome and /reconcile-peers painted the tmux status bar and
+            # watched a revived pane; they left with the tmux backend (2026-09-11) and fall to the 404 below. The
+            # postal bus is a long-lived singleton that restarts only when its own source changes, so a bus from
+            # before still POSTs them for a while: a 404 is the harmless answer (nothing to paint).
             if u.path == "/tunnels":
                 # Attach a remote kernel: open its ssh tunnels + fetch its token so the browser can merge
                 # its fleet. Body: {"host": <any ssh target>, "kernelPort"?: <remote port>}. The blocking ssh
@@ -55812,7 +55023,7 @@ class Handler(BaseHTTPRequestHandler):
                     _refuse_ws_flag(client, msg["type"], ferr, "mkdir", msg.get("mkdir"))
                     return
                 cwd, derr = _resolve_create_dir(msg.get("dir"), create=mk)
-                live = _live_names(_tmux_sessions())
+                live = _live_names(_live_map())
                 # `parent` / `tags` (tab groups on tags, the user 2026-09-04): validated up front, like
                 # POST /new — an unknown parent or a malformed tags list refuses the create loudly,
                 # BEFORE the live-name check, so a bad request is refused whether or not the name runs
@@ -55849,7 +55060,7 @@ class Handler(BaseHTTPRequestHandler):
                     client["send"](json.dumps({"type": "warn", "text": GOING_DOWN_REFUSAL}))
                 elif _thread_name_refusal(nm, _thread_names()):   # a thread's name (or unverifiable): never mint a namesake tab (T223)
                     client["send"](json.dumps({"type": "warn", "text": _thread_name_refusal(nm, _thread_names())}))
-                elif msg.get("backend") == "sdk":   # non-tmux: drive via the Agent SDK
+                elif msg.get("backend") in (None, "", "sdk"):   # Claude Code via the Agent SDK (the default)
                     # _sdk_ready(), not _sdk(): the backend object exists even with the dependency
                     # missing, so the old check took it as a yes and created a session that could never
                     # run — silently, which is the whole failure (the user 2026-07-28).
@@ -55870,8 +55081,8 @@ class Handler(BaseHTTPRequestHandler):
                         elif extra.get("tagError"):
                             client["send"](json.dumps({"type": "warn", "text": "tagging the new session: %s" % extra["tagError"]}))
                     else:
-                        # NEVER silently fall back to tmux (the user asked for SDK and got a mystery tmux
-                        # session on a remote host without the venv, 2026-07-02). Say what's missing.
+                        # NEVER a silent fallback to another backend (the user asked for the SDK and got a
+                        # mystery terminal session on a remote host without the venv, 2026-07-02). Say what's missing.
                         client["send"](json.dumps({"type": "warn", "text": _sdk_setup_hint()}))
                 elif msg.get("backend") == "codex":   # an OpenAI Codex thread (plans/codex-backend.md)
                     if _codex_ready():
@@ -55898,39 +55109,33 @@ class Handler(BaseHTTPRequestHandler):
                             elif extra.get("tagError"):
                                 client["send"](json.dumps({"type": "warn", "text": "tagging the new session: %s" % extra["tagError"]}))
                     else:
-                        # same rule as SDK: the user asked for Codex — refuse loudly, never a
-                        # mystery tmux session. _codex_ready is False for a missing dep, a dead
+                        # same rule as SDK: the user asked for Codex — refuse loudly, never another
+                        # backend's session. _codex_ready is False for a missing dep, a dead
                         # app-server, or a machine with no `codex login`.
                         be = _codex()
                         why = (getattr(be, "_client_err", "") or CODEX_SETUP_HINT) if be else CODEX_SETUP_HINT
                         client["send"](json.dumps({"type": "warn", "text": why}))
-                elif msg.get("parent") or msg.get("tags"):
-                    # a tmux spawn's sid is unknown at ack time — nothing could tag it (the /new
-                    # contract) — refuse loudly, never a spawn outside its group
-                    client["send"](json.dumps({"type": "warn", "text":
-                        "tags and parent need a Claude Code or Codex session — a terminal session's id is not known until it starts"}))
                 else:
-                    refusal = _spawn_session_start(nm, cwd)   # claimed on THIS thread: the refusal reaches the asker
-                    if refusal:
-                        client["send"](json.dumps({"type": "warn", "text": refusal}))
+                    # an unknown backend word is refused by name, never mapped to a backend the asker did
+                    # not pick (the tmux backend left romp 2026-09-11)
+                    client["send"](json.dumps({"type": "warn", "text":
+                        'unknown backend "%s": Claude Code ("sdk") or Codex ("codex")' % (msg.get("backend") or "")}))
         elif msg and msg.get("type") == "cancelCreate" and msg.get("name"):
             # The webview's "Opening…" cue was cancelled (the ✕/Esc/backdrop — the spawn hung/failed, or the
             # user changed their mind). We only know the NAME (no id yet). Tear down a matching LOCAL session
-            # so a slow-but-successful open doesn't leave an orphan tab; if it hasn't materialized yet, arm
-            # _cancel_pending so the in-flight threaded spawn is reaped on arrival. A remote cue ("host:name")
-            # is dismissed client-side only — nothing local to reap.
+            # so a slow-but-successful open doesn't leave an orphan tab; a name no live session answers to
+            # has nothing to reap (both backends create inline, so a session exists by the time its cue can
+            # be cancelled). A remote cue ("host:name") is dismissed client-side only — nothing local to reap.
             host, bare = _split_host_id(str(msg["name"]).strip())
             if not host and bare:
-                sid = _live_names(_tmux_sessions()).get(bare)   # tmux + SDK live names (Sessions.live merge)
+                sid = _live_names(_live_map()).get(bare)   # the live names (Sessions.live merge)
                 if sid:
                     _end_pending_sid(sid)
-                else:
-                    _cancel_pending.add(bare)
         elif msg and msg.get("type") == "requestSessions":
             # ONE request, the whole 30 days. It was briefly a lazy two-step, but measuring said the wide
             # walk is ~78ms cold once forks are off, so paging it in bought nothing (the user 2026-07-24).
             client["send"](json.dumps({"type": "sessionList",
-                                       "items": _session_list(int(time.time()), _tmux_sessions()),
+                                       "items": _session_list(int(time.time()), _live_map()),
                                        "defaultDir": _tilde(_default_create_dir()),   # prefill the new-session dir field
                                        # …and whether Browse… can do anything here, so a kernel with no
                                        # desktop shows the button as unavailable rather than inert.
@@ -55938,15 +55143,12 @@ class Handler(BaseHTTPRequestHandler):
                                        # billing choices THIS host can offer a new session, with the
                                        # reason for any it cannot — the picker's Billing row (see _auth_avail)
                                        "authAvail": _auth_avail(),
-                                       # whether the + picker OFFERS Claude Code (tmux) (T288): the kernel
-                                       # setting, off by default; the Backend row follows this reply
-                                       "tmuxBackend": jd._state_str("tmux-backend", "off") == "on",
                                        # this machine's name (the identity peers see) — the picker's
                                        # Host row labels its this-machine option with it, so every
                                        # option is a machine by name (the user 2026-08-12)
                                        "selfHost": _self_host()}))
         elif msg and msg.get("type") in ("pickResult", "openByName") and (msg.get("id") or msg.get("name")):
-            sid = msg.get("id") or _live_names(_tmux_sessions()).get(str(msg.get("name")))
+            sid = msg.get("id") or _live_names(_live_map()).get(str(msg.get("name")))
             if sid:
                 _reveal_chat_for(client, {"type": "focus", "id": sid})
         elif msg and msg.get("type") == "closeSession" and msg.get("id"):
@@ -56253,21 +55455,6 @@ class Handler(BaseHTTPRequestHandler):
                                  args=({"commentFast": str(msg["fast"]), "gt": _jgt},), daemon=True).start()
             else:
                 _tell_stale_gesture(client, msg)
-        elif msg and msg.get("type") == "setTmuxBackend" and msg.get("enabled") is not None:
-            # gear "Enable Claude Code tmux backend" (T288): a checkbox, stored as on/off. The boolean is
-            # checked like every sibling's (_as_bool; the review's find: a truthy string would have read as
-            # on and fanned out to every kernel), and a malformed frame is refused with a warn, unwritten.
-            _tbe, ferr = _as_bool(msg.get("enabled"), "enabled")
-            if ferr:
-                _refuse_ws_flag(client, msg["type"], ferr, "enabled", msg.get("enabled"))
-                return
-            _tbv = "on" if _tbe else "off"
-            _jgt = _set_tmux_backend(_tbv, gt=_gesture_ms(msg))
-            if _jgt is not None:
-                threading.Thread(target=_propagate_judge_settings,
-                                 args=({"tmuxBackend": _tbv, "gt": _jgt},), daemon=True).start()
-            else:
-                _tell_stale_gesture(client, msg)
         elif msg and msg.get("type") in ("setJudgeFast", "setDistillFast", "setIndexFast") and msg.get("enabled") is not None:
             # the gear's Fast mode box beside a tier's model picker (T300: one per tier): a checkbox, stored as on/off
             # and read by the judges per call (jd._tier_fast). The boolean is checked like its siblings' (_as_bool),
@@ -56300,6 +55487,8 @@ class Handler(BaseHTTPRequestHandler):
         iid = (q.get("iid") or [""])[0]         # which page INSTANCE: a reconnect carrying it retires its old socket
         active = (q.get("active") or [""])[0]   # the tab this client is looking at → _push builds it FIRST
         reconnect = (q.get("reconnect") or [""])[0] == "1"   # the shim's own statement: this page opened a socket before and its bundle has said ready, with no ready waiting in its queue
+        col = (q.get("col") or [""])[0]         # which chat COLUMN of that dashboard (split screen, 2026-09-08) — for the logs;
+        #                                         the columns arbitrate a dashboard-aimed focus among themselves (render.ts focusIsOurs)
         self.send_response(101)
         self.send_header("Upgrade", "websocket")
         self.send_header("Connection", "Upgrade")
@@ -56338,6 +55527,8 @@ class Handler(BaseHTTPRequestHandler):
             _rp = (q.get("proto") or [""])[0]           # the chat wire the page's bundle declared at its ready, carried on the
             if _rp in ("1", "2"):                       #  redial's dial term (round 2, item 4): a redial posts no ready of its own,
                 client["proto"] = int(_rp)              #  so nothing else could tell this socket's client the protocol
+        if col:
+            client["col"] = col
         _register_ws_client(client)
         if client.get("reconnect"):
             _pusher_wake.set()   # the reconnect is the event; without this it waited out the 0.5-3 s backstop
@@ -56965,9 +56156,6 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
 
 
 def main():
-    # where the tmux server's socket lives (T325): said once at boot, so a session that cannot be reached is diagnosed
-    # from the log, not from the /tmp listing
-    sys.stderr.write("romp-kernel: tmux socket dir: %s\n" % tsock.describe(_TMUX_TMPDIR, _TMUX_TMPDIR_RULE, _TMUX_MANAGER_RULE))
     # Export the kernel's claude resolution for every judge call (in-process tiers AND `romp-judge
     # --once` subprocesses): judges exec the binary directly, and a kernel started over non-login ssh
     # (a federated host) has no ~/.local/bin on PATH — bare `claude` exec-failed silently there.
@@ -56975,7 +56163,7 @@ def main():
     signal.signal(signal.SIGTERM, _graceful_term)             # drain, don't die mid-flight (see _graceful_term)
     # romp holds no API key (credentials.py, 2026-09-08). A retired provider line in service.env, the marker
     # beside it, or a key in this process's environment stops the kernel HERE, before the bundler, the
-    # postal bus, tmux launches or the SDK backend spawn anything that could inherit it. RuntimeError: the
+    # postal bus or the SDK backend spawn anything that could inherit it. RuntimeError: the
     # manager crash-loops the traceback into manager.log until the file is repaired (the serve token's shape).
     jd._cred.check_boot_environment()
     _ensure_bundles()

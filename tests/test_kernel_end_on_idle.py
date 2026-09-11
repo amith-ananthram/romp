@@ -92,7 +92,7 @@ class EndOnIdle(unittest.TestCase):
         src = Path(BIN, "romp-kernel").read_text()
         self.assertIn('b.get("when") == "idle"', src, "/end honors the deferral")
         self.assertIn('{"ok": True, "deferred": True}', src)
-        self.assertIn("_end_on_idle_sweep(now, tmux)", src, "the sweep rides the pusher's tick jobs")
+        self.assertIn("_end_on_idle_sweep(now, live_map)", src, "the sweep rides the pusher's tick jobs")
         sdk = Path(os.path.dirname(BIN), "kernel", "sdk_backend.py").read_text()
         self.assertIn('"ROMP_SID": str(sess.sid)', sdk,
                       "the CLI process carries the session's stable identity for `romp end self`")

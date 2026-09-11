@@ -75,7 +75,8 @@ const R = await page.evaluate((SID) => {
   const row = (i) => ({ sid: SID + i, name: ["web", "api", "tests", "docs"][i], color: null, kind: "blocked",
                         cls: "529", status: 529, since: 1700000000 + i, suppressed: false });
   const frame = (over) => Object.assign({ type: "apiHealth", state: "degraded", cls: "529", reason: "",
-    text: "overloaded · 1 waiting", waiting: 1, retrying: 0, blocked: 1, since: 1700000000, tmux: 0,
+    text: "overloaded · 1 waiting", waiting: 1, retrying: 0, blocked: 1, since: 1700000000,
+    tmux: 0,     // an older kernel's frame still carries the terminal count; the page draws no line for it (T331)
     sessions: [row(1)], seq: 1 }, over || {});
   window.__frame = frame; window.__row = row;                 // the driver's later phases reuse them
   const bg = (n) => n ? getComputedStyle(n).backgroundColor : "";

@@ -55,7 +55,7 @@ class BootWarmParsesNothing(unittest.TestCase):
         before = _threads()
         with mock.patch.object(km.jd, "discover", side_effect=lambda now, **k: calls.__setitem__("discover", calls["discover"] + 1) or []), \
              mock.patch.object(km, "_parse", side_effect=lambda *a, **k: calls.__setitem__("parse", calls["parse"] + 1)), \
-             mock.patch.object(km, "_alive_sessions", side_effect=lambda now, tmux: [{"sid": SID_OLD, "path": "/nonexistent", "name": "web"}]):
+             mock.patch.object(km, "_alive_sessions", side_effect=lambda now, live_map: [{"sid": SID_OLD, "path": "/nonexistent", "name": "web"}]):
             km._boot_warm()
             _join_new(before)
         self.assertEqual(calls["discover"], 1, "the shared discover cache is still warmed")
@@ -79,8 +79,8 @@ class FeedWarmParsesOnlyWhatMoved(unittest.TestCase):
             km._clients[:] = [{"app": "feed", "send": lambda s: None, "sent": {}, "alive": True}]
         self.addCleanup(lambda: km._clients.__setitem__(slice(None), saved))
         km._built_feed[1] = "a built payload"
-        with mock.patch.object(km, "_alive_sessions", side_effect=lambda now, tmux: rows), \
-             mock.patch.object(km, "_tmux_sessions", side_effect=lambda: {}), \
+        with mock.patch.object(km, "_alive_sessions", side_effect=lambda now, live_map: rows), \
+             mock.patch.object(km, "_live_map", side_effect=lambda: {}), \
              mock.patch.object(km, "_has_parsing_client", side_effect=lambda: False), \
              mock.patch.object(km, "_parse", side_effect=lambda path, sid, now: None), \
              mock.patch.object(km, "_push_soon", side_effect=lambda: pokes.append(1)):
@@ -103,8 +103,8 @@ class FeedWarmParsesOnlyWhatMoved(unittest.TestCase):
         with km._clients_lock:                                   # the warm is a no-op with nobody connected: a feed-only window
             km._clients[:] = [{"app": "feed", "send": lambda s: None, "sent": {}, "alive": True}]
         self.addCleanup(lambda: km._clients.__setitem__(slice(None), saved))
-        with mock.patch.object(km, "_alive_sessions", side_effect=lambda now, tmux: rows), \
-             mock.patch.object(km, "_tmux_sessions", side_effect=lambda: {SID_WORK: {"state": "working"}}), \
+        with mock.patch.object(km, "_alive_sessions", side_effect=lambda now, live_map: rows), \
+             mock.patch.object(km, "_live_map", side_effect=lambda: {SID_WORK: {"state": "working"}}), \
              mock.patch.object(km, "_has_parsing_client", side_effect=lambda: False), \
              mock.patch.object(km, "_parse", side_effect=lambda path, sid, now: parsed.append(sid)):
             km._warm_fleet_bg(int(time.time()))
@@ -207,7 +207,7 @@ class TickJobsKeyOnAChange(unittest.TestCase):
         d = tempfile.mkdtemp()
         r = _row(d, SID_OLD, old=True)
         stopped = [{"id": "t1", "t": 1000, "atoms": [{"t": 1000, "type": "user"}]}]
-        common = dict(_alive_sessions=lambda now, tmux: [r], _session_flag=lambda sid, flag: False,
+        common = dict(_alive_sessions=lambda now, live_map: [r], _session_flag=lambda sid, flag: False,
                       _compacting_now=lambda *a, **k: False, _api_error=lambda path: False,
                       _interrupt_marks=lambda turns, sid, family="judge": (1000, 900), _session_working=lambda turns: False,
                       _auto_nudge_pause=lambda why: None, _auto_nudge_resume=lambda: None)
@@ -228,7 +228,7 @@ class TickJobsKeyOnAChange(unittest.TestCase):
         d = tempfile.mkdtemp()
         r = _row(d, SID_OLD, old=True)
         stopped = [{"id": "t1", "t": 1000, "atoms": [{"t": 1000, "type": "user"}]}]
-        common = dict(_alive_sessions=lambda now, tmux: [r], _session_flag=lambda sid, flag: False,
+        common = dict(_alive_sessions=lambda now, live_map: [r], _session_flag=lambda sid, flag: False,
                       _compacting_now=lambda *a, **k: False, _api_error=lambda path: False,
                       _interrupt_marks=lambda turns, sid, family="judge": (1000, 900), _session_working=lambda turns: False,
                       _auto_nudge_resume=lambda: None, _auto_nudge_data=lambda: {}, _intr_blocked=lambda sid=None: "g1")
@@ -249,7 +249,7 @@ class TickJobsKeyOnAChange(unittest.TestCase):
         d = tempfile.mkdtemp()
         r = _row(d, SID_OLD, old=True)
         stopped = [{"id": "t1", "t": 1000, "atoms": [{"t": 1000, "type": "user"}]}]
-        common = dict(_alive_sessions=lambda now, tmux: [r], _session_flag=lambda sid, flag: False,
+        common = dict(_alive_sessions=lambda now, live_map: [r], _session_flag=lambda sid, flag: False,
                       _compacting_now=lambda *a, **k: False, _api_error=lambda path: False,
                       _interrupt_marks=lambda turns, sid, family="judge": (1000, 900), _session_working=lambda turns: False,
                       _auto_nudge_resume=lambda: None, _auto_nudge_data=lambda: {}, _intr_blocked=lambda sid=None: None,
@@ -274,7 +274,7 @@ class TickJobsKeyOnAChange(unittest.TestCase):
         self.assertNotIn("_tick_job_check", inspect.getsource(km._auto_nudge_session),
                          "the nudge has wall-clock timers, so it keeps its per-cycle evaluation (documented in _tick_job_check)")
         cyc = inspect.getsource(km._pusher_cycle_jobs)
-        self.assertLess(cyc.index("_interrupt_block_tick(now, tmux)"), cyc.index("_persist_tick_seen()"), "the memo is written after the tick jobs")
+        self.assertLess(cyc.index("_interrupt_block_tick(now, live_map)"), cyc.index("_persist_tick_seen()"), "the memo is written after the tick jobs")
         self.assertIn("_persist_tick_seen(force=True)", inspect.getsource(km._drain_and_exit), "and at exit")
 
 

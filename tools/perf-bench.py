@@ -62,7 +62,7 @@ backfill, registry cwds and how many of them map to an existing project director
 
 What is measured. Unless noted, each row is one untimed warm-up call followed by `--iters` timed
 calls, reported as ms min/median/max:
-  liveness_snapshot      Sessions.live() — the pusher cycle's one liveness read (tmux backend off)
+  liveness_snapshot      Sessions.live() — the pusher cycle's one liveness read
   names_snapshot         _names_snapshot() — the cycle's names-registry read
   discover_cold/warm     jd.discover(now) with and without its fingerprint cache
   build_session_cold:S   build_session for each of the K largest live transcripts with EVERY cache a
@@ -118,9 +118,7 @@ How the liveness snapshot is reconstructed, and what is approximated:
     A running session's snapshot also carries live-only fields (subagents, bgTasks); those read
     empty here. ctxTokens and the context percentage come from the reg's persisted values, as for a
     dormant row. `--all-regs-live` also lists regs with alive=false.
-  * The tmux backend is switched off (ROMP_TMUX_AVAILABLE=0, the kernel's own seam) and TMUX_TMPDIR
-    points at an empty private directory, so no `tmux` is ever run and tmux-backed sessions are not
-    represented. Comment threads (threadOf regs) are skipped, as the real live_sessions skips them.
+  * Comment threads (threadOf regs) are skipped, as the real live_sessions skips them.
   * The SDK backend's manager key is pinned empty (dormant rows read auth=login).
   * The session list is discovery's (jd.discover, a 48 h window keyed to the real clock) restricted to
     the live rows, plus — as _alive_sessions does for the builders — every live sid outside that
@@ -360,8 +358,6 @@ def prepare_env(state, claude_dir, private_dir):
     for k in [k for k in os.environ if k in KEY_SOURCE_ENV or k.startswith(KEY_SOURCE_ENV_PREFIXES)]:
         os.environ.pop(k)
         changes.append("unset " + k)
-    tmux_dir = os.path.join(private_dir, "tmux")
-    os.makedirs(tmux_dir, exist_ok=True)          # tmux falls back to the default socket dir when this is missing
     no_env = os.path.join(private_dir, "no-such-service.env")
     sets = {
         "ROMP_MANAGER_PORT": "1",                 # a dead port: absent maps to the default (live) port in _run_main_update
@@ -369,8 +365,6 @@ def prepare_env(state, claude_dir, private_dir):
         "ROMP_MODEL_CATALOG": "off",
         "ROMP_CLI_SCOPE": "0",
         "ROMP_CLAUDE_BIN": "/bin/false",
-        "ROMP_TMUX_AVAILABLE": "0",
-        "TMUX_TMPDIR": tmux_dir,
         "ROMP_SERVE_TOKEN": "perf-bench-token-not-for-use",
         "ROMP_SERVICE_ENV_FILE": no_env,
         "ROMP_SERVICE_ENV": no_env,
@@ -752,7 +746,7 @@ def load_kernel(repo, shadow=None):
     finally:
         Path.write_text = real_write_text
     for sym in ("_live_scope", "Sessions", "build_session", "build_feed", "build_timeline", "_push",
-                "_names_snapshot", "_sessions", "_parse", "_parse_cache", "_tmux_sessions", "_atomic_write",
+                "_names_snapshot", "_sessions", "_parse", "_parse_cache", "_live_map", "_atomic_write",
                 "_built_feed", "_built_timeline", "em", "jd"):
         if not hasattr(km, sym):
             raise BenchError("this kernel lacks %s; the harness does not know how to drive it" % sym)
@@ -1041,10 +1035,10 @@ def _bench(args, state, repo, out, shadow, rec, maps):
     def now():
         return int(time.time())
 
-    def scope(tmux):
+    def scope(live_map):
         """The pusher cycle's scope, as _pusher_cycle opens it: the liveness snapshot, the sid->path memo,
         the discover-rows memo (a per-cycle memo slot some kernel revisions read) and the names snapshot."""
-        km._live_scope.snapshot = tmux
+        km._live_scope.snapshot = live_map
         km._live_scope.paths = {}
         km._live_scope.sessions = {}
         km._live_scope.names = km._names_snapshot()
@@ -1123,16 +1117,16 @@ def _bench(args, state, repo, out, shadow, rec, maps):
         return st, last
 
     # liveness + names snapshots (the pusher cycle's per-cycle reads)
-    bench["liveness_snapshot"], tmux = timed(lambda: km.Sessions.live(), iters)
+    bench["liveness_snapshot"], live_map = timed(lambda: km.Sessions.live(), iters)
     bench["names_snapshot"], _ = timed(lambda: km._names_snapshot(), iters)
     regs = sbmod.list_regs(state)
-    check_snapshot_rows(tmux, regs, args.all_regs_live)      # exact by construction: one row per counted reg
-    out["liveness"] = {"live": len(tmux), "alive_regs": sum(1 for r in regs if r.get("alive") and not r.get("threadOf")),
+    check_snapshot_rows(live_map, regs, args.all_regs_live)      # exact by construction: one row per counted reg
+    out["liveness"] = {"live": len(live_map), "alive_regs": sum(1 for r in regs if r.get("alive") and not r.get("threadOf")),
                        "closed_regs": sum(1 for r in regs if not r.get("alive") and not r.get("threadOf")),
                        "thread_regs": sum(1 for r in regs if r.get("threadOf")),
                        "rows": "dormant" if args.dormant_rows else "states-file",
-                       "states": {sid[:8]: (row.get("state") if isinstance(row, dict) else None) for sid, row in tmux.items()}}
-    scope(tmux)
+                       "states": {sid[:8]: (row.get("state") if isinstance(row, dict) else None) for sid, row in live_map.items()}}
+    scope(live_map)
     try:
         # discovery
         discover_clears = [0]
@@ -1148,9 +1142,9 @@ def _bench(args, state, repo, out, shadow, rec, maps):
 
         # ONE world: discovery's live sessions, plus every live sid outside its window resolved the way
         # _alive_sessions resolves them for the builders
-        sessions = [s for s in km._sessions(now()) if s["sid"] in tmux]
+        sessions = [s for s in km._sessions(now()) if s["sid"] in live_map]
         have = {s["sid"] for s in sessions}
-        missing = [sid for sid in tmux if sid not in have]
+        missing = [sid for sid in live_map if sid not in have]
         backfilled = []
         if missing and hasattr(jd, "DEATH_BACKFILL_WINDOW"):
             wide = {f[0]: f for f in jd.discover(now(), window=jd.DEATH_BACKFILL_WINDOW)}
@@ -1166,8 +1160,8 @@ def _bench(args, state, repo, out, shadow, rec, maps):
                 sessions.append({"sid": fsid, "name": name or fsid[:8], "anchor": anchor, "path": str(path), "mtime": mtime})
                 backfilled.append(sid)
         no_transcript = [sid for sid in missing if sid not in set(backfilled)]
-        searched = transcript_search(jd, state, tmux)
-        if tmux and not sessions:
+        searched = transcript_search(jd, state, live_map)
+        if live_map and not sessions:
             # after the backfill, not before it: a copy whose transcripts are all older than the
             # discovery window is a normal copy, and the backfill is what finds them
             raise BenchError("discovery found no transcript for any of the %d live sessions: %d in the %d h window, "
@@ -1175,7 +1169,7 @@ def _bench(args, state, repo, out, shadow, rec, maps):
                              "director%s holding %d transcript(s)%s. Causes: a wrong --claude-dir; registry cwds a "
                              "redaction rewrote while the project directories kept their names (see --cwd-map); a copy "
                              "whose transcripts are older than the backfill window"
-                             % (len(tmux), len(have), int(getattr(jd, "WINDOW", 0)) // 3600, len(backfilled),
+                             % (len(live_map), len(have), int(getattr(jd, "WINDOW", 0)) // 3600, len(backfilled),
                                 int(getattr(jd, "DEATH_BACKFILL_WINDOW", 0)) // 86400, searched["cwds"],
                                 searched["project_dirs"], "y" if searched["project_dirs"] == 1 else "ies",
                                 searched["transcripts"],
@@ -1207,7 +1201,7 @@ def _bench(args, state, repo, out, shadow, rec, maps):
             def cold_after(ms, _tag=tag, _path=os.path.realpath(s["path"])):
                 check_cold_sample(em, _tag, _path, asm_before)
                 ctr.n += 1
-            st_cold, m = timed_counted(lambda: km.build_session(sid, now(), tmux), before=cold_before, after=cold_after)
+            st_cold, m = timed_counted(lambda: km.build_session(sid, now(), live_map), before=cold_before, after=cold_after)
             bench["build_session_cold:" + tag] = st_cold
 
             def emwarm_before():
@@ -1216,15 +1210,15 @@ def _bench(args, state, repo, out, shadow, rec, maps):
 
             def count_after(ms):
                 ctr.n += 1
-            st_em, _ = timed_counted(lambda: km.build_session(sid, now(), tmux), before=emwarm_before, after=count_after)
+            st_em, _ = timed_counted(lambda: km.build_session(sid, now(), live_map), before=emwarm_before, after=count_after)
             bench["build_session_emwarm:" + tag] = st_em
-            st_warm, _ = timed_counted(lambda: km.build_session(sid, now(), tmux), after=count_after)
+            st_warm, _ = timed_counted(lambda: km.build_session(sid, now(), live_map), after=count_after)
             bench["build_session_warm:" + tag] = st_warm
             out["benched_sessions"].append({"sid8": tag, "name": s.get("name", ""), "bytes": s["bytes"],
                                             "events": len((m or {}).get("events") or [])})
             if args.profile:
-                profiles["build_session_cold:" + tag] = profile_entry(lambda: km.build_session(sid, now(), tmux), clear_all_caches, repo)
-                profiles["build_session_warm:" + tag] = profile_entry(lambda: km.build_session(sid, now(), tmux), None, repo)
+                profiles["build_session_cold:" + tag] = profile_entry(lambda: km.build_session(sid, now(), live_map), clear_all_caches, repo)
+                profiles["build_session_warm:" + tag] = profile_entry(lambda: km.build_session(sid, now(), live_map), None, repo)
 
         # every live parse once from empty (the boot-time cost); kept warm for the feed/timeline
         clear_all_caches()
@@ -1234,16 +1228,16 @@ def _bench(args, state, repo, out, shadow, rec, maps):
         bench["warm_all_parses"] = single((time.perf_counter() - t0) * 1000, sessions=len(sessions))
 
         # feed + timeline in the steady state
-        bench["build_feed"], feed = timed(lambda: km.build_feed(now(), tmux), iters)
+        bench["build_feed"], feed = timed(lambda: km.build_feed(now(), live_map), iters)
         bench["build_feed"]["cards"] = {k: len(feed.get(k) or []) for k in ("asks", "working", "awaiting") if isinstance(feed, dict)}
-        bench["build_timeline_bars"], tl = timed(lambda: km.build_timeline(now(), tmux, with_bars=True), iters)
+        bench["build_timeline_bars"], tl = timed(lambda: km.build_timeline(now(), live_map, with_bars=True), iters)
         bench["build_timeline_bars"]["lanes"] = len((tl or {}).get("sessions") or [])
-        bench["build_timeline_skel"], _ = timed(lambda: km.build_timeline(now(), tmux, with_bars=False), iters)
+        bench["build_timeline_skel"], _ = timed(lambda: km.build_timeline(now(), live_map, with_bars=False), iters)
         if args.profile:
-            profiles["build_feed"] = profile_entry(lambda: km.build_feed(now(), tmux), None, repo)
-            profiles["build_timeline_bars"] = profile_entry(lambda: km.build_timeline(now(), tmux, with_bars=True), None, repo)
+            profiles["build_feed"] = profile_entry(lambda: km.build_feed(now(), live_map), None, repo)
+            profiles["build_timeline_bars"] = profile_entry(lambda: km.build_timeline(now(), live_map, with_bars=True), None, repo)
         # the feed with nothing parsed (cards-first boot)
-        bench["build_feed_noparse"], _ = timed(lambda: km.build_feed(now(), tmux), iters, before=km._parse_cache.clear)
+        bench["build_feed_noparse"], _ = timed(lambda: km.build_feed(now(), live_map), iters, before=km._parse_cache.clear)
         for s in sessions:
             km._parse(s["path"], s["sid"], now())
 
@@ -1282,15 +1276,15 @@ def _bench(args, state, repo, out, shadow, rec, maps):
                 if hasattr(km, name):
                     setattr(km, name, None)
             unscope()
-            scope(tmux)
+            scope(live_map)
             asm0 = dict(em._ASM_STATS)
             t0 = time.perf_counter()
-            km._push(clients, tmux=tmux)
+            km._push(clients, live_map=live_map)
             bench["push_cold_cycle"] = single((time.perf_counter() - t0) * 1000, bytes=client_bytes(clients), clients=apps,
                                               asm=asm_delta(em, asm0))   # every live transcript parsed inside the cycle
             reset_client_bytes(clients)
             new_cycle()
-            km._push(clients, tmux=tmux)               # a warming cycle: baselines, wire caches, chat cache
+            km._push(clients, live_map=live_map)               # a warming cycle: baselines, wire caches, chat cache
             reset_client_bytes(clients)
 
             # a page load: one fresh client with empty dedup state, connect=True
@@ -1302,7 +1296,7 @@ def _bench(args, state, repo, out, shadow, rec, maps):
                     new_cycle()
 
                 def connect_push():
-                    km._push([holder["c"]], connect=True, tmux=tmux)
+                    km._push([holder["c"]], connect=True, live_map=live_map)
                 st, _ = timed(connect_push, iters, before=connect_before)
                 st["bytes"] = client_bytes([holder["c"]])[app]
                 bench["push_connect:" + app] = st
@@ -1315,7 +1309,7 @@ def _bench(args, state, repo, out, shadow, rec, maps):
                 reset_client_bytes(clients)
                 b0 = built_at()
                 t0 = time.perf_counter()
-                km._push(clients, tmux=tmux)
+                km._push(clients, live_map=live_map)
                 ms = (time.perf_counter() - t0) * 1000
                 b1 = built_at()
                 samples.append({"ms": round(ms, 2), "rebuilt_feed": b1[0] != b0[0], "rebuilt_timeline": b1[1] != b0[1],
@@ -1329,13 +1323,13 @@ def _bench(args, state, repo, out, shadow, rec, maps):
                 bench["push_steady_rebuild"] = st2
             reset_client_bytes(clients)
             new_cycle()
-            km._push(clients, tmux=tmux)
+            km._push(clients, live_map=live_map)
             bench["push_steady"]["bytes"] = client_bytes(clients)   # one further cycle's per-slot bytes
             out["push_rebuilds"] = len(rebuilt)
             if args.profile:
                 def one_push():
                     new_cycle()
-                    km._push(clients, tmux=tmux)
+                    km._push(clients, live_map=live_map)
                 profiles["push_steady"] = profile_entry(one_push, None, repo)
     finally:
         unscope()

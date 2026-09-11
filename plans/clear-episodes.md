@@ -1,5 +1,9 @@
 # `/clear` is an episode boundary, not a deletion
 
+*History (2026-09-11): the terminal (tmux) backend this plan lists among its accepted gaps was
+removed from romp on that date (issue #1398; the migration note is in `docs/reference.md`). The tmux
+passages below describe the state at the time of writing and are kept as history.*
+
 Direction picked by the user (2026-07-26): when a session's conversation is
 cleared, keep the session — its name, tab slot, mailbox, worktree naming, and
 timeline lane all persist — and treat the cleared conversation as a **closed

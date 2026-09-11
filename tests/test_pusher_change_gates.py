@@ -253,8 +253,8 @@ class FoldEvictionKeepsThreads(unittest.TestCase):
         with open(self.path, "w") as f:
             f.write("{}\n")                                 # stat-able: the build cache keys on it
         self.sess = {"sid": self.PSID, "name": "web", "anchor": None, "path": self.path, "mtime": 0}
-        self.tmux = {self.PSID: {"state": "waiting", "color": "#888888", "since": 0, "model": "", "effort": "",
-                                 "context": None, "backend": "tmux"}}
+        self.live = {self.PSID: {"state": "waiting", "color": "#888888", "since": 0, "model": "", "effort": "",
+                                 "context": None, "backend": "sdk"}}
         self.client = {"app": "chat", "alive": True, "sent": {}, "send": lambda s: None}
         self._saved_keep = [set(km._thread_fold_keep[0]), set(km._thread_fold_keep[1])]
         km._thread_fold_keep[0], km._thread_fold_keep[1] = set(), set()
@@ -277,11 +277,11 @@ class FoldEvictionKeepsThreads(unittest.TestCase):
         with mock.patch.object(km, "_alive_sessions", lambda now, tm: [dict(self.sess)]), \
                 mock.patch.object(km, "_chat_tab_sessions", lambda now, tm: [dict(self.sess)]), \
                 mock.patch.object(km, "_warm_fleet_bg", lambda now: None), \
-                mock.patch.object(km, "_tmux_sessions", lambda: dict(self.tmux)), \
-                mock.patch.object(km, "build_session", lambda sid, now, tmux=None, **kw: dict(frame)), \
+                mock.patch.object(km, "_live_map", lambda: dict(self.live)), \
+                mock.patch.object(km, "build_session", lambda sid, now, live_map=None, **kw: dict(frame)), \
                 mock.patch.object(km, "_cached_feed", lambda *a, **k: {"working": [], "awaiting": [], "asks": []}), \
                 mock.patch.object(km, "_send_client", lambda c, key, msg, pre=None, sig=None, kind="full": None):
-            km._push([self.client], tmux=self.tmux)
+            km._push([self.client], live_map=self.live)
 
     def _held(self):
         with km._chat_fold_lock:

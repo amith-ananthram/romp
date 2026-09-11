@@ -338,16 +338,16 @@ class PruneAndWriteDiscipline(_Base):
         self.seed_disk({WEB + ":g1": _entry("completed", WEB), API + ":g1": _entry("needs_input", API),
                         GONE + ":g1": _entry("needs_input", GONE), KEPT + ":g1": _entry("completed", KEPT)})
         self.boot(_feed(_card(WEB + ":g1", WEB, "completed"), sessions=[WEB]))
-        saved = jd.discover, km._tmux_sessions
+        saved = jd.discover, km._live_map
         jd.discover = lambda now, window=None, forks=True: [(API, "/dev/null", None, "api")]   # api: dead, in the window
-        km._tmux_sessions = lambda: {WEB: {}}                     # web: alive
+        km._live_map = lambda: {WEB: {}}                     # web: alive
         km._kept_open.add(KEPT)                                   # kept: a dead tab the user kept open
         err = io.StringIO()
         try:
             with redirect_stderr(err):
                 km._compact_goal_stores()
         finally:
-            jd.discover, km._tmux_sessions = saved
+            jd.discover, km._live_map = saved
             km._kept_open.discard(KEPT)
         expect = {WEB + ":g1": _entry("completed", WEB), API + ":g1": _entry("needs_input", API),
                   KEPT + ":g1": _entry("completed", KEPT)}

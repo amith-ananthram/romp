@@ -391,7 +391,7 @@ class EveryTabIsServedOnTheCompleteKey(_StateSandbox):
         self.sess = {"sid": self.SID, "path": str(self.tpath), "anchor": self.SID}
         self.tm = {"state": "waiting", "since": NOW - 100, "model": "m", "subagents": [], "bgTasks": [], "snapT": NOW}
         self.saved_sdk = km._sdk
-        km._sdk = lambda: None                                    # tmux-owned unless a test says otherwise
+        km._sdk = lambda: None                                    # no backend owns it unless a test says otherwise
         km._built_chat.pop(self.SID, None)
         km._live_scope.usage = km._live_scope.spend_pause = None   # a drain scope another module left on this thread
         self._clear_stamps()
@@ -407,13 +407,13 @@ class EveryTabIsServedOnTheCompleteKey(_StateSandbox):
             km._watches[:] = [w for w in km._watches if w.get("sid") != self.SID]
 
     def _clear_stamps(self):
-        for d in (km._interrupt_clicked, km._model_switch_pending, km._compact_clicked, km._tmux_echo, km._tmux_echo_rev):
+        for d in (km._interrupt_clicked, km._model_switch_pending, km._compact_clicked):
             d.pop(self.SID, None)
 
     def sig(self, tm=None, now=NOW, **kw):
         """The complete key, as the pusher takes it: the session, its liveness row, the push's clock and map."""
         tm = self.tm if tm is None else tm
-        return km._chat_build_sig(self.sess, tm, now, tmux={self.SID: tm} if tm is not None else {}, **kw)
+        return km._chat_build_sig(self.sess, tm, now, live_map={self.SID: tm} if tm is not None else {}, **kw)
 
     def test_a_an_identical_world_yields_the_same_key_and_a_volatile_stamp_does_not_matter(self):
         s1 = self.sig()
@@ -553,28 +553,6 @@ class EveryTabIsServedOnTheCompleteKey(_StateSandbox):
         self.assertNotEqual(s4, s5, "a watch armed")
         self.assertEqual(km._chat_sig_miss(s4, s5), ("watch",))
 
-    def test_f_the_owning_backends_live_tail_moves_the_key_for_a_tmux_session(self):
-        """Review 2026-09-05: the key read only the SDK backend's tail, so a tmux session's composer echo, a
-        kernel-side store the build renders, left the watched tab served stale until some file moved. The
-        tmux echo store counts its changes (TmuxBackend.live_rev) the way the SDK backend does, and
-        Sessions.live_rev dispatches to the owning backend."""
-        s1 = self.sig()
-        self.assertIsNotNone(s1)
-        km._tmux_echo_add(self.SID, "please also fix the header")
-        s2 = self.sig()
-        self.assertNotEqual(s1, s2, "the echo the build renders is in the key")
-        t = km._tmux_echo_atoms(self.SID)[0]["t"]
-        km._tmux_echo_settle(self.SID, human_floor=t + 5)          # the pane dropped the keystroke: marked, rendered differently
-        self.assertTrue(km._tmux_echo_atoms(self.SID)[0].get("dropped"))
-        s3 = self.sig()
-        self.assertNotEqual(s2, s3, "...and so is its dropped flag")
-        self.assertEqual(km._TMUX.dismiss_echo(self.SID, t=t), "please also fix the header")
-        s4 = self.sig()
-        self.assertNotEqual(s3, s4, "the dismissal is a change too")
-        # a revision counts changes, so the key never returns to an earlier value (one rebuild per change,
-        # never a stale hit); the old key's digest of the atoms did
-        self.assertEqual([km._chat_sig_miss(a, b) for a, b in ((s1, s2), (s2, s3), (s3, s4))], [("live",)] * 3)
-
     def test_g_the_key_carries_the_snapshot_facts_a_tabs_chips_render(self):
         """The judge generation no longer advances every pass, so a tab's chips (state, retrying, subagents,
         pending picks...) are keyed on the snapshot row itself (review 2026-09-05), minus its volatile stamp."""
@@ -588,12 +566,12 @@ class EveryTabIsServedOnTheCompleteKey(_StateSandbox):
             b3 = self.sig(tm3)
             self.assertNotEqual(b1, b3, k)
             self.assertIn("row", km._chat_sig_miss(b1, b3), k)   # modelPending is a clock input too (_model_pending_now)
-        self.assertNotEqual(b1, km._chat_build_sig(self.sess, None, NOW, tmux={}),
+        self.assertNotEqual(b1, km._chat_build_sig(self.sess, None, NOW, live_map={}),
                             "no row for the sid: a different (row-less) key, never a false hit")
 
     def test_h_the_spend_hold_moves_the_key_of_a_tab_with_a_queued_send_and_marks_the_views_dirty(self):
         """The account-level hold is what a QUEUED bubble names, so the key folds it exactly when the build
-        can render one (a queue, parked ops, an in-flight tmux echo) and never asks otherwise; the old
+        can render one (a queue, parked ops, a non-forwarding backend's in-flight echo) and never asks otherwise; the old
         watched-tab key stat'd retry-paused.json for every watched tab. The writer still stamps the dirty
         mark: the feed and the timeline rebuild past it."""
         class Stub:
@@ -826,44 +804,44 @@ class PerCycleStoreReadersAreCached(_StateSandbox):
         real = jd.load_goals_shared
         jd.load_goals_shared = lambda fsid: (loads.append(fsid), real(fsid))[1]
         saved_alive = km._alive_sessions
-        km._alive_sessions = lambda now, tmux: [{"sid": sid, "path": str(gpath)}]
-        tmux = {sid: {"state": "waiting", "bgTasks": []}}
+        km._alive_sessions = lambda now, live_map: [{"sid": sid, "path": str(gpath)}]
+        live = {sid: {"state": "waiting", "bgTasks": []}}
         scan = []                                          # what the transcript pairs: a running watcher
         saved_scan = km._bg_scan_all_cached
         km._bg_scan_all_cached = lambda path: list(scan)
         try:
             km._lift_seen.pop(sid, None)
-            km._lift_spent_awaiting(NOW, tmux)
-            km._lift_spent_awaiting(NOW + 1, tmux)
-            km._lift_spent_awaiting(NOW + 2, tmux)
+            km._lift_spent_awaiting(NOW, live)
+            km._lift_spent_awaiting(NOW + 1, live)
+            km._lift_spent_awaiting(NOW + 2, live)
             self.assertEqual(loads, [sid], "one read while nothing recorded moved")
             tmp = gpath.with_suffix(".tmp")                  # published the way save_goals publishes: tmp + replace
             tmp.write_text(json.dumps({"rompUuid": sid, "seq": 1, "nodes": {}, "placements": {}, "status": {}, "note": "longer"}))
             os.replace(tmp, gpath)
-            km._lift_spent_awaiting(NOW + 3, tmux)
+            km._lift_spent_awaiting(NOW + 3, live)
             self.assertEqual(len(loads), 2, "a store write is re-examined")
-            tmux[sid]["bgTasks"] = [{"toolUseId": "t1", "status": "running"}]
-            km._lift_spent_awaiting(NOW + 4, tmux)
+            live[sid]["bgTasks"] = [{"toolUseId": "t1", "status": "running"}]
+            km._lift_spent_awaiting(NOW + 4, live)
             self.assertEqual(len(loads), 3, "a live task appearing is re-examined")
-            tmux[sid]["subagents"] = [{"id": "a1"}]
-            km._lift_spent_awaiting(NOW + 5, tmux)
+            live[sid]["subagents"] = [{"id": "a1"}]
+            km._lift_spent_awaiting(NOW + 5, live)
             self.assertEqual(len(loads), 4, "a subagent appearing is re-examined")
             scan.append({"id": "toolu_1", "status": "running", "t": NOW, "deadline": NOW + 100})
-            km._lift_spent_awaiting(NOW + 6, tmux)
+            km._lift_spent_awaiting(NOW + 6, live)
             self.assertEqual(len(loads), 5, "a new dispatch is re-examined")
-            km._lift_spent_awaiting(NOW + 150, tmux)
+            km._lift_spent_awaiting(NOW + 150, live)
             self.assertEqual(len(loads), 5, "…and not again while its deadline has not passed")
-            km._lift_spent_awaiting(NOW + 100 + 121, tmux)
+            km._lift_spent_awaiting(NOW + 100 + 121, live)
             self.assertEqual(len(loads), 6, "the recorded deadline passing (plus grace) re-examines: the clock arm is keyed")
-            km._lift_spent_awaiting(NOW + 100 + 122, tmux)
+            km._lift_spent_awaiting(NOW + 100 + 122, live)
             self.assertEqual(len(loads), 6, "…once")
             boom = [True]
             jd.load_goals_shared = lambda fsid: (loads.append(fsid), (_ for _ in ()).throw(RuntimeError("torn read")) if boom[0] else real(fsid))[1]
             scan.append({"id": "toolu_2", "status": "running", "t": NOW + 300})
-            km._lift_spent_awaiting(NOW + 300, tmux)      # the ruling raises → not a ruling
+            km._lift_spent_awaiting(NOW + 300, live)      # the ruling raises → not a ruling
             self.assertEqual(len(loads), 7)
             boom[0] = False
-            km._lift_spent_awaiting(NOW + 301, tmux)      # …so the next cycle retries on the same inputs
+            km._lift_spent_awaiting(NOW + 301, live)      # …so the next cycle retries on the same inputs
             self.assertEqual(len(loads), 8, "a raised ruling is retried, not skipped")
         finally:
             jd.load_goals_shared = real; km._alive_sessions = saved_alive; km._bg_scan_all_cached = saved_scan; km._lift_seen.pop(sid, None)

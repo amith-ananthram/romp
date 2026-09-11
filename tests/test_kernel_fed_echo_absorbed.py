@@ -137,6 +137,67 @@ class _World:
         return key
 
 
+def streamed_after_the_send():
+    """Tool steps the session ran after a send at T0+55 and before its splice: what the model did BEFORE reading it."""
+    return [
+        aline(T0 + 120, "", "a3", "tr1", tools=("Bash",), stop="tool_use"),
+        trline(T0 + 121, "tu_a3_0", "tr2", "a3"),
+        aline(T0 + 122, "", "a4", "tr2", tools=("Bash",), stop="tool_use"),
+    ]
+
+
+class TheEchoSitsAtTheTailForEveryViewer(unittest.TestCase):
+    """The kernel's echo of a fed, unlanded send is the message's only record until the splice, and every window but
+    the sender's draws it (the sender hides it behind its own tail bubble, T262h). The merge sorted the turn's atoms
+    by time alone, so the echo sat at its SEND time — above the tool steps that streamed after the send, which the
+    model ran before reading it — while the sender's bubble sat at the tail (T252d): one session in two split columns
+    read as one column behind the other (the user 2026-09-10). An in-flight echo now sorts after every atom the turn
+    holds; a never-delivered echo (a record of a loss) and the CLI's command feedback keep their time."""
+
+    def setUp(self):
+        self.w = _World()
+
+    def tearDown(self):
+        self.w.close()
+
+    def _atoms(self, merged):
+        return merged["turns"][-1]["atoms"]
+
+    def test_an_in_flight_echo_follows_the_steps_that_streamed_after_the_send(self):
+        self.w.write(running_turn() + streamed_after_the_send())
+        self.w.echo(FED, T0 + 55)                    # sent after tr1 (T0+50), before the steps
+        self.w.s.inflight = 1
+        self.w.s._inflight_texts.append(FED)
+        atoms = self._atoms(km._merge_live_atoms(self.w.parse(), SID))
+        self.assertEqual(atoms[-1].get("_echo_text"), FED, "the echo is the turn's last atom")
+        self.assertEqual([a["uuid"] for a in atoms[-4:-1]], ["a3", "tr2", "a4"], "…below the steps that ran while it waited")
+        by_time = sorted(atoms, key=lambda a: (a.get("t", 0), a.get("_seq", 0)))
+        self.assertEqual([a["uuid"] for a in by_time[-4:]], ["echo:fed", "a3", "tr2", "a4"],
+                         "time order alone drew the send above those steps: the old order, the other column's view")
+
+    def test_a_never_delivered_echo_and_command_feedback_keep_their_time(self):
+        self.w.write(running_turn() + streamed_after_the_send())
+        key = self.w.echo(FED, T0 + 55)
+        self.w.be._live[SID][key]["dropped"] = True   # never delivered: a record of a loss, at the time it was lost
+        self.w.be._live[SID]["cmd"] = {"type": "user", "uuid": "cmd", "session_id": SID, "t": T0 + 56, "parentUuid": None,
+                                       "author": "human", "command": "/model", "_echo_text": "/model opus",
+                                       "message": {"role": "user", "content": [{"type": "text", "text": "/model opus"}]}}
+        atoms = self._atoms(km._merge_live_atoms(self.w.parse(), SID))
+        self.assertEqual([a["uuid"] for a in atoms[-5:]], ["echo:fed", "cmd", "a3", "tr2", "a4"],
+                         "both keep their place in time, before the later steps")
+
+    def test_the_landing_replaces_the_tail_echo_in_place(self):
+        # the splice lands the text below the steps (T252d): the echo retires and the absorbed atom holds the tail
+        self.w.write(running_turn() + streamed_after_the_send() + [attline(T0 + 55, FED, "att1", "a4")])
+        self.w.echo(FED, T0 + 55)
+        self.w.s.inflight = 1
+        self.w.s._inflight_texts.append(FED)
+        atoms = self._atoms(km._merge_live_atoms(self.w.parse(), SID))
+        self.assertNotIn(SID, self.w.be._live, "the landing retires the echo")
+        self.assertEqual(atoms[-1]["uuid"], "att1", "the absorbed atom is the tail, where the echo was")
+        self.assertTrue(atoms[-1].get("absorbed"))
+
+
 class FedEchoSurvivesUntilTheSpliceLands(unittest.TestCase):
     def setUp(self):
         self.w = _World()
@@ -278,7 +339,7 @@ class ChatEventSaysAbsorbed(unittest.TestCase):
         names = root / "names"; names.mkdir()
         (names / SID).write_text("web\t%s\t#abcdef\n" % str(self.w.cwd))
         self.saved = (km.jd.NAMES, km.jd.PROJECTS, km.jd.CAPDIR, km.jd.ARCHDIR, km.jd.GOALDIR, km.jd.STATE,
-                      km.NAMES, km._tmux_sessions, km._GLOBAL_CLAUDE_MD)
+                      km.NAMES, km._live_map, km._GLOBAL_CLAUDE_MD)
         km.jd.NAMES, km.jd.PROJECTS = names, proj
         km.jd.CAPDIR, km.jd.ARCHDIR, km.jd.GOALDIR = root / "captions", root / "archive", root / "goals"
         km.jd.STATE = root
@@ -287,7 +348,7 @@ class ChatEventSaysAbsorbed(unittest.TestCase):
         self.now = int(__import__("time").time())       # discovery keys on the real clock
         self.tm = {SID: {"state": "working", "since": self.now - 100, "model": "", "effort": "",
                          "context": None, "compactPct": None, "color": None}}
-        km._tmux_sessions = lambda: self.tm
+        km._live_map = lambda: self.tm
         km._chat_fold.clear(); km._parse_cache.clear()
         km._PATH_LINK_CACHE.clear(); km._SPACE_PATH_CACHE.clear()
         km._postal_index_memo[0] = None
@@ -296,7 +357,7 @@ class ChatEventSaysAbsorbed(unittest.TestCase):
 
     def tearDown(self):
         (km.jd.NAMES, km.jd.PROJECTS, km.jd.CAPDIR, km.jd.ARCHDIR, km.jd.GOALDIR, km.jd.STATE,
-         km.NAMES, km._tmux_sessions, km._GLOBAL_CLAUDE_MD) = self.saved
+         km.NAMES, km._live_map, km._GLOBAL_CLAUDE_MD) = self.saved
         km._chat_fold.clear(); km._parse_cache.clear()
         self.w.close()
 
@@ -431,69 +492,19 @@ class OneTextRuleAcrossKernelAndBackend(unittest.TestCase):
         self.assertEqual(self._texts(merged).count(FED), 1, "the echo itself is shown, once")
 
 
-class TmuxEchoPrunesUnderTheOneKey(unittest.TestCase):
-    """The tmux route's by-text prune (_tmux_echo_prune) is another reader of the key, and until 2026-09-06
-    it compared the echo's RAW text against the kernel's stripped keys: a tmux send with a trailing newline
-    (`romp send` passes its argument verbatim; the CLI records it verbatim) was never pruned by text once
-    it landed. The display dedup hid the echo behind the record, so nothing showed — until a later human
-    turn landed and the settle marked the still-resident echo `dropped`: a "never delivered" bubble, with
-    restore and dismiss, for a message the transcript holds."""
-
-    def setUp(self):
-        self._saved = km._sdk
-        km._sdk = lambda: None                 # the tmux route: no SDK backend owns the sid
-        km._tmux_echo.clear()
-
-    def tearDown(self):
-        km._sdk = self._saved
-        km._tmux_echo.clear()
-
-    @staticmethod
-    def _session(atoms):
-        return {"turns": [{"id": "t", "trigger": None, "t": T0, "end": T0, "ended": True, "atoms": atoms}]}
-
-    @staticmethod
-    def _human(text, uid, t):
-        return {"type": "user", "uuid": uid, "author": "human", "t": t,
-                "message": {"role": "user", "content": [{"type": "text", "text": text}]}}
-
-    def _echo(self, text, sent_at):
-        km._tmux_echo_add(SID, text)
-        atom = next(a for a in km._tmux_echo[SID].values() if a.get("_echo_text") == text)
-        atom["t"] = sent_at
-        return atom
-
-    def test_a_trailing_newline_tmux_echo_is_pruned_when_its_text_lands(self):
-        text = "rename this to fetch_notes\n"
-        echo = self._echo(text, T0 + 10)
-        # the record holds the text verbatim; a later human turn has landed since
-        merged = km._merge_live_atoms(self._session([self._human(text, "u1", T0 + 12),
-                                                     self._human("and the tests", "u2", T0 + 500)]), SID)
-        self.assertNotIn(SID, km._tmux_echo, "the echo's key and the record's key agree: pruned by text")
-        self.assertFalse(echo.get("dropped"), "a delivered send is never marked never-delivered")
-        texts = [t for turn in merged["turns"] for a in turn["atoms"] for t in km._atom_user_texts(a)]
-        self.assertEqual(texts.count(km.sb.echo_text_key(text)), 1, "shown once: the record")
-
-    def test_an_unlanded_tmux_echo_still_survives(self):
-        # the control: the record carries a different text, so the echo stays (and is overtaken → dropped)
-        echo = self._echo("this Enter dropped at the prompt\n", T0 + 10)
-        km._merge_live_atoms(self._session([self._human("and the tests", "u2", T0 + 500)]), SID)
-        self.assertIn(SID, km._tmux_echo)
-        self.assertTrue(echo.get("dropped"))
-
-
 class ImagePathPredicateTwins(unittest.TestCase):
     """The extension set is the CLI's, not romp's. SOURCE OF TRUTH: the installed Claude Code bundle
     (2.1.261) carries exactly one image-path test, `/\\.(png|jpe?g|gif|webp)$/i`; its callers are the
     terminal composer's bracketed-paste handler — which reads a pasted path with one of those extensions
     and rewrites the token to "[Image #N]" (the "Failed to read pasted image file" path) — and two
     attachment uploaders' isImage. Nothing on the stream-json input path an SDK session uses reaches it,
-    which is why sdk_backend.prune_live floors no echo; the kernel's tmux settle borrows the predicate
-    for the route where the hook does run. When the CLI's set changes, change BOTH twins here: the kernel
-    waits on the rewrite (_injected_img_paths), the backend exports the predicate — a drift between them
-    or from the CLI makes an echo the CLI did rewrite persist forever, or one it did not rewrite get
-    retired as an extraction. The kernel's bare-path PREVIEW (_user_images) is deliberately NOT a
-    reader: it is romp's own feature on its own set (PreviewSetIsTheHydrationRoutes below)."""
+    which is why sdk_backend.prune_live floors no echo; the kernel keeps its twin (_IMG_PATH_RE) pinned
+    to the same set (its one reader, the terminal send's pre-Enter wait, left with the tmux backend). When
+    the CLI's set changes, change BOTH twins here: the backend exports the predicate (_path_bearing) — a
+    drift between them or from the CLI makes an echo the CLI did rewrite persist forever, or one it did
+    not rewrite get retired as an extraction. The kernel's bare-path PREVIEW (_user_images) is
+    deliberately NOT a reader: it is romp's own feature on its own set (PreviewSetIsTheHydrationRoutes
+    below)."""
 
     CLI_SET = "png|jpe?g|gif|webp"
 
@@ -509,12 +520,13 @@ class ImagePathPredicateTwins(unittest.TestCase):
             self.assertTrue(rx.flags & re.IGNORECASE, "the CLI's test is case-insensitive (/i)")
         for ext in ("png", "PNG", "jpg", "JPEG", "jpeg", "gif", "webp", "WebP"):
             self.assertTrue(sb._path_bearing("see /tmp/notes-api/docs/shot.%s now" % ext), ext)
-            self.assertEqual(km._injected_img_paths("see /tmp/notes-api/docs/shot.%s now" % ext),
-                             ["/tmp/notes-api/docs/shot.%s" % ext])
+            m = km._IMG_PATH_RE.search("see /tmp/notes-api/docs/shot.%s now" % ext)
+            self.assertIsNotNone(m, ext)
+            self.assertEqual(m.group(1), "/tmp/notes-api/docs/shot.%s" % ext)
         for ext in ("svg", "bmp", "ico", "avif", "heic", "tiff", "txt", "md"):
             self.assertFalse(sb._path_bearing("see /tmp/notes-api/docs/shot.%s now" % ext),
                              "%s: the CLI never rewrites it" % ext)
-            self.assertEqual(km._injected_img_paths("see /tmp/notes-api/docs/shot.%s now" % ext), [])
+            self.assertIsNone(km._IMG_PATH_RE.search("see /tmp/notes-api/docs/shot.%s now" % ext), ext)
 
 
 class PreviewSetIsTheHydrationRoutes(unittest.TestCase):
@@ -541,11 +553,11 @@ class PreviewSetIsTheHydrationRoutes(unittest.TestCase):
                          "an extension the route cannot serve is not proposed")
 
     def test_the_preview_is_wider_than_the_cli_twin_and_the_twin_is_unchanged(self):
-        # the extraction reader still answers with the CLI's set: an svg path is previewed, yet the tmux
-        # pre-Enter wait does not wait for a rewrite the CLI never performs
+        # the CLI twin still answers with the CLI's set: an svg path is previewed, yet neither twin claims
+        # a rewrite the CLI never performs
         text = "compare with /tmp/notes-api/docs/diagram.svg"
         self.assertEqual(len(km._user_images([], text, True)), 1)
-        self.assertEqual(km._injected_img_paths(text), [])
+        self.assertIsNone(km._IMG_PATH_RE.search(text))
         self.assertFalse(sb._path_bearing(text))
 
 

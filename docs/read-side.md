@@ -176,35 +176,12 @@ single-writer.
 ### How mail reaches a session
 
 The bus stores mail per recipient (a Maildir) and the kernel owns the wake
-(`POST /deliver`). Three delivery legs, chosen by what the recipient is:
-
-1. **SDK session** — the kernel enqueues the banner on the session's SDK input
-   queue. First-class, nothing to scrape.
-2. **tmux session on Claude Code ≥ 2.1.224** — one JSON user record written to
-   the session's **inbox socket**, the per-session Unix socket the CLI binds and
-   registers (with its session id) in `~/.claude/sessions/<pid>.json`. The
-   kernel joins that registry on the session's current transcript id
-   (`lastSid`), connects, writes one line, done: instant, wakes an idle session,
-   delivers between tool calls mid-turn, and never touches the composer, so a
-   half-typed draft survives with no stash dance. The CLI treats socket arrivals
-   as another-session traffic; its inbound gate can HOLD mail from an
-   unverifiable sender (the kernel is one) when the session runs a bypass-class
-   permission mode, and a held message silently expires after ~5 minutes — and
-   the socket acks nothing, so a hold would read as delivered. That is why
-   `bin/romp` launches sessions with the CLI's inbound-accept setting
-   (`crossSessionInbound: accept`) and tags them `@romp-inbound-accept`, and the
-   kernel takes this leg ONLY for tagged sessions: the tag is written by the
-   same launch that made holds impossible, so tag and setting can never
-   disagree. Security shape: the socket is owner-only (0600 inside a 0700 dir),
-   unreachable from off-machine and from other local users; a same-user process
-   could already type into any pane via `tmux send-keys` with FULL user
-   authority, while socket mail arrives explicitly labeled as peer traffic with
-   approval power stripped — the lower-privilege injection path of the two.
-3. **Everything else** (older CLI, untagged launch, socket gone) —
-   draft-preserving pane injection at a live ❯ prompt, with the Stop-hook drain
-   (`hooks/romp-postal-drain.sh`) as the turn-boundary backstop. Unchanged, and
-   still the fallback whenever leg 2 fails for any reason: non-delivery is
-   caught by the maildir claim/retry and stuck-mail warnings either way.
+(`POST /deliver`): it hands the banner to the session's backend, which enqueues
+it on the session's input queue (a Claude Code session's SDK input queue).
+First-class, nothing to scrape, and never a touch on the composer, so a
+half-typed draft survives. The Stop-hook drain (`hooks/romp-postal-drain.sh`)
+is the turn-boundary backstop for mail a wake could not land, and non-delivery
+is caught by the maildir claim/retry and stuck-mail warnings either way.
 
 ## The two inputs
 
@@ -246,7 +223,7 @@ holding it, or the transcript OVERTAKES it — a later genuine-human turn lands,
 later second, while the send's text has landed nowhere and no queue still owes it
 (the backend's own, or the CLI's queue ledger). The composer's messages travel one
 channel in order, so a later one going through means the CLI skipped this one: lost,
-not waiting (`settle_echoes`, the SDK twin of the tmux settle; before 2026-09-11 a
+not waiting (`settle_echoes`; before 2026-09-11 a
 CLI that wedged, swallowed a send and carried on left a solid bubble nothing could
 clear). At boot the same evidence turns the re-delivery of an unlanded human send
 into the flag: a message the conversation has moved past is not re-sent behind the
@@ -264,7 +241,11 @@ at its send position, above those steps, while the model read it only after them
 so the order on screen contradicted the order the model saw; the read position is
 the one that matches. So the chat's pending bubble sits at the TAIL while pending,
 below every streaming step, and the landed atom appears in that same tail
-position, so nothing moves on landing; the send time rides along as `sentAt` for
+position, so nothing moves on landing. Every other window of the session sees the
+kernel's echo of that send in the same place: the live merge orders an in-flight
+echo after everything the turn holds (a never-delivered one keeps its time), and
+the pane dresses it as the sender's bubble is dressed, so one session in two split
+columns agrees on what is pending (2026-09-11). The send time rides along as `sentAt` for
 the bubble's hover ("sent at HH:MM", shown once landed when it differs from the
 landing by more than a minute). No header, no cue. This supersedes the
 in-place-at-send-position rule of T252/T252b; the kernel's per-copy identities
@@ -273,21 +254,15 @@ press: the client mints the copy's id (`qid`, in the kernel's echo form) and pos
 it with the send, the kernel parks the copy under it (the parked op's fourth slot)
 or queues it under it, and the ✕ names it, so the kernel cancels exactly the copy
 the bubble stands for, never a same-text neighbour by index or body. That holds
-wherever the copy carries the id: a parked send on any backend, and the SDK
-route's queue. A copy whose ✕ names no id (an op the kernel parked itself, such
-as a nudge or a re-delivery; a ✕ from an older client) is still cancelled by
-index and body. The tmux route's queue, which the CLI holds, has no ✕ at all:
-`TmuxBackend` has no `unqueue`, so `build_session` ships those copies
-`cancelable: false` and the chat draws no ✕ for them. Every copy the kernel
-queues itself (mail, a nudge, a re-delivery) is still minted an id where it
-enters the backend's queue. The CLI extracts
-no image paths on the stream-json route (its only image-path test belongs to the
+wherever the copy carries the id: a parked send, and the SDK route's queue. A
+copy whose ✕ names no id (an op the kernel parked itself, such as a nudge or a
+re-delivery; a ✕ from an older client) is still cancelled by index and body.
+Every copy the kernel queues itself (mail, a nudge, a re-delivery) is still
+minted an id where it enters the backend's queue. The CLI extracts no image
+paths on the stream-json route (its only image-path test belongs to the
 interactive composer's paste handler), so an image path in an SDK send lands as
-typed and the echo's text matches. `_path_bearing` and the extension set it tests
-(png, jpe?g, gif, webp, case-insensitive: the CLI bundle's single image-path test,
-pinned equal between kernel and backend) remain for the tmux settle path only, where
-the paste hook does run and rewrites the path to `[Image #N]`. The chat's own image
-previews (`_user_images`) use a separate set, built from the served MIME table
+typed and the echo's text matches. The chat's own image previews
+(`_user_images`) use a separate set, built from the served MIME table
 (`_IMG_MIME`, svg and bmp included), so a preview is never proposed for a file the
 image route cannot serve.
 
@@ -302,8 +277,8 @@ reads the whole file. The found verdict is recorded on the echo (`_landed`), and
 `prune_live` and the chat merge retire the echo on it without a text match, so a
 found echo always has an exit and a later boot never re-scans it. Every by-text
 comparison of an echo against a record (the guard's scan, `prune_live`'s retire, the
-kernel's `_atom_user_texts` and its folds, the fed-copy pairing `qids_for_landing`, and
-the tmux echo's prune `_tmux_echo_prune`) uses the two keys in `session_backend.py`:
+kernel's `_atom_user_texts` and its folds, and the fed-copy pairing
+`qids_for_landing`) uses the two keys in `session_backend.py`:
 `echo_text_key` (outer whitespace stripped, nothing else) and, for a slash send,
 `command_text_key` (the tokens joined by single spaces). The second exists because the
 CLI records a slash or skill command as its `<command-name>` wrapper, which parses to
@@ -318,9 +293,10 @@ agree on the same records.
 - click any line to jump to that point in the transcript.
 
 The captioner emits both grains and the event model gives the turn→segment nesting,
-so the TOC is free. (Caveat: a live permission prompt's *content* may exist only in
-tmux, not the transcript; a live AskUserQuestion/ExitPlanMode is in the tree as an
-unanswered tool_use. The chip state comes from `states/` regardless.)
+so the TOC is free. (Caveat: a live permission prompt's *content* reaches the
+kernel through the session's backend, not the transcript; a live
+AskUserQuestion/ExitPlanMode is in the tree as an unanswered tool_use. The chip
+state comes from `states/` regardless.)
 
 ### Feed = top-level-goal cards, nothing else
 

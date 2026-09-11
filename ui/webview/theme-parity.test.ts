@@ -86,6 +86,13 @@ const PAIRS: Array<[string, string, number]> = [
   ["--hl-attr", "--bg", 4.5],
 ];
 
+test("styles.css: the provisional wash the kind pairs are computed against is the one the sheet paints", () => {
+  const css = read("styles.css");
+  const bubble = css.slice(css.indexOf(".queued-bubble, .notice.queued-bubble, .notice.notice-slim.queued-bubble {"), css.indexOf("\n}\n", css.indexOf(".queued-bubble, .notice.queued-bubble, .notice.notice-slim.queued-bubble {")));
+  assert.match(bubble, /background: color-mix\(in srgb, var\(--you\) 8\.5%, transparent\);/);
+  assert.doesNotMatch(bubble, /opacity:/, "the fade is in the colours: no element opacity dims the words on the card");
+});
+
 for (const sheet of ["styles.css", "feed.css"]) {
   const css = read(sheet);
   const dark = props(block(css, ":root {"));
@@ -117,6 +124,17 @@ for (const sheet of ["styles.css", "feed.css"]) {
       // a skip must be loud (PR #763 item 6): pin how many pairs actually ran per sheet/theme —
       // grow these numbers when PAIRS grows, never let them silently shrink
       const expected = sheet === "styles.css" ? PAIRS.length : 20;   // feed's :root holds a deliberate subset (+ the retrying pair, 2026-09-08)
+      // T337: the postal kind words also sit on the PROVISIONAL card (a sent card not yet landed wears the pending
+      // bubble's dress: an 8.5% wash of --you over the page, styles.css .queued-bubble, no element opacity since the
+      // fade moved into the dress's colours), the darkest ground they meet; each reads at 4.5:1 there too
+      if (sheet === "styles.css") {
+        const you = rgbOf(theme.get("--you")!, page)!;
+        const wash = [0, 1, 2].map((i) => Math.round(you[i] * 0.085 + page[i] * 0.915)) as [number, number, number];
+        for (const tok of ["--postal-coordinate", "--postal-delegate", "--postal-question"]) {
+          const fore = rgbOf(theme.get(tok)!, wash)!;
+          assert.ok(contrast(fore, wash) >= 4.5, `${sheet} ${name}: ${tok} on the provisional wash = ${contrast(fore, wash).toFixed(2)} < 4.5`);
+        }
+      }
       assert.ok(evaluated >= expected,
         `${sheet} ${name}: only ${evaluated}/${expected} contrast pairs evaluated — silent skip`);
     }

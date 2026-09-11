@@ -67,13 +67,13 @@ class Harness(unittest.TestCase):
         self.proj = self.td / "proj"; self.proj.mkdir()
         self.leaf = str(self.proj / (SID + ".jsonl"))
         self.rows = [{"sid": SID, "name": "web", "path": self.leaf, "mtime": NOW, "anchor": SID}]
-        self.saved = (km._sessions, km._tmux_sessions)
+        self.saved = (km._sessions, km._live_map)
         km._sessions = lambda now, **kw: list(self.rows)
-        km._tmux_sessions = lambda: {}
+        km._live_map = lambda: {}
         self.fresh()
 
     def tearDown(self):
-        km._sessions, km._tmux_sessions = self.saved
+        km._sessions, km._live_map = self.saved
         km._live_scope.chat_floor0 = None
         em.set_checkpoint_dir(None)
         jd._rebind_state(self.saved_state)
@@ -682,18 +682,18 @@ class FloorDecision(Harness):
             c0, s0 = _client(proto=None); c0.update(app="chat", alive=True, ready=False)   # a socket before its ready
             with km._clients_lock:
                 km._clients = [c2, c0]
-            km._push([c2], connect=True, tmux={})
+            km._push([c2], connect=True, live_map={})
             self.assertEqual(km._RENDER_FLOOR[SID], cut, "a proto-2 page and a pre-ready socket: the floor stands")
             f2 = next(x for x in s2 if x.get("type") == "session" and x.get("id") == SID)
             self.assertEqual(f2.get("proto"), 2)
             with km._clients_lock:
                 km._clients = [c2, c1]                                    # an index client connects elsewhere
-            km._push([c2], connect=False, tmux={})
+            km._push([c2], connect=False, live_map={})
             self.assertEqual(km._RENDER_FLOOR[SID], 0, "every connected client decides: the index client drops the floor")
             self.assertEqual(km._chat_fold_last_info().get("why"), "floor")
             with km._clients_lock:
                 km._clients = [c2]
-            km._push([c2], connect=False, tmux={})
+            km._push([c2], connect=False, live_map={})
             self.assertEqual(km._RENDER_FLOOR[SID], cut, "…and it climbs back when the index client leaves")
         finally:
             km._alive_sessions = saved_alive

@@ -3,8 +3,8 @@
 op and POST /move resolve + canonicalise the folder like a new-session dir, go through the drive-op
 park-or-fire gate (a busy session parks a visible "move to …" chip; a quiet one fires now), hold the
 FIFO while the backend's blocking move runs (`_moving`), re-park a CLI-side `busy` a bounded number of
-times, and report every outcome as a typed event (moved / moveFailed) to the asker. The tmux backend
-refuses with a reason. SYNTHETIC fixtures only."""
+times, and report every outcome as a typed event (moved / moveFailed) to the asker. A sid no backend
+owns is refused with a reason by the unowned route. SYNTHETIC fixtures only."""
 import json
 import os
 import tempfile
@@ -73,11 +73,11 @@ class MoveOps(unittest.TestCase):
             mock.patch.object(km, "_cwd_of", lambda sid: self.dir),
             mock.patch.object(km, "_send_to_view", lambda app, msg, wid: self.views.append((app, msg, wid))),
             mock.patch.object(km, "_fire_move", _sync_fire),
-            # the retry spacing and the tmux prompt hold are a separate axis (their own tests below and in
+            # the retry spacing and the prompt hold are a separate axis (their own tests below and in
             # tests/test_kernel_parked_ops_liveness.py); off, so back-to-back _apply_pending_ops calls here
             # stand for successive cycles
             mock.patch.object(km, "_MOVE_BUSY_RETRY_S", 0.0),
-            mock.patch.object(km, "_TMUX_PROMPT_HOLD_S", 0.0),
+            mock.patch.object(km, "_PROMPT_HOLD_S", 0.0),
         ]
         for p in self._patches:
             p.start()
@@ -236,11 +236,13 @@ class MoveOps(unittest.TestCase):
         self.assertEqual(self.views[-1][1]["type"], "moveFailed")
         self.assertIn("no way to move", self.views[-1][1]["text"])
 
-    def test_tmux_backend_refuses_with_a_reason(self):
-        why = km._TMUX.move(SID, self.dir)
+    def test_an_unowned_sid_is_refused_with_a_reason(self):
+        # Sessions.backend_for answers _UNOWNED for a sid neither backend owns (2026-09-11); its move is the
+        # ABC's default refusal — a reason in words, never "" (which would read as moved)
+        why = km._UNOWNED.move(SID, self.dir)
         self.assertIsInstance(why, str)
-        self.assertIn("tmux", why)
-        self.assertIn("new session", why)
+        self.assertNotEqual(why, "")
+        self.assertIn("no way to move", why)
 
     def test_move_session_is_a_drive_op_beside_rename(self):
         import inspect
@@ -271,8 +273,8 @@ class MoveRoute(unittest.TestCase):
         self._patches = [
             mock.patch.object(km.Sessions, "backend_for", staticmethod(lambda sid: self.be)),
             mock.patch.object(km, "_kernel_knows", lambda sid: True),
-            mock.patch.object(km, "_live_names", lambda tmux: {"web": SID}),
-            mock.patch.object(km, "_tmux_sessions", lambda: {}),
+            mock.patch.object(km, "_live_names", lambda live_map: {"web": SID}),
+            mock.patch.object(km, "_live_map", lambda: {}),
             mock.patch.object(km, "_compacting_now", lambda sid: False),
             mock.patch.object(km, "_working_now", lambda sid: False),
             mock.patch.object(km, "_commands_for_cwd", lambda cwd: ([], False)),
@@ -331,13 +333,13 @@ class MoveRoute(unittest.TestCase):
         code, resp = self._post({"target": "nobody", "dir": self.dir})
         self.assertFalse(resp["ok"])
         self.assertIn('no live session named "nobody"', resp["error"])
-        why = "this session runs in a terminal (tmux), which has no way to move a running session"
+        why = "this session's backend has no way to move a running session"
         self.be.answers = [why]
         code, resp = self._post({"target": "web", "dir": self.dir})
         self.assertEqual(resp, {"ok": False, "error": why}, "the backend's own words ride back")
 
     def test_a_dormant_session_is_addressed_by_sid(self):
-        with mock.patch.object(km, "_live_names", lambda tmux: {}):
+        with mock.patch.object(km, "_live_names", lambda live_map: {}):
             code, resp = self._post({"target": SID, "dir": self.dir})
         self.assertEqual(resp.get("ok"), True)
         self.assertEqual(self.be.calls, [(SID, self.dir)])

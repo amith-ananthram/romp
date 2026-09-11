@@ -171,8 +171,8 @@ class ForkSessionOp(unittest.TestCase):
         self.be = _FakeForkBackend()
         self.saved = (km.Sessions.backend_for, km._sdk_ready, km._sessions, km._pick_identity_color,
                       km._reveal_chat_for, km._mark_views_dirty, km._push_session_now, km._seed_fork_stores,
-                      km._tmux_sessions)
-        km._tmux_sessions = lambda: {}   # the fork door's live snapshot (names reserved atomically) — never the box's tmux
+                      km._live_map)
+        km._live_map = lambda: {}   # the fork door's live snapshot (names reserved atomically) — never the box's live map
         km.Sessions.backend_for = lambda sid: self.be
         km._sdk_ready = lambda: True
         km._sessions = lambda now: [{"sid": PARENT, "path": self.path}]
@@ -196,7 +196,7 @@ class ForkSessionOp(unittest.TestCase):
         self.vtd.cleanup()
         (km.Sessions.backend_for, km._sdk_ready, km._sessions, km._pick_identity_color,
          km._reveal_chat_for, km._mark_views_dirty, km._push_session_now, km._seed_fork_stores,
-         km._tmux_sessions) = self.saved
+         km._live_map) = self.saved
         for d in (jd.EPIDIR, jd.CAPDIR, jd.GOALDIR):
             for f in Path(d).glob("*"):
                 f.unlink()
@@ -206,7 +206,7 @@ class ForkSessionOp(unittest.TestCase):
         self.assertIn("letters, digits", km._fork_session(PARENT, "", "bad name!") or "")
         self.assertEqual(self.be.events, [])
 
-    def test_tmux_backend_refused(self):
+    def test_a_backend_without_fork_is_refused(self):
         km.Sessions.backend_for = lambda sid: object()   # no .fork
         self.assertIn("needs a Claude Code session", km._fork_session(PARENT, "", "api-fork") or "")   # the backend's name since T288
 

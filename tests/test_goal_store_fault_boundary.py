@@ -66,9 +66,9 @@ def _peer_body(mid, text):
 
 
 def _TM():
-    """One live tmux entry, every key the feed and timeline builders read."""
+    """One live session row, every key the feed and timeline builders read."""
     return {"state": "ready", "color": "#888888", "since": NOW - 60, "model": "", "effort": "",
-            "context": None, "backend": "tmux"}
+            "context": None, "backend": "sdk"}
 
 
 def _store(sid, text, **node):
@@ -149,14 +149,14 @@ class FeedBoundary(_World):
         self._write(B, _store(B, "the healthy session's goal", origin={"peer": A, "goalId": A + ":g1"}))
         self.sessions = [{"sid": A, "name": "web", "path": "/nonexistent/%s.jsonl" % A, "anchor": 0, "mtime": 0},
                          {"sid": B, "name": "api", "path": "/nonexistent/%s.jsonl" % B, "anchor": 0, "mtime": 0}]
-        for p in (mock.patch.object(km, "_alive_sessions", lambda now, tmux: list(self.sessions)),
+        for p in (mock.patch.object(km, "_alive_sessions", lambda now, live_map: list(self.sessions)),
                   mock.patch.object(km, "_warm_fleet_bg", lambda now: None)):
             p.start()
             self.addCleanup(p.stop)
-        self.tmux = {A: _TM(), B: _TM()}
+        self.live = {A: _TM(), B: _TM()}
 
     def _asks(self):
-        return {a["itemId"]: a for a in km.build_feed(NOW, self.tmux)["asks"]}
+        return {a["itemId"]: a for a in km.build_feed(NOW, self.live)["asks"]}
 
     def test_one_faulting_store_costs_that_session_only_and_files_one_row_per_episode(self):
         with _fault_on(self.a_file):
@@ -205,7 +205,7 @@ class FeedBoundary(_World):
     def test_the_timeline_frame_ships_with_one_lane_faulting(self):
         km._BARS_COMPLAINED.clear()
         with _fault_on(self.a_file):
-            tl = km.build_timeline(NOW, self.tmux, with_bars=False)
+            tl = km.build_timeline(NOW, self.live, with_bars=False)
             self.assertIsNotNone(tl, "the frame ships")
             lanes = {s["id"] for s in tl.get("sessions") or []} if isinstance(tl, dict) else set()
             self.assertIn(B, lanes, "the healthy lane is there")
@@ -218,10 +218,10 @@ class FeedBoundary(_World):
                                      _aline(NOW - 480, "Done.", "a1", "u1")])
         sess = [{"sid": A, "name": "web", "anchor": None, "path": tpath, "mtime": NOW}]
         with mock.patch.object(km, "_sessions", lambda now, window=None, forks=True: list(sess)):
-            healthy = km.build_session(A, NOW, self.tmux)
+            healthy = km.build_session(A, NOW, self.live)
             self.assertTrue(healthy and healthy["ledger"]["tree"], "premise: the tab's ledger tree shows the goal")
             with _fault_on(self.a_file):
-                m = km.build_session(A, NOW, self.tmux)
+                m = km.build_session(A, NOW, self.live)
         self.assertIsNotNone(m, "the tab builds")
         self.assertEqual(m["id"], A)
         self.assertEqual(m["ledger"]["tree"], [], "with no goal-derived content")
@@ -233,15 +233,15 @@ class PushBoundary(_World):
         """The pusher's outer try used to catch the raise and return before sending to ANY client."""
         sessions = [{"sid": A, "name": "web", "path": "/nonexistent/%s.jsonl" % A, "anchor": 0, "mtime": 0},
                     {"sid": B, "name": "api", "path": "/nonexistent/%s.jsonl" % B, "anchor": 0, "mtime": 0}]
-        tmux = {A: _TM(), B: _TM()}
+        live = {A: _TM(), B: _TM()}
         sent = []
         with mock.patch.object(km, "_alive_sessions", lambda now, tm: list(sessions)), \
                 mock.patch.object(km, "_warm_fleet_bg", lambda now: None), \
-                mock.patch.object(km, "_tmux_sessions", lambda: dict(tmux)), \
+                mock.patch.object(km, "_live_map", lambda: dict(live)), \
                 mock.patch.object(km, "_chat_tab_sessions", lambda now, tm: []), \
                 mock.patch.object(km, "_send_client", lambda c, key, msg, pre=None, sig=None: sent.append((key, msg))), \
                 _fault_on(self.a_file):
-            km._push([{"app": "feed", "alive": True}], tmux=tmux)
+            km._push([{"app": "feed", "alive": True}], live_map=live)
         keys = [k[0] for k, _ in sent]
         self.assertIn("feed", keys, "a feed payload reached the client despite one session's fault: %r" % keys)
         payload = next(m for k, m in sent if k[0] == "feed")
@@ -268,7 +268,7 @@ class InterruptLiftBoundary(_World):
         st["closedTurns"] = []
         self._write(A, st)
         km._write_auto_nudge({"enabled": True, "nudged": {}, "intrBlocked": {}})
-        for p in (mock.patch.object(km, "_alive_sessions", lambda now, tmux: [{"sid": A, "path": self.tpath}]),
+        for p in (mock.patch.object(km, "_alive_sessions", lambda now, live_map: [{"sid": A, "path": self.tpath}]),
                   mock.patch.object(km, "_push_all", lambda *a, **k: None),
                   mock.patch.object(jd, "CLOSER_ON", False)):
             p.start()
@@ -276,7 +276,7 @@ class InterruptLiftBoundary(_World):
         km._downtime[:] = []
         km._autonudge_cache.clear()
         km._pending_ops.clear()
-        self.tmux = {A: dict(_TM(), state="idle")}
+        self.live = {A: dict(_TM(), state="idle")}
 
     def _reengage(self):
         with open(self.tpath, "a") as f:
@@ -287,16 +287,16 @@ class InterruptLiftBoundary(_World):
 
     def test_a_fault_at_the_reengage_tick_keeps_the_marker_so_the_next_tick_lifts(self):
         gid = A + ":g1"
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         self.assertEqual(km._intr_blocked(A), gid, "premise: the stop blocked the focus goal and marked it")
         self.assertEqual(jd.load_goals(A)["status"][gid], "blocked")
         self._reengage()
         before = self.a_file.read_bytes()
         with _fault_on(self.a_file):
-            km._interrupt_block_tick(NOW, self.tmux)
+            km._interrupt_block_tick(NOW, self.live)
         self.assertEqual(self.a_file.read_bytes(), before, "nothing was written to a store we could not read")
         self.assertEqual(km._intr_blocked(A), gid, "the marker is KEPT: the lift is owed, not spent")
-        km._interrupt_block_tick(NOW, self.tmux)  # the fault cleared
+        km._interrupt_block_tick(NOW, self.live)  # the fault cleared
         self.assertEqual(jd.load_goals(A)["status"][gid], "working", "the next healthy tick lifts the block")
         self.assertIsNone(km._intr_blocked(A), "and spends the marker")
 
@@ -309,11 +309,11 @@ class InterruptLiftBoundary(_World):
         gid = A + ":g1"
         before = self.a_file.read_bytes()
         with _fault_on(self.a_file):
-            km._interrupt_block_tick(NOW, self.tmux)
+            km._interrupt_block_tick(NOW, self.live)
         self.assertIsNone(km._intr_blocked(A), "no marker: nothing was blocked")
         self.assertEqual(self.a_file.read_bytes(), before, "nothing was written to a store we could not read")
         self.assertEqual([r["fsid"] for r in self._rows("store-unreadable")], [A], "and the fault is filed once")
-        km._interrupt_block_tick(NOW, self.tmux)          # the fault cleared
+        km._interrupt_block_tick(NOW, self.live)          # the fault cleared
         self.assertEqual(km._intr_blocked(A), gid, "the next healthy tick blocks the focus goal and marks it")
         self.assertEqual(jd.load_goals(A)["status"][gid], "blocked")
 
@@ -330,25 +330,25 @@ class InterruptLiftBoundary(_World):
         it cannot read is not evidence that it fell. Reading a fault as 'no longer stands' popped the
         marker, the re-block failed through the same fault, and romp's own block outlived every tick."""
         gid = A + ":g1"
-        km._interrupt_block_tick(NOW, self.tmux)
+        km._interrupt_block_tick(NOW, self.live)
         self.assertEqual(km._intr_blocked(A), gid, "premise: the stop blocked the focus goal and marked it")
         self._reengage()
         before = self.a_file.read_bytes()
         with _fault_on(self.a_file):
-            km._interrupt_block_tick(NOW, self.tmux)          # re-engaged under the fault: the lift is owed
+            km._interrupt_block_tick(NOW, self.live)          # re-engaged under the fault: the lift is owed
             self.assertEqual(km._intr_blocked(A), gid, "kept (the lift's half of the promise)")
             self._append([_uline(self.RESUME_T + 100, "and the prod host after", "u4", "a2"),
                           _aline(self.RESUME_T + 120, "on it", "a3", "u4", "tool_use"),
                           _uline(self.RESUME_T + 200, "[Request interrupted by user]", "u5", "a3")])
-            km._interrupt_block_tick(NOW, self.tmux)          # a second stop, still under the fault
+            km._interrupt_block_tick(NOW, self.live)          # a second stop, still under the fault
             self.assertEqual(km._intr_blocked(A), gid, "still kept: an unreadable store is not evidence the block fell")
         self.assertEqual(self.a_file.read_bytes(), before, "nothing was written through the fault")
-        km._interrupt_block_tick(NOW, self.tmux)              # the fault cleared, the stop still stands
+        km._interrupt_block_tick(NOW, self.live)              # the fault cleared, the stop still stands
         self.assertEqual(km._intr_blocked(A), gid, "the marked block holds its card, so the marker holds")
         self.assertEqual(jd.load_goals(A)["status"][gid], "blocked")
         self._append([_uline(self.RESUME_T + 300, "keep going with staging", "u6", "u5"),
                       _aline(self.RESUME_T + 340, "done", "a4", "u6")])
-        km._interrupt_block_tick(NOW, self.tmux)              # re-engaged, readable: the lift lands
+        km._interrupt_block_tick(NOW, self.live)              # re-engaged, readable: the lift lands
         self.assertEqual(jd.load_goals(A)["status"][gid], "working", "romp's own block is lifted")
         self.assertIsNone(km._intr_blocked(A), "and the marker is spent")
 
@@ -558,10 +558,10 @@ class GestureRefusal(_World):
         super().setUp()
         sessions = [{"sid": A, "name": "web", "path": "/nonexistent/%s.jsonl" % A, "anchor": 0, "mtime": 0},
                     {"sid": B, "name": "api", "path": "/nonexistent/%s.jsonl" % B, "anchor": 0, "mtime": 0}]
-        self.tmux = {A: _TM(), B: _TM()}
-        for p in (mock.patch.object(km, "_alive_sessions", lambda now, tmux: list(sessions)),
+        self.live = {A: _TM(), B: _TM()}
+        for p in (mock.patch.object(km, "_alive_sessions", lambda now, live_map: list(sessions)),
                   mock.patch.object(km, "_warm_fleet_bg", lambda now: None),
-                  mock.patch.object(km, "_tmux_sessions", lambda: dict(self.tmux))):   # the handler's own build
+                  mock.patch.object(km, "_live_map", lambda: dict(self.live))):   # the handler's own build
             p.start()
             self.addCleanup(p.stop)
 
@@ -573,7 +573,7 @@ class GestureRefusal(_World):
 
     def _feed_rows(self, sid):
         """What the board shows for `sid` right now: {card itemId: card}."""
-        return {a["itemId"]: a for a in km.build_feed(NOW, self.tmux)["asks"] if a["itemId"].startswith(sid)}
+        return {a["itemId"]: a for a in km.build_feed(NOW, self.live)["asks"] if a["itemId"].startswith(sid)}
 
     def test_an_undo_clear_the_fault_skipped_answers_the_socket_that_asked(self):
         gid = A + ":g1"

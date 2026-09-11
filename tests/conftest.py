@@ -336,26 +336,6 @@ def _no_cli_scope():
     yield
 
 
-# No test may reach the machine's REAL tmux server (2026-09-06; the reason changed on 2026-09-08): the
-# retired key-source module used to scrub the live server's globals from inside a test, and any tmux-backed
-# test still runs its commands somewhere. The same private socket directory the bats suites use
-# (tests/tmux-private.bash): tmux puts every socket, `-L` ones included, under $TMUX_TMPDIR/tmux-<uid>/,
-# and the directory must exist or tmux 3.4 silently falls back to the default. No server ever exists
-# there, so a tmux command from a test exits with "no server running" instead of touching the live one.
-os.environ["TMUX_TMPDIR"] = tempfile.mkdtemp(prefix="romp-tests-tmux-")
-os.environ.pop("TMUX", None)
-os.environ.pop("ROMP_TMUX_SOCKET", None)
-
-
-@pytest.fixture(autouse=True)
-def _no_live_tmux_server():
-    os.environ["TMUX_TMPDIR"] = _TMUX_PRIVATE
-    yield
-
-
-_TMUX_PRIVATE = os.environ["TMUX_TMPDIR"]
-
-
 @pytest.fixture(autouse=True)
 def _stub_place_llm(monkeypatch):
     """Card-first placer floor (2026-07-08): every loaded romp-judge instance gets a no-op place_llm so
@@ -503,7 +483,7 @@ ENV_VALUE_REDACTED = "[REDACTED-ENV-VALUE]"
 _ENV_VALUE_PATH_NAMES = frozenset((
     "PWD", "OLDPWD", "HOME", "PATH", "TMPDIR", "SHELL", "VIRTUAL_ENV", "PYTHONPATH", "LS_COLORS",
     "ROMP_SERVICE_ENV_FILE", "ROMP_SERVICE_ENV", "ROMP_DIR", "ROMP_STATE_DIR", "ROMP_CLAUDE_BIN",
-    "ROMP_SYSTEMD_DIR", "ROMP_LAUNCHD_DIR", "CLAUDE_CONFIG_DIR", "TMUX_TMPDIR", "ROMP_TESTS_SYSTEM_TMPDIR",
+    "ROMP_SYSTEMD_DIR", "ROMP_LAUNCHD_DIR", "CLAUDE_CONFIG_DIR", "ROMP_TESTS_SYSTEM_TMPDIR",
     # the Claude settings dir conftest saved ahead of its CLAUDE_CONFIG_DIR floor (above), for the live
     # move test: a path a failure report may quote, like CLAUDE_CONFIG_DIR beside it
     "ROMP_TESTS_REAL_CLAUDE_CONFIG_DIR",

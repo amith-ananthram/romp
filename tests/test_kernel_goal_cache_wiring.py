@@ -51,9 +51,9 @@ def _aline(t, text, uuid, parent, stop="end_turn"):
 
 
 def _tm():
-    """One live tmux entry, every key the feed builder reads."""
+    """One live entry, every key the feed builder reads."""
     return {"state": "ready", "color": "#888888", "since": NOW - 60, "model": "", "effort": "",
-            "context": None, "backend": "tmux"}
+            "context": None, "backend": "sdk"}
 
 # The pusher-side READ-ONLY sites, wired (kernel.py). Each reads nodes / status / seams / confirming / log
 # rows and hands nothing to rollup_status, record_verdict or save_goals (audited 2026-09-06; the deep
@@ -151,7 +151,7 @@ class SharedViewInBuilds(unittest.TestCase):
             jd.apply_plan(s, "s1", T0, [{"do": "mint", "why": "x", "text": "Goal %d" % i}], [])
             jd.rollup_status(s, session_closed=False)
             jd.save_goals(sid, s)
-        km._timeline_sessions = lambda now, tmux, live_only=False: [
+        km._timeline_sessions = lambda now, live_map, live_only=False: [
             {"sid": sid, "name": "s%d" % i, "path": os.path.join(self.td.name, "no-such-transcript-%d" % i)}
             for i, sid in enumerate(SIDS)]
         # the compaction sweep evicts the entries of stores no DISCOVERED session owns, so the three synthetic
@@ -349,7 +349,7 @@ class PushSurvivesOneFailedChatBuild(unittest.TestCase):
     not a silent degrade and a build that fails every cycle is not a traceback every cycle (review find,
     2026-09-08). The episode is the fault text: a repeat says nothing, a different fault is a new episode,
     and a build that succeeds ends it."""
-    STUBS = ("NAMES", "_tmux_sessions", "_live_names", "_chat_tab_sessions", "build_session",
+    STUBS = ("NAMES", "_live_map", "_live_names", "_chat_tab_sessions", "build_session",
              "_cached_feed", "_cached_timeline", "build_timeline", "_fleet_view_sig", "_comments_frame",
              "_retry_parked_creates")
     A, B = SIDS[1], SIDS[2]
@@ -370,18 +370,18 @@ class PushSurvivesOneFailedChatBuild(unittest.TestCase):
         km.NAMES = names
         km.jd.STATE = Path(self.tmp) / "state"
         km.jd.STATE.mkdir(parents=True, exist_ok=True)
-        km._tmux_sessions = lambda: {}
+        km._live_map = lambda: {}
         km._live_names = lambda tm: {"web": self.A, "api": self.B}
-        km._chat_tab_sessions = lambda now, tmux: [
+        km._chat_tab_sessions = lambda now, live_map: [
             {"sid": sid, "name": nm, "path": str(self.tx[sid]), "anchor": sid}
             for sid, nm in ((self.A, "web"), (self.B, "api"))]
         km.build_session = self._build_session
-        km._cached_feed = lambda now, tmux, sig, connect=False: {"working": [], "awaiting": [], "now": now}
-        km._cached_timeline = lambda now, tmux, sig, connect=False: {"turns": {}, "judging": [], "messages": [],
+        km._cached_feed = lambda now, live_map, sig, connect=False: {"working": [], "awaiting": [], "now": now}
+        km._cached_timeline = lambda now, live_map, sig, connect=False: {"turns": {}, "judging": [], "messages": [],
                                                                       "now": now}
-        km.build_timeline = lambda now, tmux, **kw: {"lanes": [], "now": now}
-        km._fleet_view_sig = lambda now, tmux: {"probe": 1}
-        km._comments_frame = lambda sid, tmux: None
+        km.build_timeline = lambda now, live_map, **kw: {"lanes": [], "now": now}
+        km._fleet_view_sig = lambda now, live_map: {"probe": 1}
+        km._comments_frame = lambda sid, live_map: None
         km._retry_parked_creates = lambda: None
         km._built_chat.clear(); km._prev_chat_events.clear(); km._prev_chat_ledger.clear()
         self.saved_bell = list(km._SYNC_NOTICES)          # the dashboard bell ring the fault reaches
@@ -404,7 +404,7 @@ class PushSurvivesOneFailedChatBuild(unittest.TestCase):
         km._last_tab_order[:] = lo
         km._SYNC_NOTICES[:] = self.saved_bell
 
-    def _build_session(self, sid, now, tmux):
+    def _build_session(self, sid, now, live_map):
         self.built.append(sid)
         if sid == self.A and self.fail_with:
             raise RuntimeError(self.fail_with)

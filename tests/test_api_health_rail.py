@@ -37,7 +37,7 @@ MDOT = "·"
 
 
 def _frame_keys():
-    return {"type", "state", "cls", "reason", "text", "waiting", "retrying", "blocked", "since", "tmux", "sessions", "seq", "hosts", "quiet", "errs", "host"}
+    return {"type", "state", "cls", "reason", "text", "waiting", "retrying", "blocked", "since", "sessions", "seq", "hosts", "quiet", "errs", "host"}
 
 
 class Reference(unittest.TestCase):
@@ -77,12 +77,12 @@ class _Fixture(unittest.TestCase):
         self._send = km._send_to_app
         self._backend_for = km.Sessions.__dict__["backend_for"]
         self._color = km._name_color
-        self.sess, self.live, self.errs, self.tmux_sids, self.colors = [], {}, {}, set(), {}
-        km._alive_sessions = lambda now, tmux: list(self.sess)
+        self.sess, self.live, self.errs, self.colors = [], {}, {}, {}
+        km._alive_sessions = lambda now, live_map: list(self.sess)
         km._api_last_failed = lambda p: self.errs.get(p)
         self.sent = []
         km._send_to_app = lambda app, m: self.sent.append((app, m))
-        km.Sessions.backend_for = staticmethod(lambda sid: km._TMUX if sid in self.tmux_sids else object())
+        km.Sessions.backend_for = staticmethod(lambda sid: object())   # the frame reads no backend since the tmux count went (2026-09-11)
         km._name_color = lambda sid: self.colors.get(sid)
         # the frame's quiet and errs flags ask the SDK backend through km._sdk (T301): patched, so no test builds a
         # real SdkBackend in-process (its boot reconcile thread and catalog fetch); `self.backend` is what it answers
@@ -242,13 +242,6 @@ class States(_Fixture):
         self.assertFalse(rows[SID[1]]["suppressed"])
         self.assertEqual(self.frame()["waiting"], 2, "the interrupt says nothing about the API: still counted")
 
-    def test_tmux_backed_sessions_are_counted_for_the_coverage_line(self):
-        self.add(0)
-        self.add(1)
-        self.add(2, err={"status": 500, "category": "server_error"})
-        self.tmux_sids = {SID[1], SID[2]}
-        self.assertEqual(self.frame()["tmux"], 2)
-
     def test_rows_carry_name_and_color(self):
         self.colors[SID[0]] = {"bg": "#3366cc", "fg": "#ffffff"}
         self.add(0, retry={"status": 429})
@@ -257,7 +250,7 @@ class States(_Fixture):
 
     def test_a_latched_row_reads_retrying_while_its_session_is_working(self):
         # The retry prompt (romp's own, or a human's) was accepted and the turn is open, no api_retry frame yet;
-        # for a tmux session that is the whole internal retry. The word follows the live state; the latch only
+        # for a terminal session of the time that was the whole internal retry. The word follows the live state; the latch only
         # keeps the row counted, and its since stays the record's time.
         self.add(0, state="working", err={"status": 529, "category": "overloaded"})
         f = self.frame()
@@ -413,8 +406,8 @@ class Wiring(unittest.TestCase):
 
     def test_the_frame_is_built_in_the_jobs_block_after_this_cycle_s_pause_decisions(self):
         src = inspect.getsource(km._pusher_cycle_jobs)
-        self.assertIn("_api_health_push(_api_health_frame(now, tmux))", src)
-        self.assertLess(src.index("_auto_resume_retry(now, tmux)"), src.index("_api_health_push(_api_health_frame"))
+        self.assertIn("_api_health_push(_api_health_frame(now, live_map))", src)
+        self.assertLess(src.index("_auto_resume_retry(now, live_map)"), src.index("_api_health_push(_api_health_frame"))
         self.assertNotIn("_api_health", inspect.getsource(km._cached_feed), "not gated by the feed's sig / rebuild floor")
 
     def test_the_jobs_block_runs_the_frame_after_the_pause_decisions(self):
@@ -424,9 +417,9 @@ class Wiring(unittest.TestCase):
         quiet = {nm: (lambda *a, **k: None) for nm in self.OTHER_JOBS}
         with mock.patch.multiple(km, **quiet), \
                 mock.patch.object(km, "_auto_pause_on_limit", side_effect=lambda: order.append("limit")), \
-                mock.patch.object(km, "_auto_pause_on_spend_limit", side_effect=lambda now, tmux: order.append("spend")), \
-                mock.patch.object(km, "_auto_resume_retry", side_effect=lambda now, tmux: order.append("resume")), \
-                mock.patch.object(km, "_api_health_frame", side_effect=lambda now, tmux: order.append("frame") or {"type": "apiHealth"}), \
+                mock.patch.object(km, "_auto_pause_on_spend_limit", side_effect=lambda now, live_map: order.append("spend")), \
+                mock.patch.object(km, "_auto_resume_retry", side_effect=lambda now, live_map: order.append("resume")), \
+                mock.patch.object(km, "_api_health_frame", side_effect=lambda now, live_map: order.append("frame") or {"type": "apiHealth"}), \
                 mock.patch.object(km, "_api_health_push", side_effect=lambda f: order.append("push:" + f["type"])):
             km._pusher_cycle_jobs(T_STORM, {}, True)
         self.assertEqual(order, ["limit", "spend", "resume", "frame", "push:apiHealth"])
@@ -467,7 +460,7 @@ class Detail(unittest.TestCase):
         # sentence are gone, and the state machine's word never reaches the user
         self.assertNotIn("API %s this machine" % MDOT, self.JS)
         self.assertNotIn("No session is waiting on the API.", self.JS)
-        self.assertIn("429 = the API told us to slow down (rate limit)", self.JS)
+        self.assertIn("['r429','429','rate limit: the API told us to slow down']", self.JS)   # T340: the token in its ink, the words beside it
 
     def test_the_pause_button_is_the_chat_card_s_and_acknowledges_before_the_round_trip(self):
         self.assertIn("'Resume all auto-retries'", self.JS)
@@ -492,9 +485,9 @@ class Detail(unittest.TestCase):
         self.assertIn("else{hint=NOTSENT;dirty=true;}", row, "a dead socket is said here too")
 
     def test_no_terminal_coverage_line_is_drawn(self):
-        # T331 (the user 2026-09-10: the tmux backend is being removed): the popup no longer says how many terminal
-        # sessions are seen through their transcripts; the frame's `tmux` count stays on the wire until the kernel
-        # side goes (a federation field older peers keep sending)
+        # T331 (the user 2026-09-10, removing the terminal backend): the popup no longer says how many terminal
+        # sessions are seen through their transcripts; the frame's terminal count went with the kernel side (T332;
+        # a federation field older peers may still send, which the rail ignores)
         self.assertNotIn("m.tmux", self.JS)
         self.assertNotIn("seen through their transcripts only", self.JS)
 

@@ -38,11 +38,11 @@ MARKER = re.compile("romp-msg-" + r"(?:id|kind)\s*:")
 # fails; a new one here has to be argued for in this table. Counts, not whole-file exemptions, so a
 # genuine postal fixture added to one of these files still trips the guard.
 EXPECTED_BARE = {
-    # kernel.py's _pending_queued / _genuine_queued / _postal_shaped are plain substring tests,
-    # deliberately over-broad: there a false positive only refuses a delivery (safe), while a false
-    # negative is the postal-isolation bypass they were written for on 2026-07-10. Their fixtures
-    # test the substring, so the bare form is the right input.
-    "test_kernel.py": 2,
+    # kernel.py's _genuine_queued / _postal_shaped are plain substring tests, deliberately over-broad:
+    # there a false positive only refuses a delivery (safe), while a false negative is the
+    # postal-isolation bypass they were written for on 2026-07-10. Their fixtures test the substring,
+    # so the bare form is the right input.
+    "test_kernel.py": 1,
     # The mention-is-not-a-delivery case: writing the bare form IS the case.
     "test_teammate_message.py": 3,
     # The neutralizer suite (MarkerNeutralizerVariants) assembles whitespace VARIANTS of the

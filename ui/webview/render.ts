@@ -25,8 +25,9 @@ import { mintWriteId, ackOutcome, adoptViews, seqOf, capsAdopts, announcedSeq, a
 import { lensVisible, surfaceLens } from "./tag-lens";
 import { openTagMenu, tagMenuButton, syncTagFilter, tagChip } from "./tag-menu";
 import { syncSessionsFromTabMeta, applyMetaToSession, notePendingMeta, PendingTabMeta } from "./tab-meta";
-import { markerLabel, dayContext } from "./time-marker";
-import { compactDisplay, toolCounts, type DisplayItem } from "./compact";
+import { markerLabel, dayContext, DayWalk } from "./time-marker";
+import { REVEAL_LABEL, revealFraction, revealShownFraction, residentSpan, revealCountWords, revealPercentWords, messageCount } from "./reveal-progress";
+import { compactDisplay, isFoldableNoticeShape, toolCounts, itemAnchor, type DisplayItem } from "./compact";
 import { senderKind, SenderKind } from "./sender-identity";
 import { loadSettings, onExternalSettingsChange, installSettingsSync, type RompSettings } from "./settings";
 import { backendLabel, effectiveDefaultBackend } from "./backend-names";
@@ -49,7 +50,7 @@ import { titleWithKey, chordOf, effectiveChord, loadOverrides } from "./keybindi
 import { DEFAULT_CHORDS } from "./commands";
 import { NavHistory } from "./nav-history";
 import { StagedStack, quoteReplyBody, stagedPosts } from "./staged-messages";
-import { type PendingSend, type TailEvent, OPT_PREFIX, isOptimisticUuid, newPending, mintQid, reconcilePending, queuedCopyToHide, dropPending, bareGroupLabel, sentAtLabel, pendingBody } from "./send-pending";
+import { type PendingSend, type TailEvent, OPT_PREFIX, isOptimisticUuid, isKernelEchoUuid, newPending, mintQid, reconcilePending, queuedCopyToHide, dropPending, bareGroupLabel, sentAtLabel, pendingBody } from "./send-pending";
 import { reconcileHeld, heldAsQueued, type HeldCopy, type HeldQueued, type HeldMemory } from "./queued-held";
 import { reloadHoldReason } from "./reload-hold";
 import { liveNotices, keepReloadNotices, takeReloadNotices } from "./reload-notices";
@@ -104,7 +105,7 @@ import { reconcileRewindPass, type RewindEvent } from "./rewind-reconcile";
 import { watchChatVisibility, browserChatVisibilityDeps } from "./chat-visibility";
 import type { PaneHiddenHost } from "./paint-gate";
 import { gistOf, collapseWs, postalHead } from "./gist";   // the shared gist rule + the postal head (T294)
-import { kindLabel, deliveryOf, deliveryTitle, type PostalDelivery, type PostalDeliveryState, type PostalReceipt } from "./postal-state";   // the postal card's kind word + delivery state (T302)
+import { kindLabel, deliveryOf, deliveryTitle, DELIVERY_GLYPHS, type PostalDelivery, type PostalReceipt } from "./postal-state";   // the postal card's kind word + delivery state (T302), the marks' drawings (T337)
 
 for (const [name, lang] of Object.entries({
   bash, sh: bash, shell: bash, python, py: python, javascript, js: javascript,
@@ -1041,14 +1042,14 @@ let anchorPendingOlder = false; // scrollToAnchor kicked off a loadOlder fetch f
 // or the standing can't-trap backstop expires into the honest failure. While it outlives the
 // immediate landing, a small pane-local notice says so ("finding the passage…") with the ✕ —
 // cancel leaves the reader exactly where they are, scroll fully theirs.
-let seek: { sid: string; uuid: string; kind: string | null } | null = null;
+let seek: { sid: string; uuid: string; kind: string | null; t: number | null; from0: number | null } | null = null;   // t: the anchor turn's own moment when the kernel resolved it (anchorEventT); from0: the session's headFrom when the seek was armed. Both read by the reveal progress line (T336)
 let seekBackstop: number | undefined;
 const SEEK_BACKSTOP_MS = 30_000;
 
-function armSeek(sid: string, uuid: string, kind: string | null): void {
+function armSeek(sid: string, uuid: string, kind: string | null, t: number | null = null): void {
   if (seek && seek.sid === sid && seek.uuid === uuid) return;   // same target mid-seek: idempotent, never a restart
   clearSeek();                                                  // a different target supersedes cleanly
-  seek = { sid, uuid, kind };
+  seek = { sid, uuid, kind, t, from0: sessions.get(sid)?.headFrom ?? null };
   seekBackstop = window.setTimeout(() => failSeek(), SEEK_BACKSTOP_MS);
 }
 
@@ -1056,6 +1057,7 @@ function clearSeek(): void {
   seek = null;
   if (seekBackstop !== undefined) { clearTimeout(seekBackstop); seekBackstop = undefined; }
   document.getElementById("seek-note")?.remove();
+  revealProgressEnd();   // every end of the seek ends the progress line too (T336)
 }
 
 /** Drop the seek's claim on any in-flight older fetch: the chunk (if one is on the wire) arrives as
@@ -1098,6 +1100,7 @@ function showSeekNote(): void {
   if (!seek) return;
   const existing = document.getElementById("seek-note");
   if (seek.sid !== activeId) { existing?.remove(); return; }
+  if (revealProgress && revealProgress.uuid === seek.uuid) { existing?.remove(); return; }   // the progress line has the slot and the ✕ (T336)
   if (existing) return;
   const n = el("div", "");
   n.id = "seek-note";
@@ -1113,6 +1116,105 @@ function showSeekNote(): void {
   n.appendChild(x);
   document.body.appendChild(n);
 }
+// ── reveal progress (T336) ───────────────────────────────────────────────────────────────────────────────
+// The interim progress line while the index wire's fetch-until-resident loop walks back to a far-past anchor
+// (the user 2026-09-10: a distilled summary far back in a long session took a long time to reveal, with nothing
+// saying how far along it was). It hangs off the loop's START (a landing pass that kicked, or is waiting on, an
+// older fetch for the anchor while the index wire's headFrom count is above 0; the anchor turn's own moment rides the
+// seek, from the kernel's anchorEventT, never the card's time; the count of messages loaded is read off the state from the
+// seek's headFrom at its arm) and its END (the loop's own anchor lands,
+// the loop stops asking, the seek is cleared or cancelled, the tab changes), and off nothing else: the
+// one-round-trip window (T323 stage 4b, proto 2) carries no headFrom count, so under it the line never begins.
+// The fraction is the resident span over the span back to the anchor's moment (revealFraction), honest or
+// absent; absent, the line carries the count of older messages loaded and the oldest loaded time. The composer
+// placeholder's dim ink, a thin bar, no motion. It takes the seek note's slot and its ✕ while it shows.
+let revealProgress: { sid: string; uuid: string; anchorT: number | null; from0: number } | null = null;
+function revealProgressBegin(sid: string, uuid: string, anchorT: number | null, from0: number): void {
+  revealProgress = { sid, uuid, anchorT, from0 };
+  hideLoadingPill();                                  // one message for the wait, not two
+  document.getElementById("seek-note")?.remove();     // the line takes the seek note's slot (showSeekNote yields to it)
+}
+function revealProgressEnd(): void {
+  revealProgress = null;
+  document.getElementById("reveal-progress")?.remove();
+}
+function revealProgressPaint(): void {
+  const p = revealProgress;
+  if (!p) return;
+  const s = liveSession(p.sid);   // a display path: a skeleton tab shows nothing as current
+  const existing = document.getElementById("reveal-progress");
+  if (!s || p.sid !== activeId) { existing?.remove(); return; }
+  const { oldestT, newestT } = residentSpan(s.events, eventEpoch);
+  const fraction = revealFraction(newestT, oldestT, p.anchorT);
+  // the count is read off the state, never accumulated: the messages among the events the loop has prepended, from the
+  // seek's headFrom at its arm (a tab round trip or a full frame cannot restart it) down to the session's headFrom now
+  const from0 = seek && seek.uuid === p.uuid && seek.from0 != null ? seek.from0 : p.from0;
+  const loaded = messageCount(s.events.slice(0, Math.max(0, from0 - (s.headFrom ?? 0))));
+  let n = existing;
+  if (!n) {   // built once per loop, updated in place: click-safe by construction
+    n = el("div", "");
+    n.id = "reveal-progress";
+    n.setAttribute("role", "status");
+    const label = el("span", "rp-label");
+    label.textContent = REVEAL_LABEL;
+    n.appendChild(label);
+    const dots = metaDots();                          // the loading rule's pulsing dots while no honest fraction exists (count mode)
+    dots.classList.add("rp-dots");
+    n.appendChild(dots);
+    const bar = el("div", "rp-bar");
+    bar.appendChild(el("div", "rp-fill"));
+    n.appendChild(bar);
+    n.appendChild(el("span", "rp-detail"));
+    if (seek && seek.uuid === p.uuid) {               // the seek's ✕, carried over: cancel leaves the reader where they are
+      const x = el("button", "rp-x");
+      x.setAttribute("aria-label", "Stop loading");
+      x.title = "stop loading, stay right here";
+      x.textContent = "✕";
+      x.addEventListener("click", (e) => { e.stopPropagation(); cancelSeek(); });
+      n.appendChild(x);
+    }
+    document.body.appendChild(n);
+  }
+  const bar = n.querySelector(".rp-bar") as HTMLElement;
+  const fill = n.querySelector(".rp-fill") as HTMLElement;
+  const detail = n.querySelector(".rp-detail") as HTMLElement;
+  const dots = n.querySelector(".rp-dots") as HTMLElement;
+  n.dataset.loaded = String(loaded);
+  if (fraction != null) {
+    const shown = revealShownFraction(fraction);          // floored below 1: the bar never reads complete before the event lands
+    n.dataset.fraction = shown.toFixed(3);
+    bar.hidden = false; bar.title = revealPercentWords(fraction);
+    fill.style.width = (shown * 100).toFixed(1) + "%";
+    detail.textContent = "";
+    dots.hidden = true;                                 // the still bar is the motion here
+  } else {
+    delete n.dataset.fraction;
+    bar.hidden = true; bar.title = "";
+    fill.style.width = "0%";
+    detail.textContent = revealCountWords(loaded, oldestT, Date.now());
+    dots.hidden = false;
+  }
+}
+// Once per landing pass, after the attempt: the loop's start and end are read off the pass itself.
+function revealProgressTick(scrolled: boolean, attAnchor: string | null): void {
+  if (revealProgress) {
+    const p = revealProgress;
+    const inFlight = loadingOlder.has(p.sid) && pendingOlderAnchor.get(p.sid) === p.uuid;
+    // the END: this loop's own anchor landed (another anchor's landing in the same session leaves a loop whose fetch is
+    // still on the wire alone), the tab changed, or the pass neither kicked nor waits on a fetch for the anchor
+    if ((scrolled && attAnchor === p.uuid) || p.sid !== activeId || (!anchorPendingOlder && !inFlight)) { revealProgressEnd(); return; }
+    revealProgressPaint();
+    return;
+  }
+  const s = liveSession(activeId);
+  if (anchorPendingOlder && pendingAnchor && s && (s.headFrom ?? 0) > 0) {   // the index wire's loop, by its own count
+    // the anchor turn's OWN moment, carried on the seek from the kernel's anchorEventT: the card's `t` is the card's newest
+    // activity, later than the turn it points at, and a fraction over it would read more progress than exists
+    revealProgressBegin(activeId!, pendingAnchor, seek && seek.uuid === pendingAnchor ? seek.t : null, s.headFrom ?? 0);
+    revealProgressPaint();
+  }
+}
+// ── end reveal progress ──────────────────────────────────────────────────────────────────────────────────
 // KEEP-OFFSET landing (the user 2026-08-02). A scroll-back loadOlder re-anchors on the row the reader was
 // on — that is POSITION PRESERVATION, not a deep-link: the row must come back at the SAME on-screen offset,
 // with no top-align and no flash. Non-null ⇒ resolve pendingAnchor by id as usual (which renders the window
@@ -2679,7 +2781,7 @@ function timeMarker(epoch: number, prevEpoch: number | null): HTMLElement {
   const { text, day, hm } = markerLabel(epoch, prevEpoch, Date.now());
   const m = el("div", "time-marker");
   m.dataset.hm = hm;
-  m.dataset.epoch = String(epoch);   // the top-of-view day-context label reads this (paintRailSticky)
+  m.dataset.epoch = String(epoch);   // the row's own moment; the top-of-view day-context label reads data-day, the walk's mark (stampWalkDay), and falls back to this (paintRailSticky)
   // The gutter shows the TIME and nothing else. The date rides a full-width day divider
   // instead (dayDividerFor below) — no date word has to fit 47px of rail any more.
   if (text) m.textContent = day ? hm : text;
@@ -2699,12 +2801,16 @@ function timeMarker(epoch: number, prevEpoch: number | null): HTMLElement {
 // It must be a SIBLING, never the turn's first child: .dot and .time-marker are absolutely
 // positioned against the TURN's top edge, so a divider inside it would shove the message down
 // and leave the dot stranded up beside the rule.
-function dayDividerFor(epoch: number, prevEpoch: number | null): HTMLElement | null {
-  const { day, date } = markerLabel(epoch, prevEpoch, Date.now());
-  if (!day || !date) return null;
+// Only a FORWARD crossing opens a day, against the walk's high-water mark (time-marker.ts DayWalk, T339): a row stamped
+// earlier than the rows around it draws no divider and never becomes the reference. The date sits CENTERED over the
+// column between two hairlines, and the divider carries its own segment of the rail (styles.css .day-divider::before) so
+// the line runs through it (the user 2026-09-11).
+function dayDividerFor(epoch: number, walk: DayWalk): HTMLElement | null {
+  const date = walk.open(epoch, Date.now());
+  if (!date) return null;
   const d = el("div", "day-divider");
   const lbl = el("span", "day-divider-label"); lbl.textContent = date;
-  d.appendChild(lbl);
+  d.append(el("span", "day-divider-rule"), lbl, el("span", "day-divider-rule"));
   return d;
 }
 
@@ -3029,7 +3135,10 @@ function paintRailSticky(): void {
   // AT the line, so when a
   // label shows, the slot line drops by the label's height to make that room (the 2026-08-17 first
   // cut floated the label above the sticky without shifting it, and bled into the tab bar).
-  const ep = anchorM ? Number(anchorM.dataset.epoch || 0) : 0;
+  // the WALK's day at that row (data-day, stampWalkDay), not the row's own moment (T342): a stale echo at the top line
+  // used to say "2 days ago" between rows the divider walk keeps under one "Yesterday"; the row's own epoch is the
+  // fallback for a marker no walk stamped
+  const ep = anchorM ? Number(anchorM.dataset.day || anchorM.dataset.epoch || 0) : 0;
   const label = ep && gRect ? dayContext(ep, Date.now()) : "";
   let dayW = 0, dayH = 0;
   if (label) {
@@ -3321,6 +3430,20 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
         turn.appendChild(notice({ src: "system", glyph: "system", gist, body: more ? bubble : null, nested: true,
                                   key: ev.uuid ? "hn:" + ev.uuid : undefined }));
       } else turn.appendChild(bubble);
+      // The kernel's ECHO of a send the model has not read yet, seen from a window that did not send it (the other
+      // column of a split, another browser): dressed as the sender's own tail bubble is — dashed, captioned
+      // "sending…" — so two views of one session agree on what is pending (the user 2026-09-10: one session in two
+      // columns, solid history in one and a pending bubble in the other). The kernel orders the echo at the turn's
+      // tail for the same reason (_merge_live_atoms); the sender's own window hides this event behind its bubble
+      // (hiddenByPending, above); a never-delivered echo takes the dress below instead.
+      if (!ev.undelivered && !injected && isKernelEchoUuid(ev.uuid)) {   // the backend's "echo:" prefix rides into the payload
+        turn.classList.add("echo");
+        bubble.classList.add("echo-bubble");
+        const note = el("div", "echo-note");
+        note.textContent = "sending…";
+        setTip(note, "On its way to the session. The window that sent it can still cancel it until the session takes it.");
+        turn.appendChild(note);
+      }
       // NEVER-DELIVERED send (kernel ev.undelivered, from the backend's dropped-echo marking): the
       // session's process died holding this message, so it was never seen — say so instead of letting
       // it pose as history (the user 2026-07-29: a two-day-old lost send kept resurfacing mid-chat as
@@ -3832,14 +3955,15 @@ function fillClearBody(body: HTMLElement, got: { events: ChatEvent[]; truncated?
   }
   const wrap = el("div", "clear-episode");
   let prevEp: number | null = null;
+  const walk = new DayWalk();   // the fold divides days by the chat's own high-water mark (T339)
   for (const e of got.events) {
     try {
       const ep = eventEpoch(e);
-      const prior = prevEp;   // the PREVIOUS event's epoch — chained, so the fold divides days
+      const prior = prevEp;   // the PREVIOUS event's epoch — chained, so the rail's same-minute rule holds
       if (ep != null) {       // rather than re-stamping the full date on every turn in it
-        const dv = dayDividerFor(ep, prior);
+        const dv = dayDividerFor(ep, walk);
         if (dv) wrap.appendChild(dv);
-        prevEp = ep;
+        prevEp = ep; walk.pass(ep);
       }
       wrap.appendChild(renderEvent(e, prior));
     }
@@ -4870,26 +4994,19 @@ function postalServiceIntent(body: string | undefined): { label: string; cls: st
 }
 
 // The delivery-state icon at the postal head's right edge (T302, the user 2026-09-10): the way messaging apps
-// show sent / delivered / read. One check = sent (handed to the relay), two dim checks = delivered (in the
-// recipient's inbox, or the far host's ack), two coloured checks = read (the recipient consumed it: the
-// ledger's own exec event, never inferred), a clock = parked, a red mark = bounced, a return arrow = recalled.
-// Each carries a worded title with the clock. States and words: postal-state.ts.
-const DELIVERY_GLYPHS: Record<PostalDeliveryState, string> = {
-  sent: '<path d="M3 8.6 L6.4 12 L13 5"/>',
-  delivered: '<path d="M1.6 8.6 L4.8 11.8 L10.2 5.4"/><path d="M6.6 11.6 L14.4 5.4"/>',
-  read: '<path d="M1.6 8.6 L4.8 11.8 L10.2 5.4"/><path d="M6.6 11.6 L14.4 5.4"/>',
-  parked: '<circle cx="8" cy="8" r="5.6"/><path d="M8 4.8 V8.2 L10.4 9.6"/>',
-  bounced: '<path d="M4.5 4.5 L11.5 11.5"/><path d="M11.5 4.5 L4.5 11.5"/>',
-  recalled: '<path d="M6.6 4.6 L3.2 8 L6.6 11.4"/><path d="M3.2 8 H10 A2.8 2.8 0 0 0 12.8 5.2"/>',
-};
+// show sent / delivered / read. The drawings, states and words live in postal-state.ts (DELIVERY_GLYPHS: the
+// circled-check ladder for sent / delivered / read since T337, a clock = parked, a cross = bounced, a return
+// arrow = recalled); this wraps one in its box: 14 px, a 1.5 stroke in the state's colour, round caps and joins,
+// heavier than the envelope glyph at the head's other end (12 px, 1.4) for the reason postal-state.ts gives: a ring
+// with a check inside needs the room, and the stroke is the mark's own specification.
 function clockOf(epochS: number): string {
   return new Date(epochS * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 function deliveryIcon(d: PostalDelivery): HTMLElement {
   const span = el("span", "postal-delivery postal-delivery-" + d.state);
   span.dataset.state = d.state;
-  span.innerHTML = '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" '
-    + 'stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">' + DELIVERY_GLYPHS[d.state] + "</svg>";
+  span.innerHTML = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" '
+    + 'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' + DELIVERY_GLYPHS[d.state] + "</svg>";
   const title = deliveryTitle(d, clockOf);
   setTip(span, title);                       // the pane's styled tip on hover…
   span.setAttribute("role", "img");          // …and the same words for a screen reader: a labelled span is announced
@@ -5009,8 +5126,14 @@ function renderTeammate(ev: Extract<ChatEvent, { kind: "teammate" }>): HTMLEleme
 
 function bgRgb(): [number, number, number] {
   try {
-    const m = /(\d+)\D+(\d+)\D+(\d+)/.exec(getComputedStyle(document.body).backgroundColor || "");
-    if (m) return [+m[1], +m[2], +m[3]];
+    const parse = (c: string): [number, number, number] | null => { const m = /(\d+)\D+(\d+)\D+(\d+)/.exec(c || ""); return m ? [+m[1], +m[2], +m[3]] : null; };
+    const own = getComputedStyle(document.body).backgroundColor || "";
+    // the picker's lift paints the body TRANSPARENT (styles.css body.picker-lifted) and backs the page with its ::before at
+    // var(--bg): a transparent body is that backing's colour, not black (T345 review: read as black, a light page's
+    // yellow session passed the ring's readability test under the lift and wore an invisible ring after it)
+    const transparent = own === "transparent" || /^rgba\([^)]*,\s*0\)$/.test(own);
+    const c = parse(transparent ? getComputedStyle(document.body, "::before").backgroundColor : own);
+    if (c) return c;
   } catch { /* ignore */ }
   return [30, 30, 30];
 }
@@ -5020,18 +5143,42 @@ function bgRgb(): [number, number, number] {
 // as a dim one (blue) — consistent "faded-ness" regardless of color. Never
 // touches the bright color (only used for at-rest tabs).
 const CLASSIC_FADE_SCALE = 0.9;   // T118 (the user 2026-08-27): +10% brighter faded tab labels under Classic — one tunable knob (half the parked T113 number)
-function fadedColor(hex: string): string {
+// The composer's name overlay fades HALFWAY (T341, the user 2026-09-11: at the strip's full fade the name in the box read
+// too faint; at none it outshone the placeholder). The strength of the one fade rule, not a second colour formula: 0.5
+// covers half the perceptual distance the strip's at-rest label covers. Its host prefix sits at the matching midpoint
+// (styles.css --host-fade on #composer-ph).
+const PH_NAME_FADE = 0.5;
+const LUM_MARGIN = 38;   // the luminance step a colour must stand off the page by to read as its own (the fade's target, the ring's test)
+const lum = (x: number, y: number, z: number) => 0.2126 * x + 0.7152 * y + 0.0722 * z;
+function hexRgb(hex: string): [number, number, number] | null {
   const m = /^#?([0-9a-fA-F]{6})$/.exec(hex.trim());
-  if (!m) return hex;
+  if (!m) return null;
   const n = parseInt(m[1], 16);
-  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+// Does an identity colour stand off the page enough to read as a RING around the message box (T345)? The strip's fade
+// asks a one-sided version of this (is the colour brighter than the page by the margin, so a fade has room), which on a
+// light page is true of no colour at all; a ring reads on either side of the page's luminance, so the same margin is
+// applied both ways. A colour within the margin falls back to the accent.
+function identityReadable(hex: string): boolean {
+  const c = hexRgb(hex);
+  if (!c) return false;
   const [br, bgc, bb] = bgRgb();
-  const lum = (x: number, y: number, z: number) => 0.2126 * x + 0.7152 * y + 0.0722 * z;
-  const Lc = lum(r, g, b), Lb = lum(br, bgc, bb), Lt = Lb + 38;
+  return Math.abs(lum(c[0], c[1], c[2]) - lum(br, bgc, bb)) > LUM_MARGIN;
+}
+// `amount` is the fade's strength: 1 (the default) is the strip's at-rest fade, unchanged for tabs; 0.5 is half the way
+// from the identity colour toward the page background. It scales the one blend, so the dim-hue early return holds at every
+// strength and a light page (already past the luminance target) stays a no-op.
+function fadedColor(hex: string, amount = 1): string {
+  const c = hexRgb(hex);
+  if (!c) return hex;
+  const [r, g, b] = c;
+  const [br, bgc, bb] = bgRgb();
+  const Lc = lum(r, g, b), Lb = lum(br, bgc, bb), Lt = Lb + LUM_MARGIN;
   if (Lc <= Lt) return hex; // already dim — leave it
   // Classic fades 10% less far toward the background (T118); Yatharth keeps his full fade.
   const scale = settings.chatTabTheme === "yatharth" ? 1 : CLASSIC_FADE_SCALE;
-  const t = Math.min(0.85, (Lc - Lt) / (Lc - Lb)) * scale;
+  const t = Math.min(0.85, (Lc - Lt) / (Lc - Lb)) * scale * amount;
   const hx = (a: number, c: number) => Math.round(a * (1 - t) + c * t).toString(16).padStart(2, "0");
   return `#${hx(r, br)}${hx(g, bgc)}${hx(b, bb)}`;
 }
@@ -5978,6 +6125,10 @@ function renderTabs() {
   // 2026-09-10: its screenshots caught the tip after every pick). The rebuild is the event: hide it here, once, before
   // the nodes go.
   hideTabTip();
+  // the rebuild repaints every at-rest label's fade against the page background as it stands (fadedColor reads it live),
+  // and the composer's name overlay wears that same fade (T335): re-sync it on the same event, so a background the host
+  // rewrote (a VS Code colour-theme switch, which fires no romp event) reaches the box when it reaches the strip
+  syncComposerPh();
   // Preserve TAB-MODE keyboard focus across the rebuild (the user 2026-06-29). renderTabs runs on EVERY kernel
   // push (0.5–3s), and replaceChildren() destroys the focused tab — dropping focus out of the strip (often out
   // of the chat iframe entirely), which silently killed ←/→/Enter nav after a send or any push: you were left
@@ -6290,7 +6441,7 @@ function setSessionColor(id: string, bg: string) {
 
 // Small inline-SVG icon for the tab menu's toggle items (trusted constant markup; `off` slashes + dims it,
 // matching the timeline lane toggles). 16-unit viewBox; currentColor so .ctx-icon/.off set the tint.
-function ctxIcon(kind: "feed" | "mail" | "bell" | "bill" | "folder" | "tag" | "pencil", off: boolean): HTMLElement {
+function ctxIcon(kind: "feed" | "mail" | "bell" | "bill" | "folder" | "tag" | "pencil" | "split", off: boolean): HTMLElement {
   const span = el("span", "ctx-icon" + (off ? " off" : ""));
   const slash = off ? '<line x1="1.6" y1="14.4" x2="14.4" y2="1.6"/>' : "";
   const body = kind === "feed"
@@ -6303,6 +6454,8 @@ function ctxIcon(kind: "feed" | "mail" | "bell" | "bill" | "folder" | "tag" | "p
           ? '<path d="M2 4.5 A1.2 1.2 0 0 1 3.2 3.3 L6.2 3.3 L7.6 4.9 L12.8 4.9 A1.2 1.2 0 0 1 14 6.1 L14 11.5 A1.2 1.2 0 0 1 12.8 12.7 L3.2 12.7 A1.2 1.2 0 0 1 2 11.5 Z"/>'  // folder (browse files)
         : kind === "tag"
           ? '<path d="M2 3.4 A1.4 1.4 0 0 1 3.4 2 L7.6 2 A1.4 1.4 0 0 1 8.6 2.4 L13.6 7.4 A1.4 1.4 0 0 1 13.6 9.4 L9.4 13.6 A1.4 1.4 0 0 1 7.4 13.6 L2.4 8.6 A1.4 1.4 0 0 1 2 7.6 Z"/><circle cx="5.4" cy="5.4" r="1.1"/>'  // luggage tag (session tags)
+        : kind === "split"
+          ? '<rect x="2" y="3" width="5" height="10" rx="1"/><rect x="9" y="3" width="5" height="10" rx="1"/>'  // two columns side by side (open in a new split)
         : kind === "pencil"
           ? '<path d="M3 13 L3.6 10.4 L10.8 3.2 A1.3 1.3 0 0 1 12.8 5.2 L5.6 12.4 Z"/><line x1="9.8" y1="4.2" x2="11.8" y2="6.2"/>'  // pencil (rename)
           : '<path d="M8 2 C5.9 2.2 4.7 3.8 4.7 5.8 L4.7 8 L3.4 9.9 L12.6 9.9 L11.3 8 L11.3 5.8 C11.3 3.8 10.1 2.2 8 2 Z"/><path d="M6.6 11.6 A1.5 1.5 0 0 0 9.4 11.6"/>';  // bell (system notifications)
@@ -6346,6 +6499,27 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
     mv.appendChild(bodyEl);
     mv.addEventListener("click", (ev) => { ev.stopPropagation(); dismissTabMenu(); showMovePrompt(id); });
     menu.appendChild(mv);
+  }
+  // Open in new split (the user 2026-09-08, who wanted several sessions open at once instead of tabbing):
+  // another chat column beside the last one, opened on this session. The shell makes the column
+  // (_LANDING_SPLIT_JS) and hands it a focus; this pane only asks. Shell-hosted only — standalone and
+  // VS Code have no row to split — and only a shell that carries the split script.
+  const shellCanSplit = (() => {   // a shell with the split script, and one that can take another column right now (the cap, the phone)
+    try { const p = window.parent as any; return inRompShell() && typeof p.__rompSplitChat === "function" && (typeof p.__rompCanSplit !== "function" || !!p.__rompCanSplit()); }
+    catch (e) { return false; }
+  })();
+  if (shellCanSplit) {
+    const split = el("div", "ctx-item ctx-item-toggle");
+    split.appendChild(ctxIcon("split", false));
+    const bodyEl = el("span", "ctx-item-body");
+    const l = el("span", "ctx-item-label"); l.textContent = "Open in new split"; bodyEl.appendChild(l);
+    const sb = el("span", "ctx-item-sub"); sb.textContent = "another chat column beside this one, on this session"; bodyEl.appendChild(sb);
+    split.appendChild(bodyEl);
+    split.addEventListener("click", (ev) => {
+      ev.stopPropagation(); dismissTabMenu();
+      try { window.parent.postMessage({ romp: "openSplit", sid: id }, "*"); } catch (e) { /* no shell to ask */ }
+    });
+    menu.appendChild(split);
   }
   // Colors join Rename in the AESTHETIC section (the user 2026-08-24, the final by-kind grouping:
   // [Rename + colors] / [feed, mail, bell, billing, Tags] / [Browse]). The swatch row itself is
@@ -7299,6 +7473,20 @@ function revealSelfPane(): void {
     if (window.parent && window.parent !== window) window.parent.postMessage({ romp: "reveal", pane: "chat" }, "*");
   } catch (e) { /* standalone page — no shell to ask */ }
 }
+// Split screen (the user 2026-09-08): the kernel aims a focus at the DASHBOARD, so every chat column's socket
+// receives it, and the feed's click echo reaches every column's storage listener. The shell says which column
+// a session-focus belongs to (__rompChatTarget: the column already showing that session, else the one the
+// user last worked in, else the first) and the others stand down. Standalone and VS Code have no shell and
+// always act, exactly as before.
+function focusIsOurs(sid: string): boolean {
+  try {
+    if (!window.parent || window.parent === window) return true;
+    const t = (window.parent as any).__rompChatTarget;
+    if (typeof t !== "function") return true;   // a shell without the split script (an older page): one column
+    const f = t(sid);
+    return !f || f === window.frameElement;
+  } catch (e) { return true; }   // cross-origin parent (VS Code) — not the romp shell
+}
 
 // Full-screen bridge (the user 2026-07-05): the picker is rendered inside the /chat iframe, so its
 // position:fixed;inset:0 only covered the chat PANE — on a short pane the session list couldn't scroll.
@@ -7314,7 +7502,11 @@ function revealSelfPane(): void {
 // VS Code) falls back to that hiding via .pane-gone.
 function liftPaneRect(): DOMRect | null {
   try {
-    const p = window.parent?.document?.getElementById("chat-pane");
+    // THIS column's pane (split screen, the user 2026-09-08): a later column that measured #chat-pane pinned its
+    // transcript at the FIRST column's rect — the 2026-08-08/09 black-hole family in a new form. frameElement is
+    // the iframe the shell wrapped in a .pane; the id lookup stays as the fallback it always was.
+    const own = window.frameElement ? (window.frameElement as HTMLElement).parentElement : null;
+    const p = own || window.parent?.document?.getElementById("chat-pane");
     return p ? p.getBoundingClientRect() : null;
   } catch (e) { return null; }   // cross-origin parent (VS Code) — no shell pane to measure
 }
@@ -8942,7 +9134,8 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
     renderingSid = th.tid;
     renderingOwnerSid = sid;   // fold keys are per-thread; file/preview URLs belong to the thread's SESSION
     renderingIntoThread = true;   // same renderer, minus the transcript-coupled hover chrome (see the flag)
-    let prev: number | null = null;
+    let prev: number | null = null;       // the rail's raw previous epoch (the same-minute rule)
+    const walk = new DayWalk();           // the day walk's high-water mark (T339)
     let quoteHost: HTMLElement | null = null;   // the thread's OPENING message — the quote's home
     // the SAME display units the chat renders (the user 2026-08-24, leg C: the popover ignored the
     // compact/hide-thinking setting — thinking blocks and raw tool runs showed regardless of the
@@ -8957,14 +9150,15 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
     let relayNoted = !th.relayedT;   // T145: drop the sent-back marker at its place in time, once
     for (const it of items) {
       // a new day opens with the chat's own divider (the parity bundle, 2026-08-26) — same helper,
-      // same placement idiom as appendItem
-      const dayOpen = eventEpoch(evs[itemFirstEvent(it)]);
+      // same placement idiom as appendItem, the unit timed by its anchor member (T339)
+      const anchor = itemAnchor(it, (i) => eventEpoch(evs[i]));
+      const dayOpen = eventEpoch(evs[anchor]);
       if (!relayNoted && dayOpen != null && dayOpen > (th.relayedT || 0)) {
         list.appendChild(cmtRelayedNote(th.relayedT || 0));
         relayNoted = true;
       }
       if (dayOpen != null) {
-        const dv = dayDividerFor(dayOpen, prev);
+        const dv = dayDividerFor(dayOpen, walk);
         if (dv) list.appendChild(dv);
       }
       if (it.kind === "toolgroup" || it.kind === "noticegroup") {
@@ -8973,7 +9167,8 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
         const open = openFolds.has(key);
         list.appendChild(it.kind === "toolgroup"
           ? renderToolGroup(run as Extract<ChatEvent, { kind: "tool" }>[], prev, key, open)
-          : renderNoticeGroup(run, prev, key, open));
+          : renderNoticeGroup(run, evs[anchor], prev, key, open));
+        let exit: number | null;   // the epoch the run leaves the walk on (the rail chain and the day mark alike)
         if (open) {
           it.indices.forEach((ix, j) => {   // the run's own members — it.indices already excludes thinking
             const child = renderEvent(evs[ix], prev, turnWorkedSecs(evs, ix, thWorking));
@@ -8981,9 +9176,12 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
             list.appendChild(child);
             const ep = eventEpoch(evs[ix]); if (ep != null) prev = ep;
           });
+          exit = it.kind === "noticegroup" ? eventEpoch(evs[anchor]) : prev;   // a notice run leaves the walk on its anchor, whatever order its members came in (T339)
+          if (it.kind === "noticegroup" && exit != null) prev = exit;
         } else {
-          const ep = eventEpoch(run[run.length - 1]); if (ep != null) prev = ep;
+          exit = eventEpoch(it.kind === "noticegroup" ? evs[anchor] : run[run.length - 1]); if (exit != null) prev = exit;
         }
+        walk.pass(exit);
         continue;
       }
       const ev = evs[it.index];
@@ -8994,6 +9192,7 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
       if (!quoteHost && ev.kind === "user") quoteHost = node;
       const ep = eventEpoch(ev);
       if (ep != null) prev = ep;
+      walk.pass(ep);
     }
     if (!relayNoted) list.appendChild(cmtRelayedNote(th.relayedT || 0));   // relay at the tail — nothing new after it yet
     renderingIntoThread = false;
@@ -9883,6 +10082,7 @@ function closePicker() {
   const o = document.getElementById("picker");
   if (o) o.style.display = "none";
   signalPickerOverlay(false);   // release the full-window lift — the chat iframe returns to its pane
+  syncComposerPh();             // …and the box re-reads its ring against the page it is back on (T345)
   if (pickMode) {
     if (vscodeApi) vscodeApi.postMessage({ type: "pickResult", id: null });
     pickMode = false;
@@ -10770,16 +10970,19 @@ function syncViewInner(id: string, atBottom?: boolean): View {
   const unitOf = (n: ChildNode): number =>
     n instanceof HTMLElement && n.dataset.unit != null ? Number(n.dataset.unit) : -1;
   while (v.el.lastChild && unitOf(v.el.lastChild) >= from) v.el.removeChild(v.el.lastChild);
+  const walk = dayWalkBeforeEvent(s.events, from);   // the day walk's high-water mark up to here (T339)
   for (let i = from; i < len; i++) {
-    const prev = prevTimedEpoch(s.events, i);
+    const prev = prevTimedEpoch(s.events, i);   // the rail's raw previous epoch (the same-minute rule)
     const ep = eventEpoch(s.events[i]);
     if (ep != null) {   // a day boundary opens with its divider here too, or the tail append would drop it
-      const dv = dayDividerFor(ep, prev);
+      const dv = dayDividerFor(ep, walk);
       if (dv) { dv.dataset.unit = String(i); v.el.appendChild(dv); }
     }
     const node = renderEvent(s.events[i], prev, turnWorkedSecs(s.events, i, working));
     node.dataset.unit = String(i);   // unit === event in normal mode
     v.el.appendChild(node);
+    walk.pass(ep);
+    stampWalkDay(node, walk);
   }
   patchWorkedFooters(v, s, from, working);
   v.winEnd = total; v.spacerCount = v.winStart ?? 0; v.spacerCountBot = 0; v.unitTotal = total; v.rendered = len;
@@ -10828,6 +11031,38 @@ function prevTimedEpoch(events: ChatEvent[], i: number): number | null {
   return null;
 }
 
+// The epoch a display unit leaves the day walk on (T339): a lone event its own; a notice run its ANCHOR member (the
+// latest, compact.ts itemAnchor); a tool run its first member when collapsed and its last when expanded, exactly what
+// appendItem's rail chain (adv) leaves behind. One rule for the walk and for a window's seed, so a window opening
+// mid-transcript decides its first divider as a walk from the top would have.
+function unitExit(s: Session, it: DisplayItem): number | null {
+  if (it.kind === "event") return eventEpoch(s.events[it.index]);
+  if (it.kind === "noticegroup") return eventEpoch(s.events[itemAnchor(it, (i) => eventEpoch(s.events[i]))]);
+  const open = openFolds.has(toolGroupKey(s.events[it.indices[0]]));
+  return eventEpoch(s.events[open ? it.indices[it.indices.length - 1] : it.indices[0]]);
+}
+// The day the WALK is in at a row (T342, the manager's review of T339): the top-of-view day-context label
+// (paintRailSticky) read the top row's own epoch, so a stale echo at the top line said "2 days ago" between rows the
+// divider walk keeps under one "Yesterday". Every turn a walk appends carries the walk's mark after its unit as
+// data-day on its marker; the label reads that, and the rail's HH:MM stays the row's own. A divider or an untimed
+// row has no marker and is left alone.
+function stampWalkDay(node: HTMLElement, walk: DayWalk): void {
+  const m = node.firstChild as HTMLElement | null;
+  if (walk.mark != null && m && m.nodeType === 1 && m.classList && m.classList.contains("time-marker")) m.dataset.day = String(walk.mark);
+}
+// the day walk's high-water mark a walk from the top would hold before unit `unitStart` (compact units) …
+function dayWalkBefore(s: Session, items: DisplayItem[], unitStart: number): DayWalk {
+  const w = new DayWalk();
+  for (let u = 0; u < unitStart && u < items.length; u++) w.pass(unitExit(s, items[u]));
+  return w;
+}
+// … and before event `i` in normal mode, where every unit is one event
+function dayWalkBeforeEvent(events: ChatEvent[], i: number): DayWalk {
+  const w = new DayWalk();
+  for (let j = 0; j < i && j < events.length; j++) w.pass(eventEpoch(events[j]));
+  return w;
+}
+
 // ── Unified bidirectional virtualization (the user 2026-06-25) ─────────────────────────────────────────
 // Both modes render a window of UNITS [winStart, winEnd): a unit is one event (normal) or one folded
 // compactDisplay item (compact). The hidden head [0, winStart) collapses into a TOP spacer and the hidden
@@ -10862,16 +11097,21 @@ function lastCompactUnit(s: Session, items: DisplayItem[]): number {
 }
 
 // Append one display unit's DOM to v.el (a turn, or a folded toolgroup + its expansion), tagging every node
-// with data-unit = u for the scroll↔unit map. Returns the advanced prevEpoch.
-function appendItem(v: View, s: Session, items: DisplayItem[], u: number, prevEpoch: number | null, working: boolean): number | null {
+// with data-unit = u for the scroll↔unit map. Returns the advanced prevEpoch (the rail's raw chain, for the same-minute
+// rule); `walk` is the day walk's high-water mark, advanced over the unit's exit (unitExit) and never rewound (T339).
+function appendItem(v: View, s: Session, items: DisplayItem[], u: number, prevEpoch: number | null, walk: DayWalk, working: boolean): number | null {
   const it = items[u];
-  const tag = (node: HTMLElement): HTMLElement => { node.dataset.unit = String(u); return node; };
+  const nodes: HTMLElement[] = [];   // every node this unit appends: stamped with the walk's day on the way out (T342)
+  const tag = (node: HTMLElement): HTMLElement => { node.dataset.unit = String(u); nodes.push(node); return node; };
   const adv = (i: number) => { const ep = eventEpoch(s.events[i]); if (ep != null) prevEpoch = ep; };
   // A new day opens with its divider, above whatever unit starts that day (tagged with the same
-  // data-unit so the scroll↔unit map still resolves every node it walks).
-  const dayOpen = eventEpoch(s.events[itemFirstEvent(it)]);
+  // data-unit so the scroll↔unit map still resolves every node it walks). The unit is placed and timed by its ANCHOR
+  // member (compact.ts itemAnchor, T339): a run's latest member, the one in sequence with its neighbours, never a member
+  // stamped earlier than the rows around it.
+  const anchor = itemAnchor(it, (i) => eventEpoch(s.events[i]));
+  const dayOpen = eventEpoch(s.events[anchor]);
   if (dayOpen != null) {
-    const dv = dayDividerFor(dayOpen, prevEpoch);
+    const dv = dayDividerFor(dayOpen, walk);
     if (dv) v.el.appendChild(tag(dv));
   }
   if (it.kind === "toolgroup") {
@@ -10895,19 +11135,22 @@ function appendItem(v: View, s: Session, items: DisplayItem[], u: number, prevEp
     const notes = it.indices.map((i) => s.events[i]);
     const key = noticeGroupKey(notes[0]);
     const open = openFolds.has(key);
-    v.el.appendChild(tag(renderNoticeGroup(notes, prevEpoch, key, open)));
-    adv(it.indices[0]);
+    v.el.appendChild(tag(renderNoticeGroup(notes, s.events[anchor], prevEpoch, key, open)));   // timed by the anchor member (T339)
+    adv(anchor);
     if (open) {
       it.indices.forEach((i, j) => {
         const child = renderEvent(s.events[i], prevEpoch, turnWorkedSecs(s.events, i, working));
         child.classList.add("tg-child"); if (j === it.indices.length - 1) child.classList.add("tg-last");
         v.el.appendChild(tag(child)); adv(i);
       });
+      adv(anchor);   // the walk leaves the run on its latest member, whatever order its members came in
     }
   } else {
     v.el.appendChild(tag(renderEvent(s.events[it.index], prevEpoch, turnWorkedSecs(s.events, it.index, working))));
     adv(it.index);
   }
+  walk.pass(unitExit(s, it));
+  for (const n of nodes) stampWalkDay(n, walk);
   return prevEpoch;
 }
 
@@ -10920,7 +11163,8 @@ function renderWindowItems(v: View, s: Session, items: DisplayItem[], unitStart:
   while (v.el.firstChild) v.el.removeChild(v.el.firstChild);
   if (unitStart > 0) v.el.appendChild(el("div", "tx-spacer tx-spacer-top"));
   let prevEpoch = unitStart > 0 && unitStart < total ? prevTimedEpoch(s.events, itemFirstEvent(items[unitStart])) : null;
-  for (let u = unitStart; u < unitEnd; u++) prevEpoch = appendItem(v, s, items, u, prevEpoch, working);
+  const walk = dayWalkBefore(s, items, unitStart);   // the mark a walk from the top would hold here (T339)
+  for (let u = unitStart; u < unitEnd; u++) prevEpoch = appendItem(v, s, items, u, prevEpoch, walk, working);
   if (unitEnd < total) v.el.appendChild(el("div", "tx-spacer tx-spacer-bot"));
   v.winStart = unitStart; v.winEnd = unitEnd;
   v.spacerCount = unitStart; v.spacerCountBot = total - unitEnd; v.unitTotal = total;
@@ -11028,12 +11272,7 @@ function noticeGroupKey(first: ChatEvent): string { return "ng:" + (first.uuid |
 // recovery, an effort change, a model swap, a reload, an interrupt + its settle, a background report, a
 // system reminder, a romp notice); peers, API errors, compaction/clear boundaries, asks, to-dos and every
 // bubble stay standalone (they are either owed a reply or mark a boundary)
-function isFoldableNotice(ev: ChatEvent): boolean {
-  if (ev.kind === "retried" || ev.kind === "effortApplied" || ev.kind === "modelFallback" || ev.kind === "reconnecting") return true;
-  if (ev.kind === "user") return !!((ev as any).interruptMarker || ((ev as any).rompSystem && ev.md) || (ev.source && !ev.human && !ev.undelivered));
-  if (ev.kind === "assistant") return !!(ev as any).interruptSettle;
-  return false;
-}
+function isFoldableNotice(ev: ChatEvent): boolean { return isFoldableNoticeShape(ev as any); }   // the one reading lives in compact.ts (shared with the reveal progress count)
 // the head words of a foldable notice, as its own renderer would show them (the gist helpers are shared)
 function noticeBrief(ev: ChatEvent): { src: string; glyph: NoticeGlyphKind; gist: string } {
   if (ev.kind === "retried") return { src: "API", glyph: "retry", gist: retriedGist(ev.retries || 0) };
@@ -11051,18 +11290,21 @@ function noticeBrief(ev: ChatEvent): { src: string; glyph: NoticeGlyphKind; gist
   }
   return { src: "session", glyph: "session", gist: "" };
 }
-function renderNoticeGroup(evs: ChatEvent[], prevEpoch: number | null, key: string, open: boolean): HTMLElement {
+// `anchor` is the member the run is placed and timed by (compact.ts itemAnchor, T339): its latest, the one in sequence
+// with the rows around it. The head's rail time, data-t, uuid and hover wiring all read it; the words (the source, the
+// glyph, the first gist) stay the first member's, which is what the run reads as.
+function renderNoticeGroup(evs: ChatEvent[], anchor: ChatEvent, prevEpoch: number | null, key: string, open: boolean): HTMLElement {
   const b = noticeBrief(evs[0]);
   const turn = notice({ src: b.src, glyph: b.glyph, gist: `${evs.length} notices`, meta: open ? undefined : b.gist,
                         group: { key, open }, cls: "turn-toolgroup turn-noticegroup" + (open ? " expanded" : ""),
                         tip: open ? "click to collapse" : "click to expand" });
-  const epoch = eventEpoch(evs[0]);
-  const anchorUuid = evs[0].uuid ?? null;
+  const epoch = eventEpoch(anchor);
+  const anchorUuid = anchor.uuid ?? null;
   if (anchorUuid) turn.dataset.uuid = anchorUuid;
   if (epoch != null) turn.dataset.t = String(epoch);
   if (epoch != null) turn.insertBefore(timeMarker(epoch, prevEpoch ?? null), turn.firstChild);
   const railDot = turn.querySelector(".dot") as HTMLElement | null;
-  if (anchorUuid || epoch != null) wireTurnHover(turn, railDot, anchorUuid, epoch ?? 0, evs[0].tlId ?? null);
+  if (anchorUuid || epoch != null) wireTurnHover(turn, railDot, anchorUuid, epoch ?? 0, anchor.tlId ?? null);
   return turn;
 }
 
@@ -11745,6 +11987,8 @@ function landActive(content: HTMLElement | null, v: View): void {
   // and never dead-ending. If the moment predates the loaded history, the oldest loaded message is
   // the nearest reachable point — the note names that too (fail loudly, land nearest).
   if (!scrolled && !att.anchor && att.t != null) scrolled = landNearestMoment(att.t);
+  revealProgressTick(scrolled, att.anchor);   // the reveal loop's progress line begins, repaints or ends on this pass, decided BEFORE the
+                                         // seek note: the pass that ends the loop without landing gets its note (and ✕) back at once (T336)
   if (seek && att.anchor === seek.uuid) {
     if (scrolled) clearSeek();             // the landing event — the indicator dies with the seek
     else showSeekNote();                   // outlived the immediate landing → say the search is on
@@ -12427,6 +12671,7 @@ function virtualizeToViewport(): void {
 // (the user 2026-06-25). Lives in the chat iframe's body; idempotent.
 let loadingPillEl: HTMLElement | null = null;
 function showLoadingPill(): void {
+  if (revealProgress) return;   // the reveal progress line is the one message for that wait (T336)
   if (!loadingPillEl) {
     loadingPillEl = document.createElement("div");
     loadingPillEl.className = "tx-loading-pill";
@@ -13070,6 +13315,7 @@ function syncComposerPh(): void {
   let ph = document.getElementById("composer-ph");
   if (!ph) {
     ph = el("div", ""); ph.id = "composer-ph"; ph.setAttribute("aria-hidden", "true"); box.appendChild(ph);
+    ph.classList.add("name-faded");   // the strip's at-rest class: a remote host's prefix fades with the name it precedes (styles.css .name-faded .host-prefix; T335)
     // The box's LAYOUT moves the textarea too, not only its value: a quote chip seeded by a highlight, a dropped
     // file or a staged note adds a row above it (the user 2026-09-10: the name overlay sat on top of the chip
     // row). Every such change resizes #composer, so its ResizeObserver re-places the overlay — event-based,
@@ -13082,6 +13328,14 @@ function syncComposerPh(): void {
   const live = liveSession(activeId);
   const meta = activeId ? tabMeta.get(activeId) : undefined;
   const colorBg = (live?.color?.bg || meta?.color?.bg) || null;
+  // the box's FOCUS ring wears the session's identity colour (T345, the user 2026-09-11: the thin border around the focused
+  // box should be the colour of the session you are messaging): published here, the one place that knows the active
+  // session's colour, as a variable on the box for the focus rule (styles.css #composer-input:focus) to read; the accent
+  // stays the fallback for a session with no colour, or one too close to the page's luminance to read as a ring
+  const ring = colorBg && identityReadable(colorBg) ? colorBg : "";
+  if (box.style.getPropertyValue("--composer-identity") !== ring) {
+    if (ring) box.style.setProperty("--composer-identity", ring); else box.style.removeProperty("--composer-identity");
+  }
   const parts = phParts(ta.placeholder, live?.name || meta?.name || "", activeId);   // the sid tells a remote host's prefix from a name (host-prefix.ts)
   const show = parts.kind === "named" && !ta.value && !ta.disabled && ta.offsetParent !== null;
   ph.style.display = show ? "" : "none";
@@ -13095,8 +13349,12 @@ function syncComposerPh(): void {
     // the quiet .host-prefix span, marked when the host's link is down, and only the name below is bold and coloured
     ph.appendChild(hostNameNodes(parts.host + parts.name, activeId)[0]);
   }
+  // the name HALFWAY between its identity colour and an inactive tab label's level (T335, the user 2026-09-10: at the full
+  // colour it stood out brighter than every other word of the faded placeholder; T341, the user 2026-09-11: at the strip's
+  // full fade it read too faint): the strip's own perceptual fade of the identity colour (fadedColor) at half strength,
+  // the weight kept; the host span fades in tandem through the strip's own class on the overlay, at the matching midpoint
   const nm = el("b", "composer-ph-name"); nm.textContent = parts.name;
-  if (colorBg) nm.style.color = colorBg; else nm.style.removeProperty("color");
+  if (colorBg) nm.style.color = fadedColor(colorBg, PH_NAME_FADE); else nm.style.removeProperty("color");
   ph.appendChild(nm);
   ph.appendChild(document.createTextNode(parts.after));
   // where the box's own first line sits: inside its border and padding, in its font (offsets are relative to
@@ -15505,7 +15763,7 @@ const navHist = new NavHistory({
   },
 });
 
-function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: string) {
+function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: string, anchorEventT?: number) {
   noteMru(id);
   // EPHEMERAL PEEK (see peekId): an out-of-view target opens as the peek; activating anything else
   // drops it. Before the already-active early-return, so a re-focus of a hidden session re-asserts
@@ -15562,7 +15820,12 @@ function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: s
   pendingAnchor = anchor ?? null;
   if (anchor) flashedAnchor = null;        // a fresh navigation re-arms the one-per-navigation flash
   pendingAnchorIntent = anchor ? (anchorKind ?? null) : null;
-  if (anchor) armSeek(id, anchor, anchorKind ?? null);   // durable until land / ✕ / backstop (see armSeek)
+  if (anchor) armSeek(id, anchor, anchorKind ?? null, anchorEventT ?? null);   // durable until land / ✕ / backstop (see armSeek)
+  else if (anchorT != null) {              // a time-only navigation supersedes a seek (and the reveal progress line with it)…
+    releaseSeekFetch(id);                  // …and drops the loop's claim on any in-flight older fetch, so the chunk that lands next is a
+    if (seek && seek.sid !== id) releaseSeekFetch(seek.sid);   // pure prepend and never re-pursues the abandoned anchor (review find)
+    clearSeek();
+  }
   activeId = id;
   updateLivePaused();   // the entering tab's own detached state shows or hides the strip (round 2, item 7)
   try { vscodeApi?.setState?.({ ...(vscodeApi.getState?.() || {}), activeId: id }); } catch { /* ignore */ }
@@ -16498,6 +16761,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   else if (m.type === "update") update(m);
   else if (m.type === "wsup") { onSocketUp(skeletonTabs); skeletonDiagArmed = true; reholdQueuedEditors(); }   // the shim's socket-flip marker, in FRAME order: the dead socket's frames may still be draining from the FIFO when onopen fires (review find 2026-09-07)
   else if (m.type === "status") statusOnly(m);
+  else if (m.type === "focus" && !m.own && !focusIsOurs(m.id)) { /* another chat column's (split screen): the shell named the column it belongs to; `own` is the shell's hand-over to THIS new column */ }
   else if (m.type === "focus") {
     revealSelfPane();   // every focus is someone jumping HERE — on mobile, come forward (incl. from a remote kernel)
     closingTabs.delete(m.id);   // an explicit reveal outranks a pending close-suppression: closing a tab and
@@ -16529,7 +16793,8 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
       });
     } else {
       pendingAnchorQuote = typeof (m as { anchorQuote?: string }).anchorQuote === "string" ? (m as { anchorQuote?: string }).anchorQuote! : null;   // the supporting span (T218) — consumed by the landing
-      setActive(m.id, m.anchor, typeof m.anchorT === "number" ? m.anchorT : undefined, typeof m.anchorKind === "string" ? m.anchorKind : undefined);
+      setActive(m.id, m.anchor, typeof m.anchorT === "number" ? m.anchorT : undefined, typeof m.anchorKind === "string" ? m.anchorKind : undefined,
+                typeof m.anchorEventT === "number" ? m.anchorEventT : undefined);   // the anchor turn's own moment, when the kernel resolved it (T336)
     }
     // A feed card click that resolved to a live goal → seed the composer citation chip (the user 2026-07-01).
     if (m.cite && typeof m.cite.itemId === "string" && typeof m.cite.title === "string") setCitation(m.id, { itemId: m.cite.itemId, title: m.cite.title });
@@ -16747,6 +17012,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
         closeTabLocally(m.id);   // same optimistic drop as the in-page ✕ — this path used to sit and wait
       });
   }
+  else if (m.type === "confirmRevive" && m.id && !m.own && !focusIsOurs(m.id)) { /* another chat column's prompt (split screen) — one dialog, not one per column; `own` is addressed to this column */ }
   else if (m.type === "confirmRevive" && m.id) {
     revealSelfPane();   // the dead-session prompt is drawn in THIS pane — useless if the pane isn't showing
     const nm = String(m.name || "");
@@ -18157,6 +18423,7 @@ window.addEventListener("storage", (e) => {
     const v = JSON.parse(e.newValue);
     const sid = typeof v.sid === "string" ? v.sid : "";
     if (!sid || (!sessions.has(sid) && !tabMeta.has(sid))) return;
+    if (!focusIsOurs(sid)) return;   // another chat column's (split screen): the echo reaches every column's listener
     revealSelfPane();
     closingTabs.delete(sid);
     assertPeekFor(sid);

@@ -263,7 +263,7 @@ class TimelineViews(unittest.TestCase):
         self.assertIn('**_views_payload(),', src, "the timeline payload carries the RENDERED shape (through the one carrier, which marks "
                       "a blob a read fault left unproved or sends the marker alone, 2026-09-08)")
         self.assertIn('"palette": pal.colors(_palette_name()),', src, "and the palette, for tag colors in every host")
-        self.assertIn('_send_tab_order(c, tab_order, tab_meta, tmux)', src, "tabOrder pushes carry it (through the one frame builder, T258)")
+        self.assertIn('_send_tab_order(c, tab_order, tab_meta, live_map)', src, "tabOrder pushes carry it (through the one frame builder, T258)")
         # every tabOrder frame is built by ONE helper (2026-09-06: the frame also carries selfHost; 2026-09-07: it is
         # built per client through _send_tab_order, so a reconnecting client's skeleton list can ride it; 2026-09-08:
         # the views ride the one carrier, which marks a blob a read fault left unproved or sends the marker alone)

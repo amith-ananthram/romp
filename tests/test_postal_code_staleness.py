@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Bus code-staleness self-restart (the user 2026-06-29): the postal bus is a long-lived singleton keyed on
 its port, so a process started before a code change keeps serving STALE in-memory code — which silently
-stranded mail to SDK sessions (a bus from before the "deliver via the kernel, not by pasting into a tmux
-pane" refactor couldn't reach a pane-less SDK recipient). Guard: the bus fingerprints its own source at boot
+stranded mail to SDK sessions (a bus from before the 2026-06-26 "deliver through the kernel" refactor still
+reached for recipients the way the since-removed backend did and could not reach an SDK recipient at all).
+Guard: the bus fingerprints its own source at boot
 and the monitor re-execs into the new code the moment the on-disk file changes.
 
 Synthetic only — no real session data.

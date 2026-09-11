@@ -155,13 +155,13 @@ class BuiltFeedIsClockInvariantApartFromTheClockItself(unittest.TestCase):
         km.jd.NAMES, km.jd.PROJECTS = names, proj
         km._GLOBAL_CLAUDE_MD = td / "no-global-claude.md"
         # Fixed so the stub itself contributes nothing clock-derived (mirrors the chat invariant test).
-        self.tmux = {SID: {"state": "idle", "since": NOW - 100, "model": "", "effort": "",
+        self.live = {SID: {"state": "idle", "since": NOW - 100, "model": "", "effort": "",
                            "context": None, "compactPct": None, "color": None}}
         # The invariant is over an UNCHANGING fleet. A session's FIRST build adopts it into the persisted
         # session order (feed `order` reads that file before _ordered appends the newcomer), so the first
         # sight is a genuine change; warm once so the two compared builds are both post-adoption (T258).
         km.jd._discover_cache.clear()
-        km.build_feed(NOW - 1, self.tmux)
+        km.build_feed(NOW - 1, self.live)
 
     def tearDown(self):
         km.jd._rebind_state(self.saved_kernel_state)
@@ -170,8 +170,8 @@ class BuiltFeedIsClockInvariantApartFromTheClockItself(unittest.TestCase):
         self.td.cleanup()
 
     def test_only_the_declared_volatile_fields_move_with_the_clock(self):
-        a = km.build_feed(NOW, self.tmux)
-        b = km.build_feed(NOW + 600, self.tmux)
+        a = km.build_feed(NOW, self.live)
+        b = km.build_feed(NOW + 600, self.live)
         varying = sorted(k for k in set(list(a) + list(b))
                          if json.dumps(a.get(k), sort_keys=True, default=str)
                          != json.dumps(b.get(k), sort_keys=True, default=str))
@@ -184,8 +184,8 @@ class BuiltFeedIsClockInvariantApartFromTheClockItself(unittest.TestCase):
         """End to end: the builder's output, run through the real sender, must send once."""
         sent = []
         client = {"send": sent.append, "alive": True}
-        km._send_client(client, ("feed",), km.build_feed(NOW, self.tmux))
-        km._send_client(client, ("feed",), km.build_feed(NOW + 600, self.tmux))
+        km._send_client(client, ("feed",), km.build_feed(NOW, self.live))
+        km._send_client(client, ("feed",), km.build_feed(NOW + 600, self.live))
         self.assertEqual(len(sent), 1,
                          "an unchanging fleet must not re-send the feed just because time passed")
 
@@ -214,7 +214,7 @@ class BuiltFeedIsClockInvariantApartFromTheClockItself(unittest.TestCase):
                     except OSError:
                         pass
         self.addCleanup(restore)
-        self.assertNotIn("t281-foreign", json.dumps(km.build_feed(NOW, self.tmux), default=str),
+        self.assertNotIn("t281-foreign", json.dumps(km.build_feed(NOW, self.live), default=str),
                          "a store at the run-wide goals directory is not this feed's input")
         self.assertEqual(km.jd.GOALDIR, Path(self.td.name) / "goals", "the kernel's judge reads this fixture's goals")
 

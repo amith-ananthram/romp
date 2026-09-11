@@ -51,7 +51,7 @@ test("kernel: the feed payload carries the build id, claimed BEFORE the read it 
   assert.match(KERNEL, /def _next_feed_build_id\(\):/);
   const cached = KERNEL.slice(KERNEL.indexOf("def _cached_feed("), KERNEL.indexOf("def _cached_timeline("));
   const claim = cached.indexOf("bid = _next_feed_build_id()");
-  const build = cached.indexOf("feed = build_feed(now, tmux)");
+  const build = cached.indexOf("feed = build_feed(now, live_map)");
   assert.ok(claim >= 0 && build > claim,
     "claimed before the build: one already in flight when a click lands gets the LOWER id it deserves");
   assert.match(cached, /feed\["buildId"\] = bid/);
