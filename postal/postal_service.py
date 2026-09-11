@@ -343,6 +343,13 @@ def _safe_id(s):
 # printable is in here: spaces, punctuation, accents, CJK and emoji all live outside it.
 _HDR_BREAK_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 
+def _marker_val(v):
+    """A relay marker as the wire may carry it: the kernel's own alphabet (digits, letters, ':' '_' '.' '-'), at most 64
+    characters; anything else is dropped, so a value from a tokened client, a far host or a held record can carry
+    no header line and forge nothing."""
+    return re.sub(r"[^A-Za-z0-9:_.-]", "", str(v or ""))[:64]
+
+
 def _hdr_val(v):
     """One value, made safe to write into a maildir header line (see deliver).
 
@@ -552,7 +559,12 @@ def _walk_root_record(frm_id):
 
 
 def deliver(to_id, from_name, from_id, body, park=False, kind="", from_host="",
-            relay_mid="", relay_via="", tracked=False, user_ask=None):
+            relay_mid="", relay_via="", tracked=False, user_ask=None, relayed=False, relay_marker=""):
+    # relayed=True (T334, 2026-09-11): romp sent this on the SENDER's behalf (the kernel relaying a worker's block
+    # toward the peer that delegated its goal, as the worker's own question). The header and the row say so, so
+    # the courier and the sender's own receipts can tell it from a typed ask (the recipient reads ordinary mail);
+    # relay_marker is the kernel's identity for the relay, written on the row so a send whose answer was lost is
+    # found again and never repeated.
     # park=True marks a HANDOFF parked for a session that's currently dead. The
     # maildir is keyed by the session UUID (which `romp resume` reuses), so the
     # message simply waits on disk until that session is revived — delivered then,
@@ -566,7 +578,10 @@ def deliver(to_id, from_name, from_id, body, park=False, kind="", from_host="",
     # from — stamped into headers so the read receipt can flow back when the recipient actually reads
     # it (read_box/restore queue it into the readbox). The maildir file is the durable record: the
     # receipt route survives a bus restart exactly as long as the unread mail does.
-    mb = _mailbox(to_id)
+    relayed = bool(relayed) and kind == "question"   # the invariant every path shares (the /send gate, the far side's
+    relay_marker = _marker_val(relay_marker) if relayed else ""   # deliver, a held message's approve): only a question is
+    mb = _mailbox(to_id)                             #   relayed; the marker (the kernel's relay identity) rides with it,
+    #                                                  clamped to a marker's own alphabet (a wire value forges nothing)
     name = _unique()
     tmp = mb / "tmp" / name
     # THE header write point — every value that lands in a header line goes through _hdr_val
@@ -594,6 +609,11 @@ def deliver(to_id, from_name, from_id, body, park=False, kind="", from_host="",
         hdr += "X-From-Host: %s\n" % h["from_host"]
     if h["relay_mid"] and h["relay_via"]:
         hdr += "X-Peer-Mid: %s\nX-Peer-Via: %s\n" % (h["relay_mid"], h["relay_via"])
+    if relayed:
+        hdr += "X-Relayed: romp\n"                  # sent by romp on the sender's behalf (T334)
+    if relay_marker:
+        hdr += "X-Relay-Marker: %s\n" % _hdr_val(relay_marker)   # the kernel's marker id (clamped above; the one
+        #                                                          sanitizer every header value passes, as well)
     tmp.write_text(hdr + "\n" + body + "\n")
     # Timeline log: a message was SENT (the matching exec event is logged when
     # the recipient consumes it in read_box). id = maildir filename joins the two.
@@ -603,6 +623,10 @@ def deliver(to_id, from_name, from_id, body, park=False, kind="", from_host="",
         ev["park"] = True
     if kind:
         ev["kind"] = kind                            # additive (consumer contract above)
+    if relayed:
+        ev["relayed"] = True                         # additive (consumer contract above): romp relayed it (T334)
+    if relay_marker:
+        ev["relayMarker"] = relay_marker             # additive: the kernel finds a send it lost the record of by this
     if tracked:
         ev["tracked"] = True                         # additive (consumer contract above): report-back
         #                                              delegation — the row is the flag's ONE record;
@@ -790,6 +814,7 @@ def read_box(sid, consume):
         out.append({"from": meta.get("from", "?"), "from_id": meta.get("from-id", ""),
                     "date": meta.get("date", ""), "body": body.rstrip("\n"), "id": f.name,
                     "park": bool(meta.get("x-park")), "kind": meta.get("x-kind", ""),
+                    "relayed": bool(meta.get("x-relayed")),   # romp sent it on the sender's behalf (T334)
                     "from_host": meta.get("x-from-host", "")})
     if consume:
         _mark_pending(sid)         # cleared the box -> drop the marker (no-op if more arrived)
@@ -977,7 +1002,8 @@ def format_receipts(recs):
             st = "delivered %s (not read yet) · id %s" % (_hhmm_epoch(r["relayed"]), r.get("id", "?"))
         else:                                  # still unread -> recallable; show the id to target it
             st = "pending (not read yet) · id %s" % r.get("id", "?")
-        out.append("  → %-18s sent %s · %s" % (r.get("to", "?"), _hhmm_epoch(r["sent"]), st))
+        out.append("  → %-18s sent %s · %s%s" % (r.get("to", "?"), _hhmm_epoch(r["sent"]), st,
+                                                  " · sent on your behalf" if r.get("onBehalf") else ""))
     return "\n".join(out)
 
 # ───────────────────────── the bus (server) ─────────────────────────
@@ -1614,6 +1640,32 @@ def _recall(from_id, to, mid, kept=None):
                                               "box": "outbox", "host": hostdir.name})
     return removed
 
+def _relay_marker_sent_row(from_id, marker):
+    """The sent row of a relayed question `from_id` sent under the kernel's relay marker `marker`, if any: the bus's own
+    record that makes /send idempotent for a relay (a stalled answer has the kernel POST again; the manager must hold
+    the question once). A row whose id was bounced as NOT PARKED never went anywhere and does not count. Reads the
+    log's tail, newest first."""
+    log = TLDIR / "messages.jsonl"
+    if not (from_id and marker) or not log.exists():
+        return None
+    try:
+        lines = log.read_text(errors="replace").splitlines()
+    except OSError:
+        return None
+    unsent = set()
+    for line in reversed(lines):
+        try:
+            e = json.loads(line)
+        except Exception:
+            continue
+        if e.get("ev") == "bounced" and e.get("notParked"):
+            unsent.add(str(e.get("id") or ""))
+        elif (e.get("ev") == "sent" and e.get("from_id") == from_id and e.get("relayed")
+              and str(e.get("relayMarker") or "") == str(marker) and str(e.get("id") or "") not in unsent):
+            return e
+    return None
+
+
 def _sent_receipts(mid):
     """[{to, id, sent, exec, recalled}] for messages SENT by `mid`, joined by id,
     oldest first. exec is None until the recipient reads it; recalled is set if the
@@ -1661,6 +1713,8 @@ def _sent_receipts(mid):
         r = {"to": e.get("toName") or _name(e.get("to_id", "")), "id": i, "sent": e["t"],
              "exec": execs.get(i), "recalled": recalls.get(i),
              "relayed": relays.get(i), "bounced": bounced.get(i), "parked": h}
+        if e.get("relayed"):
+            r["onBehalf"] = True                     # romp sent it on this session's behalf (T334): the receipt says so
         if r["bounced"]:
             r["bouncedWhy"] = bounced_why.get(i, "")   # additive: an older client ignores it
         if h:
@@ -2003,7 +2057,7 @@ def _bounce_oversize(sid, m):
         return
     if not restore(sid, mid):
         deliver(sid, m.get("from", "?"), frm_id, m.get("body", ""), park=m.get("park", False),
-                kind=m.get("kind", ""), from_host=m.get("from_host", ""))
+                kind=m.get("kind", ""), from_host=m.get("from_host", ""), relayed=bool(m.get("relayed")))
     if mid not in _OVERSIZE_NAMED:
         _OVERSIZE_NAMED.add(mid)
         _log("push to %s: message %s is %d bytes, over the %d-byte /deliver limit, and has no local sender "
@@ -2068,7 +2122,7 @@ def _push(sid, agent):
             if not restore(sid, m.get("id", "")):
                 deliver(sid, m.get("from", "?"), m.get("from_id", ""), m.get("body", ""),
                         park=m.get("park", False), kind=m.get("kind", ""),
-                        from_host=m.get("from_host", ""))
+                        from_host=m.get("from_host", ""), relayed=bool(m.get("relayed")))
         _log("push to %s deferred (%s); %d msg(s) restored for the drain backstop%s"
              % (sid, cause, len(held), (" after %d landed" % landed) if landed else ""))
         return False
@@ -2403,6 +2457,19 @@ class Handler(BaseHTTPRequestHandler):
             if terr:                                   # a string here armed tracking on a plain send
                 return self._send({"error": terr}, 400)
             tracked = tracked and kind == "delegate"
+            relayed, rerr = _as_bool(data.get("relayed"), "relayed")   # the kernel relaying a worker's question (T334)
+            if rerr:
+                return self._send({"error": rerr}, 400)
+            relayed = relayed and kind == "question"
+            relay_marker = _marker_val(data.get("relayMarker")) if relayed else ""   # the kernel's marker id (T334)
+            if relay_marker:
+                prior = _relay_marker_sent_row(frm_id, relay_marker)
+                if prior is not None:                  # the same relayed question was sent already (a stalled answer had
+                    to_prior = str(prior.get("to_id") or "")   # the kernel ask again): answer THAT send, deliver nothing
+                    if to_prior.startswith("peer:"):
+                        return self._send({"ok": True, "id": prior.get("id"), "duplicate": True, "host": to_prior[5:],
+                                           "note": "already relayed to %s" % to_prior[5:]})
+                    return self._send({"ok": True, "to": to, "id": prior.get("id"), "duplicate": True})
             #   (the user 2026-08-24): only a delegate can be tracked; wire metadata only — nothing
             #   about the flag ever appears in message prose (the injected-voice rule)
             why_off = _mail_off_why(frm_id)
@@ -2453,6 +2520,11 @@ class Handler(BaseHTTPRequestHandler):
                     ua = _walk_root_record(frm_id)
                     if ua:
                         relay_msg["userAsk"] = ua
+                if relayed:
+                    relay_msg["relayed"] = True    # the far side's deliver marks it (T334): a relayed question
+                    #                                reaches a far-host manager marked, exactly as a local one does
+                    if relay_marker:
+                        relay_msg["relayMarker"] = relay_marker
                 # `to_sid` (2026-09-08): the recipient's STABLE id, the same value the wire's toId
                 # carries. The row used to name the recipient only ("<host>:<name>"), so every
                 # reader of the wait (the kernel's wait maps, the judge's ask maps) had to join it
@@ -2471,12 +2543,14 @@ class Handler(BaseHTTPRequestHandler):
                                                      "to_id": "peer:%s" % phost,
                                                      "toName": "%s:%s" % (phost, hit.get("name") or to),
                                                      "to_sid": str(hit.get("id") or ""),
-                                                     "body": body, "kind": kind}):
+                                                     "body": body, "kind": kind,
+                                                     **({"relayed": True} if relayed else {}),   # as deliver's row (T334)
+                                                     **({"relayMarker": relay_marker} if relay_marker else {})}):
                     return self._send({"ok": False, "error": NOT_RECORDED_TEXT}, 503)
                 if not outbox_put(phost, relay_msg):
                     _tl_append("messages.jsonl", {"t": int(time.time()), "ev": "bounced", "id": mid,
                                                   "to": hit.get("name") or to, "host": phost,
-                                                  "why": WHY_NOT_PARKED})
+                                                  "why": WHY_NOT_PARKED, "notParked": True})   # never left (T334 reads it)
                     return self._send({"ok": False, "error": "the message could not be parked for %s "
                                        "(the outbox could not be written), so it was not sent — "
                                        "nothing is lost; retry" % phost}, 503)
@@ -2490,7 +2564,8 @@ class Handler(BaseHTTPRequestHandler):
                                    "note": _parked_note(phost, frm_id) + tnote})
             a0 = res["agent"]
             try:
-                mid = deliver(a0["id"], frm, frm_id, body, kind=kind, tracked=tracked)
+                mid = deliver(a0["id"], frm, frm_id, body, kind=kind, tracked=tracked, relayed=relayed,
+                              relay_marker=relay_marker)
             except DeliveryNotRecorded as e:
                 # 503 + ok:false (see the relay leg): nothing was published; the sender retries.
                 return self._send({"ok": False, "error": str(e)}, 503)
@@ -2746,6 +2821,10 @@ def _rebuild_rows_for_rowless_mail(box, sent, ended):
             row["park"] = True
         if meta.get("x-kind"):
             row["kind"] = meta["x-kind"]
+        if meta.get("x-relayed"):
+            row["relayed"] = True                    # romp sent it on the sender's behalf (T334)
+        if meta.get("x-relay-marker"):
+            row["relayMarker"] = str(meta.get("x-relay-marker"))[:64]
         row["from_host"] = meta.get("x-from-host", "")
         if meta.get("x-peer-mid"):
             row["originMid"] = meta["x-peer-mid"]
@@ -3861,6 +3940,10 @@ def _quarantine_put(origin, m, to_id, via="", wire_id=None):
         rec["toWireId"] = wire
     if isinstance(m.get("userAsk"), dict):
         rec["userAsk"] = m["userAsk"]                # held with its provenance; approve replays it (T126)
+    if m.get("relayed"):
+        rec["relayed"] = True                        # held with its mark; approve replays it (T334)
+        if m.get("relayMarker"):
+            rec["relayMarker"] = str(m.get("relayMarker"))[:64]
     try:
         QUARANTINE.mkdir(parents=True, exist_ok=True)
         tmp = QUARANTINE / (mid + ".tmp")
@@ -3993,7 +4076,8 @@ def quarantine_decide(mid, action, text=None, feedback=None):
             deliver(to_id, rec.get("frm") or "?", rec.get("frmId") or "", body, kind=rec.get("kind") or "",
                     from_host=rec.get("origin") or "",
                     relay_mid=rec.get("mid") or "", relay_via=rec.get("via") or rec.get("origin") or "",
-                    user_ask=rec.get("userAsk"))
+                    user_ask=rec.get("userAsk"), relayed=bool(rec.get("relayed")),
+                    relay_marker=str(rec.get("relayMarker") or ""))
         except DeliveryNotRecorded as e:
             return False, "%s — the held message is untouched" % e
         quarantine_del(mid)
@@ -4067,7 +4151,9 @@ def _relay_in(host, m, token_proven=False):
                 deliver(match[0]["id"], m.get("frm") or "?", m.get("frm_id") or "", m.get("body") or "",
                         kind=m.get("kind") or "", from_host=origin,
                         relay_mid=mid, relay_via=host,       # read-receipt route: back through the direct peer
-                        user_ask=m.get("userAsk"))           # origin-kernel walked record rides through (T126)
+                        user_ask=m.get("userAsk"),           # origin-kernel walked record rides through (T126)
+                        relayed=bool(m.get("relayed")),      # romp sent it on the sender's behalf (T334)
+                        relay_marker=str(m.get("relayMarker") or ""))
             except DeliveryNotRecorded as e:
                 # nothing landed → NOT acked and not marked seen: silence crosses the wire as
                 # 'retry', the sender's outbox keeps it parked and re-relays it next exchange

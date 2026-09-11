@@ -8527,8 +8527,10 @@ class StaleBlockGuard(unittest.TestCase):
         # this pin just keeps the planner on the one seam.
         import inspect
         src = inspect.getsource(jd)
-        self.assertIn('if t and record_verdict(store, nodes[t], "planner", "block", seg_t', src,
-                      "the planner's block op must go through record_verdict exactly like the closer")
+        self.assertIn('file_block(store, nodes[t], "planner", o["why"], seg_t, seg=seg_id) if t else', src,
+                      "the planner's block op goes through the one block writer, like the closer (T334)")
+        self.assertIn('record_verdict(store, nd, src, "block", ev_t, why=why, seg=seg)', inspect.getsource(jd.file_block),
+                      "…and that writer files a user's block through record_verdict, the fused gate+recorder")
 
 
 class FollowupContinuationCarry(unittest.TestCase):
