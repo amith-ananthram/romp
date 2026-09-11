@@ -293,7 +293,8 @@ class DeadWaitCorroboration(_HermeticDeadWait):
         km._dead_wait_sweep(set(), self.nudged, STAMP_T + 900)
         self.assertFalse(self._blocked(), "unconfirmed is never dead — nothing files")
         self.assertIn(SID, km._PREV_ALIVE, "the candidate is kept, not spent")
-        self.codex._registry_unreadable = False   # the registry reads again and knows no such sid: dead history…
+        self.codex._registry_unreadable = False   # the registry reads again and marks the sid dead: the owner's answer…
+        self.codex.rows[SID] = False
         km._dead_wait_sweep(set(), self.nudged, STAMP_T + 950)
         self.assertTrue(self._blocked(), "…and the retried tick converts")
 
@@ -479,7 +480,7 @@ class DeadWaitOneObserver(_HermeticDeadWait):
         # the single-flight guard: the pusher's pass holds _AUTO_NUDGE_TICK_LOCK (a plain Lock), so
         # the nested tick returns at its try-acquire before run_dead_wait is even read. The
         # run_dead_wait=False sweep skip is pinned by the sequential sibling above, not by this test.
-        _seed_store(ended=False)
+        _seed_store()
         _write_state("idle", STAMP_T + 50)
         km._PREV_ALIVE = {SID}
         real = km._dead_wait_corroborated
