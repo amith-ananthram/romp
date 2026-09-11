@@ -86,7 +86,7 @@ class ThreadMailOff(unittest.TestCase):
         src = inspect.getsource(km._comments_frame)
         self.assertIn('"mailOff": bool(_postal_isolated(tsid))', src)
         rows = inspect.getsource(km._thread_rows)
-        self.assertIn('"postalServiceOff": _postal_isolated(tsid)', rows); self.assertIn('"mailOffWhy": "thread" if _thread_mail_off(tsid) else ""', rows)
+        self.assertIn('"postalServiceOff": _postal_isolated(tsid)', rows); self.assertIn('"mailOffWhy": _mail_off_why_k(tsid)', rows)
         whole = Path(os.path.join(BIN, "romp-kernel")).read_text()
         self.assertEqual(whole.count('"postalServiceOff": _postal_isolated('), 4, "chat rows, timeline lanes, thread rows, Sessions pane rows")
         self.assertNotIn('"postalServiceOff": _session_flag(sid, "postalServiceOff")', whole, "no row reads the raw flag past the effective reader")
@@ -106,6 +106,32 @@ class HeldMail(unittest.TestCase):
             (box / ("m%d" % i)).write_text("From: peer\n\nhello\n")
         self.assertEqual(km._held_mail_count(THREAD), 3)
         self.assertIn('"heldMail": _held_mail_count(tsid)', inspect.getsource(km._comments_frame), "the frame carries it beside mailOff")
+
+
+class UnreadableRecordOnTheKernelSide(unittest.TestCase):
+    """The bus holds every message for a session whose record cannot be read; the kernel must not paint mail as on for
+    it (the review's low): the same closed door, with its own reason on the rows."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp(); self.saved = km.jd.STATE; km.jd._rebind_state(Path(self.td)); km._thread_reg_memo.clear()
+        (Path(self.td) / "sdk").mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        km.jd._rebind_state(self.saved); km._thread_reg_memo.clear(); shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_the_kernel_derives_unreadable_thread_and_isolation_with_their_reasons(self):
+        self.assertEqual(km._mail_off_why_k(PLAIN), "", "no record: an ordinary session, mail on")
+        (Path(self.td) / "sdk" / (PLAIN + ".json")).write_text("{corrupt")
+        self.assertTrue(km._reg_unreadable(PLAIN)); self.assertEqual(km._mail_off_why_k(PLAIN), "unreadable"); self.assertTrue(km._postal_isolated(PLAIN))
+        (Path(self.td) / "sdk" / (PLAIN + ".json")).write_text(json.dumps(["not", "a", "dict"]))
+        self.assertEqual(km._mail_off_why_k(PLAIN), "unreadable", "…whatever shape the corruption takes")
+        (Path(self.td) / "sdk" / (THREAD + ".json")).write_text(json.dumps({"sid": THREAD, "threadOf": PARENT, "alive": True}))
+        self.assertEqual(km._mail_off_why_k(THREAD), "thread")
+        (Path(self.td) / "sdk" / (PARENT + ".json")).write_text(json.dumps({"sid": PARENT, "alive": True}))
+        (Path(self.td) / "session-flags.json").write_text(json.dumps({PARENT: {"postalOff": True}}))
+        self.assertEqual(km._mail_off_why_k(PARENT), "isolation", "the legacy key still isolates, under its reason")
+        whole = Path(os.path.join(BIN, "romp-kernel")).read_text()
+        self.assertEqual(whole.count('"mailOffWhy": _mail_off_why_k('), 3, "chat rows, thread rows, Sessions pane rows carry the reason")
 
 
 if __name__ == "__main__":

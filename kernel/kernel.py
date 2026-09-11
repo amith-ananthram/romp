@@ -14316,8 +14316,9 @@ def _comments_frame(sid, live_map=None):
                         "lastUuid": last_uuid,                         # the newest record shown/held — the client's cap-proof "transcript moved" datum
                         "unreachable": unreachable or None,            # a broken thread (missing transcript / lost cut): owes nothing
                         "promotedName": th.get("promotedName") or "",
-                        # the thread's mail state (T356): off by default until broken out; the popover says so, and how
-                        # many messages wait in its box (they land within the bus's retry interval of a break-out)
+                        # the thread's mail state (T356): off by default until broken out. The popover does not announce
+                        # it (the user 2026-09-11; the tab hover and the Sessions pane carry the state); it shows only how
+                        # many messages wait in the box (they land within the bus's retry interval of a break-out)
                         "mailOff": bool(_postal_isolated(tsid)),
                         "heldMail": _held_mail_count(tsid),
                         "model": (reg.get("liveModel") or reg.get("model") or "") if reg else "",
@@ -22948,7 +22949,7 @@ def _thread_rows():
                     # a thread's mail is off until the user breaks it out (T356): the row says so, so a listing
                     # consumer never has to derive it
                     "postalServiceOff": _postal_isolated(tsid),
-                    "mailOffWhy": "thread" if _thread_mail_off(tsid) else ""})
+                    "mailOffWhy": _mail_off_why_k(tsid)})
     return out
 
 
@@ -23553,10 +23554,36 @@ def _thread_mail_off(sid):
     return not (isinstance(f, dict) and f.get("threadMail") is True)
 
 
+def _reg_unreadable(sid):
+    """Does `sid`'s durable record exist but defy reading (corrupt, or a directory the kernel cannot stat)? The bus
+    holds every message for such a session (its _mail_off_why answers "unreadable"), so the kernel must not paint
+    mail as on for it (the review's low: _thread_reg answers {} for missing and unreadable alike). No record → False."""
+    if not sid:
+        return False
+    p = jd.STATE / "sdk" / (str(sid) + ".json")
+    try:
+        if not p.exists():
+            return False
+        return not isinstance(json.loads(p.read_text()), dict)
+    except (OSError, ValueError):
+        return True
+
+
+def _mail_off_why_k(sid):
+    """Why the session can neither send nor receive mail, the kernel's twin of the bus's _mail_off_why over the same
+    two files: "unreadable" (its record cannot be read: the bus holds everything), "thread" (a comment thread not yet
+    broken out, _thread_mail_off), "isolation" (the mailbox flag the timeline lane's icon writes, legacy key included),
+    or "" (mail on). Rides the rows as mailOffWhy so the tab hover and the Sessions pane can say which."""
+    if _reg_unreadable(sid):
+        return "unreadable"
+    if _thread_mail_off(sid):
+        return "thread"
+    return "isolation" if (_session_flag(sid, "postalServiceOff") or _session_flag(sid, "postalOff")) else ""
+
+
 def _postal_isolated(sid):
-    """The session's EFFECTIVE postal isolation: a comment thread whose mail is off (_thread_mail_off), else the
-    mailbox flag the timeline lane's icon writes, legacy key included."""
-    return _thread_mail_off(sid) or bool(_session_flag(sid, "postalServiceOff") or _session_flag(sid, "postalOff"))
+    """The session's EFFECTIVE postal isolation: any closed door of _mail_off_why_k."""
+    return bool(_mail_off_why_k(sid))
 
 
 _FOLLOWUP_GOAL_RE = re.compile(r"romp-goal-id:\s*([^\s>]+)")
@@ -33781,6 +33808,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
             # the timeline lane's feed checkbox + postal mailbox. Same flags + legacy fallback as build_timeline.
             "hideFromFeed": _session_flag(sid, "hideFromFeed"),
             "postalServiceOff": _postal_isolated(sid),    # EFFECTIVE: a comment thread reads off until broken out (T356)
+            "mailOffWhy": _mail_off_why_k(sid),             # …and why (thread, isolation, an unreadable record), for the tab hover's words
             "notify": _notify_session_effective(sid),   # session-level bell, EFFECTIVE (override, else the master default): OS notification when its work blocks on you / completes (the user 2026-07-28)
             # NEVER `now`. This rides the chat payload, and _send_client dedups by comparing the
             # SERIALIZED payload against what that client last received — so a firstSeen that ticked
@@ -44810,6 +44838,7 @@ def _push(targets, connect=False, live_map=None):
                 feed["ledgers"] = [{"sid": m["id"], "name": m["name"], "color": m.get("color"),
                                     "status": m.get("status"),
                                     "postalServiceOff": _postal_isolated(m["id"]),   # the Sessions pane shows a mail-off session (T356)
+                                    "mailOffWhy": _mail_off_why_k(m["id"]),
                                     # attach the archived-completed TOP tasks so the Fleet's "Show completed"
                                     # can surface a finished+archived session (the user 2026-06-27); cached, so
                                     # ~free. The client renders them only when the toggle is on.

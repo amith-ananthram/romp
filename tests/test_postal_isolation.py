@@ -349,5 +349,34 @@ class ThreadMailOffFollowUp(unittest.TestCase):
         _flags({SENDER: {"postalServiceOff": True}})
         self.assertEqual(pm._isolated_bounce_why([{"id": SENDER, "name": "api"}], "api"), "recipient 'api' has its mailbox off (postal isolation)")
 
+
+class CliJudgesIsolationToo(unittest.TestCase):
+    """`romp mail send --from <label>` judged the caller for the thread and unreadable doors only; a mailbox the user
+    toggled OFF fell through (the review's low). Every closed door now stops the CLI before any label applies."""
+
+    def tearDown(self):
+        try:
+            pm.SESSION_FLAGS.unlink()
+        except OSError:
+            pass
+
+    def test_an_isolated_caller_is_stopped_with_the_isolation_words_with_and_without_from(self):
+        _flags({SENDER: {"postalServiceOff": True}})
+        import io
+        saved = (pm._self_identity, pm.ensure, pm._http)
+        calls = []
+        try:
+            pm._self_identity = lambda: (SENDER, "api"); pm.ensure = lambda: True; pm._http = lambda *a, **k: calls.append(a) or {}
+            err = io.StringIO(); real = sys.stderr; sys.stderr = err
+            try:
+                rc1 = pm.cli_send(["web", "a note"]); rc2 = pm.cli_send(["--from", "nightly", "web", "a note"])
+            finally:
+                sys.stderr = real
+            self.assertEqual((rc1, rc2), (1, 1)); self.assertEqual(calls, [], "nothing reached the bus")
+            self.assertEqual(err.getvalue().count("YOUR OWN mailbox is OFF"), 2); self.assertNotIn("COMMENT THREAD", err.getvalue())
+            self.assertEqual(pm.ISOLATION_SENDER, pm.ISOLATION_SENDER.strip()); self.assertIn("isolation:", pm.ISOLATION_SENDER)
+        finally:
+            pm._self_identity, pm.ensure, pm._http = saved
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
