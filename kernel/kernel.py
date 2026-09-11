@@ -28560,7 +28560,9 @@ def _parse(path, sid, now):
     # session's anchor file), so the tree it returns is the tree the judges walk: parsed once per file version, held
     # once. The old per-path cache is a view over that store (_SharedParseView).
     _mode, stats = [], {}
-    session = jd.parsed_session(sid, [path], now, asm_mode_out=_mode, stats=stats)
+    states = str(jd.STATE / "states" / (sid + ".jsonl"))   # the kernel's states log path (the judges default to the same file)
+    session = jd.parsed_session(sid, [path], now, asm_mode_out=_mode, stats=stats, states=states,
+                                sdk_human=_display_sdk_human(sid))
     _parse_mode[path] = _mode[-1] if _mode else "full"
     try:
         if stats.get("miss"):
@@ -29068,13 +29070,23 @@ def _rewind_holds_boot():
             sys.stderr.write("rewind-hold boot: %s\n" % traceback.format_exc())
 
 
+def _display_sdk_human(sid):
+    """The display parse's answer to sdk_human: a backend (SDK or Codex) owns the session. The same answer the owner
+    hook gives the judges once a backend exists, so both sides share one slot; in a process without one (tests) the
+    judges fall back to the registry file and a differing answer keeps its own slot."""
+    _be = _sdk()
+    return bool((_be and _be.owns(sid)) or ((_cx := _codex()) and _cx.owns(sid)))
+
+
 def _parse_cached(path):
     """The CACHED parse for `path` (matching its (mtime,size)) or None — NEVER parses, so it adds no cold
     cost on the request path. build_feed reads it for the working-dots + deep-link anchors so its CARDS
     (which come from the goal store, cheap) paint AT ONCE on a cold kernel start; the dots/anchors fill in a
     beat later once _warm_fleet_bg has parsed the session in the background (the user 2026-06-26: the feed
     cards lagged the timeline lanes on startup, all of it the ~1s cold parse of the fleet)."""
-    return jd.parse_cached(_SharedParseView._fsid(path), [str(path)])   # the shared store's live-key read (stage 2)
+    fsid = _SharedParseView._fsid(path)
+    return jd.parse_cached(fsid, [str(path)], states=str(jd.STATE / "states" / (fsid + ".jsonl")),
+                           sdk_human=_display_sdk_human(fsid))   # the store's live-key read, under the display's slot
 
 
 _warm_lock = threading.Lock()

@@ -95,7 +95,7 @@ class OneParseForBoth(unittest.TestCase):
             jd.set_pending_cut_provider(lambda fsid: "a1")          # a bare rollback armed: the world cut at a1
             cut = jd.parsed_session(A, [p], self.now)
             self.assertIsNot(plain, cut)
-            self.assertIn((A, ""), jd._PARSE_CACHE); self.assertIn((A, "a1"), jd._PARSE_CACHE)
+            self.assertIn((A, ""), jd._PARSE_CACHE); self.assertIn((A, "a1"), jd._PARSE_CACHE)   # a slot per cut, a tree per flag inside
             m0 = self._misses()
             jd.set_pending_cut_provider(lambda fsid: "")
             self.assertIs(jd.parsed_session(A, [p], self.now), plain, "the un-cut slot is still there, not evicted by the cut one")

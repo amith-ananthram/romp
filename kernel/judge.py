@@ -175,6 +175,7 @@ def _rebind_state(path):
     _lastsid_memo.clear()   # sdk-registry reads are mtime-memoized per sid — a rebind must not serve the old root's values
     _STORE_FAULTS.clear()   # unreadable-store episodes belong to the old root's files
     _CHAIN_MEMO.clear()     # the write-moment chain memo keys on paths under STATESDIR; a new root is a new world
+    parse_cache_clear()      # the parses belong to the old root too
     _COURIER_SEEN.clear()   # the courier gate keys on the old root's files
     _PLANNER_SEEN.clear()   # ...and the planner gate
     _BACKREF_MEMO["slot"] = None   # ...and so does the sender-board walk's map
@@ -1316,7 +1317,7 @@ def _sig_inputs(tier, fsid, path):
     if tier in ("group", "consolidate"):
         ident += [STATE / "cleared.jsonl"]
     if tier == "distill":
-        ident += [(STATE / "states") / (fsid + ".jsonl")]
+        ident += [STATESDIR / (fsid + ".jsonl")]
         value += [STATE / "auto-nudge.json"]
     return ident, value
 
@@ -2721,11 +2722,15 @@ class _ParseStore(collections.OrderedDict):
         return None
 
     def __getitem__(self, k):
-        if not isinstance(k, tuple):
+        if not isinstance(k, tuple):                     # a bare id: the newest slot's newest tree, as (key, session, leaf, flag)
             nk = self._newest(k)
             if nk is None:
                 raise KeyError(k)
-            return super().__getitem__(nk)
+            trees = super().__getitem__(nk)
+            ent = _newest_of(trees)
+            if ent is None:
+                raise KeyError(k)
+            return ent
         return super().__getitem__(k)
 
     def get(self, k, default=None):
@@ -2738,12 +2743,13 @@ class _ParseStore(collections.OrderedDict):
         return (self._newest(k) is not None) if not isinstance(k, tuple) else super().__contains__(k)
 
     def __setitem__(self, k, v):
-        if not isinstance(k, tuple):
-            k = (k, _pending_cut(k))
+        if not isinstance(k, tuple):                     # a bare id write (a test stand-in): one tree under the live cut
+            flag = bool(v[3]) if isinstance(v, tuple) and len(v) > 3 else False
+            k, v = (k, _pending_cut(k)), {flag: v}
         super().__setitem__(k, v)
 
 
-_PARSE_CACHE = _ParseStore()   # (fsid, cut) -> (key, session, leaf, sdk_human); a bare fsid reads the newest slot
+_PARSE_CACHE = _ParseStore()   # (fsid, cut) -> {sdk_human: (key, session, leaf, sdk_human)}; a bare fsid reads the newest slot
 _PARSE_CACHE_MAX = 256
 _PARSE_CACHE_LOCK = threading.Lock()
 _PARSE_HITS = [0]              # served from the cache (whoever asked); misses are _PARSE_MISSES
@@ -2767,29 +2773,50 @@ def _lru_touch(cache, k):
         touch(k)
 
 
-def _parse_slot(fsid, cut):
-    """The cache entry for (fsid, cut), marked most recently used; None when absent."""
+def _newest_of(trees):
+    return trees[next(reversed(trees))] if trees else None
+
+
+def _parse_slot(fsid, cut, human=None):
+    """The cache entry for (fsid, cut) under the sdk_human flag `human`, marked most recently used; None when absent.
+    A slot holds one tree per flag: a display parse and a judge parse that answer "is the composer input the human"
+    differently (a process with no owner hook: the kernel asks its backend, the judges the registry file) each keep
+    their own tree rather than one reading the other's; with the hook both answer alike and share one tree. `human`
+    None (a judge caller) takes the slot's only tree when it has exactly one and no hook is installed, so a hit reads
+    no registry file (the stage gate's signature lists none); otherwise the judges' own answer picks."""
     with _PARSE_CACHE_LOCK:
-        ent = _PARSE_CACHE.get((fsid, cut))
-        if ent is not None:
-            _lru_touch(_PARSE_CACHE, (fsid, cut))
-        return ent
+        trees = _PARSE_CACHE.get((fsid, cut))
+        if not trees:
+            return None
+        _lru_touch(_PARSE_CACHE, (fsid, cut))
+        if human is None and _SDK_OWNER_FN is None and len(trees) == 1:
+            return _newest_of(trees)
+    if human is None:
+        human = _sdk_owned(fsid)
+    with _PARSE_CACHE_LOCK:
+        trees = _PARSE_CACHE.get((fsid, cut)) or {}
+        return trees.get(bool(human))
 
 
 def _parse_store(fsid, cut, key, session, leaf, human):
     with _PARSE_CACHE_LOCK:
-        _PARSE_CACHE[(fsid, cut)] = (key, session, str(leaf), bool(human))
+        trees = _PARSE_CACHE.get((fsid, cut))
+        if trees is None:
+            trees = _PARSE_CACHE[(fsid, cut)] = {}
+        trees.pop(bool(human), None)
+        trees[bool(human)] = (key, session, str(leaf), bool(human))
         _lru_touch(_PARSE_CACHE, (fsid, cut))
         while len(_PARSE_CACHE) > _PARSE_CACHE_MAX:
             del _PARSE_CACHE[next(iter(_PARSE_CACHE))]   # the least recently used goes, never everything at once
 
 
 def _parse_entry(fsid):
-    """The newest cached entry for fsid across cuts (the chain and courier keys compare its session by identity)."""
+    """The newest cached entry for fsid across cuts and flags (the chain and courier keys compare its session by
+    identity)."""
     with _PARSE_CACHE_LOCK:
         for k in reversed(_PARSE_CACHE):
             if k[0] == fsid:
-                return _PARSE_CACHE[k]
+                return _newest_of(_PARSE_CACHE[k])
     return None
 
 
@@ -2798,15 +2825,16 @@ def parse_entry_for_leaf(leaf):
     leaf = str(leaf)
     with _PARSE_CACHE_LOCK:
         for k in reversed(_PARSE_CACHE):
-            if _PARSE_CACHE[k][2] == leaf:
-                return _PARSE_CACHE[k]
+            for ent in reversed(list(_PARSE_CACHE[k].values())):
+                if ent[2] == leaf:
+                    return ent
     return None
 
 
 def parse_cache_paths():
-    """The leaf paths of every cached parse, newest last (the kernel's view iterates these)."""
+    """The leaf paths of every cached parse, one per slot, newest last (the kernel's view iterates these)."""
     with _PARSE_CACHE_LOCK:
-        return [ent[2] for ent in _PARSE_CACHE.values()]
+        return [_newest_of(trees)[2] for trees in _PARSE_CACHE.values() if trees]
 
 
 def parse_cache_drop(fsid):
@@ -2827,16 +2855,17 @@ def parse_hits():
     return int(_PARSE_HITS[0])
 
 
-def parse_cached(fsid, files):
-    """The cached session for fsid under the LIVE key (files as they stand now, the live cut, sdk_human), or None:
-    NEVER parses, so the feed's cache-only read costs nothing cold (kernel._parse_cached)."""
+def parse_cached(fsid, files, states=None, sdk_human=None):
+    """The cached session for fsid under the LIVE key (files as they stand now, the live cut, the caller's
+    sdk_human or the judges' answer), or None: NEVER parses, so the feed's cache-only read costs nothing cold
+    (kernel._parse_cached)."""
     try:
-        cands, states, keyfiles = _parse_key_files(fsid, files)
+        cands, _states, keyfiles = _parse_key_files(fsid, files, states)
         pair = _fileset_key(keyfiles)
     except Exception:
         return None
     cut = _pending_cut(fsid)
-    ent = _parse_slot(fsid, cut)
+    ent = _parse_slot(fsid, cut, None if sdk_human is None else bool(sdk_human))
     if ent is not None and ent[0] == (pair, cut):
         return ent[1]
     return None
@@ -3049,7 +3078,7 @@ def _chain_membership(fsid, path, cut):
     from _CHAIN_MEMO when the inputs are unchanged. Returns the five-way dict with FROZENSET values,
     shared with the memo (immutable, so no per-hit copy; the dict itself is a fresh shallow copy).
     A build that raises propagates and leaves the memo untouched."""
-    states = (STATE / "states") / (fsid + ".jsonl")
+    states = STATESDIR / (fsid + ".jsonl")
     states_s = str(states) if states.exists() else None
     cands = _judge_candidates(fsid, [str(path)])
     try:
@@ -3213,18 +3242,19 @@ def _pass_frame():
     return _frame if getattr(_judge_ctx, "in_pass", False) else None
 
 
-def _parse_key_files(fsid, files):
+def _parse_key_files(fsid, files, states=None):
     """The files the judge parse of `fsid` reads, as the filesystem shows them now: the candidate
     transcripts (_judge_candidates over the RAW leaf list every caller hands in) plus states/<fsid>.jsonl
     when it exists. Takes the raw list on purpose: _judge_candidates over an already-expanded list would
     append a fork lane's anchor a second time, and a key computed that way would never equal the one the
     parse cache holds (one spurious parse per fork lane per pass)."""
     cands = _judge_candidates(fsid, files)
-    states = (STATE / "states") / (fsid + ".jsonl")
+    states = Path(states) if states else STATESDIR / (fsid + ".jsonl")   # the caller's states log (the kernel's display
+    #                                                                       parse names its own path) or the judges' default
     return cands, states, list(cands) + ([str(states)] if states.exists() else [])
 
 
-def _frame_parse_key(fsid, files):
+def _frame_parse_key(fsid, files, states=None):
     """The (fileset key, pending cut) pair this pass judges `fsid` under, pinned in the pass frame
     (2026-09-07).
 
@@ -3255,7 +3285,7 @@ def _frame_parse_key(fsid, files):
             hit = fr["keys"].get(("parse", fsid), _NO_PIN)
         if hit is not _NO_PIN:
             return hit, None, fr
-    _cands, _states, key_files = _parse_key_files(fsid, files)
+    _cands, _states, key_files = _parse_key_files(fsid, files, states)
     cut = _pending_cut(fsid)
     try:
         key = (_fileset_key(key_files), cut)
@@ -3278,7 +3308,7 @@ def _frame_pin_parse(fr, fsid, session, key):
     return won
 
 
-def parsed_session(fsid, files, now, asm_mode_out=None, stats=None):
+def parsed_session(fsid, files, now, asm_mode_out=None, stats=None, states=None, sdk_human=None):
     """ONE event-model parse per (transcript+states, mtime+size), reused across the captioner, planner,
     sweep, courier, and grouper — which all re-parsed the SAME leaf every pass (up to 4× per change, and
     once per pass even when nothing changed, which is what forced the PLAN_SESSIONS cap). In-memory: the
@@ -3311,8 +3341,8 @@ def parsed_session(fsid, files, now, asm_mode_out=None, stats=None):
     # The pass's (fileset key, cut) pair, pinned BEFORE this read: a gate that pinned first fixes the
     # fileset component for the pass; a first toucher pins the live one here. `fr` is the frame the pin
     # went into, and the parse below is pinned into that same frame.
-    pair, cut, fr = _frame_parse_key(fsid, files)
-    states = (STATE / "states") / (fsid + ".jsonl")
+    pair, cut, fr = _frame_parse_key(fsid, files, states)
+    states = Path(states) if states else STATESDIR / (fsid + ".jsonl")   # the same log the key was taken over
     # A FORKED leaf (SDK /clear: discover hands the lastSid file under the stable romp sid) parses with
     # the session's anchor transcript among the candidates, so a fork whose chain back-links across files
     # (a resume-style fork) keeps its history — the FileAdapter walk crosses files by design, and a /clear
@@ -3330,8 +3360,8 @@ def parsed_session(fsid, files, now, asm_mode_out=None, stats=None):
     # shows up as a served pair that differs from the pinned one, which withholds the gate's stamp.
     if cut is None:                        # a pin answered and read nothing: the live cut is ours to read
         cut = _pending_cut(fsid)
-    key = (pair[0], cut) if pair is not None else None   # the frame's pair shape; sdk_human rides the entry (stage 2)
-    hit = _parse_slot(fsid, cut)
+    key = (pair[0], cut) if pair is not None else None   # the frame's pair shape; sdk_human is the slot's tree pick (stage 2)
+    hit = _parse_slot(fsid, cut, None if sdk_human is None else bool(sdk_human))
     if key is not None and hit and hit[0] == key:
         _PARSE_HITS[0] += 1
         if stats is not None:
@@ -3342,7 +3372,7 @@ def parsed_session(fsid, files, now, asm_mode_out=None, stats=None):
         return hit[1]                      #  only - the two-worlds shape the frame exists to prevent
     session = em.parse_session(files[0], rompuuid=fsid, candidate_files=list(files),
                                states=str(states), postal_log=str(MESSAGES), now=now,
-                               sdk_human=(human := bool(_sdk_owned(fsid))),   # SDK session → the composer input is the human (one owner hook; read on a miss only)
+                               sdk_human=(human := bool(sdk_human) if sdk_human is not None else bool(_sdk_owned(fsid))),   # the caller's answer, else the judges', read on a miss
                                leaf_override=cut or None, asm_mode_out=asm_mode_out)
     if stats is not None:
         stats["miss"] = True
@@ -5889,7 +5919,7 @@ def reconcile_rewound_goals(fsid, path, now):
     either side moved, archiving only on a hit (one-way, identity-keyed, tombstone-idempotent: no
     flap, no store re-publish on a miss)."""
     files = _judge_candidates(fsid, [str(path)])
-    states = (STATE / "states") / (fsid + ".jsonl")
+    states = STATESDIR / (fsid + ".jsonl")
     epi = EPIDIR / (fsid + ".jsonl")
     key_files = (list(files) + ([str(states)] if states.exists() else [])
                  + ([str(epi)] if epi.exists() else []))
@@ -12991,7 +13021,7 @@ def _write_death_marker(fsid, m):
 def _newest_states_t(fsid):
     """The newest states-row t for a sid, any row shape — the finalize's supersession read."""
     try:
-        rows = ((STATE / "states") / (fsid + ".jsonl")).read_text().splitlines()
+        rows = (STATESDIR / (fsid + ".jsonl")).read_text().splitlines()
         for ln in reversed(rows):
             try:
                 r = json.loads(ln)
@@ -14325,7 +14355,7 @@ def _live_prompt_since(fsid):
     the running stage incomplete and logs a `states-unreadable` row (_read_failed): the distiller's
     signature carries this file by identity, and a stamp over an answer that never read it would skip the
     session until the file moved (a brief owed to a parked session would wait on an unrelated row)."""
-    path_s = str((STATE / "states") / (fsid + ".jsonl"))
+    path_s = str(STATESDIR / (fsid + ".jsonl"))
     try:
         st = os.stat(path_s)
     except OSError:
