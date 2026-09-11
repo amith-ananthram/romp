@@ -36396,29 +36396,38 @@ def _spend_detail_local(now=None):
     def _series(buckets, keys):
         idx = {k: i for i, k in enumerate(keys)}
         n = len(keys)
-        per = {sid: ([0.0] * n, [0] * n) for sid in top}
-        other, una, others = ([0.0] * n, [0] * n), ([0.0] * n, [0] * n), set()
+        # per stack: usd[], tok[], turns[], keyUsd[] (T353: the list follows the chart's range, so every column the
+        # table shows is summed from the SAME buckets the chart draws; keyUsd is the key-billed sub-count's dollars,
+        # the table's key column, meaningful in the total scope alone)
+        per = {sid: ([0.0] * n, [0] * n, [0] * n, [0.0] * n) for sid in top}
+        other, una, others = ([0.0] * n, [0] * n, [0] * n, [0.0] * n), ([0.0] * n, [0] * n, [0] * n), set()
         for k, e in buckets.items():
             i = idx.get(k)
             if i is None or not isinstance(e, dict):
                 continue
-            tu, tt, _ = _tot(e)
+            tu, tt, tn = _tot(e)
             bs = _by(e)
             if bs is None:
-                una[0][i] += tu; una[1][i] += tt
+                una[0][i] += tu; una[1][i] += tt; una[2][i] += tn
                 continue
-            au = at = 0
+            au = at = an = 0
+            kb = e.get("bySid") if isinstance(e.get("bySid"), dict) else {}
             for sid, (u, t, _n) in bs.items():
-                au += u; at += t
+                au += u; at += t; an += _n
                 dst = per.get(sid)
                 if dst is None:
                     dst = other
                     if u > 0 or t > 0:
                         others.add(sid)   # "other (N sessions)" counts contributors only — the table's own fold
                         #                   (a login-only session in the keyed scope adds (0,0,0); T247b review)
-                dst[0][i] += u; dst[1][i] += t
+                dst[0][i] += u; dst[1][i] += t; dst[2][i] += _n
+                if not keyed:
+                    ks = kb.get(sid) if isinstance(kb.get(sid), dict) else None
+                    kk = ks.get("key") if ks and isinstance(ks.get("key"), dict) else None
+                    if kk:
+                        dst[3][i] += float(kk.get("usd") or 0)
             res = tu - au
-            una[0][i] += res if res >= _SPEND_GRAIN else 0.0; una[1][i] += max(0, tt - at)
+            una[0][i] += res if res >= _SPEND_GRAIN else 0.0; una[1][i] += max(0, tt - at); una[2][i] += max(0, tn - an)
         # presence is tested on the ROUNDED values the payload carries: a residue that rounds to nothing
         # must not hang a stack (a hatched "unattributed" chip with no bars, T247b review)
         stacks = []
@@ -36428,13 +36437,15 @@ def _spend_detail_local(now=None):
                 continue          # a top-N session with nothing in THIS range: no empty stack, no legend chip (review find)
             s = meta[sid]
             stacks.append({"kind": "sid", "sid": sid, "name": s["name"], "bg": s["bg"], "live": s["live"],
-                           "usd": usd, "tok": per[sid][1]})
+                           "usd": usd, "tok": per[sid][1], "turns": per[sid][2],
+                           "keyUsd": [round(v, 4) for v in per[sid][3]]})
         ousd = [round(v, 4) for v in other[0]]
         if any(ousd) or any(other[1]):
-            stacks.append({"kind": "other", "name": "other", "count": len(others), "usd": ousd, "tok": other[1]})
+            stacks.append({"kind": "other", "name": "other", "count": len(others), "usd": ousd, "tok": other[1],
+                           "turns": other[2]})
         uusd = [round(v, 4) for v in una[0]]
         if any(uusd) or any(una[1]):
-            stacks.append({"kind": "unattributed", "name": "unattributed", "usd": uusd, "tok": una[1]})
+            stacks.append({"kind": "unattributed", "name": "unattributed", "usd": uusd, "tok": una[1], "turns": una[2]})
         return {"keys": keys, "stacks": stacks}
 
     h0 = int(now // 3600) - (_SERIES_HOURS - 1)
@@ -36674,11 +36685,11 @@ def _merge_spend_details(payloads, hosts, local):
                 keys.append(a)
         n = len(keys)
         pos = {e: i for i, e in enumerate(epochs)} if name == "hours" else {k: i for i, k in enumerate(keys)}
-        per = {}           # (host, sid) -> [usd[], tok[]]
-        others = {}        # host -> ([usd], [tok], count): an OLDER peer's own "other" fold (its build still
+        per = {}           # (host, sid) -> [usd[], tok[], turns[], keyUsd[]] (T353: the list's columns per bucket)
+        others = {}        # host -> ([usd], [tok], count, [turns]): an OLDER peer's own "other" fold (its build still
         #                    folds beyond a top-N); kept as that host's stack so its dollars are not lost, and
         #                    named with the host — a current build folds nothing (T247e)
-        una = ([0.0] * n, [0] * n)
+        una = ([0.0] * n, [0] * n, [0] * n)
         una_hosts = {}
         for host, p, rng, ax in peer_axes:
             idx = [pos.get(a) for a in ax]
@@ -36686,18 +36697,23 @@ def _merge_spend_details(payloads, hosts, local):
                 if not isinstance(s, dict) or not _own(host, p, s):
                     continue
                 usd, tok = s.get("usd") or [], s.get("tok") or []
+                turns, keyu = s.get("turns") or [], s.get("keyUsd") or []   # absent on an older peer: zeros
                 kind = s.get("kind")
+                tarr = karr = None
                 if kind == "sid":
                     key = (host, str(s.get("sid") or ""))
                     if key not in top_set:
                         continue          # a stack for a session the roster does not know: nothing to draw it as
-                    dst = per.setdefault(key, ([0.0] * n, [0] * n))
+                    dst = per.setdefault(key, ([0.0] * n, [0] * n, [0] * n, [0.0] * n))
+                    tarr, karr = dst[2], dst[3]
                 elif kind == "other":
-                    o = others.setdefault(host, ([0.0] * n, [0] * n, [0]))
+                    o = others.setdefault(host, ([0.0] * n, [0] * n, [0], [0] * n))
                     o[2][0] += int(s.get("count") or 0)
                     dst = o
+                    tarr = o[3]
                 elif kind == "unattributed":
                     dst = una
+                    tarr = una[2]
                     hu = una_hosts.setdefault(host, ([0.0] * n, [0] * n))
                     # a merged-shaped answer breaks its unattributed stack down by host: take the peer's own share
                     if isinstance(s.get("hosts"), dict) and isinstance(s["hosts"].get(p.get("host") or host), dict):
@@ -36710,6 +36726,10 @@ def _merge_spend_details(payloads, hosts, local):
                         continue
                     v = float(usd[j] or 0); t = int((tok[j] if j < len(tok) else 0) or 0)
                     dst[0][i] += v; dst[1][i] += t
+                    if tarr is not None:
+                        tarr[i] += int((turns[j] if j < len(turns) else 0) or 0)
+                    if karr is not None and j < len(keyu):
+                        karr[i] += float(keyu[j] or 0)
                     if kind == "unattributed":
                         hu[0][i] += v; hu[1][i] += t
         stacks = []
@@ -36722,14 +36742,16 @@ def _merge_spend_details(payloads, hosts, local):
                 continue
             m = meta[key]
             stacks.append({"kind": "sid", "host": key[0], "sid": key[1], "name": m.get("name") or "", "bg": m.get("bg") or "",
-                           "live": bool(m.get("live")), "usd": u, "tok": arr[1]})
+                           "live": bool(m.get("live")), "usd": u, "tok": arr[1], "turns": arr[2],
+                           "keyUsd": [round(v, 4) for v in arr[3]]})
         for oh, o in others.items():
             ou = [round(v, 4) for v in o[0]]
             if any(ou) or any(o[1]):
-                stacks.append({"kind": "other", "host": oh, "name": "other", "count": o[2][0], "usd": ou, "tok": o[1]})
+                stacks.append({"kind": "other", "host": oh, "name": "other", "count": o[2][0], "usd": ou, "tok": o[1],
+                               "turns": o[3]})
         uu = [round(v, 4) for v in una[0]]
         if any(uu) or any(una[1]):
-            stacks.append({"kind": "unattributed", "name": "unattributed", "usd": uu, "tok": una[1],
+            stacks.append({"kind": "unattributed", "name": "unattributed", "usd": uu, "tok": una[1], "turns": una[2],
                            "hosts": {h: {"usd": [round(v, 4) for v in a[0]], "tok": a[1]} for h, a in una_hosts.items()}})
         out = {"keys": keys, "stacks": stacks}
         if name == "hours":
@@ -47323,10 +47345,12 @@ var seed=(d.order||[]).map(function(p){return (p[0]&&p[0]!==d.host)?(p[0]+':'+p[
 var fin=spApplyViewOrder(seed,spViewOrder()),rank=Object.create(null);fin.forEach(function(id,i){rank[id]=i;});
 var known=[],rest=[];ss.forEach(function(s){if(rank[spKey(d,s)]!==undefined)known.push(s);else rest.push(s);});
 known.sort(function(a,b){return rank[spKey(d,a)]-rank[spKey(d,b)];});return known.concat(rest);}
-// the chart's stacks follow the list, bottom to top = top row to bottom row
-function spStackOrder(d,stacks){if(SP.order!=='yours')return stacks;var rank={};spOrdered(d).forEach(function(s,i){rank[String(s.host)+'\t'+s.sid]=i;});
-var sids=stacks.filter(function(s){return s.kind==='sid';}),rest=stacks.filter(function(s){return s.kind!=='sid';});
-sids.sort(function(a,b){return (rank[String(a.host)+'\t'+a.sid]||0)-(rank[String(b.host)+'\t'+b.sid]||0);});return sids.concat(rest);}
+// the chart's stacks follow the list, bottom to top = top row to bottom row: in every order since T353 (the list is
+// the range view's rows, by spend or the viewer's own), the unattributed and an older peer's fold last
+function spStackOrderRows(d,stacks,rows){var rank={};(rows||[]).forEach(function(r,i){if(r.kind==='sid')rank[String(r.host)+'|'+r.sid]=i;});
+var any=function(a){return (a||[]).some(function(v){return v>0;});};   // a session with nothing in THIS range is no stack (its row is gone too)
+var sids=stacks.filter(function(s){return s.kind==='sid'&&(any(s.usd)||any(s.tok));}),rest=stacks.filter(function(s){return s.kind!=='sid';});
+sids.sort(function(a,b){var ra=rank[String(a.host)+'|'+a.sid],rb=rank[String(b.host)+'|'+b.sid];if(ra===undefined)ra=1e9;if(rb===undefined)rb=1e9;return ra-rb;});return sids.concat(rest);}
 var SP_OTHER='#4a5361',SP_NONE='#6b7a8c';   // "other" and a session with no identity color: neutrals, never a hue
 function spName(s){return s.name||('session '+String(s.sid||'').slice(0,8));}
 // T247c: when more than one machine contributes, a row or chip names its host the way a federated
@@ -47348,8 +47372,33 @@ function spTagChip(s){var c=spColor(s);return '<span class=rsp-tag-chip style="d
 var SP_RANGE_BUCKETS={day:24,hours:168};
 function spSeries(d){var ser=d[SP.range==='day'?'hours':SP.range];if(!ser)return null;var keep=SP_RANGE_BUCKETS[SP.range];return keep?spTail(ser,keep):ser;}
 function spTail(ser,keep){var n=(ser.keys||[]).length,cut=Math.max(0,n-keep);
-return {keys:(ser.keys||[]).slice(cut),epochs:(ser.epochs||[]).slice(cut),stacks:(ser.stacks||[]).map(function(s){var o={};for(var k in s)o[k]=s[k];o.usd=(s.usd||[]).slice(cut);o.tok=(s.tok||[]).slice(cut);
+return {keys:(ser.keys||[]).slice(cut),epochs:(ser.epochs||[]).slice(cut),stacks:(ser.stacks||[]).map(function(s){var o={};for(var k in s)o[k]=s[k];o.usd=(s.usd||[]).slice(cut);o.tok=(s.tok||[]).slice(cut);if(s.turns)o.turns=s.turns.slice(cut);if(s.keyUsd)o.keyUsd=s.keyUsd.slice(cut);
 if(s.hosts){o.hosts={};Object.keys(s.hosts).forEach(function(h){o.hosts[h]={usd:(s.hosts[h].usd||[]).slice(cut),tok:(s.hosts[h].tok||[]).slice(cut)};});}return o;})};}
+// The list FOLLOWS THE CHART (T353, the user 2026-09-11): the per-session rows are summed from the SAME buckets the
+// chart draws (spSeries: the range's tail of the ledger's series), so the list's total is the chart's total by
+// construction for every range, dollars, tokens and turns alike, and the key-billed column too (keyUsd). The
+// payload's own 90-day sessions stay the roster: names, colours, liveness, the viewer's order and the tag store's
+// members are read off them by key; a session with nothing in the range is no row and no stack. An older peer's
+// stacks carry no turns or keyUsd: those columns read 0 for it, never a guess.
+function spSumArr(a){var t=0;(a||[]).forEach(function(v){t+=v||0;});return t;}
+function spRound4(v){return Math.round(v*10000)/10000;}
+function spRangeView(d){var ser=spSeries(d);if(!ser||!ser.stacks)return d;var meta={};(d.sessions||[]).forEach(function(s){meta[spKey(d,s)]=s;});
+var sessions=[],un={usd:0,tok:0,turns:0},other=null;
+ser.stacks.forEach(function(st){var usd=spSumArr(st.usd),tok=spSumArr(st.tok),turns=spSumArr(st.turns);
+if(st.kind==='sid'){if(!(usd>0||tok>0||turns>0))return;var m=meta[spKey(d,st)]||{};
+var row={sid:st.sid,host:st.host,name:st.name||m.name||'',bg:st.bg||m.bg||'',fg:m.fg||'',live:!!st.live,usd:spRound4(usd),tok:tok,turns:turns};
+if(m.bgDerived)row.bgDerived=true;
+// the key column follows the range too, but only where the ledger tracks a key split for the session (the roster's own
+// `key`, or key dollars inside the range): a stack whose keyUsd is all zeros on a login-only host grows no $0 column
+var ku=st.keyUsd?spSumArr(st.keyUsd):0;if(st.keyUsd&&(ku>0||(m.key&&typeof m.key.usd==='number')))row.key={usd:spRound4(ku)};sessions.push(row);}
+else if(st.kind==='other'){other=other||{usd:0,tok:0,turns:0,count:0,hosts:[]};other.usd+=usd;other.tok+=tok;other.turns+=turns;other.count+=st.count||0;if(st.host&&other.hosts.indexOf(st.host)<0)other.hosts.push(st.host);}
+else if(st.kind==='unattributed'){un.usd+=usd;un.tok+=tok;un.turns+=turns;}});
+sessions.sort(function(a,b){return (b.usd-a.usd)||(b.tok-a.tok)||String(a.name).localeCompare(String(b.name));});
+var out={};for(var k in d)out[k]=d[k];out.sessions=sessions;out.unattributed={usd:spRound4(un.usd),tok:un.tok,turns:un.turns};
+if(other){other.usd=spRound4(other.usd);out.other=other;}return out;}
+// the range in words, from the buckets the chart draws: '1 day \u00b7 by hour' reads 'last 24 hours', the week 'last 7 days',
+// the daily range 'last N days' (the payload's own key count, 90 today)
+function spRangeWords(ser){var n=ser&&ser.keys?ser.keys.length:0;if(SP.range==='days')return 'last '+n+' days';if(SP.range==='day')return 'last '+n+' hours';return 'last '+Math.round(n/24)+' days';}
 // the rows: the ordered sessions, or — merged by tag — one row per tag holding sessions here (named
 // by the tag, colored by the tag store's color, the strip's chip color) and the untagged sessions as
 // themselves. A session under several tags counts under EACH (the user's ruling: tags are equivalent,
@@ -47364,11 +47413,11 @@ if(SP.order==='yours')rows.sort(function(a,b){return a.rank-b.rank;});else rows.
 var multi=0;Object.keys(counts).forEach(function(k){if(counts[k]>1)multi++;});return {rows:rows,multi:multi};}
 // the stacks follow the rows: a tag row's stack is its members' stacks summed; untagged sessions keep
 // their own; unattributed (and an older peer's fold) stay last
-function spStacks(d,ser,model){var stacks=ser.stacks||[];if(!SP.merge||!(d.tags&&d.tags.length))return spStackOrder(d,stacks);
+function spStacks(d,ser,model){var stacks=spStackOrderRows(d,ser.stacks||[],model.rows);if(!SP.merge||!(d.tags&&d.tags.length))return stacks;
 var byKey={};stacks.forEach(function(s){if(s.kind==='sid')byKey[spKey(d,s)]=s;});var out=[];
-model.rows.forEach(function(r){if(r.kind==='tag'){var usd=null,tok=null;r.members.forEach(function(m){var st=byKey[spKey(d,m)];if(!st)return;
-if(!usd){usd=st.usd.slice();tok=st.tok.slice();}else{for(var i=0;i<usd.length;i++){usd[i]+=st.usd[i]||0;tok[i]+=st.tok[i]||0;}}});
-if(usd&&(usd.some(function(v){return v>0;})||tok.some(function(v){return v>0;})))out.push({kind:'tag',name:r.name,bg:r.bg,live:r.live,usd:usd,tok:tok});}
+model.rows.forEach(function(r){if(r.kind==='tag'){var usd=null,tok=null,turns=null;r.members.forEach(function(m){var st=byKey[spKey(d,m)];if(!st)return;
+if(!usd){usd=st.usd.slice();tok=st.tok.slice();turns=(st.turns||[]).slice();}else{for(var i=0;i<usd.length;i++){usd[i]+=st.usd[i]||0;tok[i]+=st.tok[i]||0;turns[i]=(turns[i]||0)+((st.turns||[])[i]||0);}}});
+if(usd&&(usd.some(function(v){return v>0;})||tok.some(function(v){return v>0;})))out.push({kind:'tag',name:r.name,bg:r.bg,live:r.live,usd:usd,tok:tok,turns:turns});}
 else{var st=byKey[spKey(d,r)];if(st)out.push(st);}});
 stacks.forEach(function(s){if(s.kind!=='sid')out.push(s);});return out;}
 function spColor(s){return (s.bg&&/^#[0-9a-fA-F]{3,8}$/.test(s.bg))?s.bg:SP_NONE;}
@@ -47408,10 +47457,13 @@ if(!b)return;var a=b.getAttribute('data-act');
 if(a==='close'){closeSpend();return;}
 if(a==='retry'){openSpend();return;}
 if(a==='merge:toggle'){SP.merge=!SP.merge;spSavePrefs();if(SP.merge)b.classList.add('on');else b.classList.remove('on');
-var tb2=document.getElementById('rsp-table');if(tb2){tb2.innerHTML=sessionTable(SP.data);tb2.scrollTop=0;}renderChart();return;}
+var tb2=document.getElementById('rsp-table');if(tb2){tb2.innerHTML=sessionTable(spRangeView(SP.data));tb2.scrollTop=0;}renderChart();return;}
 var m=/^(range|measure|order):(\\w+)$/.exec(a);if(!m)return;
 SP[m[1]]=m[2];spSavePrefs();
-if(m[1]==='order'){var tb=document.getElementById('rsp-table');if(tb){tb.innerHTML=sessionTable(SP.data);tb.scrollTop=0;}}   // the new order's head rows, not a mid-list slice (review find)
+// the list follows the chart (T353): a new RANGE re-sums the rows over the buckets the chart now draws, and the head
+// names the range; a new order's head rows, not a mid-list slice (review find)
+if(m[1]==='order'||m[1]==='range'){var tb=document.getElementById('rsp-table');if(tb){tb.innerHTML=sessionTable(spRangeView(SP.data));tb.scrollTop=0;}
+var rn=document.getElementById('rsp-range-note');if(rn)rn.textContent=spRangeWords(spSeries(SP.data));}
 var sib=b.parentNode.querySelectorAll('[data-act^="'+m[1]+':"]');
 for(var i=0;i<sib.length;i++){if(sib[i]===b)sib[i].classList.add('on');else sib[i].classList.remove('on');}
 renderChart();});
@@ -47433,6 +47485,9 @@ model.rows.forEach(function(s){h+='<tr data-sid="'+esc(s.sid||'')+'"'+(s.live?' 
 // spend recorded before per-session attribution existed (T100, 2026-08-24), or the part of a bucket no
 // session accounts for: shown as its own row, never dropped or folded into a session (fail loudly);
 // its hatch mark is the chart's hatched stack, not a session swatch
+var oth=d.other;   // an OLDER peer's own "other" fold (its build still folds beyond a top-N): a row of its own, its host named
+if(oth&&(oth.usd>0||oth.tok>0))h+='<tr class=rsp-dead><td class=rsp-name><i class=rsp-sw></i> other ('+(oth.count||0)+' session'+(oth.count===1?'':'s')+(oth.hosts&&oth.hosts.length?' on '+esc(oth.hosts.join(', ')):'')+')</td>'
++'<td class=n>'+fmtUsd(oth.usd)+'</td>'+(keyCol?'<td class=n>\u2014</td>':'')+'<td class=n>'+(oth.turns||0)+'</td><td class=n>'+fmtTok(oth.tok||0)+'</td></tr>';
 if(un&&(un.usd>0||un.tok>0))h+='<tr class=rsp-dead>'
 +'<td class=rsp-name><i class="rsp-sw rsp-hatch"></i> unattributed<span class=ru-tip-reset> \u00b7 recorded before per-session tracking</span></td>'
 +'<td class=n>'+fmtUsd(un.usd)+'</td>'+(keyCol?'<td class=n>\u2014</td>':'')+'<td class=n>'+(un.turns||0)+'</td><td class=n>'+fmtTok(un.tok||0)+'</td></tr>';
@@ -47475,11 +47530,11 @@ var ok=spHosts(d),many=ok.length>1;
 var scopes={};ok.forEach(function(x){scopes[x.scope||d.scope]=1;});var sk=Object.keys(scopes);
 var rule=sk.length===1?(sk[0]==='keyed'?'key-billed turns':sk[0]==='computed'?'computed cost, not billed':'all turns'):'each machine\u2019s own billing rule';
 h+='<div class=rsp-sec><div class=ru-tip-name><span>By session'+(many?' \u00b7 '+ok.length+' machines':'')+'</span>'
-+'<span class=ru-tip-reset>'+rule+' \u00b7 last '+((d.days&&d.days.keys)?d.days.keys.length:90)+' days</span></div>';
++'<span class=ru-tip-reset>'+rule+' \u00b7 <span id=rsp-range-note>'+spRangeWords(spSeries(d))+'</span></span></div>';
 // a machine that could not join is NAMED, never silently missing: down, timed out, refused, or too old
 ((d.hosts)||[]).forEach(function(x){if(x.status==='ok')return;
 h+='<div class=rsp-note>'+esc(x.host)+': '+(x.status==='older'?'older build, no per-session data':'not reachable')+(x.detail?' \u2014 '+esc(x.detail):'')+'</div>';});
-h+='<div id=rsp-table>'+sessionTable(d)+'</div></div>';
+h+='<div id=rsp-table>'+sessionTable(spRangeView(d))+'</div></div>';   // the list over the chart's own range (T353)
 spPanel.innerHTML=h;renderChart();spSizePane();}
 // the list pane takes exactly the room left under the chart (review find: a fixed 38vh cap left the card
 // itself scrolling at common viewport heights, a scroll region inside a scroll region); a floor keeps a
@@ -47535,7 +47590,7 @@ function spTipHide(){if(spTip)spTip.style.display='none';}
 function renderChart(){spTipHide();var box=document.getElementById('rsp-chart');if(!box||!SP.data)return;
 var d=SP.data,ser=spSeries(d),meas=SP.measure;
 if(!ser||!ser.keys||!ser.keys.length){box.innerHTML='<div class=rsp-note>No history yet.</div>';return;}
-var stacks=spStacks(d,ser,spRows(d)),n=ser.keys.length,W=Math.max(320,box.clientWidth||600),H=200;
+var stacks=spStacks(d,ser,spRows(spRangeView(d))),n=ser.keys.length,W=Math.max(320,box.clientWidth||600),H=200;
 var tots=[],mx=0;for(var i=0;i<n;i++){var t=0;for(var s=0;s<stacks.length;s++){t+=(stacks[s][meas]&&stacks[s][meas][i])||0;}tots.push(t);if(t>mx)mx=t;}
 if(!(mx>0)){box.innerHTML='<div class=rsp-note>Nothing recorded in this range.</div>';return;}
 var top=niceTop(mx),slot=W/n,gap=Math.min(2,slot*0.3),bw=Math.max(1,slot-gap),PADT=6;
