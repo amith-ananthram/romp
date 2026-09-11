@@ -9455,13 +9455,37 @@ def _last_state(sid):
     so this is the authoritative "properly stopped" signal. The TIME matters for auto-nudge: a progressing
     state recorded AFTER the parsed turn's end means the session is genuinely still working (a newer turn the
     parse hasn't caught up to); one recorded BEFORE it means the turn ended and the post-turn 'waiting' write
-    was lost (e.g. a kernel restart) — a stale record that must not block the nudge forever."""
-    val, vt = "", 0
-    for rec in _states_rows(sid):
-        if isinstance(rec, dict) and isinstance(rec.get("state"), str):
-            val = rec["state"]
-            vt = rec.get("t", vt)
-    return (val, vt)
+    was lost (e.g. a kernel restart) — a stale record that must not block the nudge forever. A fold_records
+    fold since T323 stage 3 (it walked every row of the shared record list per call): the newest row wins, the
+    cursor resumes from the file's checkpoint after a restart, so the log is read as a tail, not whole."""
+    return _fold_records(_last_state_cache, jd.STATE / "states" / ("%s.jsonl" % sid), lambda: ("", 0), _last_state_step,
+                         ckpt="lastState")
+
+
+_last_state_cache = {}            # states path -> fold cursor of _last_state
+_last_natural_state_cache = {}    # states path -> fold cursor of _last_natural_state
+_retrying_since_cache = {}        # states path -> fold cursor of the retrying-stretch start
+
+
+def _last_state_step(state, rec):
+    if isinstance(rec.get("state"), str):
+        return (rec["state"], rec.get("t", state[1]))
+    return state
+
+
+def _last_natural_state_step(state, rec):
+    if isinstance(rec.get("state"), str) and not rec.get("by"):
+        return (rec["state"], rec.get("t", state[1]))
+    return state
+
+
+def _retrying_since_step(since, o):
+    st = o.get("state")
+    if not st:
+        return since                                       # overlay/recovery rows don't bound a stretch
+    if st == "retrying":
+        return since if since is not None else o.get("t")  # first row of the current stretch
+    return None                                            # any real state transition ends the stretch
 
 
 def _last_natural_state(sid):
@@ -9469,13 +9493,10 @@ def _last_natural_state(sid):
     appended for a Stop press (`by` set: _record_idle and the SDK interrupt) skipped. A finished-turn
     signal reads this one: a Stop press is the user's own act, not a turn the session finished (review
     find on #937, 2026-09-07). Served from _states_rows, the append-incremental cache every other states
-    reader uses, so the turn tick's per-cycle ask is a stat while the log is quiet."""
-    val, vt = "", 0
-    for rec in _states_rows(sid):
-        if isinstance(rec, dict) and isinstance(rec.get("state"), str) and not rec.get("by"):
-            val = rec["state"]
-            vt = rec.get("t", vt)
-    return (val, vt)
+    reader uses, so the turn tick's per-cycle ask is a stat while the log is quiet; a fold_records fold since
+    T323 stage 3, resumed from the file's checkpoint after a restart."""
+    return _fold_records(_last_natural_state_cache, jd.STATE / "states" / ("%s.jsonl" % sid), lambda: ("", 0),
+                         _last_natural_state_step, ckpt="lastNaturalState")
 
 
 def _last_state_value(sid):
@@ -25681,19 +25702,11 @@ def _session_retrying(sid, tm):
     unchanged."""
     if not tm or tm.get("state") != "retrying":
         return None
-    since = None
-    try:
-        for o in _states_rows(sid):
-            st = o.get("state") if isinstance(o, dict) else None
-            if not st:
-                continue                                   # overlay/recovery rows don't bound a stretch
-            if st == "retrying":
-                if since is None:
-                    since = o.get("t")                     # first row of the current stretch
-            else:
-                since = None                               # any real state transition ends the stretch
+    try:                                                   # a fold since T323 stage 3 (it re-walked the whole log per call)
+        since = _fold_records(_retrying_since_cache, jd.STATE / "states" / ("%s.jsonl" % sid), lambda: None,
+                              _retrying_since_step, ckpt="retryingSince")
     except Exception:
-        pass
+        since = None
     try:
         count = int(tm.get("retryCount") or 0)
     except (TypeError, ValueError):
@@ -39577,7 +39590,7 @@ def _run_judging(t0, alive_sids, semantic):
     return out
 
 
-_nudge_times_cache = {}                       # path → ((mtime_ns, size), {gid: [t, ...]})
+_nudge_times_cache = {}                       # path → fold cursor (count, gen, {gid: [t, ...]}) (T323 stage 3)
 
 
 def _nudge_times():
@@ -39585,19 +39598,14 @@ def _nudge_times():
     auto-nudge fire) — the card-side nudge HISTORY behind the stalled chip (the user 2026-07-02: a chip
     that just says "stalled" reads like a state romp observed; the evidence that romp DID follow up,
     and when, must be one click away). mtime-cached like _auto_nudge_data; best-effort {}."""
-    p = jd.STATE / "nudge-events.jsonl"
-    try:
-        st = p.stat(); key = (st.st_mtime_ns, st.st_size)
-    except OSError:
-        return {}
-    hit = _nudge_times_cache.get(str(p))
-    if hit is not None and hit[0] == key:
-        return hit[1]
-    idx = {}
-    for o in em._read_jsonl_incremental(p):          # append-incremental (2026-09-03): the log grows on
-        if isinstance(o, dict) and o.get("gid") and o.get("t"):   # most nudge ticks; only new rows decode
-            idx.setdefault(o["gid"], []).append(int(o["t"]))
-    _nudge_times_cache[str(p)] = (key, idx)
+    return _fold_records(_nudge_times_cache, jd.STATE / "nudge-events.jsonl", dict, _nudge_times_step, ckpt="nudgeTimes")
+
+
+def _nudge_times_step(idx, o):
+    """One nudge-events row: the fire time under its goal id. A fold since T323 stage 3 (it re-walked the shared
+    record list on every log move); the cursor resumes from the file's checkpoint after a restart."""
+    if o.get("gid") and o.get("t"):
+        idx.setdefault(o["gid"], []).append(int(o["t"]))
     return idx
 
 

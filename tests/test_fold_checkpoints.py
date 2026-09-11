@@ -340,7 +340,8 @@ class KernelFolds(Base):
         head = [{"t": TS0, "state": "working"}, {"t": TS0 + 5, "awaiting": True, "state": "waiting"},
                 {"t": TS0 + 6, "machineCut": "restart", "state": "idle"},
                 {"t": TS0 + 7, "retriesRecovered": True, "retries": 2}]
-        rest = [{"t": TS0 + 8, "state": "working"}, {"t": TS0 + 9, "state": "waiting"},
+        rest = [{"t": TS0 + 8, "state": "working"}, {"t": TS0 + 8.5, "state": "idle", "by": "stop"},
+                {"t": TS0 + 9, "state": "retrying"}, {"t": TS0 + 9.5, "state": "retrying"},
                 {"t": TS0 + 10, "machineCut": "deploy"}, {"t": TS0 + 11, "retriesGaveUp": True, "retries": 5, "errorKind": "overloaded"}]
         return head + rest if tail else head
 
@@ -374,6 +375,10 @@ class KernelFolds(Base):
             "stateIntervals": km._state_intervals(SID, "working", TS0 + 200),
             "statesNotes": km._states_notes(SID),
             "machineCut": km._last_machine_cut(SID),
+            "lastState": km._last_state(SID),
+            "lastNaturalState": km._last_natural_state(SID),
+            "retryingSince": km._fold_records(km._retrying_since_cache, jd.STATE / "states" / (SID + ".jsonl"), lambda: None,
+                                              km._retrying_since_step, ckpt="retryingSince"),
             "queueLedger": km._pending_ledger(self.queue_leaf),
             "postalLog": {k: (dict(v) if isinstance(v, dict) else sorted(v)) for k, v in
                           km._fold_records(km._postal_log_cache, self.postal, km._postal_log_fresh, km._postal_log_step, ckpt="postalLog").items()},
@@ -391,7 +396,8 @@ class KernelFolds(Base):
             self.assertTrue(em.checkpoint_write(p), p)
             names |= set(self.doc(p)["folds"])
         self.assertEqual(names, {"sessionMeta", "bgRunning", "bgAll", "agentLaunches", "agentGist", "agentLaunchIds", "statesOverlay",
-                                 "stateIntervals", "statesNotes", "machineCut", "queueLedger", "postalLog"},
+                                 "stateIntervals", "statesNotes", "machineCut", "queueLedger", "postalLog", "lastState",
+                                 "lastNaturalState", "retryingSince"},
                          "every kernel fold this test drives left its state in the checkpoint")
         self.fresh_process()
         for p in self.files:
@@ -413,6 +419,11 @@ class KernelFolds(Base):
         self.assertEqual(len(cold["agentGist"]["steps"]), 3)
         self.assertEqual(cold["machineCut"], (float(TS0 + 10), "deploy"))
         self.assertEqual(len(cold["stateIntervals"]), 2, "two working stretches in the states rows")
+        self.assertEqual(cold["lastState"], ("retrying", TS0 + 9.5)); self.assertEqual(cold["lastNaturalState"], ("retrying", TS0 + 9.5))
+        self.assertEqual(cold["retryingSince"], TS0 + 9, "the current retrying stretch dates from its first row")
+        _append(self.states, {"t": TS0 + 12, "state": "waiting", "by": "stop"})       # a Stop press: romp's row, not the session's
+        self.assertEqual(km._last_state(SID), ("waiting", TS0 + 12))
+        self.assertEqual(km._last_natural_state(SID), ("retrying", TS0 + 9.5), "the session's own newest state skips rows with `by`")
         self.assertEqual(cold["queueLedger"], ["second", "third"])
         self.assertEqual(cold["postalLog"]["ended"], ["m2"])
         self.assertNotIn("m1", cold["postalLog"]["execd"])
