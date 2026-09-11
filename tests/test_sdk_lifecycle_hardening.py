@@ -475,6 +475,141 @@ class LeaseRules(unittest.TestCase):
         self.assertIsNotNone(sb.read_lease(d, a.sid))
         self.assertEqual(be._lease_beat_once(), 1)
 
+    def test_the_heartbeat_loop_beats_on_its_cadence_exits_on_an_empty_census_and_restarts_at_the_next_open(self):
+        # The loop itself, executed: every other test here patches it away, because the real one sleeps a
+        # beat (3 s) before anything happens. Its sleep and clock are seams (the _end_cli_tree shape), so
+        # a beat, the exit on an empty census and the restart at the next open are stepped on this thread
+        # with no second behind them; the only real thread is the recorder the restart runs, joined.
+        # Whether the loop returns never rests on which sleep it called: the close that empties the census
+        # sits on the BEAT side, and every beat checks that one recorded sleep preceded it, so a loop that
+        # slept elsewhere (the seam bypassed, a default bound at the definition) fails at its first beat,
+        # one real beat later at worst, instead of hanging the run. The recorder counts this thread only
+        # and hands any other thread the real sleep (test_kernel_update's T230b: a process-global
+        # time.sleep patch that a foreign thread consumed hung five CI jobs).
+        real_loop, real_sleep = sb.SdkBackend._lease_beat_loop, time.sleep    # kept before any patch
+        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        be = sb.SdkBackend(d, "/bin/true", lambda *a, **k: None)
+        sess = types.SimpleNamespace(sid=self.RSID, name="web", resume_sid=self.SID)
+        client = types.SimpleNamespace(_transport=types.SimpleNamespace(_process=types.SimpleNamespace(pid=os.getpid())))
+        with mock.patch.object(sb.SdkBackend, "_lease_beat_loop", lambda self_: None):  # that thread exits at once
+            be._lease_open(sess, client)
+        be._lease_thread.join(5)
+        lease0 = sb.read_lease(d, self.RSID)
+        clock, slept, struck, main = [lease0["t"] + 100.0], [], [], threading.get_ident()
+        def sleep(s):
+            if threading.get_ident() != main:
+                return real_sleep(s)                  # a foreign thread never feeds the recorder
+            slept.append(s); clock[0] += s
+            if len(slept) > 5:
+                raise AssertionError("the loop did not exit on an empty census")
+        real_beat = be._lease_beat_once
+        def beat(now, then):
+            # the loop's beat: one recorded sleep before it, the real beat, then the stage's step
+            struck.append(now)
+            if len(slept) != len(struck):
+                raise AssertionError("the loop slept on something other than its seam")
+            n = real_beat(now=now)
+            then(n)
+            return n
+        # a beat on the cadence, stamped from the loop's clock, then the exit: the loop is "this thread"
+        stamps = []
+        def close_after_the_first(n):
+            if len(struck) == 1:                      # the first beat has landed: the session ends mid-loop
+                stamps.append(sb.read_lease(d, self.RSID)["t"]); be._lease_close(sess)
+        be._lease_thread = threading.current_thread()
+        with mock.patch.object(be, "_lease_beat_once", lambda now=None: beat(now, close_after_the_first)):
+            real_loop(be, sleep=sleep, now=lambda: clock[0])
+        self.assertEqual(slept, [sb.LEASE_HEARTBEAT_S, sb.LEASE_HEARTBEAT_S])
+        self.assertEqual(struck, [lease0["t"] + 100.0 + sb.LEASE_HEARTBEAT_S, lease0["t"] + 100.0 + 2 * sb.LEASE_HEARTBEAT_S],
+                         "each beat reads the loop's clock after its sleep")
+        self.assertEqual(stamps, struck[:1], "the beat stamps the loop's clock, not time.time()")
+        self.assertIsNone(be._lease_thread, "the exit hands the thread slot back")
+        self.assertEqual(be._lease_beat_once(), 0)
+        # the exit handshake: a census that reads 0 is re-checked under the lock, so an open landing between
+        # the beat and the check keeps the loop alive (its thread is this one, alive, so that open starts
+        # none); the beat after it ends that session first, so its census reads 0 again and the loop exits
+        sess2 = types.SimpleNamespace(sid="11111111-2222-3333-4444-0000000000c1", name="api", resume_sid=None)
+        opened, started = [], []
+        def open_at_the_zero(n):
+            if n == 0 and not opened:
+                opened.append(True); be._lease_open(sess2, client)
+        def beat_around_the_open(now=None):
+            if opened:
+                be._lease_close(sess2)
+            return beat(now, open_at_the_zero)
+        del slept[:]; del struck[:]
+        be._lease_thread = threading.current_thread()
+        with mock.patch.object(be, "_lease_beat_once", beat_around_the_open), \
+             mock.patch.object(sb.SdkBackend, "_lease_beat_loop", lambda self_: started.append(1)):
+            real_loop(be, sleep=sleep, now=lambda: clock[0])
+        self.assertEqual(slept, [sb.LEASE_HEARTBEAT_S, sb.LEASE_HEARTBEAT_S], "alive past the 0: the re-check saw the open")
+        self.assertEqual((opened, started), ([True], []), "the open adopted the live loop and started no thread")
+        self.assertIsNone(be._lease_thread)
+        self.assertIsNone(sb.read_lease(d, sess2.sid))
+        # the restart: with the slot empty, the next open starts a new heartbeat thread, under its name
+        with mock.patch.object(sb.SdkBackend, "_lease_beat_loop", lambda self_: started.append(threading.current_thread().name)):
+            be._lease_open(sess, client)
+            be._lease_thread.join(5)
+        self.assertEqual(started, ["sdk-lease-beat"])
+        self.assertIsNotNone(sb.read_lease(d, self.RSID))
+        # the seams default to time.sleep and time.time, resolved at the call and not at the definition (the
+        # thread target passes neither): a stand-in for the module's `time` name, this module only and never
+        # the process-global functions, is what the loop called with no seams then runs on
+        clockwork = types.SimpleNamespace(**{k: getattr(time, k) for k in dir(time) if not k.startswith("_")})
+        clockwork.sleep, clockwork.time = sleep, lambda: clock[0]
+        del slept[:]; del struck[:]; del stamps[:]
+        be._lease_thread = threading.current_thread()
+        with mock.patch.object(be, "_lease_beat_once", lambda now=None: beat(now, close_after_the_first)), \
+             mock.patch.object(sb, "time", clockwork):
+            real_loop(be)
+        self.assertEqual(slept, [sb.LEASE_HEARTBEAT_S, sb.LEASE_HEARTBEAT_S])
+        self.assertEqual(struck, [clock[0] - sb.LEASE_HEARTBEAT_S, clock[0]], "the default clock is time.time, read at the call")
+        self.assertEqual(stamps, struck[:1])
+        self.assertIsNone(be._lease_thread)
+        self.assertEqual(sb.list_leases(d), [])
+
+    def test_a_heartbeat_thread_the_os_refuses_leaves_the_session_unleased_with_a_problem_and_no_raise(self):
+        # The heartbeat's Thread.start() runs inside the connect, after the handshake; an OS that refuses
+        # a thread (CPython's RuntimeError "can't start new thread") used to raise out of _lease_open,
+        # and the connect's handler then crash-healed a CLI that was up and answering. The session runs
+        # unleased instead, said once as a problem (the missing-pid posture), and the next open tries again.
+        # A second session holds a lease throughout, its heartbeat thread finished (the no-op loop), so the
+        # refusal is seen to drop this session's entry alone and to empty a slot that held a thread.
+        d = tempfile.mkdtemp(); self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        be = sb.SdkBackend(d, "/bin/true", lambda *a, **k: None)
+        sess = types.SimpleNamespace(sid=self.RSID, name="web", resume_sid=self.SID)
+        held = types.SimpleNamespace(sid="11111111-2222-3333-4444-0000000000c2", name="api", resume_sid=None)
+        client = types.SimpleNamespace(_transport=types.SimpleNamespace(_process=types.SimpleNamespace(pid=os.getpid())))
+        with mock.patch.object(sb.SdkBackend, "_lease_beat_loop", lambda self_: None):  # that thread exits at once
+            be._lease_open(held, client)
+        be._lease_thread.join(5)
+        self.assertFalse(be._lease_thread.is_alive(), "a finished thread sits in the slot: the next open must start one")
+        base = len(be.problems())
+        refusals = (RuntimeError("can't start new thread"), OSError(11, "Resource temporarily unavailable"))
+        for n, err in enumerate(refusals, 1):
+            class Refused(threading.Thread):
+                def start(self_):
+                    raise err
+            with mock.patch.object(sb.threading, "Thread", Refused):    # the window is this one call
+                be._lease_open(sess, client)                             # and it must not raise
+            self.assertIsNone(sb.read_lease(d, self.RSID), "no file: the session runs unleased")
+            self.assertEqual((set(be._leases), be._lease_thread), ({held.sid}, None),
+                             "this session's entry alone goes, and the slot is empty for the next open")
+            self.assertIsNotNone(sb.read_lease(d, held.sid), "the other session's lease stands")
+            self.assertEqual(len(be.problems()) - base, n)
+            text = be.problems()[-1]["text"]
+            self.assertIn("runs unleased", text); self.assertIn(str(err), text)
+        # not latched: the next open starts the heartbeat and writes the lease
+        started = []
+        with mock.patch.object(sb.SdkBackend, "_lease_beat_loop", lambda self_: started.append(threading.current_thread().name)):
+            be._lease_open(sess, client)
+            be._lease_thread.join(5)
+        self.assertEqual(started, ["sdk-lease-beat"])
+        self.assertIsNotNone(sb.read_lease(d, self.RSID))
+        self.assertEqual(len(be.problems()) - base, len(refusals), "a start that worked says nothing")
+        be._lease_close(sess); be._lease_close(held)
+        self.assertEqual(sb.list_leases(d), [])
+
     def test_source_pins_the_connect_writes_the_close_drops_and_the_cadence_is_the_drain_holds(self):
         src = open(os.path.join(BIN, "romp_sdk_backend.py")).read()
         self.assertIn("self.backend._lease_open(self, client)", src)

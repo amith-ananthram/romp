@@ -8926,11 +8926,22 @@ class PostalPeerTunnels(unittest.TestCase):
     def test_notify_bus_peer_is_guarded(self):
         saved = km.BUS_PORT
         km.BUS_PORT = 1                    # nothing listens here → refused instantly
+        # the refusal kicks the bus revive, which runs the postal service's ensure with THIS process's environment: for
+        # the call's duration the process is client-only with peers off and names a port nothing can bind, so no bus is
+        # ever started (2026-09-10: a hermetic bus reached the machine's fixed port from exactly this test while the real
+        # bus was down for a restart); restored after, whatever the outcome
+        env_saved = {k: os.environ.get(k) for k in ("ROMP_POSTAL_CLIENT_ONLY", "ROMP_POSTAL_PEERS", "ROMP_POSTAL_PORT")}
+        os.environ.update(ROMP_POSTAL_CLIENT_ONLY="1", ROMP_POSTAL_PEERS="0", ROMP_POSTAL_PORT="1")
         try:
             self.assertFalse(km._notify_bus_peer("TESTHOST", 50002, True),
                              "postal down → False, never an exception (the supervisor must survive)")
         finally:
             km.BUS_PORT = saved
+            for k, v in env_saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
 
 class CheckinMechanics(unittest.TestCase):

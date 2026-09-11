@@ -41,7 +41,8 @@ test("the theme applies LIVE through the scheme plumbing — a body class, no re
 test("Classic: the pre-720 strip verbatim — line, gap 0, gray active fill, ring, stand-down", () => {
   assert.match(CSS, /border-bottom: 1px solid var\(--box-border\);/);
   assert.match(CSS, /#tabs \{ display: flex; flex: 1 1 auto; flex-wrap: wrap; align-items: stretch; gap: 0; position: relative; \}/);
-  assert.match(CSS, /\.tab\.active \{ color: var\(--fg\); background: rgba\(255, 255, 255, 0\.14\); \}/);
+  assert.match(CSS, /\.tab\.active \{ color: var\(--fg\); background: var\(--tab-active-bg\); \}/, "the gray active fill, as the token the tag row's selected box shares (T322)");
+  assert.match(CSS, /--tab-active-bg: rgba\(255, 255, 255, 0\.14\);/, "…which IS the pre-720 gray");
   assert.match(CSS, /\.tab\.active\.colored \{ box-shadow: inset 0 0 0 1\.5px var\(--chip-bg\); \}/);
   assert.match(CSS, /\.tab\.tab-blocked\.active\.colored \{ box-shadow: none; \}/, "blocked outranks the ring (2026-07-24)");
 });

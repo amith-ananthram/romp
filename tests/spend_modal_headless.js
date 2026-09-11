@@ -194,8 +194,9 @@ const { chromium } = require('playwright');
   await pg.waitForFunction(() => document.querySelector('#rsp-panel [data-act="merge:toggle"]').classList.contains('on'), null, { timeout: 5000 });
   const merge = await pg.evaluate(() => {
     const rows = Array.from(document.querySelectorAll('#rsp-panel .rsp-tbl tbody tr')).map((tr) => tr.textContent.trim());
-    const tagRow = document.querySelector('#rsp-panel .rsp-tbl tbody tr[data-tag] .tab-label');
-    return { rows, tagColor: tagRow ? getComputedStyle(tagRow).color : null,
+    const tagRow = document.querySelector('#rsp-panel .rsp-tbl tbody tr[data-tag] .rsp-tag-chip');
+    return { rows, tagColor: tagRow ? getComputedStyle(tagRow).color : null, tagWeight: tagRow ? getComputedStyle(tagRow).fontWeight : null,
+      tagBorder: tagRow ? getComputedStyle(tagRow).borderTopColor : null,
       notes: Array.from(document.querySelectorAll('#rsp-panel .rsp-note')).map((e) => e.textContent),
       stackNames: (() => { const names = new Set(); document.querySelectorAll('#rsp-chart .rsp-seg').forEach((p) => { names.add(p.getAttribute('data-s')); }); return Array.from(names).map((i) => (window.__rompSpendStackNames || [])[+i] || ''); })(),
       prefs: JSON.parse(localStorage.getItem('romp:spendModal') || '{}') };

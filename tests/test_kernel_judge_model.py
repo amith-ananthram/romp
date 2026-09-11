@@ -177,7 +177,7 @@ class _InlineThread:
 
 
 class FastJudging(unittest.TestCase):
-    """Fast judging: STATE/judge-fast ("on" | "off", off by default) adds the CLI's fastMode opt-in to
+    """Fast mode for the judges: STATE/judge-fast ("on" | "off", off by default) adds the CLI's fastMode opt-in to
     judge calls whose model is Opus. The CLI refuses fast mode to a non-interactive client unless the
     flag-settings layer carries that exact key (sdk_backend.flag_settings_path is the sessions' twin),
     and fast mode is an Opus-only preview, so the key rides only a call whose model reads as the opus
