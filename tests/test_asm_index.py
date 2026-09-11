@@ -247,21 +247,50 @@ class Coverage(Restored):
         self.assertEqual(got, whole)
 
     def test_a_uuid_less_absorbed_attachment_matches_its_row_and_the_section_is_written(self):
-        """A queued_command attachment before the cut has a row from the absorbed branch and no uuid: the walk must find that
-        row by its scalars rather than mint a duplicate synthesized one (which made a correct tree fail coverage)."""
+        """A GENUINE uuid-less queued_command attachment before the cut (Claude Code writes the attachment record with no uuid):
+        its atom has a row from the absorbed branch and no uuid, so the walk finds that row by its scalars rather than mint a
+        duplicate synthesized one (which made a correct tree fail coverage), and, having no record to read back, its body
+        rides inline in the row (a lazy marker there could never hydrate: round 3)."""
         records, sent = G.SINGLE_FILE["queued_new_turn"]
-        path = self.write("cov-attach", T.compacting_variant(records(), "att"), sent=sent)
+        recs = records()
+        t_last = max(em.parse_z(r["timestamp"]) for r in recs if r.get("timestamp"))
+        last = next(r for r in reversed(recs) if r.get("uuid"))
+        recs = recs + [G.attline(t_last + 30, "a queued follow-up, sent while the turn ran", None, last["uuid"])]   # no uuid
+        path = self.write("cov-attach", T.compacting_variant(recs, "att"), sent=sent)
         whole = self.cold(path)
+        att = [a for t in whole["turns"] for a in t["atoms"] if a.get("absorbed") or (a.get("type") == "user" and a.get("uuid") is None)]
+        self.assertTrue(att, "the fixture holds a uuid-less absorbed atom before the cut")
         self.fresh(); self.parse(path)
         em._ASM_CKPT_STATS["skipped"] = {}
         self.assertTrue(self.doc(path), em.asm_checkpoint_stats())
         self.assertIsNone(em.asm_checkpoint_stats()["skipped"].get("turnsCoverage"), "not refused")
         d = T._doc(path)
         self.assertIsNotNone(d["turns"], "the section was written")
-        self.assertTrue(any(r.get("uuid") is None for r in (d["atoms"][k]["s"] if "s" in d["atoms"][k] else {} for k in range(len(d["atoms"])))
-                            if isinstance(r, dict)) or True)
+        rows = [r for r in d["atoms"] if "r" not in r and not r.get("syn")]
+        self.assertTrue(rows, "the attachment's row: no record behind it")
+        self.assertTrue(all("lz" not in r and "m" in r for r in rows), "…its body inline, no lazy marker")
         got, modes, n_lazy = self.restored(path)
-        self.assertEqual(modes, ["restore"]); self.assertEqual(got, whole)
+        self.assertEqual(modes, ["restore"]); self.assertEqual(got, whole, "restored and hydrated equals the whole, the attachment included")
+
+    def test_a_tail_marker_is_dedupped_like_the_whole_parse_against_assistants_only_and_by_prefix(self):
+        """Round 3 M2a and M2b: a marker equal to a pre-cut USER prompt is salvaged (a prompt is not a kept reply), and a marker
+        that is a strict prefix of a pre-cut reply, or extends one, is dropped, as the whole parse decides both."""
+        recs = transcript(T.NOW - 86400, turns=40, compact_every=20)
+        t_last = max(em.parse_z(r["timestamp"]) for r in recs if r.get("timestamp"))
+        prompt = next(r for r in recs if r.get("type") == "user" and isinstance(r["message"].get("content"), str))["message"]["content"]
+        reply = next(r for r in recs if r.get("type") == "assistant")["message"]["content"][0]["text"]
+        cases = [("same-as-prompt", prompt, True), ("prefix-of-reply", reply[: max(1, len(reply) // 2)], False), ("extends-reply", reply + " and more", False)]
+        for name, text, salvaged in cases:
+            with self.subTest(case=name):
+                path = self.write("orph-" + name, recs, states=[{"t": int(t_last) + 1, "orphanReply": {"uuid": "orph-" + name, "text": text}}])
+                whole = self.cold(path)
+                self.assertEqual(any(a.get("orphaned") for t in whole["turns"] for a in t["atoms"]), salvaged, "the whole parse's verdict")
+                self.fresh(); self.parse(path); self.assertTrue(self.doc(path))
+                self.fresh(); modes = []
+                tree = self.parse(path, modes)
+                self.assertEqual(modes, ["restore"])
+                em.hydrate(tree, SID)
+                self.assertEqual(T._strip(tree), whole, "restored equals whole: %s" % name)
 
     def test_a_permuted_section_is_refused_by_the_digest(self):
         """Review round 2, low a: two equal-length turns with their row lists swapped cover the rows and would restore the wrong

@@ -3121,36 +3121,39 @@ def synthesize_orphans(states, atoms, landed_text_uuids=None, rompuuid=None, pre
     lazy = [a for a in atoms if a.get("lazy") is not None]           # atoms before an assembly checkpoint's cut: no body
     seen_uuids = {a.get("uuid") for a in atoms
                   if a.get("uuid") and (a["lazy"].get("nt") if a.get("lazy") is not None else _text_of(_content(a.get("message"))).strip())}
-    pre_rows = []                                                     # (turn, row index) of the restored pre-cut atoms (stage 4c)
-    if pre:
+    pre_rows = []                                                     # (turn, slot, row, type, has text, hash) of the restored pre-cut
+    if pre:                                                           #  atoms (stage 4c), one decode per row
         for pt in pre:
             la = pt["atoms"]
             for k, r in enumerate(la.rows()):
-                pre_rows.append((la, k, r))
-        for la, k, r in pre_rows:                                     # text-bearing uuids from the rows: no atom built
-            typ, nt = la._index.text_flags(r)
-            if nt:
-                u = la._index.uuid_of(r)
-                if u:
-                    seen_uuids.add(u)
+                typ, nt, hh = la._index.text_flags(r)
+                pre_rows.append((la, k, r, typ, nt, hh))
+                if nt:
+                    u = la._index.uuid_of(r)                           # text-bearing uuids from the rows: no atom built
+                    if u:
+                        seen_uuids.add(u)
     disk_texts = [t for a in atoms if a.get("type") == "assistant" and a.get("lazy") is None
                   if (t := _text_of(_content(a.get("message"))).strip())]
     older = [None]                                                    # the lazy assistants' texts, hydrated once, only if a marker needs them
 
-    pre_hashes = None                                                 # the pre-cut assistants' text hashes (lz.h): an exact match
+    pre_hashes = {hh for la, k, r, typ, nt, hh in pre_rows if typ == "assistant" and hh}   # the pre-cut ASSISTANTS' text hashes
+    pre_texts = [None]                                                # …and their texts, built and hydrated only if a marker needs them
 
     def _pre_exact(txt):
-        """Whether a pre-cut assistant kept exactly `txt`, from the rows' text hashes: no atom built, no body read (the
-        restored parse's bound, review round 2 M2; a marker whose text is a strict PREFIX of a pre-cut reply is not
-        matched here, where a whole parse would have dropped it: the chat's near-window dedup of the note stands)."""
-        nonlocal pre_hashes
-        if pre_hashes is None:
-            pre_hashes = set()
-            for la, k, r in pre_rows:
-                hh = la._index.text_hash(r)
-                if hh:
-                    pre_hashes.add(hh)
+        """Whether a pre-cut assistant kept exactly `txt`, from the rows' hashes: no atom built (a user prompt or a command
+        with the same text is not a kept reply, so only assistants count: round 3 M2a)."""
         return hashlib.sha1(txt.encode("utf-8", "replace")).hexdigest()[:8] in pre_hashes
+
+    def _pre_texts():
+        """The pre-cut assistants' texts for the either-way prefix rule the whole parse applies (round 3 M2b): built and
+        hydrated once, only when a tail marker survived the cheaper checks (the t_floor filter above keeps this off every
+        parse with no marker the tail can hold)."""
+        if pre_texts[0] is None:
+            las = [la[k] for la, k, r, typ, nt, hh in pre_rows if typ == "assistant" and nt]
+            if las:
+                hydrate(las, rompuuid or (atoms[0].get("session_id") if atoms else None), by="synthesize_orphans")
+            pre_texts[0] = [t for a in las if (t := _text_of(_content(a.get("message"))).strip())]
+        return pre_texts[0]
 
     def _older_texts():
         if older[0] is None:
@@ -3185,8 +3188,8 @@ def synthesize_orphans(states, atoms, landed_text_uuids=None, rompuuid=None, pre
             continue
         if lazy and any(dt.startswith(txt) or txt.startswith(dt) for dt in _older_texts()):
             continue                                                   # a reply the disk kept before the cut
-        if pre_rows and _pre_exact(txt):
-            continue                                                   # …or the index kept, exactly (by hash: no atom built)
+        if pre_rows and (_pre_exact(txt) or any(dt.startswith(txt) or txt.startswith(dt) for dt in _pre_texts())):
+            continue                                                   # …or the index kept, exactly (by hash) or as a prefix either way
         out.append({"type": "assistant", "uuid": u or ("orphan:%d" % int(r["t"])), "session_id": sid,
                     "t": int(r["t"]), "fsid": None, "parentUuid": None, "orphaned": True,
                     "message": {"role": "assistant", "content": [{"type": "text", "text": txt}],
@@ -4090,34 +4093,23 @@ class LazyIndex:
             return self.records[ri][0]
         return (row.get("s") or {}).get("uuid")
 
-    def text_hash(self, k):
-        """A row's text hash (lz.h: the first eight hex of sha1 over the text) without building its atom; None for a row
-        with no lazy marker (a synthesized atom: its message is inline and hashed here)."""
-        with _MAT_LOCK:
-            _ASM_INDEX_STATS["rowDecodes"] += 1
-        row = json.loads(self.rowb[k])
-        lz = row.get("lz")
-        if lz is not None:
-            return lz.get("h") if lz.get("nt") else None
-        if row.get("syn") and "m" in row:
-            txt = _text_of(_content(row["m"])).strip()
-            return hashlib.sha1(txt.encode("utf-8", "replace")).hexdigest()[:8] if txt else None
-        return None
-
     def text_flags(self, k):
-        """(type, has text) for a row without building its atom: what an orphan marker's dedup reads."""
+        """(type, has text, text hash) for a row without building its atom, one decode: what an orphan marker's dedup reads.
+        The hash is lz.h (the first eight hex of sha1 over the text) for a lazy row, the same digest over an inline message
+        for a synthesized or inline row; None without text."""
         with _MAT_LOCK:
             _ASM_INDEX_STATS["rowDecodes"] += 1
         row = json.loads(self.rowb[k])
         ri = row.get("r")
+        lz = row.get("lz")
         tname = {"u": "user", "a": "assistant", "s": "system"}
         typ = (row.get("s") or {}).get("type") or (tname.get(self.records[ri][2], "user") if ri is not None else None)
-        lz = row.get("lz")
         if lz is not None:
-            return typ, bool(lz.get("nt"))
-        if row.get("syn") and "m" in row:
-            return typ, bool(_text_of(_content(row["m"])).strip())
-        return typ, False
+            return typ, bool(lz.get("nt")), (lz.get("h") if lz.get("nt") else None)
+        if "m" in row:
+            txt = _text_of(_content(row["m"])).strip()
+            return typ, bool(txt), (hashlib.sha1(txt.encode("utf-8", "replace")).hexdigest()[:8] if txt else None)
+        return typ, False, None
 
 
 class LazyAtoms(list):
@@ -4584,8 +4576,12 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None):
                 row["r"] = ri
             if a.get("_seq", sq) != sq:
                 row["seq"] = a.get("_seq", sq)             # an adopted boundary's emit order differs from its read order
-            if kind in _LAZY_KINDS:
+            if kind in _LAZY_KINDS and idx >= 0 and fp is not None:
                 row["lz"] = _lazy_of(a, kind, idx)
+            elif kind in _LAZY_KINDS:                          # no record to read back (an absorbed attachment with no uuid, round 3):
+                row["m"] = a.get("message")                    #  the body rides inline, never a lazy marker hydrate cannot fill
+                if "toolUseResult" in a:
+                    row["tur"] = a["toolUseResult"]
             pre_atoms.append(row)
         # the pre-cut spine, root to cut
         chain, u, guard_n = [], ad.leaf_uuid, 0
@@ -4645,6 +4641,8 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None):
                 for a in turn["atoms"]:
                     u_ = a.get("uuid")
                     k_ = row_of_atom.get(u_) if u_ else row_of_scalars.pop(json.dumps(_atom_scalars(a), sort_keys=True, default=str), None)
+                    #  (two uuid-less attachments in one turn with the same enqueue stamp collide on the scalar key: the second
+                    #   finds no row, the walk mints a synthesized one, and the coverage check refuses the section cleanly)
                     if k_ is None:
                         if u_ in ad.seq_of:
                             return skip("turnRows")      # a record atom with no row of its own: the tree and the entry disagree
@@ -4782,6 +4780,10 @@ def _restore_prefix_atoms(pre_atoms, rompuuid, rows, fsids):
         if lz is not None:
             a["lazy"] = dict(lz, i=row["i"], at=tuple(row["at"]) if row.get("at") else None)
             a["message"] = _LazyBody(a.get("uuid"))
+        elif "m" in row:                                  # an inline body: an emitted atom with no record behind it (round 3)
+            a["message"] = row["m"]
+            if "tur" in row:
+                a["toolUseResult"] = row["tur"]
         out.append(a)
     return out
 
