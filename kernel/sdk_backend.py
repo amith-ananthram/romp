@@ -5155,6 +5155,8 @@ class SdkSession:
         #   2026-09-06). Which counter is which, and the measurement: _turn_usage.
         self._spend_unknown_open = False   # True from an attach-unknown seed until the first LIVE result: every replayed
         #                                    record meanwhile is the lifetime so far and advances the watermarks (T354)
+        self._spend_seed_epoch_seen = False   # an orphan drain: a record of the watermark's own epoch has been replayed, so
+        #                                       a different epoch from here on is a NEWER one (_spend_redelivered)
         self._spend_baseline = "fresh"     # what the watermarks stand on: "fresh" (a new CLI process: zero, or the
         #                                    resumed transcript's cost-state record), "attach-pending" (a host attach:
         #                                    the surviving CLI's watermark is read from the registry at the first
@@ -6929,6 +6931,7 @@ class SdkSession:
         self._spend_first_result = True
         self._spend_baseline = "attach-pending"
         self._spend_seed_session = ""
+        self._spend_seed_epoch_seen = False
         self._replay_cli = str(cli or "")
         self._seed_from_reg_cost_state(cli=cli, dead=True)
 
@@ -6995,14 +6998,22 @@ class SdkSession:
         if orphan:
             # the dead CLI's watermark is the line, with two exceptions (the lows of the fix's round five): a seed that
             # named no watermark (attach-unknown) knows no line, so every replayed record folds nothing rather than
-            # every ascending step after the first folding its delta; and a record from another session epoch (a
-            # /clear the dead kernel bracketed, its post-clear watermark on record) is not comparable to the
-            # watermark's totals at all, so it folds nothing
+            # every ascending step after the first folding its delta (the watermark advances with each, the fix's
+            # second round); and a record from another session epoch is not comparable to the watermark's totals, so
+            # it is judged by its POSITION in the tail (the follow-up's second round): before the watermark epoch's own
+            # records it is OLDER (a /clear the dead kernel bracketed, its post-clear watermark on record: folded, so
+            # it folds nothing); after them it is NEWER (a /clear the dead kernel never folded past: live, and a total
+            # below the watermark folds whole as the counter reset it is, the new epoch's watermark from there)
             if getattr(self, "_spend_baseline", "") == "attach-unknown":
                 return True
             seed_epoch = str(getattr(self, "_spend_seed_session", "") or "")
-            if seed_epoch and session_id and str(session_id) != seed_epoch:
-                return True
+            if seed_epoch and session_id:
+                if str(session_id) == seed_epoch:
+                    self._spend_seed_epoch_seen = True
+                elif getattr(self, "_spend_seed_epoch_seen", False):
+                    return False                     # a newer epoch: live
+                else:
+                    return True                      # an older epoch: folded before the dead kernel's /clear
             return float(total) <= float(self._last_cost_total)
         return True
 
@@ -7013,7 +7024,11 @@ class SdkSession:
         try:
             self.backend._update_reg(self.sid, costState={"total": float(total), "tokens": dict(self._last_usage_totals),
                                                            "cli": self._cli_ident(), "t": int(time.time()),
-                                                           "session": str(getattr(self, "_spend_session_id", "") or "")})
+                                                           # the epoch a live result named, else the watermark's own (a drain
+                                                           # of duplicates alone must not erase the epoch the next drain's
+                                                           # guard compares against: the follow-up's second round, low b)
+                                                           "session": str(getattr(self, "_spend_session_id", "") or
+                                                                          getattr(self, "_spend_seed_session", "") or "")})
         except Exception as e:
             self.backend._log("spend (%s): costState write failed: %s" % (self.name, e), problem=False)
 
