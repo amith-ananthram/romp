@@ -3047,6 +3047,27 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
 }
 #seek-note .seek-note-label { color: var(--dim); }
 
+/* the reveal progress line (render.ts revealProgressPaint, T336): while the index wire's fetch-until-resident
+   loop walks back to a far-past anchor, one quiet line in the seek note's slot says how far along it is, in the
+   composer placeholder's dim ink: a thin bar when the anchor's moment makes the fraction honest, the count of
+   older messages loaded and the oldest loaded time otherwise. Nothing animates; it dies with the loop. The
+   --menu-border hairline, not the seek note's raw white alpha (which vanished on the light page). */
+#reveal-progress {
+  position: fixed; left: 50%; bottom: 86px; transform: translateX(-50%); z-index: 60;
+  display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: var(--radius-toast);
+  background: var(--vscode-menu-background, var(--surface-raised)); border: 1px solid var(--menu-border);
+  box-shadow: var(--shadow-toast); font-size: 12px; color: var(--dim); white-space: nowrap;
+}
+#reveal-progress .rp-bar { position: relative; width: 120px; height: 3px; border-radius: 2px; overflow: hidden; background: color-mix(in srgb, var(--dim) 28%, transparent); }
+#reveal-progress .rp-bar[hidden] { display: none; }
+#reveal-progress .rp-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 2px; background: var(--dim); }
+#reveal-progress .rp-detail:empty { display: none; }
+#reveal-progress .rp-x {
+  flex: 0 0 auto; border: none; background: none; cursor: pointer; color: var(--dim);
+  font-size: 11px; line-height: 1.4; padding: 2px 4px; border-radius: 8px;
+}
+#reveal-progress .rp-x:hover { color: var(--fg); background: color-mix(in srgb, var(--fg) 8%, transparent); }
+
 /* jump to newest (the user 2026-08-31): the deliberate way back into follow mode once scrolled-up
    reading (and the send gate that respects it) has left it. The seek-note's menu-card vocabulary in
    a circular chip: dim at rest, accent on hover; body-level and fixed, so re-renders never rebuild
