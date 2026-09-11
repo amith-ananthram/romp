@@ -121,5 +121,78 @@ class NudgeFailedRespectsAwaiting(unittest.TestCase):
         self.assertTrue(km._auto_nudge_data()["nudged"][self.gid].get("failed"))
 
 
+class _FakeCodexBackend:
+    def __init__(self, snap):
+        self._snap = snap
+
+    def live_sessions(self):
+        return {SID: dict(self._snap)}
+
+
+class MergeReadsACodexSince(unittest.TestCase):
+    """The Codex backend stamps since = time.time() (a float) and live_sessions ships it raw, where the
+    SDK backend ships str(int(...)). Sessions.live() parsed since with a digits-only test, so every
+    Codex row's since merged as None and _idle_faded never fired: a Codex session idle past FADED_S
+    stayed a solid "ready" in the chat tab and the timeline lane while every idle SDK tab and lane
+    dimmed (2026-09-11). Through the REAL merge with a fake Codex backend, like the class above. The SDK
+    arm has the same latent gap, which is why the parse was widened in the merge and not in the Codex
+    backend: its dormant read serves the state log's LAST record, and the machineCut and resume-fork
+    lines carry a float t by design (a bound that must not move earlier), so a dormant SDK row whose last
+    line is one of those ships a float string too — the third case drives that arm."""
+
+    def test_a_codex_rows_float_since_merges_as_an_epoch_and_fades_past_the_hour(self):
+        snap = {"state": "waiting", "since": 1781100000.5, "model": "gpt-5-test", "effort": "",
+                "mode": "sandboxed", "context": None, "compactPct": None, "backend": "codex",
+                "name": "web", "cwd": "/TESTDIR", "color": None}
+        saved_sdk, saved_codex = km._sdk, km._codex
+        fake = _FakeCodexBackend(snap)
+        km._sdk = lambda: None            # no SDK backend on this box: the merge is the Codex rows alone
+        km._codex = lambda: fake
+        try:
+            out = km.Sessions.live()
+        finally:
+            km._sdk, km._codex = saved_sdk, saved_codex
+            km._LIVE_LAST_ROWS.pop("codex", None)
+        self.assertIn(SID, out)
+        self.assertEqual(out[SID]["backend"], "codex")
+        self.assertEqual(out[SID]["since"], 1781100000,
+                         "the merged map carries the Codex row's since as an epoch — the faded rule reads it here")
+        # ...and the one faded rule fires off exactly that merged value, as it does for an SDK row
+        self.assertFalse(km._idle_faded("ready", out[SID]["since"], 1781100000 + km.FADED_S))
+        self.assertTrue(km._idle_faded("ready", out[SID]["since"], 1781100000 + km.FADED_S + 1),
+                        "a Codex session idle past the hour wears the faded look like an SDK one")
+
+    def test_a_dormant_sdk_rows_float_since_merges_as_an_epoch_too(self):
+        # the dormant SDK read ships str(last_state(...)["t"]); after a machineCut or resume-fork line that
+        # is "1781100000.5", where a state line's is "1781100000" — the SDK arm of the merge parses it too
+        snap = {"state": "waiting", "since": "1781100000.5", "model": "Fable 5", "effort": "",
+                "modelPending": False, "effortPending": False, "retryCount": 0, "retryInfo": None,
+                "ctx": None, "mode": "auto", "subagents": [], "bgTasks": []}
+        saved_sdk, saved_codex = km._sdk, km._codex
+        fake = _FakeSdkBackend(snap)
+        km._sdk = lambda: fake
+        km._codex = lambda: None          # no Codex backend on this box: the merge is the SDK rows alone
+        # a fresh process: no previous SDK rows to go on. This module's state root has no sdk/ directory (no
+        # boot pass ran), and with rows left from an earlier read the merge would judge the registry blind
+        # and serve THOSE rows instead of this fake's (_sdk_records_blind)
+        km._LIVE_LAST_ROWS.pop("sdk", None)
+        try:
+            out = km.Sessions.live()
+        finally:
+            km._sdk, km._codex = saved_sdk, saved_codex
+            km._LIVE_LAST_ROWS.pop("sdk", None)
+        self.assertIn(SID, out)
+        self.assertEqual(out[SID]["backend"], "sdk")
+        self.assertEqual(out[SID]["since"], 1781100000,
+                         "a dormant SDK row whose last state-log line is a machineCut or resume-fork ships a float since")
+
+    def test_the_since_parser_reads_a_float_string_and_stays_none_for_non_numbers(self):
+        self.assertEqual(km._num("1781100000.5"), 1781100000)
+        self.assertEqual(km._num("1781100000"), 1781100000)
+        self.assertEqual(km._num("-3"), -3)
+        for bad in ("", "  ", "soon", "nan", "inf", None):
+            self.assertIsNone(km._num(bad), repr(bad))
+
+
 if __name__ == "__main__":
     unittest.main()
