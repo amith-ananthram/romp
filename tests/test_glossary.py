@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""The glossary (T351 stage 2, the user 2026-09-11): the kernel parses a group's glossary file in the README's grammar,
+resolves a session to its group's file, ships a byte-bounded index frame, and answers GET /glossary/<term>. The fixture
+is SYNTHETIC (tests/fixtures/glossary_grammar.json: an invented notes-api team's entries); the TS twin reads the same
+file. Hermetic state; nothing of any real glossary reaches the repo."""
+import json
+import os
+import shutil
+import tempfile
+import unittest
+from pathlib import Path
+
+from romp_load import load_source
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+BIN = os.path.join(os.path.dirname(HERE), "bin")
+os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
+os.environ.pop("ROMP_STATE_DIR", None)
+os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
+load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
+load_source("romp_judge", os.path.join(BIN, "romp-judge"))
+km = load_source("romp_kernel_glossary", os.path.join(BIN, "romp-kernel"))
+
+FIX = json.loads(Path(HERE, "fixtures", "glossary_grammar.json").read_text())
+SID = "11111111-2222-3333-4444-555555555555"
+OTHER = "aaaaaaaa-1111-2222-3333-444444444444"
+
+
+class Parser(unittest.TestCase):
+    def test_the_fixture_parses_to_its_expectation(self):
+        got = km._glossary_parse(FIX["text"])
+        self.assertEqual(got["skip"], FIX["expect"]["skip"], "the Not-coinages bullets read as words: the bold lead or the text before the colon")
+        self.assertEqual([e["slug"] for e in km._slice_headings(FIX["text"])], FIX["expect"]["slugs"], "slugs over ALL headings, the viewer's rule")
+        slim = [{k: v for k, v in e.items() if k != "section"} for e in got["terms"]]
+        self.assertEqual(slim, FIX["expect"]["terms"])
+        self.assertTrue(got["terms"][0]["section"].startswith("## fold\n"), "each entry keeps its whole section for the route")
+        self.assertIn("- registered: 2026-09-11 by web", got["terms"][0]["section"])
+
+    def test_edge_cases(self):
+        self.assertEqual(km._glossary_parse(""), {"skip": [], "terms": []})
+        self.assertEqual(km._glossary_parse("# only a title\n\nprose\n"), {"skip": [], "terms": []})
+        got = km._glossary_parse("## a\n\ndef\n\n### sub\n\nmore\n\n## b\n\n- status: retired\n")
+        self.assertEqual([e["term"] for e in got["terms"]], ["a", "b"], "a level-3 heading stays inside its section")
+        self.assertEqual(got["terms"][0]["definition"], "def more", "…and its prose folds into the definition")
+        self.assertEqual(got["terms"][1]["definition"], ""); self.assertEqual(got["terms"][1]["status"], "retired")
+        fenced = "## x\n\n```\n## not a heading\n```\n\n- plain words: y\n"
+        self.assertEqual([e["term"] for e in km._glossary_parse(fenced)["terms"]], ["x"], "fenced code hides no heading")
+
+
+class Lookup(unittest.TestCase):
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self.saved_env = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = self.td
+        self.saved_state = km.jd.STATE
+        km.jd._rebind_state(Path(self.td) / "state")
+        (Path(self.td) / "glossaries").mkdir(parents=True)
+        Path(self.td, "glossaries", "notes-api.md").write_text(FIX["text"])
+        km._GLOSSARY_CACHE.clear()
+        self.saved_views, self.saved_name = km._timeline_views, km._name_of
+        km._timeline_views = lambda: {"tags": [{"id": "t1", "name": "notes-api", "members": [{"host": "", "sid": SID}]}]}
+        km._name_of = lambda sid: {SID: "web", OTHER: "docs"}.get(sid, "")
+
+    def tearDown(self):
+        km._timeline_views, km._name_of = self.saved_views, self.saved_name
+        if self.saved_env is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = self.saved_env
+        km.jd._rebind_state(self.saved_state)
+        km._GLOSSARY_CACHE.clear()
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_a_session_resolves_to_its_groups_file_else_its_own_names_else_none(self):
+        self.assertEqual(km._session_groups(SID), ["notes-api"])
+        g, p = km._glossary_source(SID)
+        self.assertEqual((g, p.name), ("notes-api", "notes-api.md"))
+        self.assertEqual(km._glossary_source(OTHER), (None, None), "no group, no docs.md: nothing")
+        Path(self.td, "glossaries", "docs.md").write_text("## twin\n\nThe TS mirror of a Python rule.\n\n- plain words: the mirror test\n")
+        self.assertEqual(km._glossary_source(OTHER)[0], "docs", "its own name's file")
+
+    def test_the_frame_is_the_index_bounded_by_bytes_with_the_cut_counted(self):
+        fr = km._glossary_frame(SID)
+        self.assertEqual((fr["type"], fr["id"], fr["group"]), ("glossary", SID, "notes-api"))
+        self.assertTrue(fr["path"].endswith("glossaries/notes-api.md")); self.assertTrue(fr["mtime"].isdigit())
+        self.assertEqual(fr["skip"], FIX["expect"]["skip"]); self.assertEqual([e["term"] for e in fr["terms"]], ["fold", "lens", "pin", "fold head"])
+        self.assertNotIn("section", fr["terms"][0], "the section stays on the kernel's side"); self.assertEqual(fr["truncated"], 0)
+        self.assertIsNone(km._glossary_frame(OTHER), "no file: no frame")
+        cap = km._GLOSSARY_INDEX_MAX_BYTES
+        try:
+            km._GLOSSARY_INDEX_MAX_BYTES = 600
+            before = dict(km._PERF_STATS.glossary_stats)
+            fr = km._glossary_frame(SID)
+            self.assertLess(len(fr["terms"]), 4); self.assertEqual(fr["truncated"], 4 - len(fr["terms"]), "the cut is counted on the frame")
+            self.assertEqual(km._PERF_STATS.glossary_stats["cut"] - before["cut"], fr["truncated"], "…and in /perf")
+        finally:
+            km._GLOSSARY_INDEX_MAX_BYTES = cap
+
+    def test_a_rewrite_is_a_new_cache_key_and_the_old_one_goes(self):
+        km._glossary_frame(SID)
+        self.assertEqual(len(km._GLOSSARY_CACHE), 1)
+        p = Path(self.td, "glossaries", "notes-api.md")
+        st = p.stat(); p.write_text(FIX["text"] + "\n## wire\n\nA coined verb.\n\n- plain words: to connect\n"); os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+        fr = km._glossary_frame(SID)
+        self.assertIn("wire", [e["term"] for e in fr["terms"]]); self.assertEqual(len(km._GLOSSARY_CACHE), 1, "one entry per file")
+
+    def test_the_route_answers_a_term_or_an_alias_and_404s_with_the_paths_tried(self):
+        s, b = km._glossary_lookup(SID, "Fold")
+        self.assertEqual((s, b["title"], b["anchor"], b["group"], b["status"]), (200, "fold", "fold", "notes-api", "unconfirmed"))
+        self.assertTrue(b["markdown"].startswith("## fold")); self.assertTrue(b["source_path"].endswith("notes-api.md"))
+        self.assertEqual(km._glossary_lookup(SID, "review fold")[1]["title"], "fold", "an alias answers the term")
+        self.assertEqual(km._glossary_lookup(SID, "fold head")[1]["anchor"], "fold-head", "the multi-word term is its own entry")
+        s, b = km._glossary_lookup(SID, "nonesuch")
+        self.assertEqual(s, 404); self.assertTrue(b["tried"][0].endswith("notes-api.md"))
+        s, b = km._glossary_lookup(OTHER, "fold")
+        self.assertEqual(s, 404); self.assertTrue(any(t.endswith("docs.md") for t in b["tried"]), "the paths tried, for a session with no file")
+
+    def test_the_perf_snapshot_carries_the_counters(self):
+        snap = km._PERF_STATS.snapshot() if hasattr(km._PERF_STATS, "snapshot") else None
+        if snap is not None:
+            self.assertIn("glossary", snap)
+        src = Path(os.path.join(BIN, "romp-kernel")).read_text()
+        self.assertIn('"glossary": glossary_stats,', src)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -425,6 +425,13 @@ thread out it is a session like any other, mail on unless you toggle its
 mailbox off (the user 2026-09-11, after a thread received a manager's mail and
 acted as the manager).
 
+Words your team coined wear a quiet dotted underline wherever a session writes
+them: hover for the definition and the plain phrase, click to open the group's
+glossary at that entry. The glossary is a plain file per tag group,
+`~/.claude/glossaries/<group>.md`; its README gives the grammar, and a `link`
+line per entry sets how often a word is underlined (every time, first mention
+per message, or never) for headwords that are also everyday words.
+
 A session started from another one joins its tags. Forking a session, breaking
 a comment thread out into its own session, and running `romp new` inside a
 session's shell all put the new session in the parent's groups, so a session's

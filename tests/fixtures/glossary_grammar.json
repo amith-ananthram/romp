@@ -1,0 +1,85 @@
+{
+ "text": "# notes-api team glossary\n\nSynthetic. Nothing here is a real entry.\n\n## Not coinages\n\n- **green, CI, auto-merge**: the trade's own words.\n- fold (kernel sense): the kernel's own chat fold, not the team's.\n- T followed by a number: a task id, bookkeeping.\n\n## fold\n\nThe fixes from a review, folded into the pull request as new commits; \"the fold\" is that set.\nDistinct from the kernel's chat fold.\n\n- plain words: the fixes from a review\n- also: folded, fold head, review fold\n- scope: notes-api team mail\n- status: unconfirmed\n- registered: 2026-09-11 by web\n\n## lens\n\nOne angle a verifier reads a change through.\n\n- plain words: one review angle\n- status: confirmed\n- registered: 2026-09-10 by api\n- link: first\n\n## pin\n\nA source assertion that fails when a branch shape changes.\n\n- plain words: a source assertion\n- also: pins, pinned\n- status: retired\n- registered: 2026-09-09 by docs\n- link: off\n\n## fold head\n\nThe head a review's fixes land on.\n\n- plain words: the head after the fixes\n- status: nonsense-value\n- registered: sometime\n",
+ "expect": {
+  "skip": [
+   "green",
+   "ci",
+   "auto-merge",
+   "fold (kernel sense)",
+   "t followed by a number"
+  ],
+  "slugs": [
+   "notes-api-team-glossary",
+   "not-coinages",
+   "fold",
+   "lens",
+   "pin",
+   "fold-head"
+  ],
+  "terms": [
+   {
+    "term": "fold",
+    "slug": "fold",
+    "definition": "The fixes from a review, folded into the pull request as new commits; \"the fold\" is that set. Distinct from the kernel's chat fold.",
+    "plainWords": "the fixes from a review",
+    "also": [
+     "folded",
+     "fold head",
+     "review fold"
+    ],
+    "scope": "notes-api team mail",
+    "status": "unconfirmed",
+    "registered": {
+     "date": "2026-09-11",
+     "by": "web"
+    },
+    "link": "all"
+   },
+   {
+    "term": "lens",
+    "slug": "lens",
+    "definition": "One angle a verifier reads a change through.",
+    "plainWords": "one review angle",
+    "also": [],
+    "scope": "",
+    "status": "confirmed",
+    "registered": {
+     "date": "2026-09-10",
+     "by": "api"
+    },
+    "link": "first"
+   },
+   {
+    "term": "pin",
+    "slug": "pin",
+    "definition": "A source assertion that fails when a branch shape changes.",
+    "plainWords": "a source assertion",
+    "also": [
+     "pins",
+     "pinned"
+    ],
+    "scope": "",
+    "status": "retired",
+    "registered": {
+     "date": "2026-09-09",
+     "by": "docs"
+    },
+    "link": "off"
+   },
+   {
+    "term": "fold head",
+    "slug": "fold-head",
+    "definition": "The head a review's fixes land on.",
+    "plainWords": "the head after the fixes",
+    "also": [],
+    "scope": "",
+    "status": "unconfirmed",
+    "registered": {
+     "date": "sometime",
+     "by": ""
+    },
+    "link": "all"
+   }
+  ]
+ }
+}
