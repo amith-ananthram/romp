@@ -46,6 +46,13 @@ class _LiveThread:
 class _Running:
     thread = _LiveThread()
 
+    def __init__(self, state="working"):
+        self.state = state
+
+    def snapshot(self):
+        return {"state": self.state, "since": "", "model": "", "effort": "", "mode": "", "connected": True,
+                "spawning": False, "ctx": None, "subagents": [], "bgTasks": []}
+
 
 class _FakeSdk:
     """The SDK backend's live_sessions as list_regs shapes it: the alive regs under sdk/, and {} when the
@@ -102,7 +109,7 @@ class _Root(unittest.TestCase):
         self._saved = (km._sdk, km._codex, dict(km._LIVE_LAST_ROWS), dict(km._LIVE_READ_FAILS), km._prev_live_sids[0])
         km._sdk = lambda: self.fake
         km._codex = lambda: None
-        km._LIVE_LAST_ROWS.clear(); km._VANISHED_SAID.clear()
+        km._LIVE_LAST_ROWS.clear(); km._VANISHED_SAID.clear(); km._DEAD_WAIT_LIFE_SAID[0] = set()
         km._LIVE_READ_FAILS["count"] = 0
         km._LIVE_READ_FAILS["last"] = {}
         km._prev_live_sids[0] = None
@@ -221,7 +228,7 @@ class RegistryDirectoryGone(_Root):
         self.assertIs(km._dead_wait_corroborated(SID, now=NOW), False, "a live thread is alive")
         stats = {}
         self.assertIsNone(km._dead_wait_corroborated(SID2, stats=stats, now=NOW))
-        self.assertEqual(stats, {"life": 1})
+        self.assertEqual((stats.get("life"), stats.get("lifeSids")), (1, {SID2}))
 
     def test_a_boot_sparing_six_holds_them_through_a_new_sessions_reg_and_the_next_boot(self):
         # the six spared at boot must stay spared after the user creates ONE session: its reg lands, the
@@ -275,7 +282,7 @@ class RegistryDirectoryGone(_Root):
             stats = {}
             self.assertIsNone(km._dead_wait_corroborated(SID, stats=stats, now=NOW))
         self.assertIsNone(_marker(SID)); self.assertIsNone(_marker(SID2))
-        self.assertEqual(stats, {"life": 1}, "its own key: the directory reads, the life is what stands it down")
+        self.assertEqual((stats.get("life"), stats.get("lifeSids")), (1, {SID}), "its own key: the directory reads, the life is what stands it down")
         self.assertEqual(km._LIVE_READ_FAILS["count"], 2, "both stand-downs counted")
         self.assertEqual(self.err.getvalue().count("death-boot: 2 names sid(s) hold no reg but show recent life"), 1)
 
@@ -288,6 +295,42 @@ class RegistryDirectoryGone(_Root):
             km._death_boot_pass(NOW)
         self.assertIsNotNone(_marker(SID), "no life within the horizon: dead history")
         self.assertEqual(km._LIVE_READ_FAILS["count"], 0)
+
+    def test_a_stood_down_departure_stays_armed_and_is_stamped_the_tick_its_life_ages_out(self):
+        rows = self._seed()
+        d = jd.STATE / "states"; d.mkdir(parents=True, exist_ok=True)
+        (d / (SID2 + ".jsonl")).write_text(json.dumps({"t": NOW - 120, "state": "waiting"}) + "\n")
+        km._death_sweep_tick(NOW, rows)
+        os.unlink(jd.SDKDIR / (SID2 + ".json"))       # the reg goes; the session shows life, no thread
+        with contextlib.redirect_stderr(self.err):
+            km._death_sweep_tick(NOW + 1, {SID: rows[SID]})
+            self.assertIsNone(_marker(SID2), "recent life: stood down")
+            self.assertIn(SID2, km._prev_live_sids[0], "…and still a departure the next tick re-asks")
+            km._death_sweep_tick(NOW + 2, {SID: rows[SID]})
+            self.assertIsNone(_marker(SID2))
+            km._death_sweep_tick(NOW + jd.WINDOW + 10, {SID: rows[SID]})   # its life ages out of the horizon
+        self.assertIsNotNone(_marker(SID2), "stamped by the sweep itself, no restart needed")
+
+    def test_the_dead_wait_life_stand_down_line_is_said_once_per_episode(self):
+        _name(SID); _name(SID2)
+        jd.SDKDIR.mkdir(parents=True, exist_ok=True)
+        d = jd.STATE / "states"; d.mkdir(parents=True, exist_ok=True)
+        for sid in (SID, SID2):
+            (d / (sid + ".jsonl")).write_text(json.dumps({"t": NOW - 120, "state": "waiting"}) + "\n")
+        saved = km._PREV_ALIVE
+        try:
+            km._PREV_ALIVE = {SID}
+            with contextlib.redirect_stderr(self.err):
+                km._dead_wait_sweep(set(), {}, NOW)
+                km._dead_wait_sweep(set(), {}, NOW + 1)
+                km._dead_wait_sweep(set(), {}, NOW + 2)
+            self.assertEqual(self.err.getvalue().count("show recent life; stood down"), 1, "one line for the episode")
+            km._PREV_ALIVE = {SID, SID2}
+            with contextlib.redirect_stderr(self.err):
+                km._dead_wait_sweep(set(), {}, NOW + 3)
+            self.assertEqual(self.err.getvalue().count("show recent life; stood down"), 2, "the set changed: said again")
+        finally:
+            km._PREV_ALIVE = saved
 
     def test_dead_wait_reads_a_names_only_sid_with_stale_life_as_dead_history(self):
         _name(SID)
@@ -311,11 +354,15 @@ class RegistryDirectoryGone(_Root):
 
     def test_a_reg_deleted_by_hand_under_a_running_session_keeps_it_alive(self):
         rows = self._seed()
-        self.fake.sessions[SID2] = _Running()
+        run = _Running(state="permission")
+        self.fake.sessions[SID2] = run
         os.unlink(jd.SDKDIR / (SID2 + ".json"))
         fresh = self.live()
         self.assertEqual(set(fresh), {SID, SID2}, "its driver runs: the row stays")
         self.assertIn("kept alive", self.err.getvalue())
+        self.assertEqual(fresh[SID2]["state"], "permission", "the row is the session's own snapshot, not the read before")
+        run.state = "working"
+        self.assertEqual(self.live()[SID2]["state"], "working", "…and it follows the snapshot every tick, never frozen")
         km._death_sweep_tick(NOW, rows)
         with contextlib.redirect_stderr(self.err):
             km._death_sweep_tick(NOW + 1, {SID: fresh[SID]})   # a map that dropped it anyway

@@ -10502,6 +10502,8 @@ def _lift_decisions(sid, s, store, now, live_map):
 
 
 _PREV_ALIVE = None                       # last tick's alive sids — a sid LEAVING is the death event
+_DEAD_WAIT_LIFE_SAID = [set()]           # the sids the last dead-wait pass stood down for recent life: the line
+#                                          repeats only when that set changes (an episode, not every 0.5 s pass)
 
 
 def _codex_records_blind(cx):
@@ -10599,6 +10601,7 @@ def _dead_wait_corroborated(sid, stats=None, now=None):
     if _recent_life(sid, int(now if now is not None else time.time())):
         if stats is not None:
             stats["life"] = stats.get("life", 0) + 1
+            stats.setdefault("lifeSids", set()).add(sid)
         else:
             sys.stderr.write("dead-wait: %s holds no reg but shows recent life — standing down (a registry moved aside?)\n" % sid)
         return None                              # a real end leaves alive:False or a marker, never a vanished reg
@@ -10715,9 +10718,12 @@ def _dead_wait_sweep(alive_ids, nudged, now):
     if stats.get("sdk"):
         sys.stderr.write("dead-wait: the SDK registry directory cannot be read; %d candidate(s) stood down this pass\n"
                          % stats["sdk"])
-    if stats.get("life"):
-        sys.stderr.write("dead-wait: %d candidate(s) hold no reg but show recent life; stood down this pass "
-                         "(a registry moved aside?)\n" % stats["life"])
+    life_sids = set(stats.get("lifeSids") or ())
+    if life_sids != _DEAD_WAIT_LIFE_SAID[0]:          # once per EPISODE: the pass runs every 0.5 s for up to 48 h
+        _DEAD_WAIT_LIFE_SAID[0] = life_sids
+        if life_sids:
+            sys.stderr.write("dead-wait: %d candidate(s) hold no reg but show recent life; stood down "
+                             "(a registry moved aside?)\n" % len(life_sids))
     if stats.get("codex"):
         sys.stderr.write("dead-wait: the Codex registry cannot be read; %d candidate(s) stood down this pass\n"
                          % stats["codex"])
@@ -16773,6 +16779,25 @@ def _sdk_records_blind(rows=None):
     return any(cx is None or cx._session(sid) is None for sid in names)
 
 
+def _sdk_session_snapshot(sid):
+    """The live row of the SDK session `sid` this kernel runs right now — the session's own snapshot(), the
+    same shape live_sessions reports for it — or None when no live driver thread exists for it. Read
+    kernel-side from the backend's session table (the SDK module is not touched). The row a running
+    session keeps past its vanished reg (_backend_rows) is THIS, taken every tick, never a frozen copy of
+    the previous read: a copy frozen at 'permission' or 'retrying' would read needs-you or retrying for
+    the rest of the thread's life (review find, 2026-09-11)."""
+    be = _sdk()
+    try:
+        sess = getattr(be, "sessions", None) if be else None
+        s = sess.get(str(sid)) if isinstance(sess, dict) else None
+        if s is None or not s.thread.is_alive():
+            return None
+        snap = s.snapshot()
+        return snap if isinstance(snap, dict) else None
+    except Exception:
+        return None
+
+
 def _sdk_thread_alive(sid):
     """Whether this kernel's SDK backend runs a live driver thread for `sid` right now, read kernel-side from
     the backend's own session table (SdkBackend.sessions: sid -> a session whose .thread drives the CLI; the
@@ -16845,10 +16870,12 @@ def _backend_rows(name, be):
             if sid in rows or not (jd.NAMES / sid).is_file():
                 continue
             present = _sdk_reg_exists(sid)
-            if _sdk_thread_alive(sid):
+            snap = _sdk_session_snapshot(sid)
+            if snap is not None:
                 # its reg vanished, or came back gutted (the backend's next routine write re-created a
-                # {sid, field} reg with no alive bit, which live_sessions skips): the driver runs, so alive
-                rows = dict(rows); rows[sid] = _LIVE_LAST_ROWS["sdk"][sid]
+                # {sid, field} reg with no alive bit, which live_sessions skips): the driver runs, so alive,
+                # and its row is the session's OWN snapshot this tick, never the previous read's copy
+                rows = dict(rows); rows[sid] = snap
                 if ("alive", sid) not in _VANISHED_SAID:
                     _VANISHED_SAID.add(("alive", sid))
                     sys.stderr.write("liveness: the SDK reg of %s vanished while its session runs — kept alive\n" % sid)
@@ -22646,9 +22673,11 @@ def _death_sweep_tick(now, live_map):
             continue
         if sdk_blind or present is None:
             stood_sdk += 1                           # its reg may sit behind the unreadable directory: stand down
+            _prev_live_sids[0].add(sid)              # …and stays a departure the next tick re-asks
             continue
         if blind:
             stood += 1                               # a Codex sid and dead history look alike until the registry reads
+            _prev_live_sids[0].add(sid)
             continue
         if cx is not None and cx._session(sid) is not None:
             if cx.owns(sid):
@@ -22657,7 +22686,8 @@ def _death_sweep_tick(now, live_map):
             continue                                 # its reg went, its driver runs: alive (the liveness read keeps it)
         elif _recent_life(sid, now):
             stood_life += 1                          # no reg, no thread, but life within the horizon: a registry moved
-            continue                                 # aside, not an end — stand down, per sid
+            _prev_live_sids[0].add(sid)              # aside, not an end — stand down, per sid, and re-ask every tick
+            continue                                 # so the stamp lands the tick its life ages out, not at the next boot
         _record_death(sid, now, "gone")
     if stood_life:
         _LIVE_READ_FAILS["count"] += stood_life
