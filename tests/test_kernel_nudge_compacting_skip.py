@@ -1,8 +1,9 @@
 """Auto-nudge must SKIP a compacting session (the user 2026-07-06, who reported a nudge getting called after compact). The old
-guard keyed on the tmux `st == "compacting"`, but SDK sessions have NO tmux state — so a /compact on an SDK
-session left the raw-state check blind and a status-check nudge fired mid-compaction. The guard now also
-consults the corroborated _compacting_now (the same signal the chip/timeline/chat compacting element use).
-A compaction is not a stall, so nudging there is a false interrupt."""
+guard keyed on the raw `st == "compacting"` of the terminal backend (removed 2026-09-11), a state SDK sessions
+never had — so a /compact on an SDK session left the raw-state check blind and a status-check nudge fired
+mid-compaction. The guard now also consults the corroborated _compacting_now (the same signal the
+chip/timeline/chat compacting element use). A compaction is not a stall, so nudging there is a false
+interrupt."""
 import inspect
 import os
 import unittest
@@ -46,14 +47,14 @@ class NudgeCompactingSkip(unittest.TestCase):
         # the per-session body lives in _auto_nudge_session since the 2026-07-16 isolation split
         src = inspect.getsource(km._auto_nudge_session)
         self.assertIn("or _compacting_now(sid)", src,
-                      "the compacting skip must corroborate, not trust the tmux-only state")
+                      "the compacting skip must corroborate, not trust the raw state alone (the removed terminal backend's)")
 
     def _drive(self, compacting):
-        # minimal alive SDK session (tmux {} → no raw state); a spy on the parse tells us whether the tick
+        # minimal alive SDK session (live map {} → no raw state); a spy on the parse tells us whether the tick
         # got PAST the compacting guard. The spy returns an empty session so the tick continues harmlessly
         # (a raise would be swallowed by the tick's own `except Exception: continue`, hiding a guard failure).
         km._auto_nudge_on = lambda: True
-        km._alive_sessions = lambda now, tmux: [{"sid": SID, "path": "/nonexistent.jsonl"}]
+        km._alive_sessions = lambda now, live_map: [{"sid": SID, "path": "/nonexistent.jsonl"}]
         km._wait_for_graph = lambda now, sids: {}
         km._session_flag = lambda sid, flag: False
         km._api_error = lambda path: None
@@ -68,7 +69,7 @@ class NudgeCompactingSkip(unittest.TestCase):
         return reached["parse"]
 
     def test_a_compacting_sdk_session_is_skipped_before_the_parse(self):
-        # SDK session: tmux is {} (no state), so only _compacting_now can catch the compaction.
+        # SDK session: the live map is {} (no state), so only _compacting_now can catch the compaction.
         self.assertFalse(self._drive(compacting=True),
                          "a compacting session must be skipped BEFORE the parse (no nudge)")
 

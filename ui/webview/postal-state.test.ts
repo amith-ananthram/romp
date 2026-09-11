@@ -2,9 +2,51 @@
 // module; the render pins live in postal-card.test.ts).
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { kindLabel, deliveryOf, deliveryTitle } from "./postal-state";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { kindLabel, deliveryOf, deliveryTitle, DELIVERY_GLYPHS, MARK_CHECK_CLASS } from "./postal-state";
 
 const clock = (t: number) => "T" + t;
+
+test("sent / delivered / read is the ladder messaging apps draw: a hollow circle, the circle with a check, the filled circle with a check (T337)", () => {
+  // the user (2026-09-10) liked the marks but wanted the circled check: zoomed in, a bare check read as a line. One circle
+  // on all three rungs, the same geometry, so the ladder reads as ONE mark changing state; the check is one three-point
+  // path, drawn the same on delivered and read (only the circle's fill changes); the read rung's check is knocked out of
+  // the filled circle in the page colour (the class the sheet styles).
+  const { sent, delivered, read } = DELIVERY_GLYPHS;
+  const circle = /<circle cx="8" cy="8" r="([\d.]+)"([^>]*)\/>/;
+  // the check is a THREE-POINT polyline (a bare line is what the user zoomed in on and rejected), every point inside the
+  // circle; the circle plus half its stroke fits the 16-unit box
+  const check = new RegExp('<path class="' + MARK_CHECK_CLASS + '" d="(M[\\d.]+ [\\d.]+ L[\\d.]+ [\\d.]+ L[\\d.]+ [\\d.]+)"\\/>');
+  const radii = [sent, delivered, read].map((g) => { const m = circle.exec(g); assert.ok(m, "a circle in " + g); return m![1]; });
+  assert.equal(new Set(radii).size, 1, "one radius for the three circles: " + radii.join(" "));
+  const r = parseFloat(radii[0]);
+  assert.ok(r >= 5 && r + 0.75 <= 8, "the circle fills the box without clipping its 1.5 stroke: r=" + r);
+  // every point of the check, its round cap included, stays half a unit clear of the ring's inner edge (ring stroke 1.5
+  // centred on r, cap radius 0.75): a tip that grazes the ring antialiases into it at 14 px (the review of 2026-09-11)
+  const pts = check.exec(delivered)![1].match(/[\d.]+/g)!.map(Number);
+  for (let i = 0; i < pts.length; i += 2) {
+    assert.ok(Math.hypot(pts[i] - 8, pts[i + 1] - 8) <= r - 1.5 - 0.5, "check point " + pts[i] + "," + pts[i + 1] + " sits clear of the ring");
+  }
+  assert.ok(pts[3] > pts[1] && pts[3] > pts[5], "the middle point is the check's low corner");
+  assert.doesNotMatch(sent, check, "sent: the hollow circle alone");
+  assert.doesNotMatch(sent, /fill=/, "sent: hollow");
+  assert.match(delivered, check, "delivered: the circle with the check");
+  assert.doesNotMatch(delivered, /fill=/, "delivered: still hollow");
+  assert.match(read, check, "read: the check…");
+  assert.match(read, /<circle[^>]* fill="currentColor"/, "…on the filled circle");
+  assert.equal(check.exec(delivered)![0], check.exec(read)![0], "one check shape on both rungs");
+  assert.equal(new Set([sent, delivered, read]).size, 3, "three states, three distinct drawings");
+  // the other three states keep their glyphs: the clock, the cross, the return arrow
+  assert.match(DELIVERY_GLYPHS.parked, /<circle cx="8" cy="8" r="5\.6"\/><path d="M8 4\.8 V8\.2 L10\.4 9\.6"\/>/);
+  assert.match(DELIVERY_GLYPHS.bounced, /M4\.5 4\.5 L11\.5 11\.5/);
+  assert.match(DELIVERY_GLYPHS.recalled, /A2\.8 2\.8 0 0 0 12\.8 5\.2/);
+  // the drawings are this repo's own primitives (a circle, a three-point check), not an icon set's assets: the module
+  // says so where the map is, because Signal's own icons ship under a copyleft licence and may not be copied here
+  const src = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "postal-state.ts"), "utf8");
+  assert.match(src, /drawn here from two primitives[\s\S]{0,400}Apache-2\.0 \(LICENSE\); Signal's own icon assets ship AGPL-3\.0[\s\S]{0,200}not copied/);
+  assert.match(src, /An adaptation of Signal's ladder, not its rungs one for one/, "the mapping onto Signal's ladder is stated");
+});
 
 test("the kind is a capitalised word per class, empty when unknown", () => {
   assert.equal(kindLabel("delegate"), "Delegation");

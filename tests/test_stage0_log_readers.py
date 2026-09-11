@@ -805,43 +805,43 @@ class PerCycleStoreReadersAreCached(_StateSandbox):
         jd.load_goals_shared = lambda fsid: (loads.append(fsid), real(fsid))[1]
         saved_alive = km._alive_sessions
         km._alive_sessions = lambda now, live_map: [{"sid": sid, "path": str(gpath)}]
-        tmux = {sid: {"state": "waiting", "bgTasks": []}}
+        live = {sid: {"state": "waiting", "bgTasks": []}}
         scan = []                                          # what the transcript pairs: a running watcher
         saved_scan = km._bg_scan_all_cached
         km._bg_scan_all_cached = lambda path: list(scan)
         try:
             km._lift_seen.pop(sid, None)
-            km._lift_spent_awaiting(NOW, tmux)
-            km._lift_spent_awaiting(NOW + 1, tmux)
-            km._lift_spent_awaiting(NOW + 2, tmux)
+            km._lift_spent_awaiting(NOW, live)
+            km._lift_spent_awaiting(NOW + 1, live)
+            km._lift_spent_awaiting(NOW + 2, live)
             self.assertEqual(loads, [sid], "one read while nothing recorded moved")
             tmp = gpath.with_suffix(".tmp")                  # published the way save_goals publishes: tmp + replace
             tmp.write_text(json.dumps({"rompUuid": sid, "seq": 1, "nodes": {}, "placements": {}, "status": {}, "note": "longer"}))
             os.replace(tmp, gpath)
-            km._lift_spent_awaiting(NOW + 3, tmux)
+            km._lift_spent_awaiting(NOW + 3, live)
             self.assertEqual(len(loads), 2, "a store write is re-examined")
-            tmux[sid]["bgTasks"] = [{"toolUseId": "t1", "status": "running"}]
-            km._lift_spent_awaiting(NOW + 4, tmux)
+            live[sid]["bgTasks"] = [{"toolUseId": "t1", "status": "running"}]
+            km._lift_spent_awaiting(NOW + 4, live)
             self.assertEqual(len(loads), 3, "a live task appearing is re-examined")
-            tmux[sid]["subagents"] = [{"id": "a1"}]
-            km._lift_spent_awaiting(NOW + 5, tmux)
+            live[sid]["subagents"] = [{"id": "a1"}]
+            km._lift_spent_awaiting(NOW + 5, live)
             self.assertEqual(len(loads), 4, "a subagent appearing is re-examined")
             scan.append({"id": "toolu_1", "status": "running", "t": NOW, "deadline": NOW + 100})
-            km._lift_spent_awaiting(NOW + 6, tmux)
+            km._lift_spent_awaiting(NOW + 6, live)
             self.assertEqual(len(loads), 5, "a new dispatch is re-examined")
-            km._lift_spent_awaiting(NOW + 150, tmux)
+            km._lift_spent_awaiting(NOW + 150, live)
             self.assertEqual(len(loads), 5, "…and not again while its deadline has not passed")
-            km._lift_spent_awaiting(NOW + 100 + 121, tmux)
+            km._lift_spent_awaiting(NOW + 100 + 121, live)
             self.assertEqual(len(loads), 6, "the recorded deadline passing (plus grace) re-examines: the clock arm is keyed")
-            km._lift_spent_awaiting(NOW + 100 + 122, tmux)
+            km._lift_spent_awaiting(NOW + 100 + 122, live)
             self.assertEqual(len(loads), 6, "…once")
             boom = [True]
             jd.load_goals_shared = lambda fsid: (loads.append(fsid), (_ for _ in ()).throw(RuntimeError("torn read")) if boom[0] else real(fsid))[1]
             scan.append({"id": "toolu_2", "status": "running", "t": NOW + 300})
-            km._lift_spent_awaiting(NOW + 300, tmux)      # the ruling raises → not a ruling
+            km._lift_spent_awaiting(NOW + 300, live)      # the ruling raises → not a ruling
             self.assertEqual(len(loads), 7)
             boom[0] = False
-            km._lift_spent_awaiting(NOW + 301, tmux)      # …so the next cycle retries on the same inputs
+            km._lift_spent_awaiting(NOW + 301, live)      # …so the next cycle retries on the same inputs
             self.assertEqual(len(loads), 8, "a raised ruling is retried, not skipped")
         finally:
             jd.load_goals_shared = real; km._alive_sessions = saved_alive; km._bg_scan_all_cached = saved_scan; km._lift_seen.pop(sid, None)

@@ -35,6 +35,10 @@ export interface FeedViewState {
   // are prune-EXEMPT like `threads` and bounded by their three known keys instead.
   cols: string[];
   order: string[];
+  // The feed's FOCUSED SESSION section (T347, the user 2026-09-11, who wanted the focused session's cards
+  // on top): whether the feed shows the chat pane's active session as a miniature above a divider. OFF by
+  // default. A view switch, not a card: prune-EXEMPT like `cols`/`order`, and not counted by the cap.
+  focused: boolean;
 }
 
 export const VIEW_STATE_KEY = "romp:feedview";
@@ -56,7 +60,8 @@ export function threadKeys(stored: string): string[] {
 export const VIEW_STATE_CAP = 4000;
 
 export function emptyViewState(): FeedViewState {
-  return { v: 1, sec: {}, tree: [], nodes: [], logs: [], asks: [], threads: [], cols: [], order: [] };
+  return { v: 1, sec: {}, tree: [], nodes: [], logs: [], asks: [], threads: [], cols: [], order: [],
+           focused: false };
 }
 
 /** Parse a stored blob. ANY malformed/foreign/old-version value reads as empty rather than throwing — a
@@ -72,11 +77,14 @@ export function parseViewState(raw: string | null | undefined): FeedViewState {
       for (const [k, v] of Object.entries(o.sec as Record<string, unknown>)) if (typeof v === "string") sec[k] = v;
     }
     // `threads` post-dates v1 blobs, so a stored entry without it reads as "nothing collapsed" rather
-    // than as corrupt — no version bump, and yesterday's saved sections survive the upgrade.
+    // than as corrupt — no version bump, and yesterday's saved sections survive the upgrade. `focused`
+    // (T347) is the same shape: a new key under the same v, so a blob saved before it, or one carrying a
+    // foreign-typed value, reads as the default (OFF) and keeps everything else it stored. Only the
+    // literal `true` switches it on.
     const col = (x: unknown): string[] =>
       arr(x).filter((k) => k === "asks" || k === "needsInput" || k === "completed");
     return { v: 1, sec, tree: arr(o.tree), nodes: arr(o.nodes), logs: arr(o.logs), asks: arr(o.asks),
-             threads: arr(o.threads), cols: col(o.cols), order: col(o.order) };
+             threads: arr(o.threads), cols: col(o.cols), order: col(o.order), focused: o.focused === true };
   } catch {
     return emptyViewState();
   }
@@ -118,15 +126,20 @@ export function keyIsLive(key: string, liveIds: Set<string>): boolean {
  *  entry meaningless; a collapsed thread describes a SESSION's run in a column, and its whole purpose is to
  *  hold while that run has no cards on the board so the next one arrives collapsed too. Pruning it against the live set
  *  would silently re-expand a thread the moment its last card cleared — exactly the "collapse it and it
- *  stays collapsed" the feature is for. It is bounded by the cap instead. */
+ *  stays collapsed" the feature is for. It is bounded by the cap instead.
+ *
+ *  `cols`, `order` and `focused` are exempt for the plainer reason that they describe the VIEW (the column
+ *  layout, the focused-session switch) and name no card at all; there is nothing to prune them against. */
 export function pruneViewState(s: FeedViewState, liveIds: Set<string>): FeedViewState {
   const sec: Record<string, string> = {};
   for (const [k, v] of Object.entries(s.sec)) if (keyIsLive(k, liveIds)) sec[k] = v;
   const keep = (xs: string[]) => xs.filter((k) => keyIsLive(k, liveIds));
   return capViewState({ v: 1, sec, tree: keep(s.tree), nodes: keep(s.nodes), logs: keep(s.logs),
-                        asks: keep(s.asks), threads: s.threads, cols: s.cols, order: s.order });
+                        asks: keep(s.asks), threads: s.threads, cols: s.cols, order: s.order,
+                        focused: s.focused });
 }
 
+// `cols`/`order` (three known keys) and `focused` (one boolean) are fixed-size view state and never count.
 export function viewStateSize(s: FeedViewState): number {
   return Object.keys(s.sec).length + s.tree.length + s.nodes.length + s.logs.length + s.asks.length
     + s.threads.length;
@@ -135,7 +148,8 @@ export function viewStateSize(s: FeedViewState): number {
 /** Backstop trim. Order is deliberate: the per-card SECTION choice is the state the user notices losing, so
  *  it is trimmed last; the per-node tree/log expansions are cheap to re-open and go first. Collapsed
  *  THREADS sit just above sec — they are few (one per session, not per card) and the most durable choice
- *  here, so they are the last thing to give before the sections do. */
+ *  here, so they are the last thing to give before the sections do. The view fields (`cols`, `order`,
+ *  `focused`) ride through the spread untouched: they are not entries and the cap never trims them. */
 export function capViewState(s: FeedViewState, cap: number = VIEW_STATE_CAP): FeedViewState {
   let over = viewStateSize(s) - cap;
   if (over <= 0) return s;

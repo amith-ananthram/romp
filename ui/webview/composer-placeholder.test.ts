@@ -135,3 +135,35 @@ test("one fade rule, two strengths (T341): the strip at 1, the composer's name a
   const hostFade = Number(/^#composer-ph \{[^\n]*; --host-fade: ([\d.]+); \}/m.exec(CSS)![1]);
   assert.equal(hostFade, 1 - nameFade * (1 - hostDefault), "the two midpoints agree: the host's opacity sits where the name's strength puts it");
 });
+
+// T345 (the user 2026-09-11): the thin border around the FOCUSED message box is the colour of the session you are
+// messaging, at the same 1px geometry the accent ring had. The colour is the placeholder's own source (the live session's
+// colour, else the strip's word on the tab), published once per sync as --composer-identity on #composer; the focus rule
+// reads it with the accent as the fallback, for a session with no colour or one too close to the page's luminance to read
+// as a ring (identityReadable: the strip's luminance margin, applied on both sides of the page since a light page sits
+// above every colour). The live picker's free-text tint keeps winning by construction: same specificity, later.
+test("the focused box's border is the session's identity colour, the accent its fallback; the answering tint still wins (T345)", () => {
+  const fn = RENDER.slice(RENDER.indexOf("function syncComposerPh("), RENDER.indexOf("function syncComposerPh(") + 4000);
+  assert.match(fn, /const ring = colorBg && identityReadable\(colorBg\) \? colorBg : "";/, "the placeholder's colour source, gated by the readability test");
+  assert.match(fn, /if \(box\.style\.getPropertyValue\("--composer-identity"\) !== ring\) \{\s*\n\s*if \(ring\) box\.style\.setProperty\("--composer-identity", ring\); else box\.style\.removeProperty\("--composer-identity"\);/, "published on the box, written only on a change, cleared when there is nothing to publish");
+  assert.ok(fn.indexOf("const ring = ") < fn.indexOf('const show = parts.kind === "named"'), "…before the overlay's own early returns, so a box with text or a picker up still wears the ring");
+  // the readability test shares the strip's numbers: the one luminance function and the one margin
+  assert.match(RENDER, /^const LUM_MARGIN = 38;/m);
+  assert.match(RENDER, /^function identityReadable\(hex: string\): boolean \{[\s\S]{0,400}?return Math\.abs\(lum\(c\[0\], c\[1\], c\[2\]\) - lum\(br, bgc, bb\)\) > LUM_MARGIN;/m, "both sides of the page's luminance");
+  assert.match(RENDER, /const Lc = lum\(r, g, b\), Lb = lum\(br, bgc, bb\), Lt = Lb \+ LUM_MARGIN;/, "the fade's target is the same margin");
+  // the page's colour under the picker's LIFT: the body is transparent then and its ::before backing carries var(--bg); read
+  // as black, a light page's yellow session passed the test and wore an invisible ring after the picker closed (the review)
+  const bg = RENDER.slice(RENDER.indexOf("function bgRgb("), RENDER.indexOf("function bgRgb(") + 900);
+  assert.match(bg, /const transparent = own === "transparent" \|\| \/\^rgba\\\(\[\^\)\]\*,\\s\*0\\\)\$\/\.test\(own\);/, "a transparent body is recognised");
+  assert.match(bg, /parse\(transparent \? getComputedStyle\(document\.body, "::before"\)\.backgroundColor : own\)/, "…and read as its backing");
+  assert.match(CSS, /^body\.picker-lifted::before \{ content: ""; position: absolute; inset: 0; background: var\(--bg\); z-index: -1; \}/m, "the backing the reader falls to");
+  assert.match(RENDER, /signalPickerOverlay\(false\);[^\n]*\n\s*syncComposerPh\(\);/, "the picker's close re-verdicts the ring against the page the box is back on");
+  assert.equal((RENDER.match(/0\.2126 \* /g) || []).length, 1, "one luminance formula in the file");
+  // the focus rule: the variable with the accent as its fallback, the geometry untouched (a fill of the existing 1px border)
+  assert.match(CSS, /^#composer-input:focus \{ border-color: var\(--composer-identity, var\(--accent\)\); \}$/m);
+  assert.doesNotMatch(CSS, /#composer-input:focus \{[^}]*(box-shadow|outline|border-width)/, "no glow, no layout shift: the ring is the border's colour alone");
+  // the live picker's free-text tint keeps winning while it applies: the same specificity (one id, one class or pseudo-class), later in the sheet
+  assert.match(CSS, /^#composer-input\.answering \{ border-color: var\(--accent\);/m);
+  assert.ok(CSS.indexOf("#composer-input:focus { border-color:") < CSS.indexOf("#composer-input.answering { border-color: var(--accent);"), "the answering rule follows the focus rule");
+  assert.doesNotMatch(CSS, /#composer-input:focus:not\(\.answering\)|#composer:focus-within/, "no second ring: the one border, one rule for its colour");
+});

@@ -150,7 +150,7 @@ class PureHelpers(unittest.TestCase):
         ps = ["  %d 1 /x/claude --output-format stream-json --resume %s --input-format stream-json" % (CLI, SID),
               "  %d %d /x/claude --output-format stream-json --resume %s --input-format stream-json" % (LIVE, KERNEL, SID),
               "  %d 1 /x/claude --output-format stream-json --resume=%s --input-format stream-json" % (CLI2, SID2),
-              "  %d 1 claude --resume %s" % (TOOL, SID),          # a tmux CLI: no stream-json mark, never counted
+              "  %d 1 claude --resume %s" % (TOOL, SID),          # a terminal CLI (no stream-json mark): never counted
               "  garbage line"]
         self.assertEqual(sb.duplicate_clis(ps, [SID, SID2]), {SID: [CLI, LIVE]})
         self.assertEqual(sb.duplicate_clis(ps, [SID2]), {})

@@ -237,8 +237,9 @@ class Shell(unittest.TestCase):
         _has(self, "var PANES=['chat-pane','fleet-pane','feed-pane','files-pane'];", self.html)
         _has(self, "grow={chat:60,fleet:34,feed:40,files:40}", self.html)
         _has(self, "id==='feed-pane'?'feed':'files'", self.html)
+        # the chat side of gv-c is the RIGHTMOST chat column (the split, 2026-09-08: lastChat() is 'chat-pane' with no split)
         _has(self, "gutter('gv-c',function(){var c=document.body.classList;return c.contains('po-feed')?'feed-pane':"
-                      "c.contains('po-fleet')?'fleet-pane':'chat-pane';},'files-pane');", self.html)
+                      "c.contains('po-fleet')?'fleet-pane':lastChat();},'files-pane');", self.html)
 
     def test_the_files_controls_own_setting_hides_it_in_both_layouts(self):
         # T317 (the user 2026-09-10): the gear's "Files control in the dashboard bar" (romp:settings.showFilesControl,

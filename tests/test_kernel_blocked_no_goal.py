@@ -61,15 +61,15 @@ class BlockedNoGoal(unittest.TestCase):
         # (the user 2026-06-29). Patch backend_for→a stub current_ask so no real session is needed.
         class _StubBackend:
             def current_ask(self, sid):
-                return {"kind": "single", "header": "Backend", "question": "Use tmux or the SDK backend?",
-                        "options": [{"label": "tmux"}, {"label": "SDK"}]}
+                return {"kind": "single", "header": "Backend", "question": "Use Codex or Claude Code?",
+                        "options": [{"label": "Codex"}, {"label": "Claude Code"}]}
         orig = km.Sessions.backend_for
         km.Sessions.backend_for = lambda sid: _StubBackend()
         try:
             c = _card("picker")
         finally:
             km.Sessions.backend_for = orig
-        self.assertEqual(c["text"], "Use tmux or the SDK backend?", "card shows the question, not the generic line")
+        self.assertEqual(c["text"], "Use Codex or Claude Code?", "card shows the question, not the generic line")
 
     def test_picker_question_is_truncated_with_an_ellipsis(self):
         long_q = "A" * 200

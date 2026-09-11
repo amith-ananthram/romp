@@ -241,7 +241,11 @@ at its send position, above those steps, while the model read it only after them
 so the order on screen contradicted the order the model saw; the read position is
 the one that matches. So the chat's pending bubble sits at the TAIL while pending,
 below every streaming step, and the landed atom appears in that same tail
-position, so nothing moves on landing; the send time rides along as `sentAt` for
+position, so nothing moves on landing. Every other window of the session sees the
+kernel's echo of that send in the same place: the live merge orders an in-flight
+echo after everything the turn holds (a never-delivered one keeps its time), and
+the pane dresses it as the sender's bubble is dressed, so one session in two split
+columns agrees on what is pending (2026-09-11). The send time rides along as `sentAt` for
 the bubble's hover ("sent at HH:MM", shown once landed when it differs from the
 landing by more than a minute). No header, no cue. This supersedes the
 in-place-at-send-position rule of T252/T252b; the kernel's per-copy identities
