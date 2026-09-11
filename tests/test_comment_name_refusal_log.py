@@ -90,14 +90,14 @@ class NameRefusalsAreLogged(unittest.TestCase):
         (jd.NAMES / PARENT).write_text("web\t%s\t\t\n" % cdir)   # the names row: the refusal names the parent by it
         self.be = FakeBackend()
         self._saved_fns = (km._sdk, km.Sessions.backend_for, km._sdk_ready, km._sessions, km._reveal_chat_for,
-                           km._push_session_now, km._tmux_sessions, km._kernel_knows)
+                           km._push_session_now, km._live_map, km._kernel_knows)
         km._sdk = lambda: None
         km._kernel_knows = lambda sid: sid == PARENT     # the dispatcher's ownership guard is not under test
         self._saved_km_names = km.NAMES
         km.NAMES = jd.NAMES                              # the kernel's own binding of the names dir follows the rebind
         km.Sessions.backend_for = staticmethod(lambda sid: self.be)
         km._sdk_ready = lambda: True
-        km._tmux_sessions = lambda: {}
+        km._live_map = lambda: {}
         t = self.now - 600
         p = self.proj / (PARENT + ".jsonl")
         p.write_text("\n".join(json.dumps(r) for r in [
@@ -112,7 +112,7 @@ class NameRefusalsAreLogged(unittest.TestCase):
 
     def tearDown(self):
         (km._sdk, km.Sessions.backend_for, km._sdk_ready, km._sessions, km._reveal_chat_for,
-         km._push_session_now, km._tmux_sessions, km._kernel_knows) = self._saved_fns
+         km._push_session_now, km._live_map, km._kernel_knows) = self._saved_fns
         km.NAMES = self._saved_km_names
         jd._rebind_state(self._saved)
         jd.PROJECTS = self._saved_proj

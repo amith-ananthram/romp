@@ -140,10 +140,8 @@ isolation_problems() {   # $1 suite
     run manager_suites
     [ "$status" -eq 0 ]
     local expected
-    # romp-manager-tmux-scope.bats starts the real manager to read where its tmux server lands, and
-    # floors its state root with an exported ROMP_STATE_DIR in setup().
     expected="$(printf '%s\n' "$TESTS/romp-manager-ensure.bats" "$TESTS/romp-manager-origin.bats" \
-        "$TESTS/romp-manager-tmux-scope.bats" "$TESTS/romp.bats" | LC_ALL=C sort)"
+        "$TESTS/romp.bats" | LC_ALL=C sort)"
     [ "$(printf '%s\n' "$output" | LC_ALL=C sort)" = "$expected" ]
 }
 

@@ -76,17 +76,17 @@ class ObservabilityRoutes(unittest.TestCase):
         self._state = jd.STATE
         jd.STATE = Path(self.td.name)
         km._flags_cache.clear()
-        self._saved = (km._tmux_sessions, km.build_feed, km._NOTIFY_PREV[0], km._BADGE_LAST[0],
+        self._saved = (km._live_map, km.build_feed, km._NOTIFY_PREV[0], km._BADGE_LAST[0],
                        getattr(km, "_PURE_FEED", None), km._views_dirty[0], list(km._clients),
                        km._fleet_view_sig, getattr(km, "_pure_feed_lock", None))
-        km._tmux_sessions = lambda: {}
+        km._live_map = lambda: {}
         km._built_feed[:] = [None, None, 0, 0]     # a cold pusher cache: headless, nothing warmed it
         km._PURE_FEED = None                        # …and no earlier GET's build either
         km._views_dirty[0] = 0.0
         del km._clients[:]
 
     def tearDown(self):
-        (km._tmux_sessions, km.build_feed, km._NOTIFY_PREV[0], km._BADGE_LAST[0],
+        (km._live_map, km.build_feed, km._NOTIFY_PREV[0], km._BADGE_LAST[0],
          km._PURE_FEED, km._views_dirty[0], clients, km._fleet_view_sig, km._pure_feed_lock) = self._saved
         del km._clients[:]
         km._clients.extend(clients)

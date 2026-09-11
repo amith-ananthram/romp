@@ -17,8 +17,6 @@ update` starts a session called "update".
 | `romp` | Open the dashboard in your browser, printing the tokened link too |
 | `romp new <name>` | Start a session, run by the kernel and watched from the dashboard |
 | `romp new -d <dir> <name>` | Start it in `<dir>` instead of the current folder |
-| `romp new -t <name>` | Start it as a terminal (tmux) session and attach; add `--detach` to leave it running |
-| `romp resume` | Resume a past conversation, chosen from a full-screen picker |
 | `romp status` | Manager and kernel status; a kernel stopped by `romp down` says so |
 | `romp refresh` | Restart the postal bus and every kernel immediately, picking up new code (cut turns resume with their history) |
 | `romp update [host…]` | Push this machine's committed Romp to attached remotes and restart them at once (every deploy restart is immediate; boot reconcile resumes the cut turns with their history); a remote stopped by `romp down` is synced and left stopped |
@@ -47,11 +45,10 @@ These are for scripting and for agents rather than daily use:
 | `romp interrupt <session>` | Interrupt whatever turn a session is taking |
 | `romp compact <session> [--wait] [--timeout <s>]` | Compact a session's context in place (Claude's `/compact`: summarize the history, keep the session's name, id, mailbox, and watches): the alternative to ending and recreating a long-lived session, and the external hand a session needs since it cannot `/compact` itself mid-turn. Quiet session → compacts now; open turn → queued, fires alone the moment the turn ends (the same safe path the chat's compact button uses). `--wait` blocks until the compaction has started and cleared, polling the kernel's own `compacting` signal on the `/sessions` rows (also the field to point a `romp watch` predicate at for scripted recycling); exits 1 honestly on timeout. A remote session's compaction is requested on its own kernel; `--wait` can't follow it from here and says so |
 | `romp end <session>` | End a session |
-| `romp move <session> <dir>` | Move an SDK session's working directory to `<dir>` (the folder must already exist); the conversation, name, mail and history stay with the session. Quiet session → moves now; open turn → queued, fires when the turn ends. See [Moving a session to another folder](#moving-a-session-to-another-folder) |
+| `romp move <session> <dir>` | Move a session's working directory to `<dir>` (the folder must already exist); the conversation, name, mail and history stay with the session. Quiet session → moves now; open turn → queued, fires when the turn ends. See [Moving a session to another folder](#moving-a-session-to-another-folder) |
 | `romp checkin <host>` / `romp checkout <host>` | Publish this machine to an attached hub, or withdraw it. The hub files this machine under the name it declares only when that name is a machine name (letters, digits, dots, hyphens or underscores, starting with a letter or digit, at most 128 characters). Any other declared name is refused with a 400 that states the rule and echoes nothing, is recorded nowhere, and is said once on both machines: on the hub, one stderr line and one Log entry under the `refused` kind, naming the value as a clipped repr; on this machine, one stderr line, one dial-log record and one Log entry carrying the hub's reason, after which the same name is not re-sent until it, or the hub's kernel, changes. A hub's `POST /tunnels/trust` for a host it has never seen (the remembered-hosts entry that tiers relayed mail by origin) holds the wider rule that registry's writers share, a machine name or an ssh alias (letters, digits, dots, hyphens, underscores, at-signs, colons or square brackets, not starting with a hyphen, at most 255 characters), because a hub keys an attached peer by its ssh alias and carries that alias when you set trust between two of your machines; anything else is refused the same way, on the hub, with nothing recorded. `ROMP_HOST_NAME` (the kernel) and `ROMP_POSTAL_HOST` (the postal bus) override the declared name only when they clear the same rule; an unusable value (a space, an at-sign, a trailing newline) is set aside once, on stderr or in the bus log, and the derived name (the short hostname, else the platform's machine name, else a minted id) is used |
 | `romp default-dir [PATH]` | The default working directory for new sessions; no argument prints it, `""` clears it |
 | `romp debug [on\|off\|status]` | Judge debug mode, where rejection rows carry the full input and reply |
-| `romp resume <id> [--name <n>] [--detach]` | Resume one exact conversation by UUID |
 | `romp refresh --quiet` | Refresh at the next quiet window instead — waits for sessions to finish their turns (15-min backstop). The ONLY door to the quiet window: a deploy (a peer's `romp update`, a release self-update, an automatic converge) restarts immediately, by the user's 2026-09-08 decision |
 | `romp down --wait <s>`, `romp down --now` | How long `romp down` waits for turns in flight to finish (0 to 600 seconds; default 5), or no wait at all |
 | `romp up --foreground` | Run the manager in this terminal even with a login service installed (its log in front of you); the manager refuses to start beside a running one |
@@ -131,8 +128,7 @@ yields nothing rather than an error.
 A session's working directory can change after it starts, so when a subproject
 moves to its own repository, the session working on it can follow. Right-click
 the session's tab and choose **Move to folder…**, or run `romp move <session>
-<dir>`. The folder must already exist. Terminal (tmux) sessions cannot be
-moved; start a new one in the folder instead.
+<dir>`. The folder must already exist.
 
 What moves with the session:
 
@@ -226,15 +222,6 @@ recipient's inbox or in the cross-host outbox, is moved aside once (see the
 state files below), its sender's receipt reads refused, and the dashboard's
 error center says so under the `refused` kind.
 
-### Claude Code 2.1.224 or newer
-
-Mail to a terminal (tmux) session delivers through Claude Code's per-session
-inbox socket, which the CLI added in 2.1.224: delivery is instant and never
-touches a half-typed draft. An older Claude Code still works: delivery falls
-back to typing the mail into the pane, which is slower and waits for a free
-prompt, and `romp` says so at launch, with the upgrade being one
-`claude update` away.
-
 ## Configuration
 
 ### Folder click, in your terminal or editor
@@ -278,14 +265,10 @@ CLI's own picker), a value the kernel cannot vouch for (a typo), or a longer
 message that merely opens with the command goes to the CLI verbatim, and the
 chat shows the CLI's own reply.
 
-The backends apply the change differently. A Claude Code session switches
-model live but reloads to apply a new effort: the chat shows "Reloading
-session…" and the effort badge shows switching-dots until the reload completes,
-and a session that is mid-turn reloads when the turn ends. A Claude Code (tmux)
-session gets the CLI's own command typed into its pane. `/model` there asks for a
-confirmation, which the kernel accepts on your behalf so the pane is never
-left waiting on a keystroke the dashboard cannot send; `/effort` and `/fast`
-apply in place.
+A Claude Code session switches model live but reloads to apply a new effort:
+the chat shows "Reloading session…" and the effort badge shows switching-dots
+until the reload completes, and a session that is mid-turn reloads when the
+turn ends.
 
 ### Fast mode, from the chat statusline
 
@@ -361,18 +344,14 @@ a last-4 tail, ever reaches a browser or a screen, and romp never sees the key
 at all. A new session defaults to the last pick made anywhere, and before any
 pick to the key when a helper is configured. A remembered key pick on a box
 whose settings carry no helper leaves new sessions unpicked, and the kernel
-log says so once, naming the settings file to configure. tmux sessions are not
-covered by the picker: their CLI lives in the tmux server's environment, which
-the kernel does not control, and resolves its credential the way any `claude`
-in a terminal does.
+log says so once, naming the settings file to configure.
 
 A tab not yet loaded after a reconnect shows "Not loaded yet — click to load"
 as its hover tooltip, until its transcript arrives.
 
-An SDK session's chat tab carries the same fact as a `Billing` row in its hover
-tooltip, one-auth machines included; tmux sessions, whose billing romp cannot
-know, and Codex sessions, which bill no Claude account, show no row. The row
-has four readings. Unless one of the three cases below applies, it reads
+A Claude Code session's chat tab carries the same fact as a `Billing` row in its
+hover tooltip, one-auth machines included; Codex sessions, which bill no Claude
+account, show no row. The row has four readings. Unless one of the three cases below applies, it reads
 `API key` or `Login (name@example.com)` (`Login` alone when the account name is
 unknown). While a switch is still reconnecting the session, the row appends
 `(applying — not confirmed yet)` to the side: `Login (applying — not confirmed
@@ -464,8 +443,8 @@ For `./install.sh`:
 
 - `ROMP_NO_SERVICE=1` skips the login service.
 - `ROMP_NO_EXT=1` skips the VS Code / Cursor extension.
-- `ROMP_NO_SDK=1` skips the Claude Code backend's Agent SDK venv (Claude Code
-  (tmux) sessions still work).
+- `ROMP_NO_SDK=1` skips the Agent SDK venv. Claude Code sessions need it, so
+  run `bin/romp-sdk-setup` before starting one.
 
 For the one-line installer (`bootstrap.sh`), which passes all of the above
 through to `install.sh`:
@@ -528,14 +507,14 @@ through to `install.sh`:
 
 ### Session backends
 
-- The new-session picker and the gear's Default backend list offer **Claude
-  Code** (the default) and **Codex**; the backends read by those names
-  everywhere (the picker, the gear, the tab tooltip's Backend row). The
-  terminal backend, **Claude Code (tmux)**, is being removed: the dashboard no
-  longer offers it or its gear switch, a saved default of it reads as Claude
-  Code (never an undefined value), and every session's tab menu offers Move to
-  folder. The kernel still carries the setting and the backend until their
-  removal lands; a session already running on it keeps working meanwhile.
+A session runs on one of two backends, chosen when it is created: **Claude
+Code** (the default; the kernel runs the session through the Claude Agent SDK)
+or **Codex** (see [Codex sessions](codex.md)). The gear's Default backend
+setting picks the default for new sessions, and the two read as **Claude Code**
+and **Codex** everywhere Romp names a backend. Raw `POST /new` callers pass the
+backend as `sdk` (Claude Code, the default when the field is absent) or
+`codex`; any other value is refused with `ok: false` and an error naming the
+two. Every session's tab menu offers Move to folder.
 
 ### Ports
 
@@ -613,7 +592,7 @@ overrides the file's path.
 Romp holds no API key (the user 2026-09-08, who wants romp to hold no key). A
 session's credential is Claude Code's own resolution: the `apiKeyHelper` in its
 settings (the helper) for a key, the login otherwise. Romp injects no credential
-into a session, a judge child or a tmux pane, runs no key command, reads no
+into a session or a judge child, runs no key command, reads no
 secret-manager reference, and keeps no key in `service.env`.
 
 A retired key path stops the kernel at boot. A `service.env` that still carries
@@ -627,12 +606,9 @@ spawned, and the message names the file and the variable names, never a value,
 says that romp did not start, and gives the fix (remove the lines, configure
 the helper, declare the billing, start again). The supervised manager retries
 and writes the message to its `manager.log` each time until the file is
-repaired. The manager refuses in the same way, before it starts the tmux
-server, when its own environment carries one of the names (it is what receives
-`service.env`, and every terminal pane inherits the server's globals), and
-`romp new -t` refuses to start a terminal session while the tmux server's
-globals carry `ANTHROPIC_API_KEY`. A key romp holds is a key a session can
-print, so there is no quiet fallback anywhere.
+repaired. The manager refuses in the same way when its own environment carries
+one of the names (it is what receives `service.env`). A key romp holds is a key
+a session can print, so there is no quiet fallback anywhere.
 
 At boot the kernel also names, once and as information rather than a problem,
 the variables in its own environment shaped like credentials (names ending
@@ -908,14 +884,6 @@ the stop was a `romp down` (the newest `restart-audit.jsonl` request row is a
 the stop time, the start time and the gap, so a model resumed hours later
 re-checks what it was running before relying on it.
 
-Terminal (tmux) sessions survive the stop where they survive a service restart
-(see [What survives a restart](#what-survives-a-restart)): on Linux
-`systemctl --user stop` kills everything in the service's cgroup, so the tmux
-server and its sessions live on only when the manager started it in its own
-transient scope (the default under the service; off with `ROMP_CLI_SCOPE=0`,
-and not true of a tmux server that predates the scopes). On macOS there is no
-cgroup kill, and the tmux server survives the stop.
-
 Only `romp refresh` stops the postal bus on purpose; `romp down` leaves it
 alone, but on Linux a bus the kernel started dies with the service anyway: the
 kernel runs `romp-postal-service ensure` at boot, which spawns the bus in a
@@ -940,8 +908,16 @@ killed by SIGKILL runs no cleanup, so its shells are re-parented and may keep
 running. The session resumes with its history and is told what was cut: its
 in-flight turn, if it had one, and each background task, with a request to
 check whether each is still running before relaunching it. A kernel restart has
-never touched work a session deliberately detached: tmux servers, `setsid`
-children and other processes that outlive their shell.
+never touched work a session deliberately detached: a tmux server it started
+itself, `setsid` children and other processes that outlive their shell.
+
+A terminal session from before 2026-09-11, when Romp's terminal (tmux) backend
+was removed, is detached work of that kind from then on. One still running when
+the new kernel starts keeps running inside its tmux server, but Romp no longer
+sees it: it has no registry row and no liveness, and nothing it does reaches the
+dashboard. End it from its terminal. The conversation continues from the
+dashboard's Revive, which resumes the same transcript as a Claude Code session;
+the old session's entry under the state directory's `names/` stays as history.
 
 A boot reads no transcript for nobody. Until 2026-09-10 a fresh kernel parsed
 every living session's whole transcript at startup (a warm for the first
@@ -1156,11 +1132,10 @@ history, told what was cut.
 
 A service restart (`systemctl --user restart romp-manager`, or the machine's
 own service management) kills everything in the service's cgroup, so on Linux
-under systemd Romp runs each session's CLI, and the default tmux server the
-manager starts, in a transient systemd scope of its own, outside that cgroup
-(`systemctl --user list-units 'romp-session-*' 'romp-tmux-*'` lists them). A
-session's tmux servers, `setsid` children and other detached work live in the
-session's scope, and a service restart leaves them alive as a kernel restart
+under systemd Romp runs each session's CLI in a transient systemd scope of its
+own, outside that cgroup (`systemctl --user list-units 'romp-session-*'` lists
+them). A session's own tmux servers, `setsid` children and other detached work
+live in the session's scope, and a service restart leaves them alive as a kernel restart
 does; before 2026-09-05 they were in the service's cgroup and died with it. The
 CLI itself still ends: the kernel receives the service's SIGTERM and runs the
 same drain. A scoped CLI outlives a service restart only when the drain does not
@@ -1171,90 +1146,13 @@ whose parent is not a live romp kernel is treated as orphaned and terminated.
 Under `systemd --user` an orphan re-parents to the user manager, not to pid 1,
 so a ppid check alone would miss it and did, before 2026-09-05.
 
-One-time caveat when this lands: the first service restart after it still
-empties the current cgroup, tmux servers included, because the running manager
-and its tmux server predate the change and are still inside the service's
-cgroup. The guarantee holds from the following restart on.
-
-`ROMP_CLI_SCOPE=0` in the service environment turns the scopes off, for
-session CLIs and the tmux server alike. A manager run outside the service
-(`romp up`) scopes nothing unless `ROMP_CLI_SCOPE=1` is set, which turns both
-on. The kernel logs which it chose at start (`cli scope: on` or `off`, with the
+`ROMP_CLI_SCOPE=0` in the service environment turns the scopes off for the
+session CLIs. A manager run outside the service (`romp up`) scopes nothing
+unless `ROMP_CLI_SCOPE=1` is set, which turns them on. The kernel logs which it chose at start (`cli scope: on` or `off`, with the
 reason); when the scopes were wanted on Linux and the box cannot provide them
 (no `systemd-run`, or a user manager that refuses to start one), that verdict
 also appears in the dashboard's error center, since every session then runs
-inside the service cgroup. The macOS launchd path is unchanged: there is no cgroup kill there,
-and the tmux server keeps its launchd lineage.
-
-#### Where the tmux server's socket lives
-
-Since 2026-09-11 romp's tmux server keeps its socket under the user's runtime
-directory whenever there is one: `TMUX_TMPDIR=$XDG_RUNTIME_DIR/romp`, created
-0700, so the socket is `$XDG_RUNTIME_DIR/romp/tmux-<uid>/default`. systemd sets
-`XDG_RUNTIME_DIR` (`/run/user/<uid>`) for every user session and user service,
-and that directory is a per-user tmpfs that no `/tmp` housekeeping, tmpfiles age
-sweep or `/tmp` mount-over can touch. On 2026-09-11 a tmpfs was mounted over a
-populated `/tmp`, `/tmp/tmux-<uid>` vanished beneath it, and every tmux-backed
-session's terminal was unreachable for an hour while the CLIs inside kept
-running; the manager logged `error connecting to /tmp/tmux-<uid>/default` the
-whole time. A `TMUX_TMPDIR` the operator sets, in the service environment file
-or the shell, wins as it stands. Without a writable runtime directory (macOS
-under launchd, a shell with the variable unset) tmux's own default applies, as
-before. On a systemd machine that default is a DIFFERENT server from the one
-the service started: a shell without `XDG_RUNTIME_DIR` (a cron job, `sudo -u`,
-`docker exec`) would start its own, and a session made there would never
-appear on the board; nor would one started from a pane on another server (the
-old `/tmp` server kept serving after the move, a personal `tmux`), since a
-pane's tmux calls dial the socket named in its own `$TMUX`. So `romp new -t`
-compares the directory its tmux calls would reach (`$TMUX`'s socket, else
-`TMUX_TMPDIR`, else the default) with the kernel's, as canonical paths, and refuses
-when they differ, worded by the kernel's rule: a pane on another server needs a
-shell outside it; a kernel under a manager from before the change (the manager
-passes its own rule to its kernels, so no word means an old manager) needs
-`romp refresh`; a current manager without a runtime directory (macOS under
-launchd, `romp up` from a shell without the variable) is named as such, with
-`export TMUX_TMPDIR=/tmp` for the session or a login shell for the manager; a
-shell without `XDG_RUNTIME_DIR` needs `export TMUX_TMPDIR=<the kernel's>` or a
-login shell. Paths compare as real paths, tmux's default included, since `/tmp`
-is a symlink on macOS and a pane's `$TMUX` names the socket by its real path. With no kernel reachable, or a kernel too old to say,
-it compares nothing and proceeds as before. The kernel's side of the comparison
-is three fields on `/version`: `tmuxSocketDir`, the directory (`""` for tmux's
-default); `tmuxSocketRule`, the branch that chose it (`operator`, `runtime-dir`,
-`manager` for a kernel under the manager, or the reason the default stands:
-`no XDG_RUNTIME_DIR`, `XDG_RUNTIME_DIR is not a writable directory`,
-`XDG_RUNTIME_DIR/romp could not be made, or is not a writable directory`); and
-`tmuxSocketManagerRule`, the manager's own rule passed to its kernels, `""`
-under a manager from before this change, which is how the refusal tells that
-manager (restart it) from a current one that has no runtime directory. A
-kernel's own terminal spawn that is refused this way says so: one line in the
-kernel log and one row in the dashboard's error center, instead of a tab that
-never appears.
-
-One rule, resolved the same way in three places: the manager, before it starts
-the server, into the environment every kernel inherits; `bin/romp`, before its
-first tmux call (`bin/romp-tmux-env`, also runnable to print the directory), so
-a plain shell's `romp new -t` and the resume picker dial the server the manager
-started; and a kernel run WITHOUT a manager (`romp-serve` bare, a lab). A kernel
-under the manager resolves nothing: it takes the manager's `TMUX_TMPDIR` as it
-stands, absent meaning tmux's default, because the manager alone starts the
-server. So a new-code kernel that comes up under a manager from before this
-change (a crash respawn, a dashboard restart, while the checkout sits ahead of
-the running manager) keeps dialing the `/tmp` server that manager started; the
-runtime-directory server begins with the manager's own restart. A stale manager
-now yields on a single kernel's restart and on a crash respawn the way it does
-on `romp refresh`: under the service it exits for a supervised respawn, which
-brings every kernel up on the new defaults. A client already inside a pane uses
-the socket named in its own `$TMUX` and needs none of this. The kernel and the
-manager each log the directory they chose and the rule that chose it at start
-(`tmux socket dir: …`).
-
-Migration: a server already running on the `/tmp` socket keeps serving until
-the next `romp refresh` (or service restart), which starts the manager's server
-under the runtime directory. From then on the kernel dials the new server, so a
-tmux-backed session still on the old one is out of romp's sight: its CLI keeps
-running, `tmux -S /tmp/tmux-<uid>/default attach -t <name>` reaches it by hand,
-and `romp new -t <name>` after ending it brings the name back onto the board.
-romp moves no session across servers.
+inside the service cgroup. The macOS launchd path is unchanged: there is no cgroup kill there.
 
 #### Per-session memory limits (opt-in)
 
@@ -1353,9 +1251,9 @@ rejection means the machine changed under the running kernel.
 
 Whenever a memory limit is set, the wrapper also sets `OOMPolicy=continue` on
 the scope. A scope's default is `stop`: when Linux's OOM killer kills one
-process in it, systemd stops the whole scope, which ends the CLI and every tmux
-server and `setsid` job in it. With `continue`, only the killed process is gone.
-systemd logs each kill to the user journal as `<unit>: A process of this unit
+process in it, systemd stops the whole scope, which ends the CLI and every
+`setsid` job and private tmux server in it. With `continue`, only the killed
+process is gone. systemd logs each kill to the user journal as `<unit>: A process of this unit
 has been killed by the OOM killer` (`journalctl --user --since today | grep
 'romp-session-'`).
 
@@ -1392,13 +1290,11 @@ kernel.
 
 The limits cover what runs in the session's scope: the CLI, its tool shells,
 their `setsid` children, and a private tmux server started directly from a tool
-shell (`tmux -L <name>`). Two kinds of work are outside it. Work a session hands
-to the server the manager started (`tmux new-session` on the default socket)
-runs in that server's scope (`romp-tmux-*`), not the session's. And anything a
-session starts as a transient unit of its own (`systemd-run --user --scope …`,
-or a `systemd-run --user` service) is a sibling of the session's scope under the
-user manager, outside its memory limits: a tmux server detached that way is
-outside them, whereas the same server started with a plain `tmux -L` is inside.
+shell (`tmux -L <name>`). Outside it is anything a session starts as a transient
+unit of its own (`systemd-run --user --scope …`, or a `systemd-run --user`
+service): that is a sibling of the session's scope under the user manager,
+outside its memory limits, so a tmux server detached that way is outside them,
+whereas the same server started with a plain `tmux -L` is inside.
 A `--scope` job started that way still inherits the session's raised
 `oom_score_adj` (`systemd-run` runs the command in place); a transient service
 does not (the user manager spawns it, not the session).
@@ -1869,12 +1765,10 @@ label the account digest itself, so a bucket can be matched to the log.
   not ended); `inTurn` (of those, sessions with a turn in flight: working or
   retrying); `retrying` (sessions inside a retry storm right now, the cheapest
   direct thrash indicator, independent of the ratio thresholds);
-  `tmuxSessionsUncovered` (tmux-backed sessions, which have no SDK stream and are
-  outside the signal; `null` when the kernel could not enumerate them; Codex-backed
-  sessions carry no Anthropic API traffic, are outside the signal too, and are
-  counted in neither field);
   `sidechainExcluded` (a constant `true`: subagent traffic is
-  outside the signal on both sides of the ratio). A reader that sees `inTurn >
+  outside the signal on both sides of the ratio). Codex-backed sessions carry no
+  Anthropic API traffic, are outside the signal, and are counted in none of
+  these. A reader that sees `inTurn >
   0` and a `lastEventAt` minutes old should treat the signal as unknown rather
   than healthy.
 - `cliScope`: scope bookkeeping carried on this payload, not part of the API
@@ -1968,8 +1862,7 @@ The signal covers each session's main thread only. A subagent's retries never
 reach the kernel (the CLI folds them into a progress frame the SDK drops), so
 its responses are not counted either; counting one side would dilute every
 rate during a storm. `coverage.sidechainExcluded` is `true` to say so.
-tmux-backed sessions and the judges' own calls have no SDK stream and are
-outside the signal.
+The judges' own calls have no SDK stream and are outside the signal.
 
 Retries carry no model field, so they are attributed to the session's
 last-learned family: attempts between a mid-storm model fallback and its first
@@ -2219,11 +2112,11 @@ again to a shell that sends `ready`:
 {"type": "apiHealth", "state": "ok | degraded | paused",
  "cls": "429 | 529 | offline | errors | ''", "reason": "'' | limit | spend | manual",
  "text": "<the rail's words>", "waiting": 0, "retrying": 0, "blocked": 0,
- "since": 0, "tmux": 0, "seq": 0, "quiet": false, "errs": 0, "host": "<this kernel's name to its peers>",
+ "since": 0, "seq": 0, "quiet": false, "errs": 0, "host": "<this kernel's name to its peers>",
  "sessions": [{"sid": "", "name": "", "color": null, "kind": "retrying | blocked",
                "cls": "", "status": null, "since": 0, "suppressed": false}],
  "hosts": {"<host>": {"state": "ok | degraded | paused", "cls": "", "text": "", "waiting": 0,
-                      "retrying": 0, "blocked": 0, "since": 0, "reason": "", "tmux": 0, "quiet": false,
+                      "retrying": 0, "blocked": 0, "since": 0, "reason": "", "quiet": false,
                       "errs": 0, "stale": false, "fault": "HTTP 403 (only when the last read was refused)"}}}
 ```
 
@@ -2236,8 +2129,7 @@ kernel. `waiting` is `retrying` plus `blocked`. `cls` is the plurality class
 over the affected sessions, ties resolved 429, then 529, then offline, then
 errors. `since` is the pause's time when paused, else the earliest affected
 session's event (a record's timestamp, or the retrying turn's start), else 0.
-`tmux` counts alive tmux-backed sessions, which the cell sees through their
-transcripts only. Every timestamp is an event's time, never the clock, so an
+Every timestamp is an event's time, never the clock, so an
 unchanged world sends nothing. On-you failures (a too-long prompt, a spent
 model allowance, a dead credential, a refusal) are not counted; a spend cap is,
 and engages the `spend` pause in the same cycle. `quiet` is true when this

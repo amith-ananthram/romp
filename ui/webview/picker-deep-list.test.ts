@@ -25,7 +25,7 @@ test("opening the picker asks for the whole list once — no lazy second fetch t
 test("the kernel serves the picker 30 days, with forks off so it stays cheap", () => {
   assert.match(KERNEL, /PICKER_WINDOW = 30 \* 86400/);
   assert.match(KERNEL, /_sessions\(now, PICKER_WINDOW if window is None else window, forks=False\)\[:PICKER_CAP\]/);
-  assert.match(KERNEL, /"items": _session_list\(int\(time\.time\(\)\), _tmux_sessions\(\)\)/);
+  assert.match(KERNEL, /"items": _session_list\(int\(time\.time\(\)\), _live_map\(\)\)/);
 });
 
 test("discover takes a window and a forks switch, cached per pair", () => {

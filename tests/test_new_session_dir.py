@@ -248,20 +248,18 @@ class CreateSessionTags(_Wire):
         super().setUp()
         self.spawned = []
         self.extra = {}
-        saved = (km._create_sdk_session, km._sdk_ready, km._spawn_session,
+        saved = (km._create_sdk_session, km._sdk_ready,
                  km._create_codex_session, km._codex_ready)
         km._create_sdk_session = lambda nm, cwd, auth="", client=None, **kw: (
             self.spawned.append((nm, dict(kw))), ("TESTSID", dict(self.extra)))[1]
         km._sdk_ready = lambda: True
-        km._spawn_session = lambda nm, cwd=None: self.spawned.append((nm, "tmux"))
         km._create_codex_session = lambda nm, cwd, client=None, **kw: (
             self.spawned.append((nm, "codex", dict(kw))), ("TESTCODEX", dict(self.extra)))[1]
         km._codex_ready = lambda: True
         self.addCleanup(lambda: (setattr(km, "_create_sdk_session", saved[0]),
                                  setattr(km, "_sdk_ready", saved[1]),
-                                 setattr(km, "_spawn_session", saved[2]),
-                                 setattr(km, "_create_codex_session", saved[3]),
-                                 setattr(km, "_codex_ready", saved[4])))
+                                 setattr(km, "_create_codex_session", saved[2]),
+                                 setattr(km, "_codex_ready", saved[3])))
         # A private state root for the duration: the kernel's judge is one module object shared by every test
         # module in the process, and the names entry, goal store and cleared rows the create flow writes at its
         # import-bound root outlived this module and reached every later module's feed (T281).
@@ -306,11 +304,15 @@ class CreateSessionTags(_Wire):
         self.assertEqual(r["type"], "warn")
         self.assertIn('two tags are named "pool"', r["text"])
 
-    def test_a_tmux_create_with_tags_refuses_instead_of_dropping_them(self):
-        r = self.send({"type": "createSession", "name": "term1", "dir": self.tmp, "backend": "tmux", "tags": ["pool"]})
+    def test_an_unknown_backend_with_tags_refuses_instead_of_dropping_them(self):
+        # two backends since the tmux backend's removal (2026-09-11): any other word is a warn naming both,
+        # and neither arm spawns — the tags are not silently gone
+        r = self.send({"type": "createSession", "name": "term1", "dir": self.tmp, "backend": "shell", "tags": ["pool"]})
         self.assertEqual(r["type"], "warn")
-        self.assertIn("Claude Code or Codex", r["text"])   # the backends' names since T288
-        self.assertEqual(self.spawned, [], "no tmux spawn with the tags silently gone")
+        self.assertIn("unknown backend", r["text"])
+        self.assertIn("Claude Code", r["text"])
+        self.assertIn("Codex", r["text"])
+        self.assertEqual(self.spawned, [], "no spawn with the tags silently gone")
 
     def test_a_codex_create_takes_tags_and_a_parent_like_an_sdk_one(self):
         self.send({"type": "createSession", "name": "api", "dir": self.tmp, "backend": "codex",

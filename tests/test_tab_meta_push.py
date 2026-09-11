@@ -50,14 +50,14 @@ class TabMetaPush(unittest.TestCase):
         self.names = Path(self.tmp) / "names"
         self.names.mkdir()
         (self.names / SID).write_text("web\t/proj/TESTHOST/app\t#1EA1EB\twhite\n")
-        self._saved = (km.NAMES, km.jd.STATE, km._tmux_sessions, km._live_names,
+        self._saved = (km.NAMES, km.jd.STATE, km._live_map, km._live_names,
                        km._mark_views_dirty, km.Sessions.backend_for,
                        km._chat_tab_sessions, km._cached_feed)
         km.NAMES = self.names
         km.jd.STATE = Path(self.tmp) / "state"
         km.jd.STATE.mkdir(parents=True, exist_ok=True)
         km._pal_cache.update({"name": km.pal.DEFAULT, "mt": None})
-        km._tmux_sessions = lambda: {}
+        km._live_map = lambda: {}
         km._live_names = lambda tm: {self._name(): SID}
         self.dirty = []
         km._mark_views_dirty = lambda: self.dirty.append(1)
@@ -81,7 +81,7 @@ class TabMetaPush(unittest.TestCase):
                        "send": lambda s: self.frames.append(json.loads(s))}
 
     def tearDown(self):
-        (km.NAMES, km.jd.STATE, km._tmux_sessions, km._live_names,
+        (km.NAMES, km.jd.STATE, km._live_map, km._live_names,
          km._mark_views_dirty, km.Sessions.backend_for,
          km._chat_tab_sessions, km._cached_feed) = self._saved
         km._pal_cache.update({"name": km.pal.DEFAULT, "mt": None})

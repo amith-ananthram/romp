@@ -3,9 +3,10 @@
 CodexBackend.prune_live took three positional arguments while the kernel's _merge_live_atoms passed four,
 so every live merge of a Codex session holding an input echo raised TypeError: the chat build and the
 feed's merge of that session failed until the echo landed, and the timeline bars logged a live-merge
-failure. Nothing pinned the shape: the backends duck-type the SessionBackend ABC (only TmuxBackend
-subclasses it), so the ABC's own signature, which also lagged, was never enforced, and the conformance
-test checked that each method EXISTS, not what it accepts.
+failure. Nothing pinned the shape: the backends duck-type the SessionBackend ABC (only the kernel's
+_UnownedBackend, the refusing route for a sid no backend owns, subclasses it), so the ABC's own
+signature, which also lagged, was never enforced, and the conformance test checked that each method
+EXISTS, not what it accepts.
 Two checks, both static (AST over the sources, no kernel import, so a bare run touches no state):
   1. every call kernel.py makes on a backend bound as `be = Sessions.backend_for(...)` binds against each
      backend class that defines the method (positional count and keyword names), so a caller that grows an
@@ -25,7 +26,7 @@ SESSION_BACKEND = os.path.join(KERNEL, "session_backend.py")
 BACKENDS = {   # class -> the source file defining it
     "SdkBackend": os.path.join(KERNEL, "sdk_backend.py"),
     "CodexBackend": os.path.join(KERNEL, "codex_backend.py"),
-    "TmuxBackend": os.path.join(KERNEL, "kernel.py"),
+    "_UnownedBackend": os.path.join(KERNEL, "kernel.py"),
 }
 
 
@@ -97,7 +98,7 @@ class CallShapeParity(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         trees = {path: _parse(path) for path in set(BACKENDS.values()) | {SESSION_BACKEND}}   # each file once
-        cls.calls = _backend_for_calls(trees[BACKENDS["TmuxBackend"]])                     # kernel.py
+        cls.calls = _backend_for_calls(trees[BACKENDS["_UnownedBackend"]])                 # kernel.py
         cls.sigs = {name: _class_signatures(trees[path], name) for name, path in BACKENDS.items()}
         cls.abc = _class_signatures(trees[SESSION_BACKEND], "SessionBackend")
 

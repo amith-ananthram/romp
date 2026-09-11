@@ -71,13 +71,13 @@ class ClearIsSilent(unittest.TestCase):
         store["status"] = {G_OPEN: "working"}
         jd.save_goals(SID, store)
         be = SentNothing()
-        saved = (km.Sessions.backend_for, km._tmux_sessions)
+        saved = (km.Sessions.backend_for, km._live_map)
         km.Sessions.backend_for = staticmethod(lambda sid: be)
-        km._tmux_sessions = lambda: {SID: {"state": "idle"}}
+        km._live_map = lambda: {SID: {"state": "idle"}}
         try:
             km._clear_all([G_OPEN])
         finally:
-            km.Sessions.backend_for, km._tmux_sessions = saved
+            km.Sessions.backend_for, km._live_map = saved
         self.assertEqual(be.sent, [], "a discard that answers back is the loop this retirement ends")
         rows = [json.loads(l) for l in (jd.STATE / "cleared.jsonl").read_text().splitlines()]
         self.assertTrue(any(r.get("id") == G_OPEN and r.get("op") == "clear" for r in rows),

@@ -107,7 +107,7 @@ class AwaitingLift(unittest.TestCase):
         km.jd.GOALDIR = td / "goals"
         km.jd.GOALDIR.mkdir(parents=True)
         self.path = str(td / (SID + ".jsonl"))
-        km._alive_sessions = lambda now, tmux: [{"sid": SID, "path": self.path}]
+        km._alive_sessions = lambda now, live_map: [{"sid": SID, "path": self.path}]
         km._mark_views_dirty = lambda *a, **k: None
         km._SESSION_STAMP_CACHE.clear()
         km._lift_seen.clear()          # stores are re-seeded in place under recycled tempdir inodes
@@ -496,7 +496,7 @@ class RestartReconcile(unittest.TestCase):
         km.jd.GOALDIR = td / "goals"
         km.jd.GOALDIR.mkdir(parents=True)
         self.path = str(td / (SID + ".jsonl"))
-        km._alive_sessions = lambda now, tmux: [{"sid": SID, "path": self.path}]
+        km._alive_sessions = lambda now, live_map: [{"sid": SID, "path": self.path}]
         km._mark_views_dirty = lambda *a, **k: None
         km._sdk_spawned_at = lambda sid: self.spawn      # the CLI epoch — the restart moment
         self.spawn = BACK                                # default: the backend respawned after the stamp
@@ -543,7 +543,7 @@ class RestartReconcile(unittest.TestCase):
         self.assertIsNone(self._stamp(), "the vanished task returned AT the respawn — stamp lifted")
 
     def test_no_lifecycle_set_means_no_reconciliation(self):
-        # a tmux CLI (or an SDK gap mid-reattach) carries no set: registry-absent is NOT evidence —
+        # a session with no registry (an SDK gap mid-reattach) carries no set: registry-absent is NOT evidence —
         # the transcript-running task keeps the wait honest exactly as before
         self._transcript([_launch("t-restart-2", LAUNCH)])
         self._seed("task")
@@ -646,7 +646,7 @@ class _HorizonBase(unittest.TestCase):
         km.jd.GOALDIR = td / "goals"
         km.jd.GOALDIR.mkdir(parents=True)
         self.path = str(td / (self.PSID + ".jsonl"))
-        km._alive_sessions = lambda now, tmux: [{"sid": self.PSID, "path": self.path}]
+        km._alive_sessions = lambda now, live_map: [{"sid": self.PSID, "path": self.path}]
         km._mark_views_dirty = lambda *a, **k: None
         km._sdk_spawned_at = lambda sid: self.spawn
         self.spawn = STAMP - 50                       # default: the CLI predates the stamp — no respawn story
@@ -1359,7 +1359,7 @@ class LiftGate(unittest.TestCase):
     def test_a_dormant_session_is_not_gated_or_recorded(self):
         self._seed_unstamped()
         before = len(self.calls)
-        km._lift_spent_awaiting(BACK + 100, {SID: None})     # dormant: no tmux/SDK row for the sid
+        km._lift_spent_awaiting(BACK + 100, {SID: None})     # dormant: no live row for the sid
         self.assertEqual(len(self.calls) - before, 0)
         self.assertNotIn(SID, km._lift_seen, "dormant: skipped before the gate, nothing remembered")
 
@@ -1449,7 +1449,7 @@ class LiftGate(unittest.TestCase):
         self._seed_unstamped()
         self._tick()
         self.assertIn(SID, km._lift_seen)
-        km._alive_sessions = lambda now, tmux: []
+        km._alive_sessions = lambda now, live_map: []
         self._tick()
         self.assertNotIn(SID, km._lift_seen, "the sid left the alive set: its entry went with it")
 
@@ -1548,7 +1548,7 @@ class InHarnessWaitLift(unittest.TestCase):
         km.jd.GOALDIR.mkdir(parents=True)
         (td / "sdk").mkdir()
         self.path = str(td / (self.PSID + ".jsonl"))
-        km._alive_sessions = lambda now, tmux: [{"sid": self.PSID, "path": self.path}]
+        km._alive_sessions = lambda now, live_map: [{"sid": self.PSID, "path": self.path}]
         km._mark_views_dirty = lambda *a, **k: None
         km._sdk_spawned_at = lambda sid: self.spawn
         self.spawn = STAMP - 50                       # default: the CLI predates the stamp — no respawn story
@@ -1637,7 +1637,7 @@ class InHarnessWaitLift(unittest.TestCase):
         self.assertIsNotNone(self._stamp())
 
     def test_no_authoritative_registry_means_no_move(self):
-        # a tmux CLI carries no lifecycle set: registry-absent is not evidence of anything
+        # a session with no registry carries no lifecycle set: registry-absent is not evidence of anything
         self._transcript([_launch("t1", LAUNCH), _notification("t1", BACK)])
         self._seed("job")
         self._tick({"state": ""})

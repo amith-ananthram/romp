@@ -56,23 +56,14 @@ class SendVisDiag(unittest.TestCase):
         echoes = [a for a in out["liveAtoms"] if a["echo"]]
         self.assertEqual([a["echo"] for a in echoes], ["an in-flight echo"])
         self.assertIn("compacting", out)
-        self.assertIn("tmuxEchoes", out)
 
-    def test_a_tmux_echo_row_says_whether_it_is_settled(self):
-        # A settled loss and an in-flight send read identically here until `dropped` was carried (the user
-        # 2026-08-26): the diagnostic's job is naming the layer, and "which of these is still going out"
-        # was the exact question it could not answer.
-        km._tmux_echo.clear()
-        km._tmux_echo_add(SID, "sent and still going out")
-        km._tmux_echo_add(SID, "overtaken, never delivered")
-        try:
-            for echo_atom in km._tmux_echo[SID].values():
-                if echo_atom["_echo_text"].startswith("overtaken"):
-                    echo_atom["dropped"] = True
-            rows = {r["echo"]: r["dropped"] for r in km._sendvis_diag(SID)["tmuxEchoes"]}
-        finally:
-            km._tmux_echo.clear()
-        self.assertEqual(rows, {"sent and still going out": False, "overtaken, never delivered": True})
+    def test_an_unowned_sid_reads_as_unowned(self):
+        # the routing layer named first: a sid no backend owns is "unowned", never a guess at a backend
+        out = km._sendvis_diag("22222222-3333-4444-5555-666666666666")
+        self.assertEqual(out["backend"], "unowned")
+        self.assertFalse(out["sdkOwns"])
+        self.assertEqual(out["pendingQueued"], [])
+        self.assertEqual(out["liveAtoms"], [])
 
     def test_route_is_wired_and_read_only(self):
         src = open(os.path.join(BIN, "romp-kernel")).read()

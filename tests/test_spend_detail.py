@@ -85,7 +85,7 @@ class SpendDetail(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
         state = Path(self.td.name)
-        self._saved = (km.jd.STATE, km.NAMES, km._live_names, km._tmux_sessions, km._self_host,
+        self._saved = (km.jd.STATE, km.NAMES, km._live_names, km._live_map, km._self_host,
                        km._claude_account, km._auth_key_present, dict(km._remotes))
         km.jd.STATE = state
         km.NAMES = state / "names"
@@ -94,7 +94,7 @@ class SpendDetail(unittest.TestCase):
         (km.NAMES / API).write_text("api\t/tmp/notes-api\t#54B204\t#ffffff\n")
         (km.NAMES / TESTS).write_text("tests\t/tmp/notes-api\n")          # no identity color
         km._live_names = lambda tm: {"web": WEB, "api": API}                # tests is no longer running
-        km._tmux_sessions = lambda: []
+        km._live_map = lambda: []
         km._self_host = lambda: "TESTHOST"
         km._claude_account = lambda: ""                                     # a key-only machine: total scope
         km._auth_key_present = lambda: True
@@ -103,7 +103,7 @@ class SpendDetail(unittest.TestCase):
         write_ledger(state)
 
     def tearDown(self):
-        (km.jd.STATE, km.NAMES, km._live_names, km._tmux_sessions, km._self_host,
+        (km.jd.STATE, km.NAMES, km._live_names, km._live_map, km._self_host,
          km._claude_account, km._auth_key_present, saved_remotes) = self._saved
         km._remotes.clear()
         km._remotes.update(saved_remotes)

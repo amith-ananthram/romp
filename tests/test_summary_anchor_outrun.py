@@ -68,7 +68,7 @@ class OutrunYield(unittest.TestCase):
         names.mkdir()
         (names / SID).write_text("web\t%s\t#abcdef\n" % str(cdir))
         self.saved = (jd.NAMES, jd.PROJECTS, jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR, jd.STATE,
-                      km.NAMES, km._tmux_sessions, km._GLOBAL_CLAUDE_MD, jd.gist_llm)
+                      km.NAMES, km._live_map, km._GLOBAL_CLAUDE_MD, jd.gist_llm)
         jd.gist_llm = lambda p: ""
         km._autonudge_cache.clear()
         km._GLOBAL_CLAUDE_MD = td / "no-global-claude.md"
@@ -76,7 +76,7 @@ class OutrunYield(unittest.TestCase):
         jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR = td / "captions", td / "archive", td / "goals"
         jd.STATE = td
         km.NAMES = names
-        km._tmux_sessions = lambda: {SID: {"state": "idle", "since": NOW - 100, "model": "",
+        km._live_map = lambda: {SID: {"state": "idle", "since": NOW - 100, "model": "",
                                            "effort": "", "context": None, "compactPct": None,
                                            "color": None}}
         jd.GOALDIR.mkdir(parents=True, exist_ok=True)
@@ -86,7 +86,7 @@ class OutrunYield(unittest.TestCase):
 
     def tearDown(self):
         (jd.NAMES, jd.PROJECTS, jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR, jd.STATE,
-         km.NAMES, km._tmux_sessions, km._GLOBAL_CLAUDE_MD, jd.gist_llm) = self.saved
+         km.NAMES, km._live_map, km._GLOBAL_CLAUDE_MD, jd.gist_llm) = self.saved
         km._autonudge_cache.clear()
         self.td.cleanup()
 

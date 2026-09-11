@@ -28,10 +28,10 @@ class SessionAwaitingSince(unittest.TestCase):
 
     def setUp(self):
         self._saved = {n: getattr(km, n) for n in
-                       ("_tmux_sessions", "_bg_live_norm", "_bg_pending", "_states_awaiting_overlay",
+                       ("_live_map", "_bg_live_norm", "_bg_pending", "_states_awaiting_overlay",
                         "_owned_yield_why", "_session_stamp_full", "_session_delegated_why")}
         # neutral defaults: a live CLI with nothing in flight, every deeper source empty
-        km._tmux_sessions = lambda: {SID: {}}
+        km._live_map = lambda: {SID: {}}
         km._bg_live_norm = lambda sid, path: []
         km._bg_pending = lambda sid, path, tasks: []
         km._states_awaiting_overlay = lambda sid: None
@@ -44,7 +44,7 @@ class SessionAwaitingSince(unittest.TestCase):
             setattr(km, n, f)
 
     def test_live_subagents_use_the_oldest_agents_start(self):
-        km._tmux_sessions = lambda: {SID: {"subagents": [{"type": "a", "since": 500},
+        km._live_map = lambda: {SID: {"subagents": [{"type": "a", "since": 500},
                                                          {"type": "b", "since": 900}]}}
         aw = km._session_awaiting(SID, "/tmp/x", True)
         self.assertEqual(aw["kind"], "agents")

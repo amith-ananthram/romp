@@ -22,18 +22,18 @@
 # tunnels that port to the laptop with `ssh -R PORT:127.0.0.1:PORT`. The bus
 # persists mailboxes to $XDG_STATE_HOME/romp/postal/mail/<session-id>/ (Maildir,
 # atomic delivery), resolves recipient names against the live romp sessions
-# (tmux) plus any heartbeating remote agents, and shuts itself down once no romp
-# clients remain.
+# (the kernel's listing of Claude Code and Codex sessions) plus any heartbeating
+# remote agents, and shuts itself down once no romp clients remain.
 #
 # Delivery has two paths. The backstop is the Stop hook: a recipient drains its
 # mailbox at the next turn boundary (also check_inbox / `romp mail inbox`). On
-# top of that, push-on-deliver (see _push) auto-wakes an IDLE local session by
-# typing the mail straight into its prompt and submitting it — so a session
-# sitting idle reacts immediately instead of only at its next turn. The push is
-# careful never to clobber a draft (it stashes/restores via Ctrl+S) and stays
-# clear of sessions at a permission prompt or mid-turn-with-a-draft, falling back
-# to the drain whenever live injection isn't safe. Disable the push alone with
-# ~/.claude/romp-postal-nopush; disable everything with ~/.claude/romp-postal-off.
+# top of that, push-on-deliver (see _push) auto-wakes an IDLE local session
+# through the kernel (POST /deliver), which hands the mail to the session as its
+# next turn — so a session sitting idle reacts immediately instead of only at
+# its next turn boundary. When the kernel reports the session did not take the
+# wake (not live or resumable, its mailbox toggled off), the mail goes back for
+# the drain. Disable the push alone with ~/.claude/romp-postal-nopush; disable
+# everything with ~/.claude/romp-postal-off.
 
 import base64
 import errno
@@ -64,7 +64,7 @@ from pathlib import Path
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("ROMP_POSTAL_PORT", "25302"))   # renumbered from 47100 alongside the kernel's port (the user 2026-07-24), same random draw. A bus that cannot bind degrades fleet messaging silently, rather than failing a URL someone is looking at, so a collision here is worth avoiding more, not less.
 BASE = f"http://{HOST}:{PORT}"
-KERNEL_BASE = "http://127.0.0.1:%s" % os.environ.get("ROMP_KERNEL_PORT", "29855")  # the dashboard kernel — it owns the backend session query (tmux + SDK)
+KERNEL_BASE = "http://127.0.0.1:%s" % os.environ.get("ROMP_KERNEL_PORT", "29855")  # the dashboard kernel — it owns the backend session query (Claude Code and Codex)
 
 STATE = Path(os.environ.get("ROMP_STATE_DIR")      # per-kernel state root override (plans/multi-kernel.md)
              or Path(os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local/state")) / "romp") / "postal"
@@ -83,7 +83,7 @@ SESSION_FLAGS = STATE.parent / "session-flags.json"   # the kernel's per-session
 
 # ── serve-token gate (Jupyter's model; the same 0600 file the kernel mints) ─────
 # Loopback is reachable by EVERY local user on the machine, so the bus — which can wake sessions
-# and inject mail straight into their prompts — requires the machine's serve token on every
+# and hand them mail as their next turn — requires the machine's serve token on every
 # request except the /ping liveness probe. The 0600 file is the same-user trust boundary; kernel
 # and bus share it (whichever daemon starts first mints it, identical logic). A peer bus dialing
 # through an ssh forward authorizes with the DIALED machine's token (?token=), which rides the
@@ -252,7 +252,6 @@ HEARTBEAT_TTL = int(os.environ.get("ROMP_POSTAL_HEARTBEAT_TTL", "90"))  # remote
 WINDOW = 30        # loop-guard rolling window (seconds)
 MAX = 6            # loop-guard: max auto-deliveries per window before pausing
 RETRY_INTERVAL = int(os.environ.get("ROMP_POSTAL_RETRY", "5"))  # re-attempt deferred deliveries every N s
-PICKER_GRACE = int(os.environ.get("ROMP_POSTAL_PICKER_GRACE", "10"))  # secs the kernel watches a revive for the resume picker (passed as the /picker-check timeout)
 ORPHAN_GRACE = int(os.environ.get("ROMP_POSTAL_ORPHAN_GRACE", "900"))  # bounce unread mail to a dead recipient after N s
 STUCK_GRACE = int(os.environ.get("ROMP_POSTAL_STUCK_GRACE", "600"))  # warn the SENDER when a LIVE-but-idle recipient still hasn't read after N s
 
@@ -260,16 +259,15 @@ REPLY_HINT = ('To reply (only if you have something substantive to add, not just
               'acknowledge): romp mail send --kind delegate|coordinate|question <name> "<text>" — '
               'put the whole point in your first sentence.')
 
-# The bus no longer shells tmux: session enumeration, the working-note, mail delivery/wake, the resume-picker
-# check, and the status-bar chrome all go through the kernel (the SessionBackend API), which owns the one tmux
-# integration. Identity is the CLAUDE_CODE_SESSION_ID env. (the user 2026-06-26: tmux + SDK behind one API.)
+# Every backend operation goes through the kernel (the SessionBackend API): session enumeration (GET
+# /sessions), the working-note (POST /working) and mail delivery/wake (POST /deliver). The bus never touches a
+# session directly. Identity is the CLAUDE_CODE_SESSION_ID env. (the user 2026-06-26: every backend behind one API.)
 
 
 def _self_id():
-    """THIS session's fsid, from CLAUDE_CODE_SESSION_ID — the harness sets it for EVERY session (SDK and tmux
-    alike), so it's the reliable identity, and the only one that's right for an SDK session (whose MCP may be
-    parented under a leftover tmux pane and so resolve to a DIFFERENT session — the user 2026-06-24). None when
-    not in a romp session. No tmux fallback: the bus never shells tmux; the env var IS the designed identity."""
+    """THIS session's fsid, from CLAUDE_CODE_SESSION_ID — the harness sets it for EVERY session, so it is the
+    reliable identity (the user 2026-06-24: an identity read from the process's surroundings once resolved an
+    SDK session to a DIFFERENT one; the env var IS the designed identity). None when not in a romp session."""
     return (os.environ.get("CLAUDE_CODE_SESSION_ID") or "").strip() or None
 
 def _self_row():
@@ -294,7 +292,7 @@ def _self_identity():
     pair two of the three fetches each beat cost). Both fallbacks kept: no row → the env fsid as the
     id (mail still routes by id) and the names registry for the name (kernel-down fallback; a
     comment-thread session withholds its names entry, which is why the row comes first). (None,
-    None) when not in a romp session (no tmux fallback: the bus never shells tmux). Nothing is
+    None) when not in a romp session. Nothing is
     memoized: a resolution that missed (kernel mid-restart) is retried in full by the next call."""
     row = _self_row()
     sid = row["id"] if row else _self_id()
@@ -389,9 +387,9 @@ def _unique():
 def _mark_pending(sid):
     """Reconcile the on-disk pending-mail marker with reality: mail-pending/<sid>
     exists IFF that session has unread mail in new/. Call after ANY mutation of a
-    new/ box (deliver, consuming read_box, recall, sweep). On-disk and tmux-free,
-    so it's the ONE fact every view can agree on — including DEAD sessions (no tmux
-    vars) and across a bus restart. Self-correcting + idempotent; never raises."""
+    new/ box (deliver, consuming read_box, recall, sweep). On-disk and owned by no
+    process, so it's the ONE fact every view can agree on — including DEAD sessions
+    and across a bus restart. Self-correcting + idempotent; never raises."""
     if not sid:
         return
     m = MAILPENDING / sid
@@ -693,7 +691,7 @@ def deliver(to_id, from_name, from_id, body, park=False, kind="", from_host="",
         _mark_pending(to_id)        # new/ may be empty again -> reconcile the marker
         raise DeliveryNotRecorded(NOT_RECORDED_TEXT)
     _mark_pending(to_id)            # new/ is now non-empty -> raise the marker (covers park + live)
-    return name   # the message id (maildir filename); joins to the log + status-bar prefix
+    return name   # the message id (maildir filename); joins to the log
 
 _UNREADABLE_SAID = set()   # (path, errno) already logged this bus run — said once, not per poll
 
@@ -801,7 +799,7 @@ def restore(sid, mid):
     """UNCLAIM a consumed message: move cur/<mid> back to new/ under its ORIGINAL id.
 
     The counterpart to read_box(consume=True). A consuming drain is a CLAIM, not a delivery — the
-    claimer may fail to hand the mail over (the kernel can't inject safely), and then the claim has
+    claimer may fail to hand the mail over (the session did not take the wake), and then the claim has
     to be rolled back. Rolling it back by re-sending through deliver() mints a NEW id and logs a
     NEW "sent" event, which is what made a timeline message arc click land nowhere: the arc is drawn
     from the message log, so every deferred push drew ANOTHER arc for the same message, and only the
@@ -989,15 +987,14 @@ STREAKS = {}           # id -> (count, last_epoch)        (loop guard)
 _lock = threading.Lock()
 
 def _kernel_sessions(threads=False):
-    """LIVE romp sessions (tmux + SDK) from the kernel's unified GET /sessions — the kernel owns the backend
-    query (TmuxBackend for tmux liveness + the SDK registry), so the bus enumerates sessions WITHOUT shelling
-    tmux and, for ADDRESSING, without reading the SDK registry directly: ONE source. (One deliberate
-    exception since 2026-08-31: _durable_session reads a per-session reg file on the REFUSAL path only,
-    to corroborate a suspected listing blink before ruling a session dead — never to resolve delivery.)
-    Loopback, authorized with X-Romp-Token
+    """LIVE romp sessions (Claude Code and Codex) from the kernel's unified GET /sessions — the kernel owns
+    the backend query (the SDK registry and the Codex registry), so for ADDRESSING the bus never reads a
+    registry directly: ONE source. (One deliberate exception since 2026-08-31: _durable_session reads a
+    per-session reg file on the REFUSAL path only, to corroborate a suspected listing blink before ruling
+    a session dead — never to resolve delivery.) Loopback, authorized with X-Romp-Token
     (the shared 0600 serve-token file — the kernel gates every request, loopback included). [] if the kernel
     is unreachable (rare — the manager supervises it); the bus then shows no local
-    agents until it's back, rather than reaching past the abstraction to tmux.
+    agents until it's back, rather than reaching past the abstraction.
 
     ROMP_SESSIONS_FILE is a test seam (like ROMP_*_BIN): a JSON file of the same rows, read instead of the
     live kernel so the bus is testable without one."""
@@ -1042,9 +1039,9 @@ def _kernel_sessions_checked(threads=False):
 
 
 def local_agents(threads=False):
-    """LIVE local sessions (tmux + SDK) as postal agent rows, read from the kernel's unified GET /sessions.
-    The kernel merges both backends, so an SDK session is a live agent here too — a send to an open SDK
-    session delivers instead of parking as dead (the user via ui, 2026-06-26).
+    """LIVE local sessions (Claude Code and Codex) as postal agent rows, read from the kernel's unified GET
+    /sessions. The kernel merges every backend, so a session of either kind is a live agent here — a send to
+    an open session delivers instead of parking as dead (the user via ui, 2026-06-26).
 
     `threads` (the user 2026-08-22): also include COMMENT-THREAD sessions — real forked sessions the
     kernel hides from tabs/lanes/cards until promotion. Opt-in per consumer so the default listing and
@@ -1086,9 +1083,9 @@ def local_agents_checked(threads=False):
 
 def _kernel_post(path, body, timeout=2):
     """POST a small JSON body to the kernel (loopback, X-Romp-Token from the shared 0600 file) — the bus's
-    one-way control channel for the
-    ops the kernel owns now that the bus never shells tmux: the working-note, mail delivery/wake, the
-    status-bar chrome, and the resume-picker check. Returns the parsed JSON response dict; None when
+    one-way control channel for the ops the kernel owns: the working-note (/working), mail delivery/wake
+    (/deliver), the host redial (/redial), the courier's root walk (/walk-root) and a notice into the
+    dashboard (/postal-notice). Returns the parsed JSON response dict; None when
     the kernel could not be reached or its answer could not be parsed (the caller degrades); or, for a
     kernel that REFUSED the request (a 4xx/5xx), {"ok": False, "status": <code>, "error": <its text>},
     logged here by status with a bounded slice of the kernel's own reason, so a refusal never reads as
@@ -1138,9 +1135,8 @@ def _kernel_up():
 
 
 def _publish_working(sid, text):
-    """Publish/clear THIS session's working-note via the kernel's backend-agnostic store (POST /working) — no
-    tmux. The kernel owns the store and both backends read it (it appears in GET /sessions' `working` field),
-    so an SDK session can publish a note too."""
+    """Publish/clear THIS session's working-note via the kernel's store (POST /working). The kernel owns the
+    store and every backend reads it (it appears in GET /sessions' `working` field)."""
     if not sid:
         return False
     r = _kernel_post("/working", {"id": str(sid), "text": text})
@@ -1262,8 +1258,9 @@ def _durable_session(bare, by_id):
     incomplete-but-200 listing into a hard "not live" for both address forms — one specimen
     mis-routed a warning mail. A reg with alive=true is a session romp WILL list (running or
     dormant-resumable), so its absence from one listing is a listing gap, never evidence of death.
-    tmux sessions have no reg — their liveness is tmux's own, and this read stays honestly silent
-    for them. Reads the registry file directly (same box, kernel-owned): the designed API is the
+    The kernel owns every session's life and keeps a durable record for each (an SDK reg here; the
+    Codex backend's registry is its own file, so a Codex session's blink is not corroborated by this
+    read and falls to the listing). Reads the registry file directly (same box, kernel-owned): the designed API is the
     listing itself, which is exactly the thing being second-guessed here."""
     root = STATE.parent
     if by_id:
@@ -1632,11 +1629,11 @@ def _drain(sid):
 # ───────────────────────── push-on-deliver (auto-wake) ─────────────────────────
 # When mail lands for a LOCAL romp session that's sitting idle, the bus wakes the recipient through the
 # kernel (POST /deliver) so it sees the mail immediately instead of waiting for its next Stop-hook drain. The
-# kernel owns the wake per backend — a tmux session gets the banner pasted into its prompt (draft-preserving),
-# an SDK session gets it enqueued — so the BUS never shells tmux. The maildir drain stays as the backstop:
-# whenever the kernel can't inject safely (a permission prompt, a draft it can't preserve, Claude mid-turn
-# with a draft), it returns injected:false and the bus puts the mail back for the next-turn drain. Disable
-# the live push with ~/.claude/romp-postal-nopush (or romp-postal-off, which also disables the drain).
+# kernel owns the wake: it enqueues the banner as the session's next turn (the SessionBackend.deliver seam,
+# one shape for every backend). The maildir drain stays as the backstop: when the kernel answers
+# injected:false — the session is not live or resumable, or its mailbox is toggled off — the bus puts the
+# mail back for the next-turn drain. Disable the live push with ~/.claude/romp-postal-nopush (or
+# romp-postal-off, which also disables the drain).
 PUSH_SENTINEL = "#" * 44                          # the banner's rule line (format_push)
 
 def _push_disabled():
@@ -1652,8 +1649,10 @@ def _sweep_orphans():
     if not MAILROOT.is_dir():
         return
     live = local_agents(threads=True)                 # a comment thread's box is live while its row is (2026-09-10)
-    if not live:                                       # tmux hiccup, not "everyone died" — don't mass-bounce
-        return
+    if not live:                                       # [] is also what an UNANSWERED listing collapses to (kernel
+        return                                         # mid-restart), indistinguishable here from "everyone died":
+                                                       # never mass-bounce; a real orphan waits for a sweep that
+                                                       # has a live row to compare against
     live_ids = {a["id"] for a in live}
     by_name = {a["name"]: a for a in live}
     now = time.time()
@@ -1918,10 +1917,10 @@ def _bounce_oversize(sid, m):
 
 def _push(sid, agent):
     """Live-deliver pending mail to a session by WAKING it through the kernel (POST /deliver) — the kernel
-    injects the banner into the pane (tmux, draft-preserving) or enqueues it (SDK); the bus never shells tmux.
-    Coarse-skip a clearly not-ready session (remote / not idle-or-working) to avoid a needless drain; the
-    kernel does the fine pane-safety (at a ❯ prompt, out of copy-mode, a draft it can safely stash) and tells
-    us whether it injected. Not injected → put the mail back for the maildir-drain backstop. Returns True iff
+    enqueues the banner as the session's next turn. Coarse-skip a clearly not-ready local session (not
+    idle-or-working) to avoid a needless drain; the kernel decides whether the session takes the wake (live
+    or resumable, mailbox on) and tells us whether it did. Not injected → put the mail back for the
+    maildir-drain backstop. Returns True iff
     every message that can ride the wake was injected (so a revive poll knows to stop). `agent` is the GET
     /sessions row (id, state, backend, remote).
 
@@ -1931,17 +1930,17 @@ def _push(sid, agent):
     re-posted identically on every retry pass, so the live wake for that recipient never came. Chunks
     post oldest first; the first that does not land stops the run, and it and everything after it are
     restored. A single message too large for any chunk is handled by _bounce_oversize. The log line
-    names the cause (a kernel that could not be reached, one that answered a status, or a pane that
-    was not safe) where every deferral used to read the same."""
+    names the cause (a kernel that could not be reached, one that answered a status, or a session that
+    did not take the wake) where every deferral used to read the same."""
     if _push_disabled() or not agent:
         return False
     if os.environ.get("ROMP_SESSIONS_FILE"):                  # test seam: no live kernel → leave it for the drain (don't churn the maildir)
         return False
     # A REMOTE (heartbeat) peer on an attached host: we don't have its live state here, so skip the local
     # state gate and POST /deliver anyway — the local kernel's wake-router forwards it over the host's -L
-    # tunnel, and the OWNING kernel does the pane-safety and tells us whether it injected.
+    # tunnel, and the OWNING kernel decides whether the session takes the wake and tells us whether it did.
     if not agent.get("remote") and agent.get("state", "") not in ("waiting", "idle", "working"):
-        return False                                          # permission / unknown / picker → drain later
+        return False                                          # a permission ask / unknown state → drain later
     try:
         res = _drain(sid)                                     # claim mail (guarded + consuming)
         msgs = res.get("messages", [])
@@ -1961,7 +1960,7 @@ def _push(sid, agent):
             elif resp.get("status"):
                 cause = "kernel answered HTTP %s" % resp["status"]   # the reason is in _kernel_post's line
             else:
-                cause = "not injected"                        # the pane was not safe to paste into
+                cause = "not injected"                        # the session did not take the wake (not live/resumable, or mailbox off)
             held = [m for c in chunks[i:] for m in c]
             break
         if not held:
@@ -1987,14 +1986,14 @@ WAKE_TIMEOUT = int(os.environ.get("ROMP_POSTAL_WAKE_TIMEOUT", "45"))
 def _wake_when_ready(sid):
     """Force-deliver pending mail to a REVIVING session once it's ready.
 
-    A resumed session loads its transcript before its prompt box is interactive, and a SessionStart hook can
-    only inject PASSIVE context (it cannot force a turn), so a session revived with parked handoffs would just
-    sit idle on un-acted mail. Instead we poll until the session is live, then _push — which (via the kernel's
-    /deliver) injects AND submits so the session takes a turn (waiting→working→acts→waiting) and shows WORKING
-    in every existing view. The kernel returns injected:false while the prompt isn't live yet, so we just retry
-    until it lands; if it never does within WAKE_TIMEOUT (a huge transcript), the mail stays in new/ for the
-    Stop-hook drain — delivered on the first turn, just not force-acted. Runs off the /wake handler so the
-    revive hook returns instantly."""
+    A resumed session loads its transcript before it can take a turn, and a SessionStart hook can only inject
+    PASSIVE context (it cannot force a turn), so a session revived with parked handoffs would just sit idle on
+    un-acted mail. Instead we poll until the kernel lists the session, then _push — which (via the kernel's
+    /deliver) enqueues the mail as a turn, so the session acts on it (waiting→working→acts→waiting) and shows
+    WORKING in every existing view. The kernel returns injected:false until the session is live or resumable,
+    so we just retry until it lands; if it never does within WAKE_TIMEOUT (a huge transcript), the mail stays
+    in new/ for the Stop-hook drain — delivered on the first turn, just not force-acted. Runs off the /wake
+    handler so the revive hook returns instantly."""
     try:
         deadline = time.time() + WAKE_TIMEOUT
         while time.time() < deadline:
@@ -2004,7 +2003,7 @@ def _wake_when_ready(sid):
             agent = next((a for a in local_agents(threads=True) if a["id"] == sid), None)   # a reviving thread is a live row
             if not agent:
                 return                                        # session died during load
-            if _push(sid, agent):                             # injected (drain + submit → forces a turn) → done
+            if _push(sid, agent):                             # the kernel took it (enqueued as a turn) → done
                 return
             time.sleep(0.5)
     except Exception as e:
@@ -2395,21 +2394,15 @@ class Handler(BaseHTTPRequestHandler):
             except DeliveryNotRecorded as e:
                 # 503 + ok:false (see the relay leg): nothing was published; the sender retries.
                 return self._send({"ok": False, "error": str(e)}, 503)
-            if not a0.get("remote", False):
-                # All through the kernel (it owns the tmux status bar + the wake), off-thread so send latency
-                # stays low: paint the recipient's "📬 from X" badge; record correspondence (peer chips) + the
-                # directional top-line indicator on both ends; and auto-wake the recipient if it's idle.
-                threading.Thread(target=_kernel_post, daemon=True,
-                                 args=("/mail-badge", {"id": a0["id"], "from_name": frm, "from_id": frm_id})).start()
-                threading.Thread(target=_kernel_post, daemon=True,
-                                 args=("/deliver-chrome", {"recip_id": a0["id"], "recip_name": a0["name"],
-                                       "sender_id": frm_id, "sender_name": frm, "body": data.get("body", ""), "mid": mid})).start()
-                threading.Thread(target=_push, args=(a0["id"], a0), daemon=True).start()
-            else:
-                # A REMOTE peer on an attached host: still WAKE it — _push POSTs /deliver to the local kernel,
-                # whose wake-router forwards it over the host's -L tunnel to the owning kernel (which injects
-                # into the pane). The tmux status chrome above is local-only, so it's skipped for remotes.
-                threading.Thread(target=_push, args=(a0["id"], a0), daemon=True).start()
+            # Auto-wake the recipient through the kernel (POST /deliver), off-thread so send latency stays
+            # low. A local recipient's kernel enqueues the mail as its next turn; a REMOTE peer on an
+            # attached host is woken the same way — the local kernel's wake-router forwards the POST over
+            # the host's -L tunnel to the owning kernel. (Until 2026-09-11 two more POSTs rode here,
+            # /mail-badge and /deliver-chrome, for a backend since removed; the kernel answers them 404.
+            # The bus is a long-lived singleton that restarts only when its own source changes, so an
+            # older bus talking to a newer kernel keeps making those fire-and-forget POSTs and gets 404s
+            # back — harmless, and over at its next restart.)
+            threading.Thread(target=_push, args=(a0["id"], a0), daemon=True).start()
             return self._send({"ok": True, "to": to})
         if u.path == "/recall":
             frm_id = data.get("from_id", "")
@@ -2444,9 +2437,10 @@ def _log(msg):
 # ── code-staleness self-restart ─────────────────────────────────────────────────────────────────────────
 # The bus is a long-lived SINGLETON keyed on its port: `ensure` is a no-op while the old process answers, and
 # `romp refresh` restarts the KERNEL, not the bus. So a bus started before a code change keeps serving STALE
-# in-memory code indefinitely — which silently stranded mail to SDK sessions: a bus from before the "deliver
-# via the kernel, not by pasting into a tmux pane" refactor literally couldn't reach a pane-less SDK recipient,
-# and the message sat unread forever with no bounce (the user 2026-06-29). Guard: the bus fingerprints its own
+# in-memory code indefinitely — which silently stranded mail to SDK sessions: a bus from before the
+# 2026-06-26 "deliver through the kernel" refactor still reached for recipients the way the since-removed
+# backend did, could not reach an SDK recipient at all, and the message sat unread forever with no bounce
+# (the user 2026-06-29). Guard: the bus fingerprints its own
 # source at boot and the monitor re-execs into the new code the moment the file on disk changes. Pending mail
 # lives in the maildir, so nothing is lost across the swap.
 _SRC = os.path.abspath(__file__)
@@ -2490,8 +2484,11 @@ def _idle_tick(n, idle, answered=True):
     `answered` False means the kernel's listing did not answer. That HOLDS the count only when the
     bus has evidence that sessions existed: the last ANSWERED listing — in memory, or its disk twin
     for a bus that started during the blink — was non-empty (_sessions_were_listed). The outage then
-    protects the sessions that were listed before it: the kernel does not own a tmux session's life
-    and lists them again when it returns. Until 2026-09-06 local sessions' heartbeats masked an
+    protects the sessions that were listed before it: an unanswered listing is a kernel that is not
+    there to ask (mid-restart, typically), not a kernel saying the sessions are gone — the kernel owns
+    every session's life, and the one that returns lists (and resumes) the sessions it owned, whose
+    mail must still be here to deliver. An ANSWERED empty listing is the kernel's own word and counts
+    toward the stop. Until 2026-09-06 local sessions' heartbeats masked an
     outage as presence; with those loops ended in peer mode the gate reads the bit itself. A bus
     that never saw an answered non-empty listing — a kernel-less `romp mail` bus, a box whose kernel
     stopped after its sessions had all gone — keeps the autostop: the count advances every poll and
@@ -2553,19 +2550,18 @@ def _monitor(httpd, boot_fp=""):
 
 def _retry_pending():
     """RETRY deferred deliveries — the fix for stranded mail. _push (and the revive
-    wake) are single-shot: when they can't safely inject (a resume-from-summary
-    picker, a permission dialog, a prompt not yet at ❯), they correctly DEFER and
-    leave the mail in new/. But an IDLE recipient then has no Stop hook to trigger
-    the drain, so the mail strands until something else happens to arrive. Here the
-    bus periodically re-attempts delivery for every session that still has pending
-    mail (marker present) and is live; _push re-checks safety each pass and injects
-    the moment the block clears and the session is at a clean ❯ prompt. This makes
-    delivery EVENTUAL rather than single-shot — covering both the revive-picker race
-    and the live-idle-behind-a-permission-dialog case. Honors 'don't wake unless
-    needed': only sessions that actually hold mail are touched, and _push still only
-    injects at a safe idle/working ❯ prompt (never mid permission dialog or over a
-    draft it can't preserve). A dead session's marker is skipped (its mail waits for
-    revival); a stale marker (new/ already empty) is reconciled away."""
+    wake) are single-shot: when the session cannot take the wake yet (a revive still
+    loading, a permission ask in progress, a state the coarse gate skips), they
+    correctly DEFER and leave the mail in new/. But an IDLE recipient then has no
+    Stop hook to trigger the drain, so the mail strands until something else happens
+    to arrive. Here the bus periodically re-attempts delivery for every session that
+    still has pending mail (marker present) and is live; _push re-checks each pass,
+    and the kernel takes the mail the moment the session can. This makes delivery
+    EVENTUAL rather than single-shot — covering both the revive race and the
+    live-idle-behind-a-permission-ask case. Honors 'don't wake unless needed': only
+    sessions that actually hold mail are touched, and _push still only wakes a
+    session the kernel lists as idle or working. A dead session's marker is skipped
+    (its mail waits for revival); a stale marker (new/ already empty) is reconciled away."""
     if not MAILPENDING.is_dir():
         return
     markers = [m for m in MAILPENDING.iterdir() if m.is_file()]
@@ -4697,7 +4693,7 @@ Addressing is live-only: you can message only currently-live sessions (list_agen
 
 A name is not guaranteed unique. When more than one live session answers to it the send is refused and the candidates are listed as `host:name`: pick one and resend rather than assuming the first. Your OWN name is refused outright, because a message there lands in your own inbox looking exactly like a reply from someone else. Your row in list_agents is the one marked `(you)`.
 
-An isolation refusal is FINAL. A mailbox toggled off is a boundary the user drew: if send_message refuses for isolation, do NOT reroute the content through any other door (the kernel's /send route, tmux keystrokes, shared files, another peer as relay). Report the refusal to the user and stop — only they lift the isolation.
+An isolation refusal is FINAL. A mailbox toggled off is a boundary the user drew: if send_message refuses for isolation, do NOT reroute the content through any other door (the kernel's /send route, shared files, another peer as relay). Report the refusal to the user and stop — only they lift the isolation.
 
 Claude Code ships its own cross-session messaging (SendMessage / ListAgents). For peer romp sessions, use these postal tools instead: postal mail declares a kind, is tracked until answered, respects the user's per-host trust boundaries, and is visible to them; a native cross-session send has none of that, so it is invisible to the user and unaccountable. Native SendMessage remains the right tool for your own subagents and teammates inside this session — just not for peer sessions.
 """
@@ -4722,7 +4718,7 @@ MCP_TOOLS = [
     {"name": "set_working",
      "description": "Publish what you're working on (files/surface) so peers steer clear; your branch shows automatically. Empty text clears it (romp also auto-clears once your work is done and the session idles).",
      "inputSchema": {"type": "object",
-                     "properties": {"text": {"type": "string", "description": "short note, e.g. 'editing scripts/romp-postal + tmux.conf'"}}}},
+                     "properties": {"text": {"type": "string", "description": "short note, e.g. 'editing postal/postal_service.py + the drain hook'"}}}},
     {"name": "check_sent",
      "description": "See your recently sent messages and whether each was read/acted on by the recipient yet, or is still pending — instead of asking 'did you get it?'.",
      "inputSchema": {"type": "object", "properties": {}}},
@@ -4806,7 +4802,7 @@ def _mcp_call(name, args):
             return ("set_working needs its `text` argument — nothing was changed. "
                     "Pass text='' if you mean to clear your published note."), True
         text = args.get("text", "")
-        _publish_working(mid, text)        # backend-agnostic kernel store (POST /working), not the @romp-working var
+        _publish_working(mid, text)        # the kernel's working-note store (POST /working)
         return ("Cleared your 'working on' note." if not text.strip()
                 else "Published — others see: working on '%s'." % text), False
     if name == "check_sent":
@@ -4981,7 +4977,7 @@ def cli_working(argv):
     if not sid:
         sys.stderr.write("[romp mail] not in a romp session\n"); return 1
     text = " ".join(argv)
-    _publish_working(sid, text)        # backend-agnostic kernel store (POST /working), not the @romp-working var
+    _publish_working(sid, text)        # the kernel's working-note store (POST /working)
     print("[romp mail] working: %s" % (text or "(cleared)"))
     return 0
 
@@ -5021,7 +5017,7 @@ def cli_recall(argv):
 
 def cli_wake(argv):
     # For the SessionStart revive hook: ask the bus to force-deliver pending mail
-    # once this reviving session's prompt is live. Non-blocking (bus does the wait).
+    # once the kernel lists this reviving session. Non-blocking (bus does the wait).
     sid = None
     if "--id" in argv:
         i = argv.index("--id")
@@ -5040,18 +5036,6 @@ def _argval(argv, flag):
         i = argv.index(flag)
         return argv[i + 1] if i + 1 < len(argv) else None
     return None
-
-def cli_picker_check(argv):
-    """Backgrounded by `romp` on RESUME (romp-postal-service picker-check --name N --id S). Claude's "resume
-    as-is / from summary" PICKER blocks before the session starts, so NO Claude hook fires while it's up — an
-    external watcher is the only way to surface it. Routed through the kernel (POST /picker-check): the kernel
-    polls the pane + @claude-state for up to PICKER_GRACE and, if the picker is confirmed up, marks
-    @claude-state=picker + appends a 'picker' state event so the feed shows NEEDS INPUT. The bus never shells tmux."""
-    sid = _argval(argv, "--id")
-    if not sid:
-        return 0
-    _kernel_post("/picker-check", {"id": sid}, timeout=PICKER_GRACE + 5)
-    return 0
 
 def cli_drain(argv):
     # For the Stop hook. --id is authoritative (from Claude's hook payload).
@@ -5149,7 +5133,7 @@ USAGE = """romp-postal-service — the Romp Postal Service
   romp mail sent                    show your sent messages + whether each was read
   romp mail recall <to> [id]        unsend an unread message you sent to <to>
   romp mail remote                  connect this (remote) machine to your laptop's bus (legacy scheme, ROMP_POSTAL_PEERS=0)
-(internal: serve | ensure | restart | mcp | drain --id <id> | wake --id <id> | picker-check --name <n> --id <id>)"""
+(internal: serve | ensure | restart | mcp | drain --id <id> | wake --id <id>)"""
 
 def main(argv):
     if not argv:
@@ -5162,8 +5146,6 @@ def main(argv):
     if cmd == "remote":  return setup_remote(force=("--force" in rest or "-f" in rest))
     if cmd == "drain":   return cli_drain(rest)
     if cmd == "wake":    return cli_wake(rest)        # SessionStart revive hook: force-deliver on resume
-    if cmd == "picker-check": return cli_picker_check(rest)   # romp resume: surface a session stuck on the resume picker
-    if cmd == "prune":   _kernel_post("/reconcile-peers", {}); return 0   # tmux session-closed + after-rename hooks → kernel reconciles the chips
     if cmd == "sweep":   _sweep_orphans(); return 0      # bounce orphaned mail (also runs in the monitor)
     if cmd == "retry":   _retry_pending(); return 0      # re-deliver deferred/stranded mail (also runs every RETRY_INTERVAL)
     if cmd in ("-h", "--help", "help"):

@@ -54,18 +54,18 @@ class TimelineAwaiting(unittest.TestCase):
         os.utime(self.tpath, (NOW - 30, NOW - 30))       # recently-touched → discovered as a lane
         names = td / "names"; names.mkdir()
         (names / SID).write_text("testsess\t%s\t#abcdef\n" % str(cdir))
-        self.saved = (km.jd.NAMES, km.jd.PROJECTS, km.jd.GOALDIR, km.jd.STATE, km.NAMES, km._tmux_sessions)
+        self.saved = (km.jd.NAMES, km.jd.PROJECTS, km.jd.GOALDIR, km.jd.STATE, km.NAMES, km._live_map)
         km.jd.NAMES, km.jd.PROJECTS, km.jd.GOALDIR = names, proj, td / "goals"
         km.jd.STATE = td                                 # sandbox states/ + usage/ + session-flags reads
         km.NAMES = names
-        km._tmux_sessions = lambda: {SID: {"state": "waiting", "since": NOW - 100, "model": "", "effort": "",
+        km._live_map = lambda: {SID: {"state": "waiting", "since": NOW - 100, "model": "", "effort": "",
                                            "context": None, "compactPct": None, "color": None, "mode": ""}}
         (td / "states").mkdir()
         self.states = td / "states" / (SID + ".jsonl")
         km._parse_cache.pop(str(self.tpath), None)
 
     def tearDown(self):
-        (km.jd.NAMES, km.jd.PROJECTS, km.jd.GOALDIR, km.jd.STATE, km.NAMES, km._tmux_sessions) = self.saved
+        (km.jd.NAMES, km.jd.PROJECTS, km.jd.GOALDIR, km.jd.STATE, km.NAMES, km._live_map) = self.saved
         self.td.cleanup()
 
     def _lane(self, with_bars=True):
@@ -90,7 +90,7 @@ class TimelineAwaiting(unittest.TestCase):
         self.assertEqual(self._lane(with_bars=False)["awaitingBg"], "bg agents")
 
     def test_dead_lane_never_awaits(self):
-        km._tmux_sessions = lambda: {}                   # session process gone → window-dead lane
+        km._live_map = lambda: {}                   # session process gone → window-dead lane
         self.states.write_text(json.dumps({"t": T0 + 21, "awaiting": True, "why": "bg"}) + "\n")
         lane = self._lane()
         self.assertFalse(lane["live"])
@@ -99,7 +99,7 @@ class TimelineAwaiting(unittest.TestCase):
     def test_bg_task_wait_carries_the_task_descriptions(self):
         # the dashed idle-but-waiting stretch (the user 2026-07-13): the lane carries the live bg-task
         # descriptions beside the why, so the stretch's hover lists exactly what's pending
-        km._tmux_sessions = lambda: {SID: {"state": "waiting", "since": NOW - 100, "model": "", "effort": "",
+        km._live_map = lambda: {SID: {"state": "waiting", "since": NOW - 100, "model": "", "effort": "",
                                            "context": None, "compactPct": None, "color": None, "mode": "",
                                            "bgTasks": [{"task_id": "t1", "desc": "Watch for round3 copy"}]}}
         lane = self._lane()
@@ -112,16 +112,16 @@ class TimelineAwaiting(unittest.TestCase):
         # the snapshot's own; a source that cannot count ships None (the view keeps its historic plural).
         base = {"state": "waiting", "since": NOW - 100, "model": "", "effort": "", "context": None,
                 "compactPct": None, "color": None, "mode": ""}
-        km._tmux_sessions = lambda: {SID: dict(base, bgTasks=[{"task_id": "t1", "desc": "Watch for round3 copy"}])}
+        km._live_map = lambda: {SID: dict(base, bgTasks=[{"task_id": "t1", "desc": "Watch for round3 copy"}])}
         lane = self._lane()
         self.assertEqual((lane["awaitingKind"], lane["awaitingCount"]), ("task", 1))
-        km._tmux_sessions = lambda: {SID: dict(base, bgTasks=[{"task_id": "t1", "desc": "Watch for round3 copy"},
+        km._live_map = lambda: {SID: dict(base, bgTasks=[{"task_id": "t1", "desc": "Watch for round3 copy"},
                                                               {"task_id": "t2", "desc": "poll the deploy"}])}
         self.assertEqual(self._lane()["awaitingCount"], 2)
-        km._tmux_sessions = lambda: {SID: dict(base, subagents=[{"type": "explore", "since": T0 + 5}])}
+        km._live_map = lambda: {SID: dict(base, subagents=[{"type": "explore", "since": T0 + 5}])}
         lane = self._lane()
         self.assertEqual((lane["awaitingKind"], lane["awaitingCount"]), ("agents", 1), "one agent → the badge reads singular")
-        km._tmux_sessions = lambda: {SID: dict(base)}
+        km._live_map = lambda: {SID: dict(base)}
         self.states.write_text(json.dumps({"t": T0 + 21, "awaiting": True, "why": "bg agents"}) + "\n")
         lane = self._lane()
         self.assertEqual(lane["awaitingBg"], "bg agents")
@@ -173,7 +173,7 @@ class TimelineLiveTail(TimelineAwaiting):
             km.Sessions.backend_for = saved
 
     def test_dead_lane_skips_the_live_merge(self):
-        km._tmux_sessions = lambda: {}                   # session process gone
+        km._live_map = lambda: {}                   # session process gone
         called = []
         saved = km.Sessions.backend_for
         km.Sessions.backend_for = lambda sid: (called.append(sid), self._fake_backend([]))[1]

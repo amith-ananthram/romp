@@ -18,9 +18,9 @@ Session control (how romp drives Claude Code) sits behind one seam:
 
 | File | What it is |
 |---|---|
-| `session_backend.py` | The `SessionBackend` ABC, the single interface both backends implement (guarded by `tests/test_session_api.py`). |
-| `sdk_backend.py` | The Agent SDK backend (current default): an exact, event-based control channel. `docs/sdk-backend.md`. The tmux backend lives inside `kernel.py` (`TmuxBackend`). |
-| `askparse.py` | tmux backend only: recovers the AskUserQuestion picker from a captured pane (SDK sessions get it natively). |
+| `session_backend.py` | The `SessionBackend` ABC, the single interface the session backends (Claude Code, Codex) implement (guarded by `tests/test_session_api.py`). |
+| `sdk_backend.py` | The Agent SDK backend, which runs every Claude Code session: an exact, event-based control channel. Design in `plans/sdk-backend.md`. |
+| `codex_backend.py` | The Codex backend: drives OpenAI Codex sessions through `codex app-server` and materializes each thread as a transcript the read side already understands. `docs/codex.md`. |
 
 Shared lookup tables: `colormap.py` (recency tints, single source shared with
 the web bundles) and `palette.py` (session-identity colors).

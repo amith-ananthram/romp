@@ -24,10 +24,10 @@ S_TMUX = "aaaa2828-0000-0000-0000-000000000004"    # reports nothing → billing
 
 class JudgeLimitView(unittest.TestCase):
     def setUp(self):
-        self._saved = (km._tmux_sessions, km._name_of, km.jd._limit_down)
+        self._saved = (km._live_map, km._name_of, km.jd._limit_down)
         km._name_of = lambda sid: {S_LOGIN: "web", S_KEY: "api", S_INTENT: "tests",
                                    S_TMUX: "notes"}.get(str(sid))
-        km._tmux_sessions = lambda: {
+        km._live_map = lambda: {
             S_LOGIN: {"authLive": "login", "auth": "key"},   # the CLI's own report OUTRANKS the intent
             S_KEY: {"authLive": "key", "auth": "login"},
             S_INTENT: {"authLive": "", "auth": "login"},
@@ -36,7 +36,7 @@ class JudgeLimitView(unittest.TestCase):
         km.jd._limit_down = lambda: {"bucket": "five_hour", "resets_at": 1_780_000_000, "pct": 100}
 
     def tearDown(self):
-        (km._tmux_sessions, km._name_of, km.jd._limit_down) = self._saved
+        (km._live_map, km._name_of, km.jd._limit_down) = self._saved
 
     def test_no_latch_no_view(self):
         km.jd._limit_down = lambda: None

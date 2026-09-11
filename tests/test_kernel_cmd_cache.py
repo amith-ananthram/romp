@@ -92,14 +92,14 @@ class CmdCachePersistence(unittest.TestCase):
 
 
 class SessionEventsWarmTheCache(unittest.TestCase):
-    """Source pins: the three session events that predict a composer each kick the warm. Placement
+    """Source pins: the two session events that predict a composer each kick the warm. Placement
     pins (the functions are heavyweight to execute here); the warm itself is executed above."""
 
     def test_spawn_create_and_revive_prewarm(self):
         # the public _create_sdk_session and _revive_session are claim wrappers since session names are
         # reserved atomically (2026-09-08); the events that predict a composer, and so the prewarm, live
-        # in the bodies they wrap — _spawn_session kept its body (its claim sits in _spawn_session_start)
-        for fn in (km._spawn_session, km._create_sdk_session_inner, km._revive_session_inner):
+        # in the bodies they wrap
+        for fn in (km._create_sdk_session_inner, km._revive_session_inner):
             self.assertIn("_commands_for_cwd(", inspect.getsource(fn),
                           "%s must pre-warm the slash-command list" % fn.__name__)
 

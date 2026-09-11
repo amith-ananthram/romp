@@ -126,7 +126,7 @@ class SessionLevelStamp(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
         td = Path(self.td.name)
-        self._saved = (km.jd.STATE, km.jd.GOALDIR, km._tmux_sessions, km._states_awaiting_overlay)
+        self._saved = (km.jd.STATE, km.jd.GOALDIR, km._live_map, km._states_awaiting_overlay)
         km.jd.STATE = td
         km.jd.GOALDIR = td / "goals"
         km.jd.GOALDIR.mkdir(parents=True)
@@ -134,10 +134,10 @@ class SessionLevelStamp(unittest.TestCase):
         km._states_awaiting_overlay = lambda sid: None
         # a LIVE snapshot with an EMPTY bg-task set (SDK-style): sources 0-1 find nothing and fall through to
         # the stamp; the present "bgTasks" key means source 0.75 (transcript pairing) is skipped as well
-        km._tmux_sessions = lambda: {SID: {"state": "", "since": None, "subagents": [], "bgTasks": []}}
+        km._live_map = lambda: {SID: {"state": "", "since": None, "subagents": [], "bgTasks": []}}
 
     def tearDown(self):
-        km.jd.STATE, km.jd.GOALDIR, km._tmux_sessions, km._states_awaiting_overlay = self._saved
+        km.jd.STATE, km.jd.GOALDIR, km._live_map, km._states_awaiting_overlay = self._saved
         km._SESSION_STAMP_CACHE.clear()
         self.td.cleanup()
 
@@ -198,7 +198,7 @@ class SessionLevelStamp(unittest.TestCase):
 
     def test_a_dormant_session_never_resurrects_off_a_stale_stamp(self):
         self._seed(("g1", "a wait whose CLI is gone", 200))
-        km._tmux_sessions = lambda: {}          # SID not in the live set → live is None
+        km._live_map = lambda: {}          # SID not in the live set → live is None
         self.assertIsNone(km._session_awaiting(SID, "/p", True, stamp=True))
 
     def test_an_open_turn_is_working_not_awaiting_even_with_a_stamp(self):
@@ -214,7 +214,7 @@ class SessionLevelStamp(unittest.TestCase):
         km._compacting = lambda *a, **k: False
         km._interrupting = lambda *a, **k: False
         try:
-            chip = km._session_chip(SID, "/p", {"turns": []}, km._tmux_sessions()[SID], NOW)
+            chip = km._session_chip(SID, "/p", {"turns": []}, km._live_map()[SID], NOW)
         finally:
             km._session_working, km._api_error, km._compacting, km._interrupting = saved
         self.assertEqual(chip, "awaitingBg")
@@ -239,7 +239,7 @@ class SessionLevelDelegation(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
         td = Path(self.td.name)
-        self._saved = (km.jd.STATE, km.jd.GOALDIR, km._tmux_sessions,
+        self._saved = (km.jd.STATE, km.jd.GOALDIR, km._live_map,
                        km._states_awaiting_overlay, km._name_of)
         km.jd.STATE = td
         km.jd.GOALDIR = td / "goals"
@@ -248,10 +248,10 @@ class SessionLevelDelegation(unittest.TestCase):
         km._states_awaiting_overlay = lambda sid: None
         km._name_of = lambda s: "probe" if s == self.PEER else None
         # LIVE snapshot, empty bg sets (SDK-style): every live source falls through, like SessionLevelStamp
-        km._tmux_sessions = lambda: {SID: {"state": "", "since": None, "subagents": [], "bgTasks": []}}
+        km._live_map = lambda: {SID: {"state": "", "since": None, "subagents": [], "bgTasks": []}}
 
     def tearDown(self):
-        (km.jd.STATE, km.jd.GOALDIR, km._tmux_sessions,
+        (km.jd.STATE, km.jd.GOALDIR, km._live_map,
          km._states_awaiting_overlay, km._name_of) = self._saved
         km._SESSION_STAMP_CACHE.clear()
         self.td.cleanup()
@@ -337,7 +337,7 @@ class SessionLevelDelegation(unittest.TestCase):
 
     def test_a_dormant_session_never_lights_off_the_graph(self):
         self._seed(self._delegated_store())
-        km._tmux_sessions = lambda: {}
+        km._live_map = lambda: {}
         self.assertIsNone(km._session_awaiting(SID, "/p", True, stamp=True))
 
     def test_the_chip_reads_awaitingBg_end_to_end(self):
@@ -349,7 +349,7 @@ class SessionLevelDelegation(unittest.TestCase):
         km._compacting = lambda *a, **k: False
         km._interrupting = lambda *a, **k: False
         try:
-            chip = km._session_chip(SID, "/p", {"turns": []}, km._tmux_sessions()[SID], NOW)
+            chip = km._session_chip(SID, "/p", {"turns": []}, km._live_map()[SID], NOW)
         finally:
             km._session_working, km._api_error, km._compacting, km._interrupting = saved
         self.assertEqual(chip, "awaitingBg")
@@ -363,7 +363,7 @@ class KindScopedRules(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
         td = Path(self.td.name)
-        self._saved = (km.jd.STATE, km.jd.GOALDIR, km._tmux_sessions, km._states_awaiting_overlay,
+        self._saved = (km.jd.STATE, km.jd.GOALDIR, km._live_map, km._states_awaiting_overlay,
                        km._peer_answered_at)
         km.jd.STATE = td
         km.jd.GOALDIR = td / "goals"
@@ -371,10 +371,10 @@ class KindScopedRules(unittest.TestCase):
         km._SESSION_STAMP_CACHE.clear()
         km._states_awaiting_overlay = lambda sid: None
         km._peer_answered_at = lambda sid: 900          # a peer exchange answered AFTER every stamp below
-        km._tmux_sessions = lambda: {SID: {"state": "", "since": None, "subagents": [], "bgTasks": []}}
+        km._live_map = lambda: {SID: {"state": "", "since": None, "subagents": [], "bgTasks": []}}
 
     def tearDown(self):
-        (km.jd.STATE, km.jd.GOALDIR, km._tmux_sessions, km._states_awaiting_overlay,
+        (km.jd.STATE, km.jd.GOALDIR, km._live_map, km._states_awaiting_overlay,
          km._peer_answered_at) = self._saved
         km._SESSION_STAMP_CACHE.clear()
         self.td.cleanup()
@@ -432,16 +432,16 @@ class OverlayDoesNotVeto(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
         td = Path(self.td.name)
-        self._saved = (km.jd.STATE, km.jd.GOALDIR, km._tmux_sessions)
+        self._saved = (km.jd.STATE, km.jd.GOALDIR, km._live_map)
         km.jd.STATE = td
         km.jd.GOALDIR = td / "goals"
         km.jd.GOALDIR.mkdir(parents=True)
         (td / "states").mkdir()
         km._SESSION_STAMP_CACHE.clear()
-        km._tmux_sessions = lambda: {SID: {"state": "", "since": None, "subagents": [], "bgTasks": []}}
+        km._live_map = lambda: {SID: {"state": "", "since": None, "subagents": [], "bgTasks": []}}
 
     def tearDown(self):
-        km.jd.STATE, km.jd.GOALDIR, km._tmux_sessions = self._saved
+        km.jd.STATE, km.jd.GOALDIR, km._live_map = self._saved
         km._SESSION_STAMP_CACHE.clear()
         self.td.cleanup()
 
@@ -532,7 +532,7 @@ class AwaitingWake(unittest.TestCase):
         (km.jd.GOALDIR / (SID + ".json")).write_text(json.dumps({
             "rompUuid": SID, "seq": 1, "placements": {}, "status": {}, "nodes": {self.gid: nd}}))
 
-    def _wake(self, now, rec=None, tmux=None):
+    def _wake(self, now, rec=None, live_map=None):
         km._SESSION_STAMP_CACHE.clear(); km._autonudge_cache.clear()   # deterministic: never a stale cache
         if rec is not None:
             d = json.loads((Path(self.td.name) / "auto-nudge.json").read_text())
@@ -543,7 +543,7 @@ class AwaitingWake(unittest.TestCase):
         stamp = km._goal_awaiting_stamp_full(store.get("nodes", {}), self.gid)
         self.assertIsNotNone(stamp, "fixture: the goal must be stamped")
         out = km._wake_goal(SID, self.gid, stamp, nudged, self.turns, store, now,
-                            self.turns[-1], {SID: {"state": ""}} if tmux is None else tmux)
+                            self.turns[-1], {SID: {"state": ""}} if live_map is None else live_map)
         km._autonudge_cache.clear()
         return out
 
@@ -659,21 +659,17 @@ class AwaitingWake(unittest.TestCase):
         # asleep — but the branch no longer dead-ends: the stamped Working card converts once to the
         # dead-wait procedural block, so it reaches a terminal column instead of pausing forever.
         # The conversion is owner-corroborated: the session carries its launch record (the names
-        # entry both backends write — without it no owner here could answer for the sid), and the
-        # owner scan is pinned to an authoritative empty answer rather than this box's real tmux.
+        # entry both backends write — without it no owner here could answer for the sid) and no
+        # backend holds a registry row for it, which is dead history (_dead_wait_corroborated → True).
         km.jd.NAMES.mkdir(parents=True, exist_ok=True)
         (km.jd.NAMES / SID).write_text("web\t~/notes-api\t#3355aa\t#ffffff\n")
         self.addCleanup(lambda: (km.jd.NAMES / SID).unlink())
-        km._TMUX.available = lambda: True
-        km._TMUX.alive_sids = lambda t=3: set()
-        self.addCleanup(lambda: [km._TMUX.__dict__.pop(nm, None)
-                                 for nm in ("available", "alive_sids")])
         now = 1_000_000
         self._seed(at=now - 7 * 3600)
         (km.jd.STATE / "states").mkdir(parents=True, exist_ok=True)
         (km.jd.STATE / "states" / (SID + ".jsonl")).write_text(
             json.dumps({"state": "idle", "t": now - 6 * 3600}) + "\n")
-        self.assertTrue(self._wake(now, tmux={}), "the conversion fired (the tick pushes once)")
+        self.assertTrue(self._wake(now, live_map={}), "the conversion fired (the tick pushes once)")
         self.assertEqual(self.fb.sent, [], "no wake message: nothing that could answer is running")
         nd = km.jd.load_goals(SID)["nodes"][self.gid]
         self.assertTrue(nd.get("blocked"), "the card lands in Blocked, the ladder's promised terminal")
@@ -945,7 +941,7 @@ class ForkedSessionChipMatchesFeed(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
         td = Path(self.td.name)
-        self._saved = (km.jd.STATE, km.jd.GOALDIR, km.jd.SDKDIR, km.NAMES, km._tmux_sessions,
+        self._saved = (km.jd.STATE, km.jd.GOALDIR, km.jd.SDKDIR, km.NAMES, km._live_map,
                        km._states_awaiting_overlay, km._name_of, km._parse_cached)
         km.jd.STATE = td
         km.jd.GOALDIR = td / "goals"
@@ -962,7 +958,7 @@ class ForkedSessionChipMatchesFeed(unittest.TestCase):
         km._SESSION_STAMP_CACHE.clear()
         km._states_awaiting_overlay = lambda sid: None
         km._name_of = lambda s: "probe" if s == self.PEER else None
-        km._tmux_sessions = lambda: {self.FSID: {"state": "", "since": None,
+        km._live_map = lambda: {self.FSID: {"state": "", "since": None,
                                                  "subagents": [], "bgTasks": []}}
         # the WARM parse lives at the lastSid file — the anchor file is dead (no parse, ever)
         self._machine = {"turns": [{"atoms": [
@@ -972,7 +968,7 @@ class ForkedSessionChipMatchesFeed(unittest.TestCase):
         km._parse_cached = lambda p: self._machine if str(p) == self.fork_path else None
 
     def tearDown(self):
-        (km.jd.STATE, km.jd.GOALDIR, km.jd.SDKDIR, km.NAMES, km._tmux_sessions,
+        (km.jd.STATE, km.jd.GOALDIR, km.jd.SDKDIR, km.NAMES, km._live_map,
          km._states_awaiting_overlay, km._name_of, km._parse_cached) = self._saved
         km._SESSION_STAMP_CACHE.clear()
         km.jd._lastsid_memo.clear()

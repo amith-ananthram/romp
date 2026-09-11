@@ -296,7 +296,7 @@ class FederatedReveal(unittest.TestCase):
     def test_a_prefixed_sid_is_handed_to_the_merged_dashboard(self):
         # liveness is the ORIGIN kernel's truth: the local session list must not turn a remote
         # session's tap into a confirmRevive minted from the wrong world
-        with mock.patch.object(km, "_tmux_sessions", return_value={}), \
+        with mock.patch.object(km, "_live_map", return_value={}), \
              mock.patch.object(km, "_name_of", return_value="web"):
             self.assertEqual(km._reveal_msg("boxa:11111111-2222"),
                              {"type": "focus", "id": "boxa:11111111-2222", "live": True})

@@ -309,12 +309,12 @@ class PlacedTops(unittest.TestCase):
         # (every task returned): that ask must not evict what the lift filled under the same parse
         self.assertEqual(km._bg_placed_tops(SID, self.path, ["t1", "t2", "t3"]), {"t1": TOP_A, "t2": TOP_B, "t3": TOP_B})
         self.assertEqual((self._delta("bg", "idx_build"), self._delta("bg", "walk")), (1, 1))
-        saved = km._tmux_sessions
-        km._tmux_sessions = lambda: {SID: {"state": "idle", "bgTasks": []}}   # live, no live tasks
+        saved = km._live_map
+        km._live_map = lambda: {SID: {"state": "idle", "bgTasks": []}}   # live, no live tasks
         try:
             self.assertEqual(km._awaiting_task_descs(SID, self.path), [])
         finally:
-            km._tmux_sessions = saved
+            km._live_map = saved
         self.assertEqual(km._bg_tops_report()["entries"], 1, "the empty ask kept the fill: the parse is current")
         self.assertEqual(km._bg_placed_tops(SID, self.path, ["t1", "t2", "t3"]), {"t1": TOP_A, "t2": TOP_B, "t3": TOP_B})
         self.assertEqual((self._delta("bg", "hit"), self._delta("bg", "idx_build"), self._delta("bg", "walk")), (1, 1, 1),
@@ -335,11 +335,11 @@ class PlacedTops(unittest.TestCase):
     def test_the_lifts_end_of_tick_prune_evicts_a_sid_that_left_the_alive_set(self):
         km._bg_placed_tops(SID, self.path, ["t1"])
         self.assertEqual(km._bg_tops_report()["entries"], 1)
-        km._alive_sessions = lambda now, tmux: [{"sid": SID, "path": self.path}]
+        km._alive_sessions = lambda now, live_map: [{"sid": SID, "path": self.path}]
         km._mark_views_dirty = lambda *a, **k: None
         km._lift_spent_awaiting(NOW, {})                   # alive (dormant here): the entry stays
         self.assertEqual(km._bg_tops_report()["entries"], 1)
-        km._alive_sessions = lambda now, tmux: []
+        km._alive_sessions = lambda now, live_map: []
         km._lift_spent_awaiting(NOW, {})
         self.assertEqual((km._bg_tops_report()["entries"], SID in km._PLACEMENT_IDX), (0, False))
 

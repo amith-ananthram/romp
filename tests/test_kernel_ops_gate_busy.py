@@ -101,15 +101,15 @@ class CompactingAuthoritativeSignal(unittest.TestCase):
     def setUp(self):
         self._saved_sdk = km._sdk
         self._saved_parse = km._parse_cached
-        self._saved_tmux = km._tmux_sessions
+        self._saved_tmux = km._live_map
         km._parse_cached = lambda *a, **k: {"turns": []}
-        km._tmux_sessions = lambda: {}
+        km._live_map = lambda: {}
         km._compact_clicked[SID] = km.time.time()   # optimistic latch STAMPED (would hold 180s on its own)
 
     def tearDown(self):
         km._sdk = self._saved_sdk
         km._parse_cached = self._saved_parse
-        km._tmux_sessions = self._saved_tmux
+        km._live_map = self._saved_tmux
         km._compact_clicked.pop(SID, None)
 
     def test_backend_says_done_overrides_a_stamped_optimistic_latch(self):

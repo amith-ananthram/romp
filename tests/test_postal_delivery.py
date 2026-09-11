@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""The bus's live-push (auto-wake on deliver) goes through the kernel (POST /deliver), not a tmux pane-inject
-(the user 2026-06-26): drain the maildir, hand the banner to the kernel, and put the mail BACK if the kernel
-didn't inject — so the maildir-drain stays the backstop and the bus never shells tmux. Synthetic only.
+"""The bus's live-push (auto-wake on deliver) goes through the kernel (POST /deliver), which enqueues the
+mail as the session's next turn (the user 2026-06-26): drain the maildir, hand the banner to the kernel, and
+put the mail BACK if the kernel reports the session did not take it — so the maildir-drain stays the backstop
+and the bus never touches a session directly. Synthetic only.
 """
 import io
 import json
@@ -119,18 +120,19 @@ class PushThroughKernel(unittest.TestCase):
         self.assertNotIn(self.THREAD, pm.HEARTBEATS)
         self.assertEqual(self.fetches, [True], "the handler asks for thread rows")
 
-    def test_source_uses_the_kernel_deliver_not_a_tmux_inject(self):
+    def test_source_wakes_through_the_kernel_deliver(self):
         src = open(os.path.join(BIN, "romp-postal-service"), encoding="utf-8").read()
         self.assertIn('_kernel_post("/deliver"', src, "the live-push wakes via the kernel")
-        self.assertNotIn("paste-buffer", src, "no tmux pane-inject remains in the bus")
-        self.assertNotIn("capture-pane", src, "no tmux pane-capture remains in the bus")
+        # the two POSTs that painted the removed backend's status chrome are gone with it (2026-09-11)
+        self.assertNotIn('"/mail-badge"', src)
+        self.assertNotIn('"/deliver-chrome"', src)
 
 
 class PushIsChunkedUnderTheKernelsCap(unittest.TestCase):
     """The kernel reads a POST body only up to _POST_MAX_BYTES (1 MiB). The bus used to hand it ONE
     /deliver banner for a recipient's whole box: past the cap the kernel refused it with 413 before
     reading a byte, _kernel_post folded the refusal into None, and _push filed it as the same "deferred"
-    every safe-pane deferral logs and re-posted the identical banner on every retry pass, forever (review
+    every not-taken deferral logs and re-posted the identical banner on every retry pass, forever (review
     find, 2026-09-08). Now the box crosses in chunks measured against the exact wire size, a refusal is
     logged by status and reads as one, and a single message no chunk can carry is bounced to its sender."""
     SID = "11111111-2222-3333-4444-555555555555"
@@ -203,9 +205,9 @@ class PushIsChunkedUnderTheKernelsCap(unittest.TestCase):
         self.assertIn("2 msg(s) restored", line)
         self.assertIn("after 1 landed", line)
 
-    def test_a_pane_deferral_and_a_kernel_refusal_read_differently_in_the_log(self):
-        # both used to log the same "deferred" line, so a size refusal was indistinguishable from a pane
-        # that was not safe to paste into
+    def test_a_not_taken_deferral_and_a_kernel_refusal_read_differently_in_the_log(self):
+        # both used to log the same "deferred" line, so a size refusal was indistinguishable from a
+        # session that did not take the wake
         pm._drain = lambda sid: {"messages": [self._msg("m1", 1000)]}
         pm._kernel_post = lambda path, body, timeout=2: {"ok": True, "injected": False}
         self.assertFalse(pm._push(self.SID, {"id": self.SID, "state": "idle"}))

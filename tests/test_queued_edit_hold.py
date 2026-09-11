@@ -25,7 +25,7 @@ os.environ.pop("ROMP_STATE_DIR", None)
 km = load_source("romp_kernel_qhold", os.path.join(BIN, "romp-kernel"))
 sb = load_source("romp_sdk_backend_qhold", os.path.join(BIN, "romp_sdk_backend.py"))
 km._limit_hold = lambda sid: None
-km._TMUX_PROMPT_HOLD_S = 0.0
+km._PROMPT_HOLD_S = 0.0
 
 SID = "11111111-2222-3333-4444-555555555555"
 

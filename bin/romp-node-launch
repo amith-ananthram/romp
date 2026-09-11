@@ -2,9 +2,9 @@
 # romp-node-launch — start romp-manager under a romp-OWNED copy of node, named
 # "romp-node", so macOS Full Disk Access can be granted to romp ALONE.
 #
-# Why: romp-manager is the launchd-rooted process that starts the tmux server,
-# so macOS TCC treats it as the "responsible process" for every session's
-# protected-folder access (see bin/romp-manager's startTmuxServer note). Run
+# Why: romp-manager is the launchd-rooted process that spawns the kernels and,
+# through them, every session's CLI, so macOS TCC treats it as the "responsible
+# process" for every session's protected-folder access. Run
 # straight from `#!/usr/bin/env node`, that responsible process is the shared
 # /opt/homebrew/bin/node — so the Full Disk Access grant reads "node" and every
 # OTHER script that node runs inherits it. Running the manager under a COPY of

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Postal must resolve THIS session's identity from CLAUDE_CODE_SESSION_ID (the harness's reliable
-per-session fsid), NOT the tmux @romp-session-id var. The tmux var is wrong for an SDK (non-tmux) session
-whose MCP is parented under a leftover tmux pane — the user 2026-06-24 hit this: an SDK session sitting in a
-stale 'FRO' pane sent mail AS the isolated FRO session and was wrongly blocked as isolated, while the
-timeline icon (keyed on the real fsid) correctly showed it un-isolated. Synthetic only — placeholder ids.
+per-session fsid), never from the process's surroundings. The user 2026-06-24 hit the failure: an SDK
+session whose MCP had been started under another session's leftover process tree sent mail AS that
+other (isolated) session and was wrongly blocked as isolated, while the timeline icon (keyed on the real
+fsid) correctly showed it un-isolated. Synthetic only — placeholder ids.
 """
 import os
 import unittest
@@ -31,11 +31,10 @@ class SelfIdentity(unittest.TestCase):
             os.environ["CLAUDE_CODE_SESSION_ID"] = self._env
 
     def test_my_id_is_the_env_session_id(self):
-        # the env IS the identity — the bus has no tmux at all to fall back to (it was the wrong id for an
-        # SDK session in a leftover pane; the env is always right).
+        # the env IS the identity — the bus has nothing else to fall back to, by design (an identity read
+        # from the process's surroundings was the wrong id for an SDK session; the env is always right).
         os.environ["CLAUDE_CODE_SESSION_ID"] = FSID
         self.assertEqual(pm.my_id(), FSID)
-        self.assertFalse(hasattr(pm, "tmux"), "the bus has no tmux() helper to fall back to")
 
     def test_my_id_is_none_when_env_absent(self):
         os.environ.pop("CLAUDE_CODE_SESSION_ID", None)

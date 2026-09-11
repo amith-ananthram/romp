@@ -5,8 +5,8 @@ row's tag chip wears no underline; a click on the row shows the overview whose h
 ordinary chip and the count; while it shows the message box (the whole footer) is gone, no tab renders as selected
 (the active tab's fill is transparent) and the row wears the selected tab's box (the tab's fill token, the identity
 ring); selecting a tab clears it and brings the footer and the tab's fill back. T322b: a row's state words are the SHARED
-status chip: the ui tag's session is idle awaiting three background agents (a tmux-backed session a fake tmux lists, its
-wait the states overlay row), and its overview row wears `chip chip-awaitingBg` reading "Awaiting 3 agents" in the same
+status chip: the ui tag's session is idle awaiting three background agents (a Codex-backed session the Codex registry
+lists, its wait the states overlay row), and its overview row wears `chip chip-awaitingBg` reading "Awaiting 3 agents" in the same
 computed dress (fill, ink, weight,
 spacing, radius, padding, line height, rendered height, the 0.7em rule) the bar under the transcript wore for it a moment earlier; no pill of the row's
 own, the green pip beside it. With SNAP_SHOTS=<dir> the driver writes screenshots (the grouped strip with one row expanded
@@ -182,7 +182,7 @@ class ServedTabOverviewMode(unittest.TestCase):
         state = os.path.join(cls.lab, "xdg", "romp")
         claude = os.path.join(cls.lab, "claude")
         cwd = os.path.join(cls.lab, "proj")
-        for d in ("names", "sdk", "states"):
+        for d in ("names", "sdk", "states", "codex"):
             os.makedirs(os.path.join(state, d), exist_ok=True)
         os.makedirs(cwd, exist_ok=True)
         proj = os.path.join(claude, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(cwd)))
@@ -191,7 +191,7 @@ class ServedTabOverviewMode(unittest.TestCase):
         for i, (name, sid) in enumerate(SIDS.items()):
             bg, fg = COLORS[name]
             Path(state, "names", sid).write_text("%s\t%s\t%s\t%s\n" % (name, cwd, bg, fg))
-            if name != "tests":   # tests is the tmux-backed session below: the fake tmux lists it, the SDK backend never does
+            if name != "tests":   # tests is the Codex-backed session below: its registry row lists it, the SDK backend never does
                 Path(state, "sdk", sid + ".json").write_text(json.dumps(
                     {"sid": sid, "name": name, "cwd": cwd, "mode": "auto", "effort": "high", "lastSid": sid, "alive": True,
                      "model": "claude-opus-5", "liveModel": "Opus 5"}))
@@ -203,33 +203,21 @@ class ServedTabOverviewMode(unittest.TestCase):
             Path(proj, sid + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs))
         # the tests session is idle awaiting background work it dispatched. Only a LIVE session can be awaiting (every
         # source of _session_awaiting is live evidence, and the kernel's audit lifts a durable stamp no live source
-        # backs), and a lab has no running process, so tests is a tmux-backed session a FAKE tmux on the lab kernel's
-        # PATH lists (one idle romp pane, the lane format's fields; every other tmux command answers nothing), and its
-        # wait is the states overlay row the tmux Stop hook writes (source 1), carrying the kind and the count the chips
-        # word. (An SDK registration would not do: the SDK backend heals an awaiting:true row of a not-running session to
-        # false on its next look.) The state root and the fake live in the lab, so the real tmux server is never reached.
+        # backs), and a lab has no running process, so tests is a Codex-backed session: the Codex backend reads its
+        # registry at boot and lists every row not marked dead as a live, idle ("waiting") session with no process
+        # behind it, and its wait is the states overlay row a Stop hook writes (source 1), carrying the kind and the
+        # count the chips word. (An SDK registration would not do: the SDK backend heals an awaiting:true row of a
+        # not-running session to false on its next look.)
         Path(state, "states", SIDS["tests"] + ".jsonl").write_text(json.dumps(
             {"t": t0 + 20, "awaiting": True, "why": "waiting on 3 background agents", "kind": "agents", "count": 3}) + "\n")
-        fake_bin = os.path.join(cls.lab, "bin")
-        os.makedirs(fake_bin, exist_ok=True)
-        lane = "1|%s|waiting|%d|Opus 5|high|||%s|auto" % (SIDS["tests"], t0 + 10, COLORS["tests"][0])
-        Path(fake_bin, "tmux").write_text("#!/bin/sh\n"
-            "# the lab's tmux: one romp session (tests), idle; list-sessions answers the format it is asked for, all else is silent\n"
-            "fmt=''; while [ $# -gt 0 ]; do case \"$1\" in -F) fmt=\"$2\"; shift;; esac; shift; done\n"   # loop-ok: a finite argv walk
-            "case \"$fmt\" in\n"
-            "  '') exit 0;;\n"
-            "  *'#{@claude-state}'*) printf '%s\\n' '" + lane + "';;\n"
-            "  *'#{session_name}'*) printf '%s\\t%s\\n' '" + SIDS["tests"] + "' tests;;\n"
-            "  *'#{@romp-session-id}'*) printf '%s\\n' '" + SIDS["tests"] + "';;\n"
-            "esac\n")
-        os.chmod(os.path.join(fake_bin, "tmux"), 0o755)
-        cls.fake_path = fake_bin + os.pathsep + os.environ.get("PATH", "")
+        Path(state, "codex", "registry.json").write_text(json.dumps({SIDS["tests"]: {
+            "tid": "thread-" + SIDS["tests"][:8], "name": "tests", "cwd": cwd, "model": "gpt-5-codex", "effort": "high",
+            "color": COLORS["tests"][0], "mode": "sandboxed"}}))
         # the tags: two, holding three of the four sessions; the fourth is the untagged trail
         Path(state, "timeline-views.json").write_text(json.dumps({"active": "all", "tags": TAGS}))
         Path(state, "usage.json").write_text(json.dumps({"five_hour": {"pct": 10}, "seven_day": {"pct": 10}}))
         cls.port, cls.token = _free_port(), "testtok-overview"
-        env = _lab.kernel_env(cls.lab, claude, dist, cls.port, cls.token, ROMP_HOST_NAME="TESTHOST",
-                              PATH=cls.fake_path, ROMP_TMUX_AVAILABLE="1")   # the fake tmux above lists the tests session
+        env = _lab.kernel_env(cls.lab, claude, dist, cls.port, cls.token, ROMP_HOST_NAME="TESTHOST")
         cls.klog = os.path.join(cls.lab, "kernel.log")
         cls.kernel = subprocess.Popen([os.path.join(BIN, "romp-kernel")], stdout=open(cls.klog, "w"), stderr=subprocess.STDOUT, env=env)
         for _ in range(120):

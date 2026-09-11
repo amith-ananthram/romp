@@ -97,7 +97,7 @@ class ControlRouteLatency(unittest.TestCase):
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
         self._saved_push = km._push_all
         self.builds = []
-        def slow_build(tmux=None):
+        def slow_build(live_map=None):
             self.builds.append(time.time())
             time.sleep(2.0)
         km._push_all = slow_build

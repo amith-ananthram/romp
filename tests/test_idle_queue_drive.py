@@ -121,7 +121,7 @@ def _backlog(count=3, minute0=14):
 
 class WakeTail(unittest.TestCase):
     """kernel._undelivered_wake_tail — the trailing unconsumed enqueues, from the transcript's own
-    queue-operation records (the authoritative queue). The display fold _pending_queued is a SEPARATE
+    queue-operation records (the authoritative queue). The ledger reader _pending_ledger is a SEPARATE
     reader with its own semantics — it credits a dequeue, which this one deliberately does not — and the
     two agree only on the record kinds whose meaning is unambiguous: a content-addressed remove, a
     content-less remove taking the oldest, and popAll withdrawing everything."""
@@ -159,7 +159,7 @@ class WakeTail(unittest.TestCase):
         entries, _ = self._tail(_turn() + [_qop("enqueue", _wrap(0)),
                                            _qop("enqueue", _wrap(1), ts=TS % (15, 0)), _qop("remove")])
         self.assertEqual([e["text"] for e in entries], [_wrap(1)],
-                         "no content → FIFO, exactly as _pending_queued folds the same records")
+                         "no content → FIFO, exactly as _queue_ledger_step folds the same records")
 
     def test_popAll_withdraws_the_whole_tail(self):
         # popAll — the whole queue recalled in one record — was unhandled here too (the user 2026-08-26),
@@ -309,7 +309,7 @@ class DriveTick(unittest.TestCase):
 
     def _tick(self, now=None):
         with mock.patch.object(km, "_sdk", lambda: self.fb), \
-             mock.patch.object(km, "_alive_sessions", lambda now, tmux: self.alive):
+             mock.patch.object(km, "_alive_sessions", lambda now, live_map: self.alive):
             km._idle_queue_drive_tick(int(time.time()) if now is None else now, {SID: {}})
 
     def test_wake_signals_reach_the_backend(self):
@@ -413,14 +413,14 @@ class DriveTick(unittest.TestCase):
     def test_sessions_of_other_backends_are_skipped(self):
         self.fb.owned = set()
         self._tick()
-        self.assertEqual(self.fb.calls, [], "tmux CLIs are interactive — they deliver their own queue")
+        self.assertEqual(self.fb.calls, [], "a session another backend owns is not the SDK drive's to deliver")
 
     def test_the_pusher_cycle_runs_the_tick(self):
-        # (now, tmux) — the cycle's ONE liveness snapshot, not a per-job fresh read (2026-08-10 CPU fix).
+        # (now, live_map) — the cycle's ONE liveness snapshot, not a per-job fresh read (2026-08-10 CPU fix).
         # Scoped to the CYCLE's body: the whole-file pin also matched the tick's own def line, so
         # deleting the wiring kept every test green (2026-08-18 review, mutation-verified).
         src = inspect.getsource(km._pusher_cycle_jobs)
-        self.assertIn("_idle_queue_drive_tick(now, tmux)", src,
+        self.assertIn("_idle_queue_drive_tick(now, live_map)", src,
                       "the pusher cycle drives queued wake signals server-side — unattended, no client needed")
 
 
@@ -777,7 +777,7 @@ class DriveDelivery(unittest.TestCase):
 class QueuedBubbleDisplay(unittest.TestCase):
     """A driven wrapper parked in the SDK pending queue must never render as the user's queued
     message (the 2026-06-30 regression: a raw <task-notification> shown as '1 queued message'). The
-    _genuine_queued filter used to exist only on the tmux transcript fold; the drive now routes
+    _genuine_queued filter used to exist only on the terminal backend's transcript fold; the drive now routes
     wrappers through the SDK's _pending/reg queue, which build_session reads raw — so the bubble
     build filters too, keeping idx aligned with the backend position for cancelQueued."""
 
@@ -815,7 +815,7 @@ class QueuedBubbleDisplay(unittest.TestCase):
              mock.patch.object(km.Sessions, "backend_for", staticmethod(lambda sid: be)), \
              mock.patch.object(km, "_captions", lambda sid: {}), \
              mock.patch.object(km, "_limit_hold", lambda sid: None):
-            m = km.build_session(SID, self.now, tmux={})
+            m = km.build_session(SID, self.now, live_map={})
         self.assertIsNotNone(m, "the session must build")
         return m["events"]
 
@@ -879,7 +879,7 @@ class OvernightShape(unittest.TestCase):
     def test_the_overnight_backlog_drives_one_turn(self):
         with mock.patch.object(self.be, "_ensure", lambda sid, **kw: self.fake), \
              mock.patch.object(km, "_sdk", lambda: self.be), \
-             mock.patch.object(km, "_alive_sessions", lambda now, tmux: self.alive):
+             mock.patch.object(km, "_alive_sessions", lambda now, live_map: self.alive):
             km._idle_queue_drive_tick(int(time.time()), {SID: {}})
             # the drive runs on a worker thread from the tick — wait for it (bounded)
             for _ in range(100):

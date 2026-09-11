@@ -54,7 +54,7 @@ def _chat_client(app="chat"):
 class CloseConfirmRidesTheKill(unittest.TestCase):
     def setUp(self):
         self.be = FakeBackend()
-        self.saved = (km._sdk, km._send_to_app, km._push_soon, km._chat_tab_sessions, km._tmux_sessions,
+        self.saved = (km._sdk, km._send_to_app, km._push_soon, km._chat_tab_sessions, km._live_map,
                       km._comment_kill_all, km._record_death, list(km._clients))
         km._sdk = lambda: self.be
         self.events = []                                   # every side effect, in order
@@ -63,13 +63,13 @@ class CloseConfirmRidesTheKill(unittest.TestCase):
         km._comment_kill_all = lambda sid, be: None
         km._record_death = lambda sid, ts, why: self.events.append(("death", sid, why))
         # the tab builder reads the backend's CURRENT liveness — so after the kill it lists only the survivor
-        km._tmux_sessions = lambda: {s: {} for s in self.be.alive}
+        km._live_map = lambda: {s: {} for s in self.be.alive}
         km._chat_tab_sessions = lambda now, tmux: [{"sid": s, "name": "web" if s == KEPT else "api", "path": "/nonexistent"}
                                                    for s in (KEPT, ENDED) if s in tmux]
         del km._clients[:]
 
     def tearDown(self):
-        (km._sdk, km._send_to_app, km._push_soon, km._chat_tab_sessions, km._tmux_sessions,
+        (km._sdk, km._send_to_app, km._push_soon, km._chat_tab_sessions, km._live_map,
          km._comment_kill_all, km._record_death, clients) = self.saved
         del km._clients[:]
         km._clients.extend(clients)

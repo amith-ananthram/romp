@@ -62,14 +62,14 @@ class _TagRouteHarness(unittest.TestCase):
         self._state = km.jd.STATE
         km.jd.STATE = Path(self.td.name)
         km._flags_cache.clear()
-        self._saved = (km._tmux_sessions, km._live_names, km._mark_views_dirty)
-        km._tmux_sessions = lambda: {}
+        self._saved = (km._live_map, km._live_names, km._mark_views_dirty)
+        km._live_map = lambda: {}
         km._live_names = lambda tm: {"web": SID, "api": SID2}
         self.dirty = []                                       # the routes must poke the views push
         km._mark_views_dirty = lambda: self.dirty.append(1)
 
     def tearDown(self):
-        (km._tmux_sessions, km._live_names, km._mark_views_dirty) = self._saved
+        (km._live_map, km._live_names, km._mark_views_dirty) = self._saved
         km.jd.STATE = self._state
         km._flags_cache.clear()
         self.td.cleanup()

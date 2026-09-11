@@ -56,7 +56,7 @@ class LaneEndsAtActivity(unittest.TestCase):
         self.tpath = self.pdir / (SID + ".jsonl")
         (td / "names").mkdir()
         (td / "names" / SID).write_text("web\t%s\t#abcdef\n" % str(cdir))
-        self.saved = (jd.STATE, jd.PROJECTS, km.NAMES, km._tmux_sessions)
+        self.saved = (jd.STATE, jd.PROJECTS, km.NAMES, km._live_map)
         jd._rebind_state(td)
         jd.PROJECTS = proj
         km.NAMES = td / "names"
@@ -64,13 +64,13 @@ class LaneEndsAtActivity(unittest.TestCase):
         self.states = td / "states" / (SID + ".jsonl")
         self.live = {SID: {"state": "waiting", "since": T_STOP, "model": "", "effort": "",
                            "context": None, "compactPct": None, "color": None, "mode": ""}}
-        km._tmux_sessions = lambda: self.live
+        km._live_map = lambda: self.live
         km._parse_cache.pop(str(self.tpath), None)
         with km._LANES_LOCK:
             km._lanes_memo.pop(SID, None)
 
     def tearDown(self):
-        state, jd.PROJECTS, km.NAMES, km._tmux_sessions = self.saved
+        state, jd.PROJECTS, km.NAMES, km._live_map = self.saved
         jd._rebind_state(state)
         km._parse_cache.pop(str(self.tpath), None)
         self.td.cleanup()

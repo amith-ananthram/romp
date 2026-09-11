@@ -244,7 +244,7 @@ class FoldMatrix(unittest.TestCase):
         (names / SND).write_text("web\t%s\t#abcdef\n" % str(cdir))
         (names / WKR).write_text("api\t%s\t#ffaa00\n" % str(cdir))
         self.saved = (jd.NAMES, jd.PROJECTS, jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR, jd.STATE,
-                      km.NAMES, km._tmux_sessions, km._GLOBAL_CLAUDE_MD, jd.gist_llm)
+                      km.NAMES, km._live_map, km._GLOBAL_CLAUDE_MD, jd.gist_llm)
         jd.gist_llm = lambda p: ""
         km._autonudge_cache.clear()
         km._GLOBAL_CLAUDE_MD = td / "no-global-claude.md"
@@ -252,7 +252,7 @@ class FoldMatrix(unittest.TestCase):
         jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR = td / "captions", td / "archive", td / "goals"
         jd.STATE = td
         km.NAMES = names
-        km._tmux_sessions = lambda: {
+        km._live_map = lambda: {
             SND: {"state": "idle", "since": NOW - 100, "model": "", "effort": "",
                   "context": None, "compactPct": None, "color": None},
             WKR: {"state": "idle", "since": NOW - 100, "model": "", "effort": "",
@@ -261,7 +261,7 @@ class FoldMatrix(unittest.TestCase):
 
     def tearDown(self):
         (jd.NAMES, jd.PROJECTS, jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR, jd.STATE,
-         km.NAMES, km._tmux_sessions, km._GLOBAL_CLAUDE_MD, jd.gist_llm) = self.saved
+         km.NAMES, km._live_map, km._GLOBAL_CLAUDE_MD, jd.gist_llm) = self.saved
         km._autonudge_cache.clear()
         self.td.cleanup()
 

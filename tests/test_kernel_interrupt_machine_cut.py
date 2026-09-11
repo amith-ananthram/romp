@@ -298,13 +298,26 @@ class _FeedHarness(unittest.TestCase):
         return g
 
     def _stub_send(self):
+        # the nudge hands its body to the session's backend (Sessions.backend_for(sid).send); a fake
+        # backend records what was sent, refusing every other op like the unowned route it extends
         sent = []
-        saved = km._tmux_send, jd.optimistic_followup
-        km._tmux_send = lambda name, body, **kw: sent.append((name, body))
+
+        class _Recording(km._UnownedBackend):
+            def owns(self, sid):
+                return True
+
+            def send(self, sid, text):
+                sent.append((sid, text))
+                return True
+
+        fake = _Recording()
+        saved = km.Sessions.backend_for, jd.optimistic_followup
+        km.Sessions.backend_for = staticmethod(lambda sid: fake)
         jd.optimistic_followup = lambda sid, gid: True
 
         def restore():
-            km._tmux_send, jd.optimistic_followup = saved
+            km.Sessions.backend_for = staticmethod(saved[0])
+            jd.optimistic_followup = saved[1]
         return sent, restore
 
     def _card(self, item_id=None):
