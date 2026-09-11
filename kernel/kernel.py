@@ -17557,8 +17557,10 @@ def _ensure_postal_bus():
     no-ops when the bus is already up, so the kernel can insist at every boot. Absolute paths: a
     bootstrap-started kernel's non-login shell has neither the repo's bin/ nor a guaranteed PATH."""
     try:
-        subprocess.run([sys.executable, str(BIN / "romp-postal-service"), "ensure"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+        r = subprocess.run([sys.executable, str(BIN / "romp-postal-service"), "ensure"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, timeout=30)
+        if r.returncode != 0:   # the bus said no (2026-09-10: it refuses the machine's fixed port under a test): say so here, where the kernel's log is
+            sys.stderr.write("postal bus ensure refused (exit %d): %s\n" % (r.returncode, (r.stderr or "").strip()[-2000:]))
     except Exception:
         sys.stderr.write("postal bus ensure failed:\n%s" % traceback.format_exc())
 
