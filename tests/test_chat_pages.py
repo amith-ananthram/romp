@@ -589,6 +589,30 @@ class ZeroMaterialization(Harness):
         self.assertTrue(r["events"])
 
 
+class EchoPlacement(Harness):
+    """Review low 3: a stale echo stamped in the pre-cut history goes into the first post-cut turn, never into a restored
+    pre-cut turn (its atoms are the document's, its spans written, and a synthetic turn among them would move the floor)."""
+
+    def test_an_echo_before_the_cut_joins_the_first_tail_turn_and_the_pre_turns_stand(self):
+        recs = transcript(NOW - 86400, turns=60, compact_every=25)
+        self.write(recs)
+        self.document()
+        m = self.restored()
+        tree = km._parse(self.leaf, SID, NOW)
+        cut = tree["cutTurn"]; turns = tree["turns"]
+        early = turns[3]["t"] + 1                                          # inside a pre-cut turn's window
+        gap = turns[cut - 1]["end"] + 1 if turns[cut]["t"] - turns[cut - 1]["end"] > 2 else turns[2]["end"] + 1   # a gap among pre-turns
+        echoes = [{"type": "user", "uuid": "echo-1", "session_id": SID, "t": early, "_echo_text": "a note sent yesterday", "message": {"role": "user", "content": "a note sent yesterday"}},
+                  {"type": "user", "uuid": "echo-2", "session_id": SID, "t": gap, "_echo_text": "another", "message": {"role": "user", "content": "another"}}]
+        out, placed = km._place_stale_echoes(turns, echoes)
+        self.assertEqual(len(out), len(turns), "no synthetic turn among the pre-cut turns")
+        for i in range(cut):
+            self.assertIs(out[i], turns[i], "a pre-cut turn is untouched")
+        self.assertEqual({p[0] for p in placed}, {cut}, "both echoes joined the first post-cut turn")
+        self.assertEqual(sorted(a["uuid"] for a in out[cut]["atoms"] if a.get("_echo_text")), ["echo-1", "echo-2"])
+        self.assertEqual(em.asm_index_stats()["materialized"], 0, "…and no pre-cut atom was built for it")
+
+
 class UniqueUuids(Harness):
     def test_every_event_carries_a_uuid_unique_within_the_list(self):
         recs = transcript(NOW - 86400, turns=60, compact_every=25)

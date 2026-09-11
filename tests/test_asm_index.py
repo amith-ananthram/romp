@@ -17,6 +17,7 @@ import sys
 import unittest
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import test_asm_checkpoint as T                                   # noqa: E402  the stage 4a harness, its event model
+from test_asm_checkpoint_served import transcript                 # noqa: E402  the served fixture's builder: many turns, compacting
 em, G = T.em, T.G
 SID = T.SID
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
@@ -27,7 +28,7 @@ class Restored(T.Harness):
         super().setUp()
         with em._MAT_LOCK:                                        # the index's counters and LRU are process-wide: per test
             em._MAT_LRU.clear()
-            em._ASM_INDEX_STATS.update(materialized=0, materializedBy={}, resident=0, evictions=0, restoredTurns=0)
+            em._ASM_INDEX_STATS.update(materialized=0, materializedBy={}, resident=0, evictions=0, restoredTurns=0, rowDecodes=0)
 
     def restored_tree(self, name="compaction_atom"):
         records, sent = G.SINGLE_FILE[name]
@@ -51,6 +52,7 @@ class ListSurface(Restored):
         self.assertIsInstance(la, em.LazyAtoms); self.assertIsInstance(la, list)
         n = len(la); self.assertGreater(n, 0)
         self.assertEqual(em.asm_index_stats()["materialized"], 0, "nothing built by the restore or the parse join: %s" % em.asm_index_stats()["materializedBy"])
+        self.assertEqual(em.asm_index_stats()["rowDecodes"], 0, "…and no row decoded: no orphan marker, no pre-cut walk (review medium 2)")
         a0 = la[0]
         self.assertIsInstance(a0, dict); self.assertEqual(a0["uuid"], pre["uuids"][0])
         self.assertIs(la[0], a0, "the built atom is memoized in its slot")
@@ -170,6 +172,73 @@ class Versions(Restored):
         self.parse(path, modes)
         self.assertEqual(modes, ["full"]); self.assertGreaterEqual(em.asm_checkpoint_stats()["fallbacks"].get("identity", 0), 1)
         self.assertEqual(em.asm_index_stats()["materialized"], 0)
+
+
+class Coverage(Restored):
+    """Review medium 1: the section must cover every pre-cut row, proven at write and at restore."""
+
+    def test_a_tree_cut_short_writes_no_section_and_the_document_restores_the_atoms(self):
+        path = self.write("cov-short", transcript(T.NOW - 86400, turns=40, compact_every=20))   # many turns before the last compaction
+        whole = self.parse(path)
+        n_pre = max(i for i, t in enumerate(whole["turns"]) if any(a.get("subtype") == "compact_boundary" for a in t["atoms"]))
+        self.assertGreaterEqual(n_pre, 2, "the fixture has several pre-cut turns")
+        short = {**whole, "turns": whole["turns"][:1]}                   # a rollback armed early: the tree stops after one turn
+        em._ASM_CKPT_STATS["skipped"] = {}
+        self.assertTrue(em.asm_checkpoint_write(path, SID, tree=short), em.asm_checkpoint_stats())
+        self.assertEqual(em.asm_checkpoint_stats()["skipped"].get("turnsCoverage"), 1, "the short section was refused, counted")
+        d = T._doc(path)
+        self.assertIsNone(d["turns"], "a turnless document")
+        self.fresh(); modes = []
+        tree = self.parse(path, modes)
+        self.assertEqual(modes, ["restore"]); self.assertFalse(any(isinstance(t, em.PreTurn) for t in tree["turns"]), "the atoms-only restore")
+        em.hydrate(tree, SID)
+        self.assertEqual(T._strip(tree), T._strip(whole), "…and it equals the whole")
+
+    def test_a_section_missing_a_row_falls_back_whole_at_restore(self):
+        path = self.write("cov-miss", transcript(T.NOW - 86400, turns=40, compact_every=20))
+        whole = self.parse(path)
+        self.assertTrue(self.doc(path), em.asm_checkpoint_stats())
+        d = T._doc(path)
+        self.assertGreaterEqual(len(d["turns"]), 2)
+        cut = dict(d, turns=d["turns"][:-1])                            # a section short of its last turn's rows
+        cut["treeIdentity"] = em._tree_identity_of_doc(cut["turns"], cut.get("identity"))   # its digest agreeing with itself
+        T._write_doc(path, cut)
+        self.fresh(); modes = []
+        got = self.parse(path, modes)
+        self.assertEqual(modes, ["full"]); self.assertGreaterEqual(em.asm_checkpoint_stats()["fallbacks"].get("coverage", 0), 1)
+        self.assertEqual(T._strip(got), T._strip(whole))
+
+    def test_a_synthesized_atom_leading_the_first_turn_is_in_the_section(self):
+        """An idle span from before the first record leads the first turn (a non-opener opens the turn the prompt then
+        absorbs into); its row is a synthesized one and the section covers it like a record's."""
+        name = "queued_new_turn"
+        records, sent = G.SINGLE_FILE[name]
+        recs = T.compacting_variant(records(), "idl")
+        t0 = min(em.parse_z(r["timestamp"]) for r in recs if r.get("timestamp"))
+        path = self.write("cov-idle", recs, states=[{"t": int(t0) - 100, "state": "waiting"}, {"t": int(t0) + 5, "state": "working"}], sent=sent)
+        whole = self.cold(path)
+        self.assertEqual(whole["turns"][0]["atoms"][0]["type"], "idle", "the idle span leads the whole parse's first turn")
+        self.fresh(); self.parse(path)
+        self.assertTrue(self.doc(path), em.asm_checkpoint_stats())
+        d = T._doc(path)
+        self.assertIsNotNone(d["turns"]); self.assertIsNone(d["turns"][0]["uuids"][0], "the idle atom's row leads the section's first turn")
+        row = d["atoms"][d["turns"][0]["atoms"][0]]
+        self.assertEqual((row.get("syn"), "m" in row, row["s"]["type"]), (1, False, "idle"), "…as a synthesized row (an idle span has no message)")
+        got, modes, n_lazy = self.restored(path)
+        self.assertEqual(modes, ["restore"]); self.assertEqual(got, whole)
+
+    def test_a_tree_that_yields_no_section_is_not_rewritten_at_every_settle(self):
+        name = "compaction_atom"
+        records, sent = G.SINGLE_FILE[name]
+        path = self.write("cov-none", records(), sent=sent)
+        self.parse(path)
+        none_tree = {"turns": []}
+        self.assertTrue(em.asm_checkpoint_write(path, SID, tree=none_tree))
+        em._ASM_CKPT_STATS["skipped"] = {}
+        self.assertFalse(em.asm_checkpoint_write(path, SID, tree=none_tree), "the same tree: remembered as yielding none")
+        self.assertEqual(em.asm_checkpoint_stats()["skipped"].get("written"), 1)
+        self.assertTrue(em.asm_checkpoint_write(path, SID, tree=self.parse(path)), "another tree: written again, with its section")
+        self.assertIsNotNone(T._doc(path)["turns"])
 
 
 class AuditGuard(unittest.TestCase):

@@ -31409,6 +31409,10 @@ def _place_stale_echoes(turns, echoes):
     scan of every atom (three merges per push cycle while a dropped echo exists)."""
     out = list(turns)
     key = lambda a: (a.get("t", 0), a.get("_seq", 0))
+    # a restored pre-cut turn (T323 stage 4c) takes no echo: its atoms are the document's, its segment spans written, and
+    # a synthetic turn inserted among them would move the render floor's index; an echo whose time falls in the pre-cut
+    # history goes into the FIRST post-cut turn instead (review low 3)
+    first_tail = next((k for k, turn in enumerate(out) if not turn.get("pre")), None)
     gaps = {}                                   # insertion index in `turns` → the echoes sent in that gap
     dest = []                                   # (the destination turn dict, echo) per echo, resolved to indexes below
     copied = set()                              # turns copied for a write: ONCE each, so every echo destined for the
@@ -31423,7 +31427,9 @@ def _place_stale_echoes(turns, echoes):
                 i = k
             else:
                 break
-        if i is not None and t <= _turn_activity_end(out[i]):
+        if i is not None and out[i].get("pre"):
+            i = first_tail                      # into the first post-cut turn, whatever its window
+        if i is not None and (out[i].get("t", 0) > t or t <= _turn_activity_end(out[i])):
             if i not in copied:
                 out[i] = dict(out[i])
                 copied.add(i)
@@ -31434,6 +31440,15 @@ def _place_stale_echoes(turns, echoes):
             gaps.setdefault(0 if i is None else i + 1, []).append(a)
     for idx in sorted(gaps, reverse=True):      # back to front, so earlier indices stay valid
         atoms = sorted(gaps[idx], key=key)
+        if first_tail is not None and idx <= first_tail and first_tail < len(out) and out[first_tail].get("echoTurn") is None \
+                and any(turn.get("pre") for turn in out[:idx]):
+            k = first_tail                      # a gap among the pre-cut turns: the echoes join the first post-cut turn
+            if k not in copied:
+                out[k] = dict(out[k]); copied.add(k)
+            out[k]["atoms"] = sorted(list(out[k]["atoms"]) + atoms, key=key)
+            out[k]["placedEchoes"] = list(out[k].get("placedEchoes") or []) + [a.get("uuid") for a in atoms]
+            dest.extend((out[k], a) for a in atoms)
+            continue
         turn = {"id": "live-" + str(atoms[0].get("uuid") or atoms[0].get("t", 0)), "trigger": None,
                 "t": atoms[0].get("t", 0), "end": atoms[-1].get("t", 0), "ended": True, "atoms": atoms,
                 "echoTurn": True, "placedEchoes": [a.get("uuid") for a in atoms]}
