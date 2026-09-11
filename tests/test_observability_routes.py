@@ -157,13 +157,13 @@ class ObservabilityRoutes(unittest.TestCase):
         the pusher's own copy would have been reused."""
         calls = []
 
-        def counting_build(now, tmux):
+        def counting_build(now, live):
             calls.append(now)
             return {"type": "feed", "asks": [], "working": [], "awaiting": [], "now": now}
 
         km.build_feed = counting_build
         sig = ["a"]
-        km._fleet_view_sig = lambda now, tmux: ("SIG", sig[0])   # the inputs' fingerprint, under the test's hand
+        km._fleet_view_sig = lambda now, live: ("SIG", sig[0])   # the inputs' fingerprint, under the test's hand
 
         def age_past_the_floor():
             pf = km._PURE_FEED
@@ -200,7 +200,7 @@ class ObservabilityRoutes(unittest.TestCase):
         saved_state = (list(km._last_tab_order), km._feed_wire, km._bars_wire)
         asked, consulted = [], []
 
-        def recording_feed(now, tmux, sig, connect=False):
+        def recording_feed(now, live, sig, connect=False):
             asked.append(sig)
             return {"type": "feed", "asks": [], "working": [], "awaiting": [], "now": now, "buildId": 1}
 
@@ -210,10 +210,10 @@ class ObservabilityRoutes(unittest.TestCase):
 
         km._cached_feed = recording_feed
         km._feed_audience = witnessed_audience
-        km._fleet_view_sig = lambda now, tmux: ("SIG",)
-        km._chat_tab_sessions = lambda now, tmux: []
+        km._fleet_view_sig = lambda now, live: ("SIG",)
+        km._chat_tab_sessions = lambda now, live: []
         km._retry_parked_creates = lambda: None
-        timeline = lambda now, tmux, *a, **kw: {"lanes": [], "turns": {}, "judging": [], "messages": [], "now": now}
+        timeline = lambda now, live, *a, **kw: {"lanes": [], "turns": {}, "judging": [], "messages": [], "now": now}
         km.build_timeline = timeline
         km._cached_timeline = timeline
         pusher_built, route_says = {}, {}
@@ -262,7 +262,7 @@ class ObservabilityRoutes(unittest.TestCase):
 
         calls = []
 
-        def blocking_build(now, tmux):
+        def blocking_build(now, live):
             calls.append(now)
             parked.put("build")
             release.wait(10)
@@ -293,7 +293,7 @@ class ObservabilityRoutes(unittest.TestCase):
         feedServe on /version and the `feed` build kind on /perf are the PUSHER's cost, read as 'a
         rising build count on a quiet board is a bug signature'; a monitoring poller's builds under
         those numbers would forge that signature, or bury a pusher regression in a poller's noise."""
-        km.build_feed = lambda now, tmux: {"type": "feed", "asks": [], "working": [], "awaiting": [], "now": now}
+        km.build_feed = lambda now, live: {"type": "feed", "asks": [], "working": [], "awaiting": [], "now": now}
         views0 = dict(km._VIEW_STATS)
         builds0 = km._PERF_STATS.snapshot()["builds"]
         self.assertEqual(self._get("/feed.json")[0], 200)     # cold: a build
@@ -317,7 +317,7 @@ class ObservabilityRoutes(unittest.TestCase):
         pusher's slot as it found it."""
         calls = []
 
-        def counting_build(now, tmux):
+        def counting_build(now, live):
             calls.append(now)
             return {"type": "feed", "asks": [], "working": [], "awaiting": [], "now": now, "fresh": True}
 

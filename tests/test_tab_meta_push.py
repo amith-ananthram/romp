@@ -72,7 +72,7 @@ class TabMetaPush(unittest.TestCase):
         km.Sessions.backend_for = staticmethod(lambda sid: BE())
         # ONE shown session whose row reads the registry live — the same store the real
         # _chat_tab_sessions labels rows from — so the push assembles from current truth each cycle.
-        km._chat_tab_sessions = lambda now, tmux: [
+        km._chat_tab_sessions = lambda now, live: [
             {"sid": SID, "name": self._name(), "path": os.path.join(self.tmp, "none.jsonl"),
              "anchor": SID}]
         km._cached_feed = lambda *a, **k: None   # no feed build — this pins the tabOrder frame only

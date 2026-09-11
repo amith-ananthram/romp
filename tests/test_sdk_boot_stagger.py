@@ -11,6 +11,7 @@ synchronize on the stub's own call events.
 """
 import os
 import queue
+import sys
 import tempfile
 import threading
 import unittest
@@ -379,6 +380,77 @@ class EnsureNoSpawnPaths(unittest.TestCase):
         fired = []
         self.assertIs(be._ensure(sid, on_boot_settled=lambda: fired.append(1)), alive)
         self.assertEqual(fired, [1], "an already-live session holds no slot")
+
+
+class BootAttachesOffTheStagger(unittest.TestCase):
+    """The restart-path work (2026-09-11): a boot RE-ATTACH to a live session host is a socket connect, not a claude
+    launch, so it runs first and on its own wider bound (BOOT_ATTACH_CONCURRENCY), never on the spawn stagger's
+    three slots; the reconcile reports censusDone before any session starts and attachDone once the last attach
+    settled (immediately when there is none). Deterministic: a stub _ensure, a stub lease reading."""
+
+    def _host_lease(self, d, sid, cli, host):
+        sb.write_lease(d, {"sid": sid, "fsid": sid, "pid": cli, "start": "1", "holder": {"pid": host, "start": "2", "kind": "host"},
+                           "version": "", "t": __import__("time").time()})
+
+    def test_attaches_run_first_all_at_once_and_cold_launches_keep_the_stagger(self):
+        d = tempfile.mkdtemp()
+        phases = []
+        be = sb.SdkBackend(d, "/bin/true", lambda *a, **k: None, log=lambda *a, **k: None, boot_phase=phases.append)
+        attach_sids = ["22222222-aaaa-0000-0000-%012d" % i for i in range(6)]
+        cold = _cut_regs(d, 4)
+        regs = []
+        alive = {}
+        for i, sid in enumerate(attach_sids):
+            regs.append(_reg(d, sid))
+            cli, host = 900000000 + 2 * i, 900000001 + 2 * i
+            self._host_lease(d, sid, cli, host); alive[cli] = "1"; alive[host] = "2"
+        regs += cold
+        calls = queue.Queue(); settles = {}
+        def fake_ensure(sid, on_boot_settled=None):
+            calls.put(sid); settles[sid] = on_boot_settled
+            return object()
+        # the lease classifier reads proc_start from the module registered as romp_sdk_backend (this module loads the
+        # backend under another name), so the patched reading must be the one it finds
+        with mock.patch.dict(sys.modules, {"romp_sdk_backend": sb}), \
+             mock.patch.object(sb, "proc_start", lambda p, run=None: alive.get(p)), \
+             mock.patch.object(be, "_ensure", fake_ensure):
+            t = threading.Thread(target=be._boot_reconcile, args=(regs,), daemon=True); t.start()
+            seen = [calls.get(timeout=5) for _ in range(6 + sb.BOOT_RESUME_CONCURRENCY)]
+        self.assertEqual(seen[:6], attach_sids, "every attach is issued first, none waiting on a spawn slot")
+        self.assertEqual(len([s for s in seen if s not in attach_sids]), sb.BOOT_RESUME_CONCURRENCY,
+                         "the cold launches fill the spawn stagger's slots and the fourth waits")
+        self.assertTrue(calls.empty(), "the fourth cold launch waits for a released slot")
+        self.assertEqual(phases, ["censusDone"], "the census ended before any start; attachDone waits for the attaches' hellos")
+        for sid in attach_sids:
+            settles[sid]()                 # the host's hello (the session fires on_boot_settled once)
+        self.assertEqual(phases, ["censusDone", "attachDone"], "attachDone once the last attach settled")
+        for sid in attach_sids:
+            settles[sid]()                 # a second fire (a death after the hello) is ignored
+        self.assertEqual(phases.count("attachDone"), 1)
+        for sid in list(settles):
+            if sid not in attach_sids and settles[sid]:
+                settles[sid]()             # release the cold slots so the thread can finish
+        t.join(5)
+
+    def test_no_attaches_means_attach_done_at_once_and_a_never_started_attach_counts_down(self):
+        d = tempfile.mkdtemp()
+        phases = []
+        be = sb.SdkBackend(d, "/bin/true", lambda *a, **k: None, log=lambda *a, **k: None, boot_phase=phases.append)
+        regs = _cut_regs(d, 1)
+        with mock.patch.object(be, "_ensure", lambda sid, on_boot_settled=None: (on_boot_settled and on_boot_settled()) or object()):
+            be._boot_reconcile(regs)
+        self.assertEqual(phases[:2], ["censusDone", "attachDone"], "nothing to attach: the phase is over before it began")
+        # an attach the ensure refuses (a stood-down or dead session returns None) must not hold attachDone
+        d2 = tempfile.mkdtemp(); phases2 = []
+        be2 = sb.SdkBackend(d2, "/bin/true", lambda *a, **k: None, log=lambda *a, **k: None, boot_phase=phases2.append)
+        sid = "33333333-aaaa-0000-0000-000000000001"
+        regs2 = [_reg(d2, sid)]
+        self._host_lease(d2, sid, 910000000, 910000001)
+        with mock.patch.dict(sys.modules, {"romp_sdk_backend": sb}), \
+             mock.patch.object(sb, "proc_start", lambda p, run=None: {910000000: "1", 910000001: "2"}.get(p)), \
+             mock.patch.object(be2, "_ensure", lambda sid, on_boot_settled=None: None):
+            be2._boot_reconcile(regs2)
+        self.assertEqual(phases2, ["censusDone", "attachDone"], "a never-started attach counts down at once")
 
 
 if __name__ == "__main__":

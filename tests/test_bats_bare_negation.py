@@ -12,10 +12,11 @@ nothing. This module is the ratchet those hand fixes lacked: the suite test scan
 tests/*.bats and names each inert site, and the Scanner tests pin the scanner itself on synthetic
 snippets.
 
-The checked form is `run <cmd>` followed by `[ "$status" -ne 0 ]` (tests/romp-manager-tmux-scope.bats
-wraps it as `log_lacks`), a count for a pipeline (`[ "$(grep -c x "$LOG")" -eq 0 ]`), or `run ! <cmd>`
-in a file that declares `bats_require_minimum_version 1.5.0`. `run` overwrites $status and $output,
-so an armed negation goes after any `[[ "$output" ... ]]` check that reads the previous run.
+The checked form is `run <cmd>` followed by `[ "$status" -ne 0 ]` (tests/romp-postal.bats and
+tests/git-hermetic.bats write it inline; the `log_lacks` helper that wrapped it left with
+tests/romp-manager-tmux-scope.bats when the tmux backend was removed, 2532d6d8 on 2026-09-11), a count for a pipeline (`[ "$(grep -c x "$LOG")" -eq 0 ]`),
+or `run ! <cmd>` in a file that declares `bats_require_minimum_version 1.5.0`. `run` overwrites $status and
+$output, so an armed negation goes after any `[[ "$output" ... ]]` check that reads the previous run.
 
 Scope: a line scan, not a bash parser. Inside a `@test ... {` block it reads every line that begins
 with `! ` and reports one whose next non-blank, non-comment line is not the block's closing `}`. It

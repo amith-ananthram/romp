@@ -1327,10 +1327,10 @@ class CommentOps(CommentBase):
         self._saved_sessions = km._sessions
         self._saved_reveal = km._reveal_chat_for
         self._saved_push_now = km._push_session_now
-        self._saved_tmux = km._live_map
+        self._saved_live_map = km._live_map
         km.Sessions.backend_for = staticmethod(lambda sid: self.be)
         km._sdk_ready = lambda: True
-        km._live_map = lambda: {}   # the create/promote doors' live snapshot (names reserved atomically) — never the box's tmux
+        km._live_map = lambda: {}   # the create/promote doors' live snapshot (names reserved atomically) — never the machine's live sessions
         p = self._write(PARENT, self._parent_records())
         km._sessions = lambda now, window=None, forks=True: [
             {"sid": PARENT, "name": "parent", "path": str(p), "mtime": self.now}]
@@ -1343,7 +1343,7 @@ class CommentOps(CommentBase):
         km._sessions = self._saved_sessions
         km._reveal_chat_for = self._saved_reveal
         km._push_session_now = self._saved_push_now
-        km._live_map = self._saved_tmux
+        km._live_map = self._saved_live_map
         self._clear_defaults()   # the module shares one hermetic STATE — never leak across tests
         super().tearDown()
 
@@ -1776,7 +1776,7 @@ class ForkCommentRoutes(CommentBase):
         self._saved_sessions = km._sessions
         self._saved_push_now = km._push_session_now
         km.Sessions.backend_for = staticmethod(lambda sid: self.be)
-        km.Sessions.live = staticmethod(lambda: {})   # hermetic: never consult the box's real tmux
+        km.Sessions.live = staticmethod(lambda: {})   # hermetic: never consult the machine's live sessions
         km._sdk_ready = lambda: True
         # km.NAMES is bound at import (module-scope constant) — _rebind_state moves only jd's copy,
         # so _name_of would read the import-time root and miss the per-test registry entry

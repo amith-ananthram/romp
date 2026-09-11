@@ -60,7 +60,7 @@ class _Base(unittest.TestCase):
         self._saved_fns = {k: getattr(km, k) for k in ("_alive_sessions", "_mark_views_dirty")}
         self.path = str(Path(self.td.name) / (SID + ".jsonl"))
         Path(self.path).write_text("")           # empty transcript: no bg dispatches anywhere
-        km._alive_sessions = lambda now, tmux: [{"sid": SID, "path": self.path}]
+        km._alive_sessions = lambda now, live: [{"sid": SID, "path": self.path}]
         km._mark_views_dirty = lambda *a, **k: None
         self.gid = SID + ":g1"
         self._reset_caches()

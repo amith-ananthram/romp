@@ -725,6 +725,60 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(len(fake.attempts), 2, "the replacement request parks if it is rejected too")
         self.assertTrue(be.kill(sid))
 
+    def test_a_queue_parked_on_a_permanent_rejection_reads_not_busy_until_a_change_re_arms_it(self):
+        # The kernel takes busy() as its authoritative "turn open" word: a model or effort pick parks behind
+        # it (a Codex pick applies at the next turn_start), and its drain skips the session for as long as
+        # busy() holds. A queue the worker parked on a permanent rejection read busy — non-empty, yet nothing
+        # in flight and no timer — so the very pick that would have unparked it was parked in turn, with no
+        # way out: this backend has no unqueue, and kill + resume re-arm the same queue with the same model
+        # (review, 2026-09-11). Parked reads not busy; an explicit change re-arms the retry and reads busy
+        # again from that event on, so a pick pressed after it parks behind the retry in press order.
+        class InvalidParamsError(RuntimeError):
+            def __init__(self, message):
+                super().__init__(message)
+                self.code = -32602
+
+        class RejectingClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.attempts = []
+                self.retry_started = threading.Event()   # the accepted retry is held INSIDE turn_start
+                self.release_retry = threading.Event()
+
+            def turn_start(self, tid, input_items, params=None):
+                self.attempts.append((list(input_items), dict(params or {})))
+                if (params or {}).get("model") != "gpt-5-fixed":
+                    raise InvalidParamsError("model is not available")
+                self.retry_started.set()
+                self.release_retry.wait(5)
+                return super().turn_start(tid, input_items, params)
+
+        fake = RejectingClient()
+        be, _, _ = build(factory=lambda: fake)
+        sid = be.spawn("web", "/TESTDIR")
+        self.assertTrue(be.send(sid, "keep this durable"))
+        self.assertTrue(until(lambda: be.launch_error(sid) is not None))   # written with the park, under the lock
+        self.assertEqual(len(fake.attempts), 1)
+        self.assertEqual(be.pending_queued(sid), ["keep this durable"], "the send stays visible as queued")
+        self.assertFalse(be.busy(sid), "a queue parked on a permanent rejection is neither in flight nor about to run")
+        # The event is the explicit change, not the worker's wake: with the worker still asleep in kick.wait(),
+        # a setter's generation bump alone re-arms the retry, and busy() says so before the worker clears the
+        # rejection — so a send handed over right then never arms a hold waiting for a turn to open.
+        s = be._session(sid)
+        with s.lock:
+            s.change_generation += 1
+        self.assertTrue(be.busy(sid), "a moved generation is a retry about to run")
+        with s.lock:
+            s.change_generation -= 1
+        self.assertFalse(be.busy(sid))
+        self.assertTrue(be.set_model(sid, "gpt-5-fixed"))
+        self.assertTrue(fake.retry_started.wait(5))
+        self.assertTrue(be.busy(sid), "the retry the pick armed is in flight: busy, so a later pick parks behind it")
+        fake.release_retry.set()
+        self.assertTrue(until(lambda: not be.busy(sid) and not be.pending_queued(sid)))
+        self.assertEqual(fake.attempts[1][1]["model"], "gpt-5-fixed")
+        self.assertTrue(be.kill(sid))
+
     def test_permanent_placeholder_prepare_parks_until_cwd_change(self):
         class InvalidParamsError(RuntimeError):
             code = -32602
@@ -1404,7 +1458,7 @@ class PruneLive(unittest.TestCase):
     bars logged a live-merge failure). The call shape is pinned across every backend in
     tests/test_backend_call_parity.py; this class covers the behaviour in the kernel's REAL shapes:
     record times are parse_z's whole seconds (the mapping's values are floats of them), and the echo's
-    own stamp is int(time.time()), as the SDK and tmux echoes stamp theirs."""
+    own stamp is int(time.time()), as the SDK echo stamps its own (and the removed tmux echo did)."""
 
     def _with_echo(self, text="ship it", t=1000):
         be, fake, _ = build()
@@ -1439,7 +1493,7 @@ class PruneLive(unittest.TestCase):
         self.assertEqual(be.live_atoms(sid), [], "a record at the send's second lands it")
 
     def test_a_record_later_in_the_sends_own_second_lands_the_echo(self):
-        # The echo is stamped in WHOLE seconds like the SDK's and the tmux echo's. A float stamp (1000.3)
+        # The echo is stamped in WHOLE seconds like the SDK's (and the removed tmux echo's). A float stamp (1000.3)
         # would keep an echo whose record was written at 1000.7: parse_z reads that record as 1000, and
         # 1000 >= 1000.3 is false, the same-second case the SDK retires.
         be, fake, _ = build()

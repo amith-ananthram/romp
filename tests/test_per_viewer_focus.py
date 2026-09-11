@@ -184,7 +184,7 @@ class CreateOpenReviveAreAimedToo(unittest.TestCase):
         km._pick_identity_color = lambda: ("#123456", "#ffffff")
         km._mark_views_dirty = lambda: None
         km._push_session_now = lambda sid: None
-        km._live_map = lambda: {}   # the create door's live snapshot (names reserved atomically) — never the box's tmux
+        km._live_map = lambda: {}   # the create door's live snapshot (names reserved atomically) — never the machine's live sessions
         try:
             km._create_sdk_session("web", "/tmp")                     # the CLI's POST /new: no dashboard in hand
             self.assertEqual(self.sink, [], "a terminal/script create yanks no window's chat")

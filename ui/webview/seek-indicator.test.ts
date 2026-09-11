@@ -17,7 +17,7 @@ const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "
 
 test("one click lands or indicates: the seek survives a missed pass and retries on the next", () => {
   // durable state, armed at the ONE navigation entry (setActive) …
-  assert.match(RENDER, /if \(anchor\) armSeek\(id, anchor, anchorKind \?\? null\);/);
+  assert.match(RENDER, /if \(anchor\) armSeek\(id, anchor, anchorKind \?\? null, anchorEventT \?\? null\);/);   // T336: the anchor turn's moment rides the seek
   // …re-arming the per-pass attempt — never hijacking a scroll-back keep-offset restore
   assert.match(RENDER, /if \(!pendingAnchor && pendingAnchorT == null && pendingAnchorKeepY == null && seek && seek\.sid === activeId\) \{/);
   // the landing event clears it; a miss shows the notice instead of dying

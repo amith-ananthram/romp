@@ -35,6 +35,11 @@ sys.path.insert(0, os.path.join(ROOT, "kernel"))
 import sdk_backend as sb  # noqa: E402
 
 REMOTE_TOKEN = "remote-token-DO-NOT-USE"
+# A remote kernel's frame. `tmux` is the terminal-session count a peer still running a kernel from before 2026-09-11
+# (the removed terminal backend) may send; this kernel's own frame lost it with that backend (T332), and _APIH_HOST_KEYS
+# does not copy it into the hosts map (test_an_older_peer_s_terminal_count_is_not_copied_into_the_map). Kept here so the
+# fixture stands in for such a peer, the way the hover tests' frames do; the tests that push it as this kernel's own
+# frame read only its hosts and state.
 FRAME_A = {"type": "apiHealth", "state": "degraded", "cls": "429", "text": "rate limited · 2 waiting", "waiting": 2,
            "retrying": 2, "blocked": 0, "since": 1000, "reason": "", "tmux": 0, "sessions": [], "seq": 3}
 DOC = {"schema": 1, "asOf": 2000.0, "overall": {"state": "healthy", "worstBucket": "key:helper|fable"}, "buckets": {}}
@@ -130,6 +135,14 @@ class HostsMap(_Fixture):
         self.assertIs(f["quiet"], True, "the fixture has no SDK backend traffic: quiet")
         self.assertEqual(f["host"], "TESTHOST", "the frame names this kernel the way its peers know it (T316)")
         self.assertNotIn("host", km._APIH_HOST_KEYS, "a peer's row is keyed by its name already: the field is not copied into the map")
+
+    def test_an_older_peer_s_terminal_count_is_not_copied_into_the_map(self):
+        # a peer on a kernel from before 2026-09-11 still sends `tmux` in its frame (FRAME_A carries it for that reason);
+        # the terminal backend is gone, so its row copies no such count and the shell has no line to draw for it
+        self._row("TESTHOST", FRAME_A)
+        self.assertIn("tmux", FRAME_A, "the fixture stands in for an older peer's frame")
+        self.assertNotIn("tmux", km._APIH_HOST_KEYS)
+        self.assertNotIn("tmux", self.frame()["hosts"]["TESTHOST"])
 
     def test_quiet_follows_the_aggregator_s_last_event(self):
         ah = sb.ApiHealth(Path(self.td.name) / "api-health-state.json") if hasattr(sb, "ApiHealth") else None
@@ -407,7 +420,7 @@ class CellCss(unittest.TestCase):
         self.assertNotIn("'unknown'", js.replace("unknown:'quiet'", ""), "the word appears only as the key the plain word replaces")
         self.assertNotIn("API · this machine", js)
         self.assertIn("var HIST_ROWS=4;", js)
-        self.assertIn("429 = the API told us to slow down (rate limit)", js)
+        self.assertIn("['r429','429','rate limit: the API told us to slow down']", js)   # T340: the token in its ink, the words beside it
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 // The footer VIEW MENU (the user 2026-08-24): the three view controls — sort direction, single-column
 // layout, by-session grouping — live behind ONE monochrome icon button, replacing the Modified/Stack/
-// Group word-buttons. The popup wears the repo-wide menu vocabulary (.ctx-menu chrome + the ✓-in-circle
+// Group word-buttons; a fourth row, "Show focused session" (T347, 2026-09-11), puts the chat's focused
+// session's cards on top of the feed (feed-focus-section.test.ts owns what it does). The popup wears the repo-wide menu vocabulary (.ctx-menu chrome + the ✓-in-circle
 // current mark); prefs still write the shared romp:settings, so the gear watcher and other panes read
 // the same keys. feed.ts has no jsdom harness → source pins (the repo convention).
 import { test } from "node:test";
@@ -23,11 +24,13 @@ test("one 'View ▴' word-button replaces the three toggles; the old footer togg
   assert.match(FEED, /b\.setAttribute\("aria-haspopup", "menu"\);/);
 });
 
-test("the menu holds exactly the three rows, in order: sort direction, single column, group", () => {
+test("the menu holds exactly the four rows, in order: sort direction, single column, group, focused session", () => {
   const sortAt = FEED.indexOf('set(0, "Sort by most recent');
   const stackAt = FEED.indexOf('set(1, "Single column view');
   const groupAt = FEED.indexOf('set(2, "Group by session');
-  assert.ok(sortAt > 0 && stackAt > sortAt && groupAt > stackAt, "three rows, this order");
+  const focusAt = FEED.indexOf('set(3, "Show focused session');
+  assert.ok(sortAt > 0 && stackAt > sortAt && groupAt > stackAt && focusAt > groupAt, "four rows, this order");
+  assert.match(FEED, /if \(rows\.length !== 4\) return;/, "paintViewMenu syncs exactly four");
   // each ✓ row declares its role; the direction row stays a plain menuitem (feed-sort.test.ts owns that)
   assert.match(FEED, /r\.setAttribute\("role", check \? "menuitemcheckbox" : "menuitem"\);/);
   assert.match(FEED, /r\.setAttribute\("aria-checked", opts\.current \? "true" : "false"\);/);

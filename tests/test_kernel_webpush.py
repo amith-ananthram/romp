@@ -1305,7 +1305,8 @@ class RevealAiming(unittest.TestCase):
             # the aimed pane arrives → delivered once, latch cleared
             mine, mine_got = _fake_ws_client("chat", "W-phone")
             km._consume_pending_reveal(mine)
-            self.assertEqual(mine_got, [{"type": "focus", "id": "SID-live", "live": True}])
+            # `own` (split screen, 2026-09-08): ONE chat client consumes the parked tap, so the pane's column arbitration must not hand it elsewhere
+            self.assertEqual(mine_got, [{"type": "focus", "id": "SID-live", "live": True, "own": True}])
             self.assertIsNone(km._PENDING_REVEAL[0])
             km._consume_pending_reveal(mine)
             self.assertEqual(len(mine_got), 1, "consumed means consumed")
@@ -1348,7 +1349,7 @@ class RevealAiming(unittest.TestCase):
             # …then the ready handler stamps the client and consumes the park
             booting["ready"] = True
             km._consume_pending_reveal(booting)
-        self.assertEqual(heard, [{"type": "focus", "id": "SID-live", "live": True}])
+        self.assertEqual(heard, [{"type": "focus", "id": "SID-live", "live": True, "own": True}])   # own: a consumed reveal is the receiving column's to take (the split, 2026-09-08)
         self.assertIsNone(km._PENDING_REVEAL[0])
         # a live (non-boot) tap to that same not-yet-ready socket parks too: the sw / ack / vanish roads had the
         # same hole once the shell saw the socket up but before the bundle listened
@@ -1384,7 +1385,7 @@ class RevealAiming(unittest.TestCase):
             self.assertEqual((parked["sid"], parked["wid"], parked.get("sent")), ("S", "W-phone", [twin]), "…and the copy stays for the fresh pane")
             fresh, fresh_got = _fake_ws_client("chat", "W-phone")
             km._consume_pending_reveal(fresh)
-        self.assertEqual(fresh_got, [{"type": "focus", "id": "S", "live": True}])
+        self.assertEqual(fresh_got, [{"type": "focus", "id": "S", "live": True, "own": True}])
         self.assertIsNone(km._PENDING_REVEAL[0])
 
     def test_a_live_tap_to_an_unproven_socket_keeps_a_copy_until_the_pong_or_the_redial(self):
@@ -1418,7 +1419,7 @@ class RevealAiming(unittest.TestCase):
             km._reveal_request("S", "W1")
             fresh, fresh_got = _fake_ws_client("chat", "W1")
             km._consume_pending_reveal(fresh)
-        self.assertEqual(fresh_got, [{"type": "focus", "id": "S", "live": True}])
+        self.assertEqual(fresh_got, [{"type": "focus", "id": "S", "live": True, "own": True}])
         self.assertIsNone(km._PENDING_REVEAL[0])
 
     def test_a_redialed_pane_is_a_target_and_its_first_strip_consumes_the_park(self):
@@ -1769,7 +1770,12 @@ class LandingRevealPins(unittest.TestCase):
         self.assertIn("romp:wid", html)            # …at the shell's own per-window id
         self.assertIn("romp:'revealCard'", html)   # a card kind also scrolls the feed to the card…
         self.assertIn("m.romp==='ready'&&m.app==='feed'", html)   # …once the feed has its cards
-        self.assertNotIn("type:'focus',id:sid", html, "no focus posted straight into the chat iframe any more")
+        # the TAP's scripts post no focus straight into the chat iframe any more (the kernel aims it). The split
+        # script (_LANDING_SPLIT_JS, 2026-09-08) is the one deliberate exception and is not a tap path: it hands a
+        # column the shell has just MADE the session it was opened on, addressed to that column (`own`).
+        taps = km._LANDING_REVEAL_JS + km._LANDING_PUSH_JS + km._LANDING_MOBILE_JS
+        self.assertNotIn("type:'focus',id:sid", taps, "no focus posted straight into the chat iframe any more")
+        self.assertNotIn("type:'focus'", km._LANDING_REVEAL_JS)
         self.assertNotIn("setTimeout", km._LANDING_REVEAL_JS, "event-based: the feed's ready, never a timer")
 
     def test_the_link_is_read_at_boot_and_on_a_same_page_url_change(self):
