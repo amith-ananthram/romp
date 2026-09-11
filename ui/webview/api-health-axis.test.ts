@@ -36,8 +36,9 @@ test("the kernel lifts the timeline's clock, NICE and niceStep by regexes that m
   assert.match(KERNEL, /_TIMELINE_AXIS_PARTS = \(r"\^const NICE = \\\[\[\^\\n\]\*\\\];", r"\^function clock\\\(t\\\) \\\{\[\^\\n\]\*\\\}", r"\^function niceStep\\\(W\\\) \\\{\[\^\\n\]\*\\\}"\)/);
   for (const re of PARTS) assert.equal(VIEW.match(new RegExp(re.source, "gm"))!.length, 1, re.source);
   assert.match(KERNEL, /def _timeline_axis_js\(\):/);
-  assert.match(KERNEL, /return "window\.__rompTimelineAxis=\(function\(\)\{" \+ "\\n"\.join\(parts\) \+ "\\nreturn \{NICE:NICE,clock:clock,niceStep:niceStep\};\}\)\(\);"/);
+  assert.match(KERNEL, /out = "window\.__rompTimelineAxis=\(function\(\)\{" \+ "\\n"\.join\(parts\) \+ "\\nreturn \{NICE:NICE,clock:clock,niceStep:niceStep\};\}\)\(\);"/);
   assert.match(KERNEL, /return "window\.__rompTimelineAxis=null;"/, "a missing file or a moved line publishes null, said on stderr");
+  assert.match(KERNEL, /if _TIMELINE_AXIS_MEMO\[0\] == mt and _TIMELINE_AXIS_MEMO\[1\]:\n\s*return _TIMELINE_AXIS_MEMO\[1\]/, "memoized on the view's mtime: the landing's hot path pays one stat");
   // published ahead of the script that reads it, in the same script element (the landing's script count is pinned elsewhere)
   assert.ok(KERNEL.includes('"<script>" + _timeline_axis_js() + _LANDING_APIH_JS + "</script>"'));
   assert.ok(APIH.includes("var TL=window.__rompTimelineAxis||null;"));
@@ -59,6 +60,8 @@ test("a 24-hour span: hours on the ticks, the date on the first tick past midnig
   const before = ticks[ticks.indexOf(dateAt) - 1];
   assert.ok(before && HM.test(before.label), "the tick before it is an hour of the 10th");
   assert.ok(ticks.every((k) => k.shown), "at the detail's width every label fits");
+  const dateTick = t0 + (dateAt.x / 560) * span;
+  assert.equal(new Date(Math.round(dateTick) * 1000).getDate(), 11, "the date tick is the first tick of the 11th in this zone");
   assert.ok(ticks.every((k, i) => i === 0 || k.x > ticks[i - 1].x), "left to right along the real span");
   assert.ok(ticks[0].x >= 0 && ticks[ticks.length - 1].x <= 560);
   // the hour ticks read the same clock the timeline's axis would print for those moments
@@ -67,6 +70,12 @@ test("a 24-hour span: hours on the ticks, the date on the first tick past midnig
   const small = axisTicks(t0, span, 168);
   assert.equal(small.length, ticks.length, "every tick still has its gridline");
   assert.ok(small.some((k) => !k.shown) && small.filter((k) => k.shown).length >= 3, "some labels yield, at least three stand");
+  // the day's date outranks the clock it collides with, at either parity of the ledger's rolling bin boundary
+  for (const t0p of [local(2026, 8, 10, 15, 30), local(2026, 8, 10, 14, 30), local(2026, 8, 10, 12, 30)]) {
+    const sm = axisTicks(t0p, span, 168);
+    assert.deepEqual(sm.filter((k) => k.shown && MD.test(k.label)).map((k) => k.label), ["09-11"], "the crossing is named at the hover's width, t0 " + hm(t0p));
+    for (let i = 1; i < sm.length; i++) if (sm[i].shown && sm[i - 1].shown) assert.ok(sm[i].x - sm[i - 1].x > 20, "no two shown labels touch");
+  }
 });
 
 test("a 7-day span: a tick a day, every label a date; a 1-hour span: ten-minute ticks, hours only", () => {
@@ -75,14 +84,17 @@ test("a 7-day span: a tick a day, every label a date; a 1-hour span: ten-minute 
   assert.ok(week.length >= 7 && week.length <= 8);
   assert.ok(week.every((k) => MD.test(k.label)), week.map((k) => k.label).join(" "));
   assert.equal(week[0].label, "09-05"); assert.equal(week[week.length - 1].label, "09-11");
+  // a day tick is a LOCAL midnight in every zone (the epoch multiples the timeline uses under a day would be UTC's)
+  const wt0 = local(2026, 8, 4, 15, 30);
+  for (const k of week) { const d = new Date(Math.round(wt0 + (k.x / 560) * 604800) * 1000); assert.equal(d.getHours() * 60 + d.getMinutes(), 0, "midnight local: " + d.toString()); }
   assert.ok(week.every((k) => !AGE.test(k.label)));
   const hour = axisTicks(local(2026, 8, 11, 14, 5), 3600, 560);
   assert.ok(hour.length >= 6 && hour.length <= 7, "the nice step for an hour is ten minutes");
   assert.ok(hour.every((k) => HM.test(k.label)), hour.map((k) => k.label).join(" "));
-  assert.equal(hour[0].label, "14:10");
+  assert.equal(hour[0].label, hm(Math.ceil(local(2026, 8, 11, 14, 5) / 600) * 600), "the first ten-minute multiple at or after t0 (14:10 in a whole-hour zone)");
   // no timeline module on the page: no clocks, no invented ones
   const bare = new Function("var window={__rompTimelineAxis:null};\n" + between("var TL=window.__rompTimelineAxis||null;", "function sumArr(") + "\nreturn { axisTicks };")() as any;
-  assert.deepEqual(bare.axisTicks(0, 86400, 560), []);
+  assert.deepEqual(bare.axisTicks(0, 86400, 560), [{ x: 140, label: "", shown: false }, { x: 280, label: "", shown: false }, { x: 420, label: "", shown: false }], "gridlines at the quarters, no clocks");
 });
 
 test("the histogram draws the clocks and nothing in ages: no tickWords, no span word, no 'now'", () => {

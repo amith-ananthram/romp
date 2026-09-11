@@ -2021,7 +2021,8 @@ in the windows. The hover reads the document as counts, never as the state
 machine's vocabulary: one line per machine, named by its kernel's own name,
 with its successful requests in the accent and each failure class counted in
 its own colour only when present (429s in the blocked red, 5xx with 529 in the
-5xx magenta, no-connection and other-status failures in the label gray); no
+5xx magenta, no-connection and other-status failures in the other band's own
+hue: a pale lime in the dark theme, an indigo in the light); no
 traffic reads as "no API traffic"; a machine whose sessions are waiting or
 whose kernel is paused shows that kernel's own words instead. The window the
 lines count is named once at the top, this kernel's: the ledger's last 24
@@ -2036,7 +2037,8 @@ theme, an indigo in the light) for no-connection and other-status failures
 only when the range or a counted line holds any; one ceiling label, no peak
 figure; along the bottom the clock times of the timeline pane's own axis (its
 formatter and tick rule, lifted verbatim: local hours, the date on the first
-tick of each new day the span crosses), never ages; a vertical, left-justified
+tick of each new day the span crosses, and on every tick once the step is a
+day or more, those ticks at local midnights), never ages; a vertical, left-justified
 legend whose class tokens (`429`, `5xx`, `other`) wear their colours with the
 explanation beside them in plain text (429 on one line, 5xx below it, the other
 line only when it applies; the accent band needs no row); the age of the read in words ("read

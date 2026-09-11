@@ -14,7 +14,7 @@
 //
 // T316 (the user 2026-09-10, the design follow-up): a machine's line is its COUNTS over the popup's window, each
 // class in its own colour (successes in the accent, 429 in the blocked red, 5xx in the 5xx magenta, no connection
-// and other statuses in the label gray), never a verdict word; the window is the ledger's 24 hours when the kernel
+// and other statuses in the other band's hue, T340), never a verdict word; the window is the ledger's 24 hours when the kernel
 // serves one, else the document's longest window; the histograms are stacked bars from the ledger's tiers.
 
 /** One kernel's apiHealth shell frame, local half (the fields the merge reads). */

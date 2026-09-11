@@ -48644,6 +48644,10 @@ window.addEventListener('message',function(e){var m=e.data;if(m&&m.romp==='usage
 _TIMELINE_AXIS_PARTS = (r"^const NICE = \[[^\n]*\];", r"^function clock\(t\) \{[^\n]*\}", r"^function niceStep\(W\) \{[^\n]*\}")
 
 
+_TIMELINE_AXIS_MEMO = [None, None]   # (the view file's mtime_ns, the lifted script): re-read only when the file changes, so an edit
+#                                      still goes live while the landing's hot path pays one stat (review find)
+
+
 def _timeline_axis_js():
     """The timeline pane's axis formatter and tick rule, lifted VERBATIM from ui/romp-timeline-view.js for the API
     health histograms' x-axis (T338, the user 2026-09-11: clock times the way the timeline labels its axis, never
@@ -48652,12 +48656,18 @@ def _timeline_axis_js():
     goes live for both. One formatter, no second copy. A missing file or a moved line publishes null and says so on
     stderr; the histograms then draw their gridlines with no clocks rather than a second, drifting formatter."""
     try:
-        src = (UI / "romp-timeline-view.js").read_text()
-        parts = [re.search(p, src, re.M).group(0) for p in _TIMELINE_AXIS_PARTS]
+        p = UI / "romp-timeline-view.js"
+        mt = p.stat().st_mtime_ns
+        if _TIMELINE_AXIS_MEMO[0] == mt and _TIMELINE_AXIS_MEMO[1]:
+            return _TIMELINE_AXIS_MEMO[1]
+        src = p.read_text()
+        parts = [re.search(p_, src, re.M).group(0) for p_ in _TIMELINE_AXIS_PARTS]
     except Exception as e:
         sys.stderr.write("timeline axis lift: the API health histograms draw no clocks: %s\n" % e)
         return "window.__rompTimelineAxis=null;"
-    return "window.__rompTimelineAxis=(function(){" + "\n".join(parts) + "\nreturn {NICE:NICE,clock:clock,niceStep:niceStep};})();"
+    out = "window.__rompTimelineAxis=(function(){" + "\n".join(parts) + "\nreturn {NICE:NICE,clock:clock,niceStep:niceStep};})();"
+    _TIMELINE_AXIS_MEMO[0], _TIMELINE_AXIS_MEMO[1] = mt, out
+    return out
 
 
 _LANDING_APIH_JS = """
@@ -48800,16 +48810,30 @@ function niceTopAh(mx){var p=Math.pow(10,Math.floor(Math.log(mx)/Math.LN10)),m=m
 // (romp-timeline-view.js clock + niceStep, lifted verbatim by the kernel into window.__rompTimelineAxis): ticks at the
 // nice step for the span (at most eight), each labelled with its local HH:MM; when the span crosses a local day, the
 // first tick of each new day carries its date instead (MM-DD, the State changes rows' own form), and at a step of a
-// day or more every tick does. A label that would overlap the one before is dropped, its gridline kept: the
-// timeline's own collision guard. No 'now' and no span word: the as-of line already says when the read is from.
+// day or more every tick does. Under a day the ticks sit at the timeline's epoch multiples; at a day or more they sit
+// at LOCAL midnights (a date names a calendar day; the timeline's window never reaches that step, so it had no rule to
+// lend). A label that would overlap the one before is dropped, its gridline kept (the timeline's own collision guard),
+// except that a day's date outranks the clock it collides with: a crossing is always named. No 'now' and no span
+// word: the as-of line already says when the read is from. With no formatter on the page (the lift found nothing) the
+// gridlines stand at the quarters with no clocks, never a second formatter's guesses.
 var TL=window.__rompTimelineAxis||null;
 function dayKey(ep){var d=new Date(ep*1000);return d.getFullYear()+'/'+d.getMonth()+'/'+d.getDate();}
 function dateWords(ep){var d=new Date(ep*1000);return ('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2);}
-function axisTicks(t0,span,W){if(!TL||!(span>0))return [];var step=TL.niceStep(span),t1=t0+span,out=[],lastX=-1e9;
+function tickMoments(t0,t1,step){var out=[];
+if(step<86400){for(var tk=Math.ceil(t0/step)*step;tk<=t1;tk+=step)out.push(tk);return out;}
+var d=new Date(t0*1000),days=Math.max(1,Math.round(step/86400));d.setHours(0,0,0,0);if(d.getTime()/1000<t0)d.setDate(d.getDate()+1);
+for(;d.getTime()/1000<=t1;d.setDate(d.getDate()+days))out.push(d.getTime()/1000);   // the Date walks calendar days: a DST day keeps its boundary
+return out;}
+function axisTicks(t0,span,W){if(!(span>0))return [];
+if(!TL){var q=[];for(var i=1;i<4;i++)q.push({x:i/4*W,label:'',shown:false});return q;}
+var step=TL.niceStep(span),t1=t0+span,out=[],lastX=-1e9,lastI=-1;
 var crosses=dayKey(t0)!==dayKey(t1),prevDay=dayKey(t0),cw=W>300?5.2:4.6;   // px per glyph at the label size, viewBox units
-for(var tk=Math.ceil(t0/step)*step;tk<=t1;tk+=step){var x=(tk-t0)/span*W,dk=dayKey(tk);
-var label=(crosses&&(dk!==prevDay||step>=86400))?dateWords(tk):TL.clock(tk);prevDay=dk;
-var hw=label.length*cw/2,shown=x-hw>lastX+4;if(shown)lastX=x+hw;out.push({x:x,label:label,shown:shown});}
+tickMoments(t0,t1,step).forEach(function(tk){var x=(tk-t0)/span*W,dk=dayKey(tk),isDate=crosses&&(dk!==prevDay||step>=86400);
+var label=isDate?dateWords(tk):TL.clock(tk);prevDay=dk;
+var hw=label.length*cw/2,shown=x-hw>lastX+4;
+if(!shown&&isDate&&lastI>=0){out[lastI].shown=false;shown=true;}   // the date wins the collision: the clock before it yields
+if(shown){lastX=x+hw;lastI=out.length;}
+out.push({x:x,label:label,shown:shown});});
 return out;}
 function sumArr(a){var t=0;(a||[]).forEach(function(v){t+=v||0;});return t;}
 function barsHTML(led,big){var n=led.ok.length,W=big?560:168,H=big?110:48,tot=[],mx=0;

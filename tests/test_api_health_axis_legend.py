@@ -41,6 +41,10 @@ class TimelineAxisLift(unittest.TestCase):
         self.assertEqual(len(km._TIMELINE_AXIS_PARTS), 3)
         self.assertIn("function clock(t) { const d = new Date(t * 1000); return String(d.getHours()).padStart(2, '0')", js, "the local HH:MM")
         self.assertIn("function niceStep(W) { for (const s of NICE) if (W / s <= 8) return s;", js, "the nice step: at most eight ticks")
+        # memoized on the view's mtime: the second call returns the held string without a read
+        mt = pathlib.Path(ROOT, "ui", "romp-timeline-view.js").stat().st_mtime_ns
+        self.assertEqual(km._TIMELINE_AXIS_MEMO[0], mt)
+        self.assertIs(km._timeline_axis_js(), js)
 
     def test_a_missing_view_publishes_null_and_says_so(self):
         real = km.UI
@@ -50,7 +54,7 @@ class TimelineAxisLift(unittest.TestCase):
         finally:
             km.UI = real
         # the popup then draws no clocks rather than a second formatter's guesses
-        self.assertIn("function axisTicks(t0,span,W){if(!TL||!(span>0))return [];", JS)
+        self.assertIn("if(!TL){var q=[];for(var i=1;i<4;i++)q.push({x:i/4*W,label:'',shown:false});return q;}", JS, "gridlines at the quarters, no clocks")
 
     def test_the_landing_publishes_the_lift_before_the_script_that_reads_it(self):
         html = km._landing()
@@ -62,7 +66,11 @@ class TimelineAxisLift(unittest.TestCase):
         self.assertNotIn("tickWords", JS, "the age words are gone")
         self.assertNotIn('">now</span>', JS)
         # the date on a day change, in the State changes rows' own form; the relative forms stay where they belong
-        self.assertIn("var label=(crosses&&(dk!==prevDay||step>=86400))?dateWords(tk):TL.clock(tk);", JS)
+        self.assertIn("isDate=crosses&&(dk!==prevDay||step>=86400);", JS)
+        self.assertIn("var label=isDate?dateWords(tk):TL.clock(tk);prevDay=dk;", JS)
+        self.assertIn("if(!shown&&isDate&&lastI>=0){out[lastI].shown=false;shown=true;}", JS, "a day's date outranks the clock it collides with")
+        self.assertIn("if(step<86400){for(var tk=Math.ceil(t0/step)*step;tk<=t1;tk+=step)out.push(tk);return out;}", JS, "under a day: the timeline's epoch multiples")
+        self.assertIn("d.setHours(0,0,0,0);if(d.getTime()/1000<t0)d.setDate(d.getDate()+1);", JS, "at a day or more: local midnights")
         self.assertIn("return dateWords(ep)+' '+hm(ep);}", JS)
         self.assertIn("function ageWords(){return LANDED&&MERGE?'read '+MERGE.agoWords((Date.now()-LANDED)/1000):'';}", JS)
         self.assertIn("(r.since?' · since '+hm(r.since):'')", JS)
