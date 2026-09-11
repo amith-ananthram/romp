@@ -40786,22 +40786,66 @@ PAGE_TURNS = 16                                  # turns per rendered page of pr
 WINDOW_TURNS = 8                                 # turns each side of a loadAround anchor
 _PAGE_CACHE = {}                                 # (sid, lo, hi, sig) → (events, bytes); LRU by insertion order
 _PAGE_CACHE_MAX, _PAGE_CACHE_BYTES = 32, 16 * 1024 * 1024
-_PAGE_STATS = {"hits": 0, "misses": 0, "evictions": 0, "pages": 0, "bytes": 0, "renderMs": 0.0}
+_PAGE_STATS = {"hits": 0, "misses": 0, "evictions": 0, "pages": 0, "bytes": 0, "renderMs": 0.0, "warmPending": 0,
+               "warmed": 0, "warmMs": 0.0, "warmCycles": 0, "warmSkipped": 0}   # the active cards' windows warmed ahead of a click
 _page_lock = threading.Lock()
 
 
-def _chat_history_page(sid, lo, hi, now, sess=None, live_map=None):
+def _page_sig(sess, sid, now, floor=None, turns=None):
+    """The pages cache's key for a session: a digest of every input a PRE-FLOOR page render reads that can change it,
+    and none of the live tail's (the transcript's stat, the liveness row, the backend's live revision, the queue, the
+    task store), which move at turn rate for exactly the working sessions the board shows and would evict a warmed
+    page before its click (the warming review, 2026-09-11). The pre-cut prefix a page renders from is fixed once
+    written: its identity here is the leaf path, the render floor and the uuid of the last atom below the floor (a
+    rewind or a /clear that reaches below the floor moves one of them). The rest are the inputs the page reshape
+    reads besides the atoms: the episodes file (the note floor, the boundary card), the goal store (the segment
+    anchors), the reg's forkedFrom (a fork's branch marker; the value, since the reg file itself is rewritten on every
+    send), the gone marker, the rewind hold and the pending cut, and the components every tab shares (the names
+    snapshot among them, _chat_sig_shared; the postal caption map is NOT among them: a pre-floor page holding a postal
+    card that was rendered before its caption landed keeps the caption-less card until an eviction re-renders it,
+    accepted, the card's text being the same). The goal store's identity is a component too, so a page survives the
+    turns that stream after it until the next judge publish for the session. None when the session has no transcript
+    path."""
+    path = sess.get("path") if sess else None
+    if not path:
+        return None
+    sid = str(sid)
+    if turns is None or floor is None:
+        try:
+            parsed = _parse(path, sid, now)
+        except Exception:
+            return None
+        turns = parsed["turns"] if turns is None else turns
+        floor = _RENDER_FLOOR.get(sid, _asm_cut_turn(parsed)) if floor is None else floor
+    last = None
+    if 0 < floor <= len(turns) and turns[floor - 1].get("atoms"):
+        last = turns[floor - 1]["atoms"][-1].get("uuid")
+    _hold = _rewind_hold_get(sid)
+    _be = _sdk()
+    shared = getattr(_live_scope, "chat_shared", None) or _chat_sig_shared()
+    raw = [os.path.realpath(path), int(floor), last,
+           _chat_ident(jd.EPIDIR / (sid + ".jsonl")), jd._store_identity(sid)[1:],
+           (_thread_reg(sid) or {}).get("forkedFrom"),    # the one reg field a page reads (the branch marker): the FILE's identity
+           _chat_ident(jd.GONEDIR / (sid + ".json")),     #  moves on every send (the queue and echo mirrors rewrite it; warming review 2)
+           (_hold.get("cutT"), _hold.get("leaf"), _hold.get("at")) if _hold else None,
+           _be.pending_cut(sid) if _be else "", shared]
+    return hashlib.sha1(json.dumps(raw, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def _chat_history_page(sid, lo, hi, now, sess=None, live_map=None, sig=None, stats=None):
     """The rendered events of turns [lo, hi) of `sid` (build_session's page mode), through a bounded LRU keyed on the
-    session's whole chat-build signature: any input that would change the render misses. Counted (/perf chatPages)."""
+    session's page signature (_page_sig: what a pre-floor page reads, none of the live tail; `sig` when the caller
+    computed it once for several pages). Counted (/perf chatPages); `stats["rendered"]` is bumped when this call
+    rendered, so a caller counts its own renders and not a concurrent handler's."""
     if live_map is None:
         live_map = _live_map()
     if sess is None:
         sess = next((x for x in _sessions(now) if x["sid"] == sid), None)
-    try:                                          # the whole chat-build signature, as one digest (its components hold dicts)
-        raw = _chat_build_sig(sess, live_map.get(sid), now, live_map=live_map, deps=False) if sess else None
-        sig = hashlib.sha1(json.dumps(raw, sort_keys=True, default=str).encode("utf-8")).hexdigest() if raw is not None else None
-    except Exception:
-        sig = None
+    if sig is None:
+        try:
+            sig = _page_sig(sess, sid, now) if sess else None
+        except Exception:
+            sig = None
     key = (sid, lo, hi, sig)
     with _page_lock:
         hit = _PAGE_CACHE.get(key) if sig is not None else None
@@ -40810,6 +40854,8 @@ def _chat_history_page(sid, lo, hi, now, sess=None, live_map=None):
             _PAGE_STATS["hits"] += 1
             return hit[0]
         _PAGE_STATS["misses"] += 1
+    if stats is not None:
+        stats["rendered"] = stats.get("rendered", 0) + 1
     t0 = time.monotonic()
     try:
         page = build_session(sid, now, live_map, page=(lo, hi))
@@ -40833,6 +40879,170 @@ def _chat_history_page(sid, lo, hi, now, sess=None, live_map=None):
                 _PAGE_STATS["bytes"] -= _b; _PAGE_STATS["evictions"] += 1
             _PAGE_STATS["pages"] = len(_PAGE_CACHE)
     return evs
+
+
+def _window_turns(j, floor):
+    """The turns [lo, hi) a loadAround window covers for an anchor in turn j before the floor: the two PAGE-ALIGNED pages
+    around it (the page holding j and its nearer neighbour), so the window is at least WINDOW_TURNS each side where the
+    history allows, every page it renders is a whole cache entry, and the windows of anchors in the same pages share
+    entries (the warm and the click render the same keys)."""
+    p = (j // PAGE_TURNS) * PAGE_TURNS
+    if j - p < PAGE_TURNS // 2 and p > 0:
+        lo, hi = p - PAGE_TURNS, p + PAGE_TURNS
+    else:
+        lo, hi = p, p + 2 * PAGE_TURNS           # the second half, or the head's own page: the page after it
+    return lo, max(lo, min(floor, hi))
+
+
+def _history_pages(sid, lo, hi, now, sess=None, live_map=None, sig=None, stats=None):
+    """The rendered events of turns [lo, hi) as page-aligned pages (PAGE_TURNS each), through the pages cache."""
+    out, a = [], lo
+    while a < hi:
+        b = min(hi, (a // PAGE_TURNS + 1) * PAGE_TURNS)
+        out.extend(_chat_history_page(sid, a, b, now, sess=sess, live_map=live_map, sig=sig, stats=stats))
+        a = b
+    return out
+
+
+# ── warming the pages cache for the active cards' anchors (the user 2026-09-10: a click on a summary far in the past
+# took long to load; the cache behind the active cards) ──────────────────────────────────────────────────────────
+WARM_ANCHORS_MAX = 32                            # anchors probed per cycle, in the feed's order (a late session's summaries can
+#                                                  fall past the cap: accepted, the board's first cards are the ones read)
+WARM_PAGES_MAX = _PAGE_CACHE_MAX // 2            # the warm SET: half the cache in pages, so a warm never evicts the pages a
+#                                                  reader just scrolled into nor its own first half; anchors past it wait for
+#                                                  the next board change (a set that fits settles to a probe)
+WARM_SKIP_MS = 1500                              # a pusher cycle slower than this: the warm stands down (counted)
+_WARM_MEMO = {"anchors": (), "keys": frozenset(), "sigs": {}}   # the last anchor list whose set was fully resident, that set's
+#                                                                  page keys, and the page signature per session they were keyed on
+
+
+def _card_anchors(feed):
+    """(sid, uuid) for every deep-link anchor the feed's cards carry that a click would land in the chat: first the card's
+    distilled summary's own targets (summaryAnchorUuid, the summary line's click, and each paragraph's `u`; a
+    completed card's too: the takeaway far in the past is the click the user named, 2026-09-10), then, for the cards
+    in every column but completed, the head's work and prompt anchors and its open rows' (a done row's are not
+    warmed; a handoff row points at another session's card and is that card's to warm). Ordered as the feed lists
+    them, deduplicated."""
+    out, seen = [], set()
+
+    def add(sid, u):
+        if u and (sid, u) not in seen:
+            seen.add((sid, u)); out.append((sid, u))
+    for card in (feed or {}).get("asks") or []:
+        if not isinstance(card, dict) or not card.get("sid"):
+            continue
+        sid = str(card["sid"])
+        add(sid, card.get("summaryAnchorUuid"))
+        for p in card.get("summaryAnchorsPara") or []:
+            if isinstance(p, dict):
+                add(sid, p.get("u"))
+        if card.get("column") == "completed":
+            continue
+        for i, row in enumerate(card.get("tree") or []):
+            if not isinstance(row, dict) or row.get("kind") == "handoff":
+                continue
+            if i > 0 and row.get("status") == "done":
+                continue
+            for k in ("anchorUuid", "promptAnchorUuid"):
+                add(sid, row.get(k))
+    return out
+
+
+def _warm_history_pages(feed, now, live_map=None):
+    """Render, into the pages cache, the pages the feed's cards' anchors would ask for (the window loadAround serves,
+    _window_turns), so a click on one lands from the cache. The warm SET is bounded to WARM_PAGES_MAX pages (half the
+    cache, in pages AND in bytes, half of each bound): anchors are taken in the feed's order and the first whose window
+    would take the set past the bound, and every anchor after it, wait for the next board change (counted as
+    chatPages.warmPending), so the warm never evicts its own pages nor a reader's and a bounded set SETTLES (the warming
+    review, 2026-09-11: an unbounded set over the cache re-rendered itself every cycle for the kernel's life). A set is
+    remembered as settled only when it is non-empty and every anchor resolved (a session with no render floor yet, an
+    index client holding the tabs at 0, leaves the set unresolved, so the floor's return warms). Each admitted page is PROBED first: one resident under
+    the session's current page signature costs nothing, one that is not is rendered, so a page a reader's scrolling
+    evicted or a floor flip re-keyed is warmed again; an unchanged board whose set is fully resident costs one probe of
+    the remembered keys (_WARM_MEMO), nothing else. Skipped whole when the pusher's last cycle ran over WARM_SKIP_MS
+    (chatPages.warmSkipped). Only sessions whose chat has been built with a render floor and only anchors before it
+    (the tail is resident already). Returns the number of pages rendered by THIS call (its own count, not a shared
+    counter's difference: a handler's render meanwhile is not the warm's)."""
+    anchors = _card_anchors(feed)[:WARM_ANCHORS_MAX]
+    if not anchors:
+        return 0
+    last_ms = _PERF_STATS.pusher.get("cycle_ms_last", 0.0) if hasattr(_PERF_STATS, "pusher") else 0.0
+    if last_ms > WARM_SKIP_MS:                    # the stand-down first: an over-budget pusher pays not even the probe (round 3, C)
+        with _page_lock:
+            _PAGE_STATS["warmSkipped"] += 1
+        return 0
+    t0 = time.monotonic()
+    rows = {x["sid"]: x for x in _sessions(now)}
+    if tuple(anchors) == _WARM_MEMO["anchors"]:
+        # a settled board: its set still resident under the sessions' CURRENT page signatures costs this probe alone (a
+        # floor flip or a judge publish moves a signature: the remembered keys are then another key's pages); the probe's
+        # time is the warm's (warmMs)
+        try:
+            same = all(_page_sig(rows[sid_], sid_, now) == sg for sid_, sg in _WARM_MEMO["sigs"].items() if sid_ in rows)
+        except Exception:
+            same = False
+        with _page_lock:
+            settled = same and all(k in _PAGE_CACHE for k in _WARM_MEMO["keys"])
+            if settled:
+                _PAGE_STATS["warmCycles"] += 1
+                _PAGE_STATS["warmMs"] += (time.monotonic() - t0) * 1000.0
+        if settled:
+            return 0
+    if live_map is None:
+        live_map = _live_map()
+    st, pending, keys, unresolved, set_bytes = {"rendered": 0}, 0, set(), 0, 0
+    per_sid = {}                                  # sid → (floor, sess, turns, uuid → turn index below the floor, page signature)
+    for sid, uuid in anchors:
+        if len(keys) >= WARM_PAGES_MAX or (keys and set_bytes >= _PAGE_CACHE_BYTES // 2):
+            pending += 1                          # past the set's bound (pages, or bytes: round 3, B): waits for the next board change
+            continue
+        try:
+            if sid not in per_sid:
+                floor, sess = _RENDER_FLOOR.get(sid), rows.get(sid)
+                if not floor or sess is None:
+                    per_sid[sid] = None
+                else:
+                    turns = _parse(sess["path"], sid, now)["turns"]
+                    u2t = {a["uuid"]: i for i, t in enumerate(turns[:floor]) for a in t.get("atoms") or [] if a.get("uuid")}
+                    per_sid[sid] = (floor, sess, turns, u2t, _page_sig(sess, sid, now, floor=floor, turns=turns))
+            entry = per_sid[sid]
+            if entry is None:
+                unresolved += 1                   # no floor yet (an index client holds every tab at 0), or no row: this
+                continue                          #  anchor's pages are unknown, so the set cannot be called settled (round 3, A)
+            floor, sess, turns, u2t, sig = entry
+            j = u2t.get(str(uuid).split("#", 1)[0])
+            if j is None:
+                j = _turn_of_uuid(turns, uuid)    # a note's key, a fork's chip: by time
+            if j is None or j >= floor:
+                continue
+            lo, hi = _window_turns(j, floor)
+            window = [(sid, a, min(hi, a + PAGE_TURNS), sig) for a in range(lo, hi, PAGE_TURNS)]
+            if keys and len(keys | set(window)) > WARM_PAGES_MAX:
+                pending += 1                      # its pages would take the set past the bound: it waits (a shared page is free)
+                continue
+            keys.update(window)
+            for key in window:
+                with _page_lock:
+                    hit = _PAGE_CACHE.get(key)
+                if hit is None:
+                    _chat_history_page(sid, key[1], key[2], now, sess=sess, live_map=live_map, sig=sig, stats=st)
+                    with _page_lock:
+                        hit = _PAGE_CACHE.get(key)
+                set_bytes += hit[1] if hit is not None else 0   # the set's bytes: a page over the half-bound alone is admitted, and the set closes
+        except Exception:
+            unresolved += 1
+            sys.stderr.write("chat pages warm: %s\n" % traceback.format_exc().strip().splitlines()[-1])
+    with _page_lock:
+        _PAGE_STATS["warmed"] += st["rendered"]
+        _PAGE_STATS["warmPending"] = pending
+        _PAGE_STATS["warmMs"] += (time.monotonic() - t0) * 1000.0
+        _PAGE_STATS["warmCycles"] += 1
+        resident_all = bool(keys) and unresolved == 0 and all(k in _PAGE_CACHE for k in keys)   # an empty or unresolved set is
+    if resident_all:                                                                              #  never "settled" (round 3, A)
+        _WARM_MEMO.update(anchors=tuple(anchors), keys=frozenset(keys), sigs={sid_: e[4] for sid_, e in per_sid.items() if e is not None})
+    else:
+        _WARM_MEMO.update(anchors=(), keys=frozenset(), sigs={})
+    return st["rendered"]
 
 
 def _turn_of_uuid(turns, uuid):
@@ -40890,13 +41100,7 @@ def _chat_history_reply(sid, msg, now, base=None):
         return _turn_of_uuid(turns, k)
 
     def pages(lo, hi):
-        out = []
-        a = lo
-        while a < hi:
-            b = min(hi, (a // PAGE_TURNS + 1) * PAGE_TURNS)
-            out.extend(_chat_history_page(sid, a, b, now, sess=sess, live_map=live_map))
-            a = b
-        return out
+        return _history_pages(sid, lo, hi, now, sess=sess, live_map=live_map)
 
     def older_than_turn(j, want):
         """Whole turns before turn j, at least `want` events when there are that many: (events, first turn)."""
@@ -40935,7 +41139,7 @@ def _chat_history_reply(sid, msg, now, base=None):
             j = _turn_of_uuid(turns, anchor)
             if j is None or j >= floor:
                 return {"type": "chatWindow", "id": sid, "anchor": anchor, "events": [], "moreBefore": False, "moreAfter": False, "missing": True}
-            lo, hi = max(0, j - WINDOW_TURNS), min(floor, j + WINDOW_TURNS)
+            lo, hi = _window_turns(j, floor)
             out = pages(lo, hi)
             body_first = _event_key(out[0]) if out else None   # the first EVENT: a head card's key places in no turn (round 3, B)
             more_before = lo > 0
@@ -43484,6 +43688,20 @@ def _push(targets, connect=False, live_map=None):
                     bars_down = True
             sys.stderr.write("push send %s (%s): %s\n" % ("feed" if is_feed else "bars", c.get("app"), traceback.format_exc()))
     _PERF_STATS.stage("push.send", time.monotonic() - _t_stage)
+    # the cards' windows, ahead of a click (the warming, 2026-09-11): AFTER the send stage, so the feed frame of the cycle a
+    # card moves never waits for the renders; only with a board to click on (a feed or fleet client among the targets;
+    # want_feed counts the chat too, which cannot click a card) and a proto-2 chat client to serve pages to; its own stage key
+    _t_stage = time.monotonic()
+    try:
+        _fs = feed_src
+    except NameError:
+        _fs = None
+    if any(c["app"] in ("feed", "fleet") for c in targets) and _fs and not connect and any(c.get("proto") == 2 for c in chat_clients):
+        try:
+            _warm_history_pages(_fs, now, live_map)
+        except Exception:
+            sys.stderr.write("chat pages warm: %s\n" % traceback.format_exc().strip().splitlines()[-1])
+        _PERF_STATS.stage("push.warm", time.monotonic() - _t_stage)
     with _clients_lock:
         _clients[:] = [c for c in _clients if c.get("alive", True)]
 
