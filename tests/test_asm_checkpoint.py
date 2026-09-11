@@ -64,8 +64,9 @@ def _write_doc(path, d):
 
 
 def _strip(tree):
-    """A tree as JSON compares it: lazy scalars dropped once hydrated (the whole parse never carries them)."""
-    t = json.loads(json.dumps(tree, default=lambda o: "<unserializable>"))
+    """A tree as JSON compares it: lazy scalars dropped once hydrated (the whole parse never carries them); a restored
+    tree's pre-cut turns are built into plain turns first (em.plain_tree, T323 stage 4c)."""
+    t = json.loads(json.dumps(em.plain_tree(tree), default=lambda o: "<unserializable>"))
     t.pop("cutTurn", None)                                  # where the lazy atoms ended: a restored tree's own fact (stage 4b)
     for turn in t["turns"]:
         for a in turn["atoms"]:
@@ -78,6 +79,8 @@ class Harness(unittest.TestCase):
         self.td = Path(tempfile.mkdtemp())
         self.ck = self.td / "checkpoints"
         em.set_checkpoint_dir(lambda: self.ck)
+        self.states, self.sent = None, []                       # what parse() hands the parser until write() sets them
+        self._trees = {}                                         # path → the tree parse() last returned (doc() writes with it)
         self.fresh()
         em._ASM_CKPT_STATS.update(written=0, restored=0, fallbacks={}, skipped={}, hydratedBytes=0, hydratedAtoms=0, hydratedBy={})
 
@@ -108,8 +111,16 @@ class Harness(unittest.TestCase):
         return str(p)
 
     def parse(self, path, modes=None):
-        return em.parse_session(path, rompuuid=SID, name="impl", dir="/TESTDIR", candidate_files=[path],
+        tree = em.parse_session(path, rompuuid=SID, name="impl", dir="/TESTDIR", candidate_files=[path],
                                 states=self.states, postal_log=self.sent, now=NOW, asm_mode_out=modes)
+        self._trees[path] = tree
+        return tree
+
+    def doc(self, path):
+        """The leaf's document, written from its whole entry with the tree the last parse() of that path returned (the kernel
+        hands the store's live tree, which gives the document its turns section: T323 stage 4c). A test that parsed the
+        path through em.parse_session itself gets a document with no turns section (the atoms-only form)."""
+        return em.asm_checkpoint_write(path, SID, tree=self._trees.get(path))
 
     def cold(self, path):
         self.fresh()
@@ -159,7 +170,7 @@ class RestoredEqualsWhole(Harness):
                 whole = self.cold(path)
                 self.fresh()
                 self.parse(path)                                        # the whole parse the writer works from
-                self.assertTrue(em.asm_checkpoint_write(path, SID), "a document is written: %s" % em.asm_checkpoint_stats())
+                self.assertTrue(self.doc(path), "a document is written: %s" % em.asm_checkpoint_stats())
                 doc = _doc(path)
                 self.assertGreater(len(doc["atoms"]), 0, "the cut leaves atoms before it")
                 got, modes, n_lazy = self.restored(path)
@@ -183,7 +194,7 @@ class RestoredEqualsWhole(Harness):
                 whole = self.cold(path)
                 self.fresh(); self.parse(path)
                 em._ASM_CKPT_STATS["skipped"] = {}
-                wrote = em.asm_checkpoint_write(path, SID)
+                wrote = self.doc(path)
                 if not wrote:
                     skipped[name] = dict(em.asm_checkpoint_stats()["skipped"])
                     continue
@@ -219,7 +230,7 @@ class RestoredEqualsWhole(Harness):
         finally:
             em._CKPT_DIR_FN = saved
         self.fresh(); parse()
-        self.assertTrue(em.asm_checkpoint_write(str(pb), SID), em.asm_checkpoint_stats())
+        self.assertTrue(self.doc(str(pb)), em.asm_checkpoint_stats())
         doc = _doc(str(pb))
         self.assertIn(G.FSID_A, doc["files"])
         self.fresh(); modes = []
@@ -240,7 +251,7 @@ class RestoredEqualsWhole(Harness):
         records, _ = G.SINGLE_FILE["compaction_atom"]
         recs = records()
         path = self.write("compaction_atom", recs)
-        self.fresh(); self.parse(path); self.assertTrue(em.asm_checkpoint_write(path, SID))
+        self.fresh(); self.parse(path); self.assertTrue(self.doc(path))
         got, modes, _ = self.restored(path)
         last = recs[-1]
         t1 = self.after(recs, 100)
@@ -259,7 +270,7 @@ class RestoredEqualsWhole(Harness):
         records, _ = G.SINGLE_FILE["compaction_atom"]
         recs = records()
         path = self.write("compaction_atom", recs)
-        self.fresh(); self.parse(path); self.assertTrue(em.asm_checkpoint_write(path, SID))
+        self.fresh(); self.parse(path); self.assertTrue(self.doc(path))
         self.restored(path)
         last = recs[-1]
         t1 = self.after(recs, 100)
@@ -277,7 +288,7 @@ class Fallbacks(Harness):
     def _armed(self, tag):
         records, _ = G.SINGLE_FILE["compaction_atom"]
         path = self.write("compaction_atom-" + tag, records())
-        self.fresh(); self.parse(path); self.assertTrue(em.asm_checkpoint_write(path, SID))
+        self.fresh(); self.parse(path); self.assertTrue(self.doc(path))
         return path
 
     def test_each_reason_falls_back_to_a_whole_parse_and_is_counted(self):
@@ -334,7 +345,7 @@ class Fallbacks(Harness):
         saved = em._ASM_CKPT_CAP
         em._ASM_CKPT_CAP = 10
         try:
-            self.assertFalse(em.asm_checkpoint_write(path, SID))
+            self.assertFalse(self.doc(path))
         finally:
             em._ASM_CKPT_CAP = saved
         self.assertEqual(em.asm_checkpoint_stats()["skipped"].get("oversize"), 1)
@@ -344,7 +355,7 @@ class Fallbacks(Harness):
         path2 = self.write("valves-order", recs)
         self.fresh(); self.parse(path2)
         em._ASM_CKPT_STATS["skipped"] = {}
-        wrote = em.asm_checkpoint_write(path2, SID)
+        wrote = self.doc(path2)
         self.assertFalse(wrote, "a pre-cut record stamped after every tail record cannot be split off")
         self.assertEqual(em.asm_checkpoint_stats()["skipped"], {"unsplittable": 1})
 
@@ -369,7 +380,7 @@ class SkillLoadCarry(Harness):
         path = self.write("skill-load", compacting_variant(recs, "skl"))
         whole = self.cold(path)
         self.assertEqual(whole["skillLoads"], {"u2": skill}, "the whole parse reports the wrapper")
-        self.fresh(); self.parse(path); self.assertTrue(em.asm_checkpoint_write(path, SID), em.asm_checkpoint_stats())
+        self.fresh(); self.parse(path); self.assertTrue(self.doc(path), em.asm_checkpoint_stats())
         self.fresh(); modes = []
         tree = self.parse(path, modes)
         self.assertEqual(modes, ["restore"])
@@ -397,7 +408,7 @@ class WriteValves(Harness):
             return h if len(calls) == 1 else "0" * len(h)          # the whole's hash, then a reconstruction that differs
         em._pre_tree_identity = identity
         try:
-            self.assertFalse(em.asm_checkpoint_write(path, SID))
+            self.assertFalse(self.doc(path))
         finally:
             em._pre_tree_identity = real
         self.assertEqual(len(calls), 2, "the whole parse's tree and the reconstruction were both hashed")
@@ -405,7 +416,7 @@ class WriteValves(Harness):
         self.assertFalse(em._asm_ckpt_file(path).exists(), "no document")
         self.assertEqual(em.asm_checkpoint_stats()["skipped"], {"reconstruction": 1})
         em._ASM_CKPT_STATS["skipped"] = {}
-        self.assertFalse(em.asm_checkpoint_write(path, SID), "the failure is memoized for this entry and cut")
+        self.assertFalse(self.doc(path), "the failure is memoized for this entry and cut")
         self.assertEqual(em.asm_checkpoint_stats()["skipped"], {"reconstruction": 1}, "counted again, nothing rebuilt")
         self.assertEqual(em._ASM_CACHE[next(iter(em._ASM_CACHE))].get("docSkip", (None, None))[1], "reconstruction")
 
@@ -416,24 +427,24 @@ class WriteValves(Harness):
         real = em.record_offsets
         em.record_offsets = lambda fp, base: None                   # a record landing between the parse and the offsets
         try:
-            self.assertFalse(em.asm_checkpoint_write(path, SID))
+            self.assertFalse(self.doc(path))
         finally:
             em.record_offsets = real
         self.assertEqual(em.asm_checkpoint_stats()["skipped"], {"offsets": 1})
         self.assertIsNone(em._ASM_CACHE[next(iter(em._ASM_CACHE))].get("docSkip"), "not memoized")
-        self.assertTrue(em.asm_checkpoint_write(path, SID), "the next settle writes")
+        self.assertTrue(self.doc(path), "the next settle writes")
 
     def test_a_whole_entry_writes_its_document_once(self):
         """Review find (H): a fold appends after the cut and changes nothing before it, so the settles after the first
         write skip the build (`written`), until the entry is replaced."""
         path = self._whole("once")
-        self.assertTrue(em.asm_checkpoint_write(path, SID))
+        self.assertTrue(self.doc(path))
         st = em._asm_ckpt_file(path).stat()
-        self.assertFalse(em.asm_checkpoint_write(path, SID))
+        self.assertFalse(self.doc(path))
         self.assertEqual(em.asm_checkpoint_stats()["skipped"], {"written": 1})
         self.assertEqual(em._asm_ckpt_file(path).stat().st_mtime_ns, st.st_mtime_ns, "the document was not rewritten")
         em._asm_ckpt_file(path).unlink()
-        self.assertTrue(em.asm_checkpoint_write(path, SID), "a missing document is written again from the same entry")
+        self.assertTrue(self.doc(path), "a missing document is written again from the same entry")
 
 
 class KernelOverRestored(Harness):
@@ -473,7 +484,7 @@ class KernelOverRestored(Harness):
                 self.fresh()
                 whole = self.parse(path)
                 cold = json.loads(json.dumps(self.answers(whole), default=str))
-                self.assertTrue(em.asm_checkpoint_write(path, SID))
+                self.assertTrue(self.doc(path))
                 self.fresh()
                 modes = []
                 tree = self.parse(path, modes)
@@ -491,7 +502,7 @@ class EventModelReaders(Harness):
         records, _ = G.SINGLE_FILE["compaction_atom"]
         recs = compacting_variant(records(), "seam")
         path = self.write("em-readers", recs)
-        self.fresh(); whole = self.parse(path); em.asm_checkpoint_write(path, SID)
+        self.fresh(); whole = self.parse(path); self.doc(path)
         self.fresh(); tree = self.parse(path)
         self.assertTrue(any(a.get("lazy") is not None for t in tree["turns"] for a in t["atoms"]))
         return whole, tree
@@ -532,7 +543,7 @@ class EventModelReaders(Harness):
         path = self.write("plan", compacting_variant(recs, "pln"))
         self.fresh(); whole = self.parse(path); plan = em.declared_plan(whole)
         self.assertEqual([t["key"] for t in plan], ["7"], "the whole parse folds the declared step")
-        self.assertTrue(em.asm_checkpoint_write(path, SID), em.asm_checkpoint_stats())
+        self.assertTrue(self.doc(path), em.asm_checkpoint_stats())
         self.fresh(); modes = []
         tree = self.parse(path, modes); self.assertEqual(modes, ["restore"])
         em._ASM_CKPT_STATS.update(hydratedAtoms=0, hydratedBytes=0, hydratedBy={})
@@ -551,7 +562,7 @@ class ConcurrentHydration(Harness):
         import threading
         records, sent = G.SINGLE_FILE["compaction_atom"]
         path = self.write("threads", records(), sent=sent)
-        self.fresh(); self.parse(path); self.assertTrue(em.asm_checkpoint_write(path, SID))
+        self.fresh(); self.parse(path); self.assertTrue(self.doc(path))
         self.fresh(); modes = []
         tree = self.parse(path, modes); self.assertEqual(modes, ["restore"])
         lazy = [a for t in tree["turns"] for a in t["atoms"] if a.get("lazy") is not None]
@@ -591,7 +602,7 @@ class ClearedSessionDocument(Harness):
         cands = [str(leaf), str(anchor)]
         self.fresh()
         em.parse_session(str(leaf), rompuuid=SID, candidate_files=cands, states=None, postal_log=[], now=NOW)
-        self.assertTrue(em.asm_checkpoint_write(str(leaf), SID), em.asm_checkpoint_stats())
+        self.assertTrue(self.doc(str(leaf)), em.asm_checkpoint_stats())
         em._ASM_CKPT_STATS["fallbacks"] = {}
         saved = jd._sdk_owned
         jd._sdk_owned = lambda fsid: False
@@ -611,7 +622,7 @@ class LazyBodies(Harness):
     def test_a_body_read_before_hydration_is_loud_and_hydration_counts(self):
         records, _ = G.SINGLE_FILE["compaction_atom"]
         path = self.write("compaction_atom", records())
-        self.fresh(); self.parse(path); self.assertTrue(em.asm_checkpoint_write(path, SID))
+        self.fresh(); self.parse(path); self.assertTrue(self.doc(path))
         self.fresh()
         tree = self.parse(path)
         lazy = [a for t in tree["turns"] for a in t["atoms"] if a.get("lazy") is not None]

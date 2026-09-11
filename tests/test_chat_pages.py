@@ -103,6 +103,9 @@ class Harness(unittest.TestCase):
         with km._page_lock:
             km._PAGE_CACHE.clear(); km._PAGE_STATS.update(hits=0, misses=0, evictions=0, pages=0, bytes=0, renderMs=0.0)
         km._live_scope.chat_floor0 = None
+        with em._MAT_LOCK:                                                # the lazy index's LRU and counters (stage 4c)
+            em._MAT_LRU.clear()
+            em._ASM_INDEX_STATS.update(materialized=0, materializedBy={}, resident=0, evictions=0, restoredTurns=0)
 
     def write(self, recs):
         Path(self.leaf).write_text("".join(json.dumps(r) + "\n" for r in recs))
@@ -120,7 +123,8 @@ class Harness(unittest.TestCase):
     def document(self):
         self.fresh()
         km.build_session(SID, NOW, {}, floor=0)                          # a whole parse, then its document
-        self.assertTrue(em.asm_checkpoint_write(self.leaf, SID), em.asm_checkpoint_stats())
+        self.assertTrue(em.asm_checkpoint_write(self.leaf, SID, tree=km._parse(self.leaf, SID, NOW)), em.asm_checkpoint_stats())   # the
+        #                                                                  store's tree gives the turns section (stage 4c)
 
     def restored(self):
         """A fresh process with the document: the floor'd build (the pusher's, no proto-1 client)."""
@@ -427,9 +431,12 @@ class RealArm(Harness):
                     self.assertTrue(mo["more"], "the walk stops inside the list, still detached")
                 if w is not None or mo is not None:
                     if any((e.get("key") or e["uuid"]) in list_keys for e in run):
-                        state["step"] = "reattach"
-                        return self._frame({"type": "needFull", "id": SID, "why": "reattach"})   # Return to live
+                        state["step"] = "keys"
+                        return self._frame({"type": "reattachKeys", "id": SID, "keys": [e.get("key") or e["uuid"] for e in run[-512:]]})
                     return self._frame({"type": "loadNewer", "id": SID, "after": run[-1].get("key") or run[-1]["uuid"]})
+            elif state["step"] == "keys":
+                state["step"] = "reattach"
+                return self._frame({"type": "needFull", "id": SID, "why": "reattach"})   # Return to live, the keys ahead of it
             elif state["step"] == "reattach":
                 f = newest("session")
                 if f is not None:
@@ -489,6 +496,26 @@ class RealArm(Harness):
         # a window back into the head part now overlaps the run [turn 0 .. the tail]: attached
         w2 = km._chat_history_reply(SID, {"type": "loadAround", "id": SID, "uuid": whole[4]["uuid"]}, NOW, base=c["echat"][SID])
         self.assertTrue(w2["connected"])
+
+
+class ReattachKeysArm(Harness):
+    """1448's lows: a posted key list is held only for a session the client has a base for, and the map is bounded."""
+
+    def test_unknown_sessions_are_ignored_and_the_map_is_bounded(self):
+        c, sent = _client()
+        c["echat"]["s-known"] = {"first": "a", "last": "b", "detached": False}
+        arm = lambda msg: km.Handler._dispatch_ws(object.__new__(km.Handler), msg, c)
+        arm({"type": "reattachKeys", "id": "s-unknown", "keys": ["k1"]})
+        self.assertNotIn("reattachKeys", c, "a session this client holds no base for: dropped")
+        arm({"type": "reattachKeys", "id": "s-known", "keys": ["k%d" % i for i in range(700)]})
+        self.assertEqual(len(c["reattachKeys"]["s-known"]), km.REATTACH_KEYS, "the newest keys, bounded")
+        for i in range(km.REATTACH_KEYS_CLIENTS + 3):
+            sid = "s-%d" % i
+            c["echat"][sid] = {"first": "a", "last": "b", "detached": False}
+            arm({"type": "reattachKeys", "id": sid, "keys": ["k"]})
+        self.assertEqual(len(c["reattachKeys"]), km.REATTACH_KEYS_CLIENTS, "the map is capped")
+        self.assertNotIn("s-known", c["reattachKeys"], "…the oldest dropped first")
+        self.assertIn("s-%d" % (km.REATTACH_KEYS_CLIENTS + 2), c["reattachKeys"])
 
 
 class OrphanGate(Harness):
@@ -558,6 +585,56 @@ class KeyCounts(unittest.TestCase):
         src = open(os.path.join(BIN, "romp-kernel")).read()
         i = src.index('"keyCounts": _key_counts(events[:_b])')
         self.assertIn("_uniq_event_uuids(events[_pref_len:_b], events[:_pref_len],", src[i - 1200:i], "the pass precedes the commit")
+
+
+class ZeroMaterialization(Harness):
+    """T323 stage 4c: the chat's first open of a restored session builds no pre-cut atom. The floor'd build reads the turns
+    before the floor through their own scalars (_cursors_before, _turn_index_of_events, _fold_tasks, the cut) and hydrates
+    the tail's atoms only; a page then builds exactly its own turns' atoms."""
+
+    def test_the_floored_build_builds_no_pre_cut_atom_and_a_page_builds_its_own_turns(self):
+        recs = transcript(NOW - 86400, turns=120, compact_every=25)
+        self.write(recs)
+        self.document()
+        m = self.restored()                                               # fresh() zeroed the index's counters
+        self.assertGreater(m["floor"], 0)
+        tree = km._parse(self.leaf, SID, NOW)
+        self.assertTrue(all(isinstance(tree["turns"][i], em.PreTurn) for i in range(m["floor"])), "the pre-cut turns are the index's")
+        st = em.asm_index_stats()
+        self.assertEqual(st["materialized"], 0, "the first open built no pre-cut atom: %s" % st["materializedBy"])
+        page = km._chat_history_page(SID, 16, 32, NOW)
+        self.assertTrue(page)
+        st = em.asm_index_stats()
+        built = sum(len(tree["turns"][i]["uuids"]) for i in range(16, 32 + km._PAGE_FILL_TURNS))
+        self.assertLessEqual(st["materialized"], built, "a page builds its turns and its fill turns, no more: %s" % st["materializedBy"])
+        self.assertGreater(st["materialized"], 0)
+        r = km._chat_history_reply(SID, {"type": "loadOlder", "id": SID, "before": m["events"][0]["uuid"]}, NOW)
+        self.assertTrue(r["events"])
+
+
+class EchoPlacement(Harness):
+    """Review low 3: a stale echo stamped in the pre-cut history goes into the first post-cut turn, never into a restored
+    pre-cut turn (its atoms are the document's, its spans written, and a synthetic turn among them would move the floor)."""
+
+    def test_an_echo_before_the_cut_joins_the_first_tail_turn_and_the_pre_turns_stand(self):
+        recs = transcript(NOW - 86400, turns=60, compact_every=25)
+        self.write(recs)
+        self.document()
+        m = self.restored()
+        tree = km._parse(self.leaf, SID, NOW)
+        cut = tree["cutTurn"]; turns = tree["turns"]
+        early = turns[3]["t"] + 1                                          # inside a pre-cut turn's window
+        gap = turns[cut - 1]["end"] + 1 if turns[cut]["t"] - turns[cut - 1]["end"] > 2 else turns[2]["end"] + 1   # a gap among pre-turns
+        echoes = [{"type": "user", "uuid": "echo-1", "session_id": SID, "t": early, "_echo_text": "a note sent yesterday", "message": {"role": "user", "content": "a note sent yesterday"}},
+                  {"type": "user", "uuid": "echo-2", "session_id": SID, "t": gap, "_echo_text": "another", "message": {"role": "user", "content": "another"}},
+                  {"type": "user", "uuid": "echo-0", "session_id": SID, "t": turns[0]["t"] - 60, "_echo_text": "before everything", "message": {"role": "user", "content": "before everything"}}]
+        out, placed = km._place_stale_echoes(turns, echoes)
+        self.assertEqual(len(out), len(turns), "no synthetic turn among the pre-cut turns")
+        for i in range(cut):
+            self.assertIs(out[i], turns[i], "a pre-cut turn is untouched")
+        self.assertEqual({p[0] for p in placed}, {cut}, "both echoes joined the first post-cut turn")
+        self.assertEqual(sorted(a["uuid"] for a in out[cut]["atoms"] if a.get("_echo_text")), ["echo-0", "echo-1", "echo-2"], "the one ahead of every turn too")
+        self.assertEqual(em.asm_index_stats()["materialized"], 0, "…and no pre-cut atom was built for it")
 
 
 class UniqueUuids(Harness):
@@ -916,23 +993,33 @@ class Proto2Wire(Harness):
         # a window that holds NO part of the run (a far anchor) still detaches the client, kernel and page agreeing
         far = km._chat_history_reply(SID, {"type": "loadAround", "id": SID, "uuid": whole[2]["uuid"]}, NOW, base=c["echat"][SID])
         self.assertFalse(far["connected"]); self.assertTrue(far["_base"]["detached"])
-        # a re-attach whose run's NEWEST key left the list (a fork rewrote the tail): the run held everything up to that key,
-        # so the keys just below the fork point survive; they are in the frame exactly when the fork left fewer than WIRE_TAIL
-        # new events, the client's merge then shares them and the kernel keeps the older first (round 4)
+        # the re-attach's shared clause reads the client's OWN resident keys (reattachKeys), never the broadcast diff's change
+        # index: the repair frame is a connect push over an unchanged build, so change_from is total there (T323 follow-up, M1)
         head_from = len(evs) - km.WIRE_TAIL
+        run_keys = [e.get("key") or e["uuid"] for e in evs[:head_from + 10]]       # a run from the list's head into the frame
         c2, sent2 = _client()
-        c2["echat"][SID] = {"first": evs[0]["uuid"], "last": "gone-after-a-fork", "detached": False, "reattach": True}
-        km._send_chat_locked(c2, m, None, head_from + 5, False)          # the fork point inside the frame: shared
-        self.assertEqual(sent2[-1]["type"], "session"); self.assertEqual(c2["echat"][SID]["first"], evs[0]["uuid"])
-        self.assertNotEqual(sent2[-1]["firstUuid"], evs[0]["uuid"], "…before the frame's first")
-        c3, sent3 = _client()
-        c3["echat"][SID] = {"first": evs[0]["uuid"], "last": "gone-after-a-fork", "detached": False, "reattach": True}
-        km._send_chat_locked(c3, m, None, head_from - 5, False)          # a fork of WIRE_TAIL or more: no run key in the frame
-        self.assertEqual(c3["echat"][SID]["first"], sent3[-1]["firstUuid"], "the client replaces: the base takes the frame's first")
-        c4, sent4 = _client()
-        c4["echat"][SID] = {"first": "gone-1", "last": "gone-2", "detached": False, "reattach": True}   # no key left at all
-        km._send_chat_locked(c4, m, None, 0, False)
-        self.assertEqual(c4["echat"][SID]["first"], sent4[-1]["firstUuid"])
+        c2["echat"][SID] = {"first": evs[0]["uuid"], "last": "gone-after-a-fork", "detached": False, "reattach": True, "keys": run_keys[-512:]}
+        km._send_chat_locked(c2, m, None, len(evs), False)               # an unchanged build: change_from == total
+        self.assertEqual(sent2[-1]["type"], "session"); self.assertEqual(c2["echat"][SID]["first"], evs[0]["uuid"], "the older first kept")
+        self.assertNotEqual(sent2[-1]["firstUuid"], evs[0]["uuid"])
+        w2 = km._chat_history_reply(SID, {"type": "loadAround", "id": SID, "uuid": evs[3]["uuid"]}, NOW, base=c2["echat"][SID])
+        self.assertTrue(w2["connected"], "a window below the frame after the re-attach stays connected: no divergence")
+        c3, sent3 = _client()                                            # the fork cut every key the client holds: replaced (M2)
+        c3["echat"][SID] = {"first": "dead-1", "last": "dead-2", "detached": False, "reattach": True, "keys": ["dead-1", "dead-9", "dead-2"]}
+        km._send_chat_locked(c3, m, None, len(evs), False)
+        self.assertEqual(c3["echat"][SID]["first"], sent3[-1]["firstUuid"], "no resident key: the base takes the frame's first")
+        c3b, sent3b = _client()                                          # resident keys, all below the frame: no shared key either
+        c3b["echat"][SID] = {"first": evs[0]["uuid"], "last": "gone", "detached": False, "reattach": True, "keys": run_keys[:head_from - 5]}
+        km._send_chat_locked(c3b, m, None, len(evs), False)
+        self.assertEqual(c3b["echat"][SID]["first"], sent3b[-1]["firstUuid"])
+        c4, sent4 = _client()                                            # an older bundle sends no keys: the newest edge decides
+        c4["echat"][SID] = {"first": evs[0]["uuid"], "last": evs[-1]["uuid"], "detached": False, "reattach": True}
+        km._send_chat_locked(c4, m, None, len(evs), False)
+        self.assertEqual(c4["echat"][SID]["first"], evs[0]["uuid"])
+        c5, sent5 = _client()
+        c5["echat"][SID] = {"first": evs[0]["uuid"], "last": "gone", "detached": False, "reattach": True}
+        km._send_chat_locked(c5, m, None, len(evs), False)
+        self.assertEqual(c5["echat"][SID]["first"], sent5[-1]["firstUuid"])
         src = open(os.path.join(BIN, "romp-kernel")).read()
         self.assertIn('if base.pop("keepLast", False):', src, "the handler applies a loadOlder's first-edge advance")
 

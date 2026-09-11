@@ -1192,18 +1192,52 @@ def present_count_checked():
 def present_count():
     return present_count_checked()[0]
 
-def _postal_off(sid):
-    """True if the session toggled POSTAL ISOLATION on (the timeline lane's mailbox icon → postalServiceOff): it's
-    invisible to list_agents, can't send, and can't receive — for working privately. Reads the kernel's
-    shared session-flags.json. Back-compat: also honours the legacy `postalOff` key so sessions isolated
-    before the rename stay isolated. Best-effort: any error → not isolated (fail OPEN, never wedge messaging)."""
+def _thread_of(sid):
+    """The parent sid when `sid` is a COMMENT THREAD (its durable SDK reg, beside session-flags.json in the kernel's
+    state, carries threadOf), else ''. Unreadable or absent → '' (an ordinary session), the same fail-open the flag
+    read below keeps; a thread's reg is written before its first turn, so a live thread always has one."""
+    if not sid or not _safe_id(sid):
+        return ""
+    try:
+        d = json.loads((SESSION_FLAGS.parent / "sdk" / (sid + ".json")).read_text())
+        return str(d.get("threadOf") or "") if isinstance(d, dict) else ""
+    except Exception:
+        return ""
+
+def _mail_off_why(sid):
+    """Why `sid` can neither send nor receive mail right now, or '' when its mail is on:
+      "thread"    — a comment thread (T356, the user 2026-09-11: a thread of a manager session received the
+                    manager's mail, mailed two workers and merged a pull request as if it were the manager). A
+                    thread's mail is OFF by default, both directions, until the user breaks it out into a session
+                    of its own; the default derives from the thread-ness itself, so a thread on disk with no flag
+                    reads OFF, and the one way on short of a break-out is the fresh key `threadMail` at the literal
+                    True in session-flags.json (never an old key re-read). A break-out clears threadOf, and the
+                    promoted session falls to the ordinary rule.
+      "isolation" — the user toggled POSTAL ISOLATION on (the timeline lane's mailbox icon → postalServiceOff;
+                    the legacy `postalOff` key still honoured).
+    Both read the kernel's shared files. Best-effort on the flag read: any error → the flag is unset (fail OPEN,
+    never wedge messaging); the thread default holds regardless of the flag file's health."""
     if not sid:
-        return False
+        return ""
     try:
         f = json.loads(SESSION_FLAGS.read_text()).get(sid)
-        return bool(isinstance(f, dict) and (f.get("postalServiceOff") or f.get("postalOff")))
     except Exception:
-        return False
+        f = None
+    if _thread_of(sid) and not (isinstance(f, dict) and f.get("threadMail") is True):
+        return "thread"
+    return "isolation" if (isinstance(f, dict) and (f.get("postalServiceOff") or f.get("postalOff"))) else ""
+
+def _postal_off(sid):
+    """True if the session can neither send nor receive mail (see _mail_off_why): it's invisible to list_agents,
+    can't send, and can't receive."""
+    return bool(_mail_off_why(sid))
+
+THREAD_MAIL_OFF_SENDER = ("isolation: YOUR OWN mail is OFF because this session is a COMMENT THREAD. A thread neither "
+                          "sends nor receives peer mail until the user breaks it out into a session of its own. "
+                          "Nothing was sent, and this is final: do not route around it (not the kernel's /send, not "
+                          "another session's mailbox, not a file drop). Answer in the thread, and leave mail to the "
+                          "session the thread belongs to. When you relay this, say the thread's mail is off until it "
+                          "is broken out.")
 
 def _git_branch(d):
     """Current git branch of a dir (for the agent list — same-branch is what makes
@@ -1372,6 +1406,14 @@ def resolve_recipient(to, frm_id=""):
     if peer_cands:
         return {"kind": "relay", "host": peer_cands[0][0], "agent": peer_cands[0][1]}
     if direct_all:                        # live, but every candidate has its mailbox off
+        if any(_mail_off_why(a["id"]) == "thread" for a in direct_all):
+            # a comment thread's mail is off until the user breaks it out (T356): say what it is, so the sender
+            # reaches the session the thread belongs to instead of waiting on a mailbox toggle nobody offers
+            return {"kind": "error", "status": 403,
+                    "error": "isolation: the RECIPIENT '%s' is a COMMENT THREAD, and a thread's mail is OFF, both "
+                             "directions, until the user breaks it out into a session of its own. YOUR mailbox is "
+                             "fine; nothing was sent, and this is final. Mail the session the thread belongs to "
+                             "instead, or wait for the user to break the thread out." % to}
         return {"kind": "error", "status": 403,
                 "error": "isolation: the RECIPIENT '%s' has its mailbox OFF (it's in "
                          "postal isolation — its mailbox icon is toggled off), so it can't receive "
@@ -2310,7 +2352,10 @@ class Handler(BaseHTTPRequestHandler):
             tracked = tracked and kind == "delegate"
             #   (the user 2026-08-24): only a delegate can be tracked; wire metadata only — nothing
             #   about the flag ever appears in message prose (the injected-voice rule)
-            if _postal_off(frm_id):                # the sender is in isolation → sending is disabled
+            why_off = _mail_off_why(frm_id)
+            if why_off == "thread":                # a comment thread's own send: refused until broken out (T356)
+                return self._send({"error": THREAD_MAIL_OFF_SENDER}, 403)
+            if why_off:                            # the sender is in isolation → sending is disabled
                 return self._send({"error": "isolation: YOUR OWN mailbox is OFF. This session is in postal "
                                    "isolation (its mailbox icon is toggled off on its timeline lane), so it "
                                    "can't send OR receive any mail. This is NOT the recipient's mailbox — the "
