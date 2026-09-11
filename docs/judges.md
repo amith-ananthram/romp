@@ -218,7 +218,16 @@ it: the block's why goes to the delegating peer as the worker's own question
 relayed in the row and the header, on a far host too, the row naming the
 marker so a send whose record was lost is adopted and never repeated; a why
 that speaks romp is scrubbed to the question, and romp's own procedural whys
-ride as the plain lead-in alone), once per block off a marker the judge
+ride as the plain lead-in alone; under the question rides the conversation it
+ends, quoted whole inside a fence: whole turns, the question's own always,
+earlier ones newest first while they fit the bound, shown oldest first with a
+line saying how many were left out, the user's prompts and the worker's
+replies with tool calls collapsed to a count and code blocks never cut, a turn
+with no paragraph break keeping its last lines, read newest first only as far
+as the bound reaches; the bound is 24 KiB as the bus carries it (JSON-encoded UTF-8) by
+default, a knob at ~/.config/romp/relay-context-bytes or
+$ROMP_RELAY_CONTEXT_BYTES, read at call time and capped at 768 KiB, so you
+raise it without a release), once per block off a marker the judge
 leaves on the node (each marker has an identity, the block's evidence time
 and the peer, that its queue entry and the record settling it name, and the
 node remembers the markers it settled, so a block filed again after a lift is
