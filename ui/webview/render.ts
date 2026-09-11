@@ -9798,14 +9798,13 @@ function renderCommentPopover(): void {
     crow.append(attach, box, send);
     pop.appendChild(crow);
     if (metaRowPending) pop.appendChild(metaRowPending);   // model/effort under the box, like the chat
-    if (th && th.mailOff) {
-      // T356 (the user 2026-09-11): a thread's mail is off, both directions, until it is broken out; the popover
-      // is the thread's whole surface, so it says so here
-      const mail = el("div", "cmt-note cmt-mail");
+    if (th && th.mailOff && (th.heldMail || 0) > 0) {
+      // T356: a thread's mail is off until it is broken out, but the comment box does not SAY so (the user
+      // 2026-09-11, 3:05 PM PT: not here; the tab hover's Mail row and the Sessions pane tag carry the state quietly).
+      // Only a message actually held in its box is worth a line: the count, and that it lands at the break-out.
       const held = th.heldMail || 0;
-      mail.textContent = "Mail off: this thread neither sends nor receives peer mail until you break it out."
-        + (held ? " " + held + (held === 1 ? " message waits" : " messages wait") + " in its box and land when you do." : "");
-      mail.title = "Peers cannot see or mail this thread, and its own mail is refused. Break out turns mail on.";
+      const mail = el("div", "cmt-note cmt-mail");
+      mail.textContent = held + (held === 1 ? " message waits in its box and lands" : " messages wait in its box and land") + " at the break-out.";
       pop.appendChild(mail);
     }
     if (th && th.status === "open") {

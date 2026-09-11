@@ -1203,9 +1203,12 @@ def _thread_of(sid):
     if not sid or not _safe_id(sid):
         return ""
     p = SESSION_FLAGS.parent / "sdk" / (sid + ".json")
-    if not p.exists():
-        return ""
     try:
+        # the stat sits INSIDE the try (the review's medium): a directory that cannot be read (EACCES, EIO) raised
+        # out of every reader — read_box, the sender gate, resolve_recipient, the /agents filter — a crash, not a
+        # closed door; here it is the closed door
+        if not p.exists():
+            return ""
         d = json.loads(p.read_text())
         return str(d.get("threadOf") or "") if isinstance(d, dict) else THREAD_REG_UNREADABLE
     except Exception:
@@ -1220,6 +1223,9 @@ def _mail_off_why(sid):
                     reads OFF, and the one way on short of a break-out is the fresh key `threadMail` at the literal
                     True in session-flags.json (never an old key re-read). A break-out clears threadOf, and the
                     promoted session falls to the ordinary rule.
+      "unreadable" — the session's durable record exists but cannot be read (corrupt, or a directory the bus cannot
+                    stat): closed, with its own words (the review's low: an ordinary session with a corrupt record was
+                    told it was a comment thread, a wrong diagnosis the norms then make final).
       "isolation" — the user toggled POSTAL ISOLATION on (the timeline lane's mailbox icon → postalServiceOff;
                     the legacy `postalOff` key still honoured).
     Both read the kernel's shared files. Best-effort on the flag read: any error → the flag is unset (fail OPEN,
@@ -1232,7 +1238,7 @@ def _mail_off_why(sid):
         f = None
     t = _thread_of(sid)
     if t == THREAD_REG_UNREADABLE:
-        return "thread"                                  # a reg that exists but cannot be read: closed, never open
+        return "unreadable"                              # a record that exists but cannot be read: closed, never open
     if t and not (isinstance(f, dict) and f.get("threadMail") is True):
         return "thread"
     return "isolation" if (isinstance(f, dict) and (f.get("postalServiceOff") or f.get("postalOff"))) else ""
@@ -1241,6 +1247,11 @@ def _postal_off(sid):
     """True if the session can neither send nor receive mail (see _mail_off_why): it's invisible to list_agents,
     can't send, and can't receive."""
     return bool(_mail_off_why(sid))
+
+UNREADABLE_REG_SENDER = ("isolation: YOUR OWN mail is held because this session's record (its entry under the kernel's sdk/ "
+                         "directory) cannot be read, so the bus cannot tell what kind of session this is. Mail to and from it is "
+                         "held until the record is repaired. Nothing was sent, and this is final: do not route around it. Tell "
+                         "the user the session record cannot be read.")
 
 THREAD_MAIL_OFF_SENDER = ("isolation: YOUR OWN mail is OFF because this session is a COMMENT THREAD. A thread neither "
                           "sends nor receives peer mail until the user breaks it out into a session of its own. "
@@ -1416,7 +1427,12 @@ def resolve_recipient(to, frm_id=""):
     if peer_cands:
         return {"kind": "relay", "host": peer_cands[0][0], "agent": peer_cands[0][1]}
     if direct_all:                        # live, but every candidate has its mailbox off
-        if any(_mail_off_why(a["id"]) == "thread" for a in direct_all):
+        whys = {a["id"]: _mail_off_why(a["id"]) for a in direct_all}
+        if "unreadable" in whys.values():
+            return {"kind": "error", "status": 403,
+                    "error": "isolation: the RECIPIENT '%s' has a session record the bus cannot read; mail to it is held "
+                             "until the record is repaired. YOUR mailbox is fine; nothing was sent, and this is final." % to}
+        if "thread" in whys.values():
             # a comment thread's mail is off until the user breaks it out (T356): say what it is, so the sender
             # reaches the session the thread belongs to instead of waiting on a mailbox toggle nobody offers
             return {"kind": "error", "status": 403,
@@ -1870,7 +1886,11 @@ def _stuck_warn_text(recip, box_sid, body):
     thread out; nothing to resend, nothing to do."""
     name = recip.get("name") or box_sid[:8]
     original = " ".join(body.split())[:160]
-    if _mail_off_why(box_sid) == "thread":
+    why = _mail_off_why(box_sid)
+    if why == "unreadable":
+        return ("↩ HELD — '%s' has a session record the bus cannot read; your message waits in its box until the record "
+                "is repaired. Nothing to resend.\nOriginal: %s" % (name, original))
+    if why == "thread":
         return ("↩ HELD — '%s' is a comment thread, and a thread's mail is off until the user breaks it out. Your "
                 "message waits in its box and lands the moment they do. Nothing to resend, and no other door: the "
                 "refusal is final.\nOriginal: %s" % (name, original))
@@ -1881,7 +1901,10 @@ def _isolated_bounce_why(named, to):
     """Why an inbound cross-host message to `to` bounces when every session answering to it has its mail off: the
     thread refusal when one of them is a comment thread (the review's low: the sender read 'mailbox off' and waited
     on a toggle nobody offers), else the isolation line."""
-    if any(_mail_off_why(a["id"]) == "thread" for a in named):
+    whys = {_mail_off_why(a["id"]) for a in named}
+    if "unreadable" in whys:
+        return "recipient '%s' has a session record the bus cannot read; mail to it is held until the record is repaired" % to
+    if "thread" in whys:
         return ("recipient '%s' is a COMMENT THREAD, and a thread's mail is off, both directions, until the user "
                 "breaks it out into a session of its own; mail the session the thread belongs to instead" % to)
     return "recipient '%s' has its mailbox off (postal isolation)" % to
@@ -2385,6 +2408,8 @@ class Handler(BaseHTTPRequestHandler):
             why_off = _mail_off_why(frm_id)
             if why_off == "thread":                # a comment thread's own send: refused until broken out (T356)
                 return self._send({"error": THREAD_MAIL_OFF_SENDER}, 403)
+            if why_off == "unreadable":            # its own words: never the thread diagnosis for a corrupt record
+                return self._send({"error": UNREADABLE_REG_SENDER}, 403)
             if why_off:                            # the sender is in isolation → sending is disabled
                 return self._send({"error": "isolation: YOUR OWN mailbox is OFF. This session is in postal "
                                    "isolation (its mailbox icon is toggled off on its timeline lane), so it "
@@ -4005,7 +4030,7 @@ def _relay_in(host, m, token_proven=False):
     # 2026-08-30: a delegate bounced "isolation" with no flag set on either kernel and the
     # maildir delivering minutes either side). Same fetch-pair race the sending resolver's
     # one-fetch fix killed (2026-08-31); `answered` feeds the death-ruling gate at the tail.
-    agents, listing_answered = local_agents_checked()
+    agents, listing_answered = local_agents_checked(threads=True)   # thread rows too: a thread recipient must reach the bounce below, not retry forever (the review)
     to_id = str(m.get("toId") or "")
     if to_id and _ID_FORM_RE.fullmatch(to_id) is None:
         to_id = ""            # a malformed wire toId degrades to name matching — it must NEVER reach
@@ -4996,10 +5021,11 @@ def cli_send(argv):
     if not ensure():
         sys.stderr.write("[romp mail] %s\n" % _unreachable_hint()); return 1
     mid, me = _self_identity()
-    if mid and _mail_off_why(mid) == "thread":
+    own = _mail_off_why(mid) if mid else ""
+    if own in ("thread", "unreadable"):
         # the CALLER's own identity is judged before any --from label substitutes a synthetic one (the review's low
         # on this change: --from was a door around the thread's own-send refusal, the incident's shape)
-        sys.stderr.write("[romp mail] %s\n" % THREAD_MAIL_OFF_SENDER)
+        sys.stderr.write("[romp mail] %s\n" % (THREAD_MAIL_OFF_SENDER if own == "thread" else UNREADABLE_REG_SENDER))
         return 1
     if frm_label:
         me, mid = frm_label, "ext:" + frm_label
