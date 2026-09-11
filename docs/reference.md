@@ -2521,6 +2521,40 @@ carry and restart metrics count. The crossing is the event: nothing repeats
 while the rate stays high. Once the rate falls under half the ceiling a
 `spend.ceiling.cleared` row and a toast say so, and the guard is armed again.
 
+## The spend ledger across a host re-attach
+
+A session under a host keeps its CLI process across a kernel restart, and the
+CLI's `total_cost_usd` is cumulative per process. The kernel folds only each
+result's delta over a watermark, so every result persists that watermark on the
+session's registry row (`costState`: the cumulative total, the token
+watermarks, and the CLI's identity as pid and start time). A kernel that
+attaches to a surviving host reads it at the first result and, when it names
+that same CLI, seeds the watermarks from it, so the first result records only
+its own turn; a fresh process still starts at zero and records its whole first
+total. A surviving process with no matching watermark on record (a kernel
+before this rule wrote none) records nothing for that first result, since its
+total is the lifetime's and the turn's share is unknowable; the kernel log says
+so, and the watermark is written from there. The replay of a dead host's
+journal tail seeds the same way for the dead CLI before it drains. A result the
+attach's replay hands over again folds nothing, whatever its total, decided
+from the record's own journal position: the transport tags each result record
+with its offset as it reads it, the kernel pops one tag for every result record
+it receives, first thing and whatever the result holds (the SDK's buffered
+reader runs a record ahead, so the transport's current offset is never the
+handled record's), and a record before the offset the host's hello named as its
+next is a replay; a dead host's journal replays through the same road, the
+replay reader being the session's transport for the drain; its turn row says `redelivered` and carries
+`journalOffset`. A live total below the watermark is a counter reset the kernel
+did not see and folds whole, as before. An orphan journal's replay keeps the
+dead CLI's watermark as its line: at or below it was folded, above it was not. The attach flag lives
+one connect, so a rollback to hosts off records a fresh child's first turn in
+full, and a `/clear` as the first turn after an attach retires the pending seed
+so the zeroed counter stands. Each `turns.jsonl` row carries
+`cumulativeUsd`, the CLI's own total at that result, and a first result's
+`spendBaseline` (`fresh`, `seeded` or `attach-unknown`). Before this rule every
+restart re-billed each hosted session's lifetime as one turn (2026-09-11: a
+staircase of rows from $436 to $953 on one session across 21 restarts).
+
 ## Restart metrics
 
 `romp restart-metrics` reads what kernel restarts do to the sessions, from the
