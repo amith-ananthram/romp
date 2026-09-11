@@ -16,7 +16,8 @@ halves are checked here:
     seed, no focus posted), a move between columns closing the emptied one, the owner lookup, the emptiness
     message, another dashboard tab's write reconciled, the cross returning sessions home with their drafts,
     drafts travelling on a move, a created session claimed once and never stolen, the restore's seeding, the
-    cap, and nothing on the phone.
+    cap, and nothing on the phone — and THE DRAG (DragZonesExecute): a tab drag's zones mounted and unmounted, the
+    rectangle's geometry and cue, the drops calling the one mutation, the refused edge at the cap.
 
 Synthetic only — invented sids, no network, no real DOM.
 """
@@ -120,13 +121,41 @@ class SplitSourcePins(unittest.TestCase):
         self.assertIn("if(state)f.addEventListener('load',function(){adopt(f,sid,state);state=null;});", split)
         self.assertEqual(split.count("addEventListener('load'"), 1)
 
-    def test_the_rail_carries_no_split_button(self):
-        # the move opens from a tab's menu ("Move to a new column") and the palette; a bottom-bar button for it
-        # read as clutter (the user 2026-09-08), so the rail and the mobile bar carry none
+    def test_the_rail_carries_no_split_button_and_the_menu_no_door(self):
+        # a tab is placed by dragging it (the drop zones) or from the palette; a bottom-bar button for it read as
+        # clutter (the user 2026-09-08), so the rail and the mobile bar carry none, and the tab menu's item and its
+        # openSplit message went with the drag (2026-09-11)
         self.assertNotIn("rail-split", self.html)
         self.assertNotIn("rail-split", km._LANDING_SPLIT_JS)
-        self.assertIn("m.romp==='openSplit'", km._LANDING_SPLIT_JS, "the tab menu's ask is a door (until the drag lands)")
-        self.assertIn("if(typeof m.sid==='string'&&m.sid)moveTab(m.sid,'new');", km._LANDING_SPLIT_JS, "…and it is the one mutation, not an empty column")
+        self.assertNotIn("openSplit", km._LANDING_SPLIT_JS, "no listener for the menu's ask: the drop zones, the palette and the cross are __rompMoveTab's doors")
+
+    def test_the_drag_s_zones_and_rectangle_are_served_with_their_dress_and_the_light_twin(self):
+        split = km._LANDING_SPLIT_JS
+        # the page's message is the whole input: the sid rides it, nothing is read from dataTransfer; the geometry is two
+        # pure functions; every transition is a pointer crossing
+        self.assertIn("if(m.romp==='tabDrag'){", split)
+        self.assertNotIn("dataTransfer.getData", split)
+        for needle in ["function edgeWidth(w){return Math.max(72,Math.min(180,0.2*w));}",
+                       "function ghostRect(pane,rowRect){return {top:rowRect.top,height:rowRect.height,left:pane.left+pane.width/2,width:pane.width/2};}",
+                       "function mountZones(){", "function unmountZones(){", "ghost=document.getElementById('col-ghost')",
+                       "ghost.textContent=refused?'Four columns at most':drag.name;"]:
+            self.assertIn(needle, split, needle)
+        self.assertNotIn("setTimeout", split, "nothing is timed")
+        # the rectangle's element beside the divider drag's landing line: a child of .col, never a flex item of the row
+        self.assertIn("<div id=gv-ghost></div><div id=col-ghost></div>", self.html)
+        # the zones ride the panes (position:relative) above the iframe and the cross (z 7); the edge above the column zone
+        self.assertIn(".col-drop{position:absolute;inset:0;z-index:8}", self.html)
+        self.assertIn(".col-drop.col-drop-edge{left:auto;z-index:9}", self.html)
+        # the dress: the accent wash (the value --accent-wash resolves to in styles.css) inside a 2 px ring through the token
+        self.assertIn(".col-drop.over,#col-ghost{background:rgba(156,210,255,0.12);box-shadow:inset 0 0 0 2px var(--accent,#9cd2ff)}", self.html)
+        self.assertIn("#col-ghost{display:none;position:fixed;pointer-events:none;z-index:40;align-items:center;justify-content:center;", self.html)
+        self.assertIn("font:600 11px 'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;color:#8a8a8a;letter-spacing:.04em}", self.html)
+        self.assertIn("#col-ghost.on{display:flex}", self.html)
+        self.assertIn("#col-ghost.refused{background:transparent;box-shadow:inset 0 0 0 1px var(--accent,#9cd2ff)}", self.html)
+        # the light twin beside the cross's, and the refused state restated at the specificity that wins the cascade
+        self.assertIn("body.theme-light #col-ghost,body.theme-light .col-drop.over{background:rgba(194,65,12,0.10)}", self.html)
+        self.assertIn("body.theme-light #col-ghost.refused{background:transparent}", self.html)
+        self.assertLess(self.html.index("body.theme-light #col-ghost,"), self.html.index("body.theme-light #col-ghost.refused"))
 
     def test_the_css_hides_columns_with_the_chat_group_lifts_by_class_and_never_shows_them_on_the_phone(self):
         self.assertIn("body:not(.po-chat) .chat-col,body:not(.po-chat) .gv-chat{display:none}", self.html)
@@ -249,6 +278,8 @@ function mkEl(tag) {
     tagName: tag, className: '', title: '', textContent: '', src: '', parentElement: null, _id: '',
     style: { flex: '', _props: {}, setProperty(k, v) { this._props[k] = v; }, removeProperty(k) { delete this._props[k]; } },
     _attrs: {}, _ls: {}, children: [], _active: '',
+    _rect: { left: 0, top: 0, width: 0, height: 0 }, getBoundingClientRect() { return Object.assign({}, this._rect); },
+    contains(n) { return n === this || this.children.some((c) => c.contains && c.contains(n)); },
     setAttribute(k, v) { this._attrs[k] = String(v); },
     getAttribute(k) { return k in this._attrs ? this._attrs[k] : null; },
     appendChild(c) { c.parentElement = this; this.children.push(c); return c; },
@@ -259,6 +290,13 @@ function mkEl(tag) {
     fire(k, ev) { const ls = (this._ls[k] || []).slice(); this._ls[k] = ls.filter((l) => !l.once); ls.forEach((l) => l.f(ev || { stopPropagation() {} })); },
   };
   Object.defineProperty(el, 'id', { get() { return this._id; }, set(v) { if (this._id) delete BYID[this._id]; this._id = String(v); if (v) BYID[v] = this; } });
+  const cls = () => el.className.split(/\s+/).filter(Boolean);
+  el.classList = {
+    contains: (c) => cls().includes(c),
+    add: (...cs) => { const l = cls(); cs.forEach((c) => { if (!l.includes(c)) l.push(c); }); el.className = l.join(' '); },
+    remove: (...cs) => { el.className = cls().filter((c) => !cs.includes(c)).join(' '); },
+    toggle: (c, force) => { const want = force === undefined ? !cls().includes(c) : !!force; if (want) el.classList.add(c); else el.classList.remove(c); return want; },
+  };
   if (tag === 'iframe') {
     el.contentWindow = {
       postMessage(m) { CALLS.posted.push({ id: el.id, m }); }, focus() { CALLS.focus.push(el.id); },
@@ -270,7 +308,7 @@ function mkEl(tag) {
 }
 let ROW = null;
 global.document = {
-  body: { classList: { contains: (c) => BODY_CLASSES.has(c) } },
+  body: { classList: { contains: (c) => BODY_CLASSES.has(c), add: (c) => BODY_CLASSES.add(c), remove: (c) => BODY_CLASSES.delete(c) } },
   querySelector(sel) { return sel === '.row' ? ROW : null; },
   getElementById(id) { return BYID[id] || null; },
   createElement(tag) { return mkEl(tag); },
@@ -302,6 +340,8 @@ function boot(store, mobile) {
   const gvb = mkEl('div'); gvb.id = 'gv-b'; ROW.appendChild(gvb);
   const fd = mkEl('div'); fd.id = 'feed-pane'; ROW.appendChild(fd);
   const mt = mkEl('nav'); mt.id = 'mtabs';
+  const cg = mkEl('div'); cg.id = 'col-ghost';   // the rectangle's element: a sibling of the row in the served markup, never a flex item of it
+  ROW._rect = { left: 0, top: 30, width: 1400, height: 800 };
   (0, eval)(SPLIT_JS);
 }
 const SPLIT_JS = __SPLIT_JS__;
@@ -675,6 +715,236 @@ class SplitExecutes(unittest.TestCase):
         self.assertEqual(m["stored"], m["storedWas"], "the desktop's arrangement stays in the store")
         self.assertEqual(m["saves"], 0)
         self.assertEqual(m["target"], "f-chat")
+
+
+# ── THE DRAG, RUN: the zones a tab drag mounts, the rectangle, the cue, the drops ─────────────────────────────────
+DRAG_DRIVER = r"""
+const out = {};
+const WEB = '11111111-2222-3333-4444-555555555501', API = '11111111-2222-3333-4444-555555555502', TESTS = '11111111-2222-3333-4444-555555555503', X = '11111111-2222-3333-4444-555555555509';
+const EV = () => { const ev = { prevented: false, dataTransfer: {}, relatedTarget: null, preventDefault() { ev.prevented = true; }, stopPropagation() {} }; return ev; };
+const isZone = (c) => c.className.split(' ').includes('col-drop');
+const isEdge = (c) => c.className.split(' ').includes('col-drop-edge');
+const paneIds = () => ['chat-pane'].concat(window.__rompChatFrameIds().filter((f) => f !== 'f-chat').map(window.__rompChatPaneOf));
+function zonesOf(pid) { const p = BYID[pid]; return p ? p.children.filter(isZone).map((z) => ({ cls: z.className, col: z.getAttribute('data-col'), refused: z.getAttribute('data-refused'), width: z.style.width || '', top: z.style.top || '' })) : null; }
+function zoneIn(pid, edge) { return (BYID[pid] ? BYID[pid].children : []).find((c) => isZone(c) && isEdge(c) === !!edge) || null; }
+function allZones() { const o = {}; paneIds().forEach((pid) => { o[pid] = zonesOf(pid); }); return o; }
+function ghost() { const g = BYID['col-ghost']; return { cls: g.className, text: g.textContent, top: g.style.top || '', height: g.style.height || '', left: g.style.left || '', width: g.style.width || '' }; }
+// the panes side by side, w px each behind 7 px gutters, in a row 800 px tall starting 30 px down
+function rects(w) { w = w || 400; let x = 0; paneIds().forEach((pid) => { const p = BYID[pid]; if (p) { p._rect = { left: x, top: 30, width: w, height: 800 }; x += w + 7; } }); }
+function on(sid, name, fromFid, stripH) { msg({ romp: 'tabDrag', on: true, sid, name, stripH: stripH === undefined ? 38 : stripH }, fromFid); }
+function off() { msg({ romp: 'tabDrag', on: false }); }
+function fire(z, kind, extra) { const ev = Object.assign(EV(), extra || {}); z.fire(kind, ev); return ev; }
+// A) from the FIRST column with columns 2 and 3 open: a column zone on panes 2 and 3, the edge on pane 3 from its top, none on pane 1
+boot({}, false);
+window.__rompMoveTab(API, 'new'); window.__rompMoveTab(TESTS, 'new'); rects();
+on(WEB, 'web', 'f-chat');
+out.fromFirst = { zones: allZones(), tabdrag: BODY_CLASSES.has('tabdrag'), ghost: ghost() };
+// the cue: .over on the column zone under the pointer alone; a leave whose relatedTarget is inside the zone is not a leave; a leave clears
+const z2 = zoneIn('chat-pane-2', false), z3 = zoneIn('chat-pane-3', false), e3 = zoneIn('chat-pane-3', true);
+const enter2 = fire(z2, 'dragenter');
+out.overOne = { prevented: enter2.prevented, z2: z2.className, z3: z3.className, ghost: ghost() };
+const over2 = fire(z2, 'dragover'); out.overOne.dropEffect = over2.dataTransfer.dropEffect; out.overOne.overPrevented = over2.prevented;
+fire(z2, 'dragleave', { relatedTarget: z2 }); out.overOne.stillOver = z2.className;
+fire(z2, 'dragleave'); out.overOne.afterLeave = z2.className;
+// the edge: the rectangle at the right half of the rightmost pane, the row's height, the name as its line; the leave hides it
+fire(e3, 'dragenter'); out.edgeCue = { ghost: ghost(), z3: z3.className, paneRect: BYID['chat-pane-3']._rect };
+fire(e3, 'dragleave'); out.edgeCue.afterLeave = ghost();
+// the drop on the edge: a new column holding the dragged session, everything unmounted; the page's dragend after it has nothing left to do
+CALLS.notify = [];
+fire(e3, 'dragenter'); const dropEv = fire(e3, 'drop');
+out.dropEdge = { prevented: dropEv.prevented, ids: ids(), stored: cols(), zones: allZones(), ghost: ghost(), tabdrag: BODY_CLASSES.has('tabdrag'), notify: CALLS.notify.slice(), blob4: blob(4), targetWeb: tgt(WEB) };
+off(); out.dropEdge.afterOff = { zones: allZones(), ghost: ghost() };
+// B) from the RIGHTMOST column (3, holding two): the edge sits on pane 3 under its strip and pane 3 gets no column zone; off unmounts; a second on re-mounts cleanly
+boot({}, false);
+window.__rompMoveTab(API, 'new'); window.__rompMoveTab(TESTS, 'new'); window.__rompMoveTab(X, 3); rects();
+on(TESTS, 'tests', 'f-chat-3', 44);
+out.fromLast = { zones: allZones() };
+off(); out.fromLast.afterOff = { zones: allZones(), tabdrag: BODY_CLASSES.has('tabdrag'), ghost: ghost() };
+on(TESTS, 'tests', 'f-chat-3', 44); on(TESTS, 'tests', 'f-chat-3', 44);
+out.fromLast.remounted = allZones(); off();
+// C) from a later column holding ONLY the dragged session: no edge zone anywhere (a new column would twin the origin); a drop on pane 3's zone moves it there and the emptied origin closes
+boot({}, false);
+window.__rompMoveTab(API, 'new'); window.__rompMoveTab(TESTS, 'new'); rects();
+on(API, 'api', 'f-chat-2');
+out.alone = { zones: allZones() };
+fire(zoneIn('chat-pane-3', false), 'drop');
+out.alone.dropped = { ids: ids(), stored: cols(), zones: allZones(), tabdrag: BODY_CLASSES.has('tabdrag') };
+// D) a drop on the FIRST column's zone: home (the first column derives); the origin keeps its other member
+boot({}, false);
+window.__rompMoveTab(API, 'new'); window.__rompMoveTab(TESTS, 2); rects();
+on(API, 'api', 'f-chat-2');
+fire(zoneIn('chat-pane', false), 'dragenter'); out.home = { over: zoneIn('chat-pane', false).className, zones: allZones() };
+fire(zoneIn('chat-pane', false), 'drop');
+out.home.dropped = { ids: ids(), stored: cols(), zones: allZones(), targetApi: tgt(API) };
+// E) from the first column onto column 2's zone (pane 2 is also the rightmost: it carries both zones, the edge from its top)
+boot({}, false);
+window.__rompMoveTab(API, 'new'); rects();
+on(WEB, 'web', 'f-chat');
+out.into2 = { zones: allZones() };
+fire(zoneIn('chat-pane-2', false), 'drop');
+out.into2.dropped = { ids: ids(), stored: cols(), zones: allZones() };
+// F) at the CAP: the edge is mounted refused; the rectangle wears .refused and says so; a drop notifies and changes nothing
+boot({}, false);
+window.__rompMoveTab(WEB, 'new'); window.__rompMoveTab(API, 'new'); window.__rompMoveTab(TESTS, 'new'); rects();
+on(X, 'x', 'f-chat');
+const e4 = zoneIn('chat-pane-4', true);
+out.cap = { zones: allZones(), refused: e4 && e4.getAttribute('data-refused') };
+fire(e4, 'dragenter'); out.cap.ghost = ghost();
+CALLS.notify = []; CALLS.sets = [];
+fire(e4, 'drop');
+out.cap.dropped = { ids: ids(), stored: cols(), notify: CALLS.notify.slice(), saves: saves(), zones: allZones(), ghost: ghost() };
+// G) the geometry: the edge a fifth of the pane, 72 to 180 px; the rectangle the pane's right half at the row's height
+boot({}, false); window.__rompMoveTab(API, 'new');
+out.geometry = {};
+[200, 400, 1000].forEach((w) => { rects(w); on(WEB, 'web', 'f-chat'); const e = zoneIn('chat-pane-2', true); fire(e, 'dragenter');
+  out.geometry[w] = { edgeWidth: e.style.width, edgeTop: e.style.top, ghost: ghost(), paneLeft: BYID['chat-pane-2']._rect.left }; off(); });
+// H) one column: the first is the source AND the rightmost — the edge alone, under its strip; a drop opens column 2
+boot({}, false); rects();
+on(WEB, 'web', 'f-chat', 38);
+out.single = { zones: allZones() };
+fire(zoneIn('chat-pane', true), 'drop');
+out.single.dropped = { ids: ids(), stored: cols() };
+// I) the phone mounts nothing; a message from no chat column, or with no sid, mounts nothing
+boot({}, true);
+on(WEB, 'web', 'f-chat');
+out.phone = { zones: zonesOf('chat-pane'), tabdrag: BODY_CLASSES.has('tabdrag') };
+boot({}, false); rects();
+msg({ romp: 'tabDrag', on: true, sid: WEB, name: 'web', stripH: 38 });
+out.unknown = { zones: zonesOf('chat-pane') };
+on('', 'web', 'f-chat'); out.unknown.noSid = zonesOf('chat-pane');
+console.log(JSON.stringify(out));
+"""
+
+
+class DragZonesExecute(unittest.TestCase):
+    """The drag (the user 2026-09-11, who asked for a tab dragged to the right edge to make a column and onto another
+    column to move it): the real _LANDING_SPLIT_JS runs against the DOM stub and the zones are driven with synthetic
+    drag events, which the shell accepts because it reads nothing from dataTransfer — the dragged sid rides the page's
+    tabDrag message. Synthetic only."""
+    maxDiff = None
+
+    @classmethod
+    def setUpClass(cls):
+        script = HARNESS.replace("__SPLIT_JS__", json.dumps(km._LANDING_SPLIT_JS)) + DRAG_DRIVER
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+            f.write(script)
+            path = f.name
+        try:
+            r = subprocess.run(["node", path], capture_output=True, text=True, timeout=30)
+        finally:
+            os.unlink(path)
+        assert r.returncode == 0, "the drag's JS threw: " + r.stderr[:1200]
+        cls.out = json.loads(r.stdout.strip().splitlines()[-1])
+
+    @staticmethod
+    def _col(col, **kw):
+        return dict({"cls": "col-drop", "col": col, "refused": None, "width": "", "top": ""}, **kw)
+
+    @staticmethod
+    def _edge(top, width="80px", refused=None):
+        return {"cls": "col-drop col-drop-edge", "col": None, "refused": refused, "width": width, "top": top}
+
+    def test_a_drag_from_the_first_column_mounts_a_column_zone_on_every_other_pane_and_the_edge_on_the_rightmost(self):
+        o = self.out["fromFirst"]
+        self.assertEqual(o["zones"], {"chat-pane": [], "chat-pane-2": [self._col("2")], "chat-pane-3": [self._col("3"), self._edge("0px")]},
+                         "no zone on the source; a whole-pane zone on the others; the edge from the rightmost pane's top, a fifth of 400 px")
+        self.assertTrue(o["tabdrag"], "body.tabdrag for the gesture")
+        self.assertEqual(o["ghost"], {"cls": "", "text": "", "top": "", "height": "", "left": "", "width": ""}, "the rectangle waits for the edge")
+
+    def test_the_cue_marks_the_zone_under_the_pointer_alone_and_a_leave_clears_it(self):
+        o = self.out["overOne"]
+        self.assertTrue(o["prevented"], "dragenter is accepted (preventDefault) so the drop can land")
+        self.assertEqual(o["z2"], "col-drop over", "the zone under the pointer wears .over…")
+        self.assertEqual(o["z3"], "col-drop", "…alone")
+        self.assertEqual(o["ghost"]["cls"], "", "a column zone never shows the rectangle")
+        self.assertEqual(o["dropEffect"], "move"); self.assertTrue(o["overPrevented"])
+        self.assertEqual(o["stillOver"], "col-drop over", "a crossing inside the zone's own subtree is not a leave")
+        self.assertEqual(o["afterLeave"], "col-drop", "the leave clears the cue")
+
+    def test_the_edge_shows_the_rectangle_at_the_right_half_of_the_rightmost_pane_with_the_name_as_its_line(self):
+        o = self.out["edgeCue"]
+        r = o["paneRect"]
+        self.assertEqual(o["ghost"], {"cls": "on", "text": "web", "top": "30px", "height": "800px",
+                                      "left": "%dpx" % (r["left"] + r["width"] / 2), "width": "%dpx" % (r["width"] / 2)},
+                         "top and height from the row, left and width the pane's right half — what the drop produces; the session's name, no verb")
+        self.assertEqual(o["z3"], "col-drop", "the column zone under the edge takes no cue of its own")
+        self.assertEqual(o["afterLeave"]["cls"], "", "the leave hides the rectangle")
+
+    def test_a_drop_on_the_edge_opens_a_new_column_on_the_session_and_unmounts_everything(self):
+        o = self.out["dropEdge"]
+        self.assertTrue(o["prevented"], "the drop is taken (no navigation)")
+        self.assertEqual(o["ids"], ["f-chat", "f-chat-2", "f-chat-3", "f-chat-4"], "__rompMoveTab(sid, 'new'): the lowest free number")
+        self.assertEqual(o["stored"], {"v": 2, "cols": [{"n": 2, "ids": [API]}, {"n": 3, "ids": [TESTS]}, {"n": 4, "ids": [WEB]}]})
+        self.assertEqual(o["blob4"], {"activeId": WEB}, "the new column opens on the dragged session")
+        self.assertEqual(o["targetWeb"], "f-chat-4")
+        self.assertEqual(o["notify"], [])
+        self.assertEqual(o["zones"], {"chat-pane": [], "chat-pane-2": [], "chat-pane-3": [], "chat-pane-4": []}, "every zone unmounted at the drop")
+        self.assertEqual(o["ghost"]["cls"], "", "the rectangle hidden at the drop"); self.assertEqual(o["ghost"]["text"], "")
+        self.assertFalse(o["tabdrag"])
+        self.assertEqual(o["afterOff"]["zones"], o["zones"], "the page's dragend after the drop finds nothing left to unmount")
+        self.assertEqual(o["afterOff"]["ghost"]["cls"], "")
+
+    def test_a_drag_from_the_rightmost_column_puts_the_edge_under_its_strip_and_no_column_zone_on_it(self):
+        o = self.out["fromLast"]
+        self.assertEqual(o["zones"], {"chat-pane": [self._col("")], "chat-pane-2": [self._col("2")], "chat-pane-3": [self._edge("44px")]},
+                         "the first column's zone carries data-col=''; the source pane has the edge alone, from the strip's bottom (its strip stays reorder territory)")
+        self.assertEqual(o["afterOff"]["zones"], {"chat-pane": [], "chat-pane-2": [], "chat-pane-3": []}, "tabDrag off unmounts everything")
+        self.assertFalse(o["afterOff"]["tabdrag"]); self.assertEqual(o["afterOff"]["ghost"]["cls"], "")
+        self.assertEqual(o["remounted"], o["zones"], "a second on (twice, even) re-mounts cleanly: never doubled")
+
+    def test_a_later_column_holding_only_the_dragged_session_gets_no_edge_and_its_drop_on_another_column_closes_it(self):
+        o = self.out["alone"]
+        self.assertEqual(o["zones"], {"chat-pane": [self._col("")], "chat-pane-2": [], "chat-pane-3": [self._col("3")]},
+                         "no edge anywhere: a new column would twin the origin and the origin would close")
+        d = o["dropped"]
+        self.assertEqual(d["ids"], ["f-chat", "f-chat-3"], "__rompMoveTab(sid, 3): the emptied origin closed")
+        self.assertEqual(d["stored"], {"v": 2, "cols": [{"n": 3, "ids": [TESTS, API]}]})
+        self.assertEqual(d["zones"], {"chat-pane": [], "chat-pane-3": []}); self.assertFalse(d["tabdrag"])
+
+    def test_a_drop_on_the_first_column_s_zone_brings_the_session_home(self):
+        o = self.out["home"]
+        self.assertEqual(o["over"], "col-drop over")
+        d = o["dropped"]
+        self.assertEqual(d["ids"], ["f-chat", "f-chat-2"], "__rompMoveTab(sid, 1): the origin keeps its other member")
+        self.assertEqual(d["stored"], {"v": 2, "cols": [{"n": 2, "ids": [TESTS]}]})
+        self.assertEqual(d["targetApi"], "f-chat"); self.assertEqual(d["zones"], {"chat-pane": [], "chat-pane-2": []})
+
+    def test_the_rightmost_pane_that_is_not_the_source_carries_both_zones_and_a_drop_on_its_column_zone_moves_there(self):
+        o = self.out["into2"]
+        self.assertEqual(o["zones"], {"chat-pane": [], "chat-pane-2": [self._col("2"), self._edge("0px")]}, "the edge above the column zone (z 9 over z 8), from the top")
+        self.assertEqual(o["dropped"]["stored"], {"v": 2, "cols": [{"n": 2, "ids": [API, WEB]}]}, "__rompMoveTab(sid, 2)")
+        self.assertEqual(o["dropped"]["ids"], ["f-chat", "f-chat-2"])
+
+    def test_at_the_cap_the_edge_is_refused_the_rectangle_says_so_and_a_drop_changes_nothing(self):
+        o = self.out["cap"]
+        self.assertEqual(o["refused"], "1", "mounted with data-refused")
+        self.assertEqual(o["zones"]["chat-pane-4"], [self._col("4"), self._edge("0px", refused="1")])
+        self.assertEqual(sorted(o["ghost"]["cls"].split()), ["on", "refused"]); self.assertEqual(o["ghost"]["text"], "Four columns at most")
+        d = o["dropped"]
+        self.assertEqual(d["ids"], ["f-chat", "f-chat-2", "f-chat-3", "f-chat-4"], "nothing opened")
+        self.assertEqual(d["stored"], {"v": 2, "cols": [{"n": 2, "ids": [WEB]}, {"n": 3, "ids": [API]}, {"n": 4, "ids": [TESTS]}]}, "nothing moved")
+        self.assertEqual(d["notify"], [["warn", "Four chat columns at most — close one to open another."]], "the existing refusal, said once")
+        self.assertEqual(d["saves"], 0)
+        self.assertEqual(d["zones"], {"chat-pane": [], "chat-pane-2": [], "chat-pane-3": [], "chat-pane-4": []}); self.assertEqual(d["ghost"]["cls"], "")
+
+    def test_the_geometry_is_a_fifth_of_the_pane_clamped_and_the_pane_s_right_half(self):
+        g = self.out["geometry"]
+        self.assertEqual(g["200"]["edgeWidth"], "72px", "the floor: 0.2 × 200 = 40 → 72")
+        self.assertEqual(g["400"]["edgeWidth"], "80px", "a fifth")
+        self.assertEqual(g["1000"]["edgeWidth"], "180px", "the ceiling: 0.2 × 1000 = 200 → 180")
+        for w in ("200", "400", "1000"):
+            self.assertEqual(g[w]["edgeTop"], "0px", "not the source: from the top")
+            half = int(w) / 2
+            self.assertEqual(g[w]["ghost"], {"cls": "on", "text": "web", "top": "30px", "height": "800px", "left": "%gpx" % (g[w]["paneLeft"] + half), "width": "%gpx" % half})
+
+    def test_one_column_is_both_source_and_rightmost_so_the_edge_alone_sits_under_its_strip(self):
+        o = self.out["single"]
+        self.assertEqual(o["zones"], {"chat-pane": [self._edge("38px")]}, "stripH from the page's message")
+        self.assertEqual(o["dropped"]["ids"], ["f-chat", "f-chat-2"]); self.assertEqual(o["dropped"]["stored"], {"v": 2, "cols": [{"n": 2, "ids": [WEB]}]})
+
+    def test_the_phone_and_a_message_from_no_chat_column_mount_nothing(self):
+        self.assertEqual(self.out["phone"], {"zones": [], "tabdrag": False})
+        self.assertEqual(self.out["unknown"], {"zones": [], "noSid": []})
 
 
 if __name__ == "__main__":

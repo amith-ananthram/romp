@@ -49538,7 +49538,7 @@ _LANDING_COLLAPSE_JS = """
 # column has no entry and holds the rest: every session that arrives with no gesture (a peer's spawn, a remote host's
 # tabs, a revived session whose column has closed) lands there. Every column page reads the sets through
 # __rompChatSets and filters its strip (render.ts tabInView, through chat-columns.ts); ONE mutation, __rompMoveTab(sid,
-# to), changes them — the palette's commands, the tab menu's item and the drop zones all go through it — and it
+# to), changes them — the drop zones of a tab drag, the palette's commands and the column's cross all go through it — and it
 # carries the session's draft, citations, attachments and staged messages with the tab (__rompTakeSessionState on the
 # source page, {romp:'adopt'} into the target). A new column opens as a skeleton client of its one session (the blob's
 # activeId seeded before the frame exists; the kernel serves that tab whole and the rest as skeleton tabs). A column
@@ -49664,8 +49664,48 @@ window.__rompClaimSession=function(sid,col){var n=Number(col),e=entry(n);if(type
 window.__rompChatFrames=frames;window.__rompChatFrameIds=function(){return frames().map(function(f){return f.id;});};
 window.__rompChatPaneOf=function(fid){return fid==='f-chat'?'chat-pane':(String(fid).indexOf('f-chat-')===0?paneId(String(fid).slice(7)):null);};
 window.__rompLastChatPane=lastPane;window.__rompColOf=colOf;window.__rompFrameOfWin=frameOfWin;window.__rompChatTarget=target;
+// THE DRAG (the user 2026-09-11, who asked for a tab dragged to the right edge to make a column and onto another column
+// to move it). The page posts {romp:'tabDrag',on:true,sid,name,stripH} at its dragstart and {on:false} at dragend
+// (render.ts wireTabDrag); for the gesture's length the shell mounts transparent hit areas as children of the chat panes
+// (the iframes stay interactive: the source strip needs its own dragover for the live reorder, so body.drag's
+// pointer-through is NOT used): a COLUMN zone over every chat pane but the source (a drop anywhere in it, strip
+// included, moves the session there; no slot choice — the column shows its members in the kernel's one order), and an
+// EDGE zone at the right of the RIGHTMOST pane (a fifth of its width, 72 to 180 px; under the strip when that pane is
+// the source, so its strip stays reorder territory) whose drop opens a new column holding the session at the right
+// half of that pane — the geometry #col-ghost, the provisional rectangle, shows on entering the zone (honest to the
+// new gutter's 7 px). No edge zone when the source is a later column holding only the dragged session (a new column
+// would twin the origin and the origin would close). At the cap the edge zone is mounted refused: the rectangle wears
+// a thin ring and says so, and a drop there notifies and changes nothing. The source pane gets no zone (over its
+// strip the drag is the live reorder, over its transcript the drop cancels as today), nor do the other panes (a drop
+// there cancels). Nothing is read from dataTransfer: the sid rides the message, so a served test can drive the zones
+// with synthetic events. Every transition is a pointer crossing (dragenter, dragleave, drop, dragend); nothing is
+// timed. The page's own dragend, after the drop, takes its cancel path and re-renders from the new sets, so the moved
+// tab is simply gone there.
+var drag=null,zones=[],ghost=document.getElementById('col-ghost');   // drag: {sid,name,from,stripH} while a tab drags, else null
+function edgeWidth(w){return Math.max(72,Math.min(180,0.2*w));}   // the edge zone's width for a pane w px wide
+function ghostRect(pane,rowRect){return {top:rowRect.top,height:rowRect.height,left:pane.left+pane.width/2,width:pane.width/2};}   // the right half of the rightmost pane, the row's height: what the drop produces
+function showGhost(z){if(!ghost)return;if(!z||!drag){ghost.classList.remove('on','refused');ghost.textContent='';return;}
+var r=ghostRect(z.parentElement.getBoundingClientRect(),row.getBoundingClientRect()),refused=!!z.getAttribute('data-refused');
+ghost.style.top=r.top+'px';ghost.style.height=r.height+'px';ghost.style.left=r.left+'px';ghost.style.width=r.width+'px';
+ghost.textContent=refused?'Four columns at most':drag.name;ghost.classList.toggle('refused',refused);ghost.classList.add('on');}
+function cue(z,on){if(z.classList.contains('col-drop-edge'))showGhost(on?z:null);else z.classList.toggle('over',on);}   // the zone under the pointer: the rectangle for the edge, .over on a column zone itself
+function unmountZones(){zones.forEach(function(z){z.remove();});zones=[];showGhost(null);document.body.classList.remove('tabdrag');}   // idempotent: every drop and the page's dragend call it
+function zone(p,cls,col,onDrop){var z=document.createElement('div');z.className='col-drop'+(cls?' '+cls:'');if(col!==null)z.setAttribute('data-col',col===1?'':String(col));
+z.addEventListener('dragenter',function(ev){ev.preventDefault();cue(z,true);});
+z.addEventListener('dragover',function(ev){ev.preventDefault();try{if(ev.dataTransfer)ev.dataTransfer.dropEffect='move';}catch(e){}cue(z,true);});
+z.addEventListener('dragleave',function(ev){if(ev.relatedTarget&&z.contains(ev.relatedTarget))return;cue(z,false);});
+z.addEventListener('drop',function(ev){ev.preventDefault();var d=drag;unmountZones();drag=null;if(d)onDrop(d.sid);});
+p.appendChild(z);zones.push(z);return z;}
+function mountZones(){unmountZones();if(!drag||mobile())return;document.body.classList.add('tabdrag');
+var from=drag.from,last=lastPane(),se=from===1?null:entry(from),alone=!!(se&&se.ids.length===1&&se.ids[0]===drag.sid);
+[{n:1,pid:'chat-pane'}].concat(cols.map(function(c){return {n:c.n,pid:paneId(c.n)};})).forEach(function(c){var p=document.getElementById(c.pid);if(!p)return;
+if(c.n!==from)zone(p,'',c.n,function(sid){moveTab(sid,c.n);});   // the column zone: a drop anywhere in the pane moves the session here
+if(c.pid===last&&!alone){var e=zone(p,'col-drop-edge',null,function(sid){if(e.getAttribute('data-refused'))refuse();else moveTab(sid,'new');});   // the edge zone: a new column at the right
+e.style.width=edgeWidth(p.getBoundingClientRect().width)+'px';e.style.top=(c.n===from?drag.stripH:0)+'px';if(!canSplit())e.setAttribute('data-refused','1');}});}
 window.addEventListener('message',function(e){var m=e&&e.data;if(!m)return;
-if(m.romp==='openSplit'){if(typeof m.sid==='string'&&m.sid)moveTab(m.sid,'new');return;}   // the tab menu's Move to a new column (render.ts), until the drag lands
+if(m.romp==='tabDrag'){if(!m.on){drag=null;unmountZones();return;}   // the page's dragend: the zones go, whatever ended the drag
+if(!frameOfWin(e.source)||mobile()||typeof m.sid!=='string'||!m.sid)return;   // a chat column's dragstart, on the desktop
+drag={sid:m.sid,name:typeof m.name==='string'?m.name:'',from:Number(colOf(e.source))||1,stripH:Math.max(0,Number(m.stripH)||0)};mountZones();return;}
 // a column whose members the kernel's strip no longer lists (ended, or closed from a tab's cross) says so: the gone
 // ids leave its entry, and an entry left empty closes its column — a member added meanwhile keeps it open
 if(m.romp==='colEmpty'&&Array.isArray(m.gone)){var c=Number(colOf(e.source)),en=c>=2?entry(c):null;if(!en)return;
@@ -50623,6 +50663,22 @@ def _landing():
             "#gv-ghost{display:none;position:fixed;width:7px;pointer-events:none;z-index:40;"
             "background:linear-gradient(90deg,transparent 3px,var(--accent,#9cd2ff) 3px,var(--accent,#9cd2ff) 4px,transparent 4px)}"
             ".pane{position:relative;min-width:0;min-height:0;overflow:hidden}"
+            # a TAB DRAG's zones and rectangle (the chat split, 2026-09-11; _LANDING_SPLIT_JS mounts them for the gesture's
+            # length). A column zone covers its whole pane above the iframe and the cross (z 8); the edge zone at the rightmost
+            # pane's right sits above that pane's column zone (z 9), its width and top set inline. #col-ghost is the provisional
+            # rectangle: fixed, never a hit target, above the focus ring like #gv-ghost; the accent wash (the value --accent-wash
+            # resolves to in styles.css — the landing sheet defines no such token) inside a 2 px accent ring, one centred line in
+            # the rail's label dress: the dragged session's name, no verb, no icon. A column zone under the pointer wears the same
+            # dress on itself (.over: no pseudo-element, so it never competes with .pane-focused::after for one property; distinct
+            # from the focus ring's 0.55-alpha ring with no wash). At the cap the rectangle is .refused: no wash, a 1 px ring, its
+            # line saying so.
+            ".col-drop{position:absolute;inset:0;z-index:8}"
+            ".col-drop.col-drop-edge{left:auto;z-index:9}"
+            ".col-drop.over,#col-ghost{background:rgba(156,210,255,0.12);box-shadow:inset 0 0 0 2px var(--accent,#9cd2ff)}"
+            "#col-ghost{display:none;position:fixed;pointer-events:none;z-index:40;align-items:center;justify-content:center;"
+            "font:600 11px 'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;color:#8a8a8a;letter-spacing:.04em}"
+            "#col-ghost.on{display:flex}"
+            "#col-ghost.refused{background:transparent;box-shadow:inset 0 0 0 1px var(--accent,#9cd2ff)}"
             ".pane>iframe{position:absolute;inset:0;width:100%;height:100%}"
             # FOCUS cue (the user 2026-06-23): NO dimming — the active section is shown by a RING around it.
             # The focused pane gets a thin inset border (drawn as an inset box-shadow over the iframe edges);
@@ -50817,6 +50873,11 @@ def _landing():
             "body.theme-light .rail-act.on{color:var(--accent)}"
             "body.theme-light .chat-col>.col-x{background:rgba(255,255,255,0.85);color:#5D574E}"
             "body.theme-light .chat-col>.col-x:hover{color:#1F1E1D;background:rgba(0,0,0,0.06)}"
+            # the tab drag's wash in the light accent (styles.css's light --accent-wash); the ring follows --accent by itself. The
+            # refused rectangle restated at the winning specificity: body.theme-light #col-ghost (1,1,1) would outrank
+            # #col-ghost.refused (1,1,0) and wash it
+            "body.theme-light #col-ghost,body.theme-light .col-drop.over{background:rgba(194,65,12,0.10)}"
+            "body.theme-light #col-ghost.refused{background:transparent}"
             "body.theme-light .gv{background:linear-gradient(90deg,transparent 3px,rgba(0,0,0,0.14) 3px,rgba(0,0,0,0.14) 4px,transparent 4px)}"
             "body.theme-light .gh{background:linear-gradient(180deg,transparent 3px,rgba(0,0,0,0.14) 3px,rgba(0,0,0,0.14) 4px,transparent 4px)}"
             "body.theme-light .gv::after,body.theme-light .gh::after{background:rgba(0,0,0,0.22)}"
@@ -50961,6 +51022,7 @@ def _landing():
             "<div class=pane id=files-pane><iframe id=f-files src=/files></iframe></div>"
             "</div>"
             "<div id=gv-ghost></div>"   # the divider drag's landing line (position:fixed; gutter() in _LANDING_JS moves it)
+            "<div id=col-ghost></div>"   # a tab drag's provisional rectangle: the right half of the rightmost chat column (position:fixed; _LANDING_SPLIT_JS places it)
             # the timeline BOTTOM BAND: full-width below the pane row, with a row-resize gutter above it. Both
             # are hidden (CSS) unless po-timeline (the rail's Timeline toggle).
             "<div class=gh id=gh></div>"

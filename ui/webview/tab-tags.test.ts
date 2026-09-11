@@ -101,7 +101,7 @@ test("one-click MOVE between groups (tab groups, 2026-09-04): 'Move to <name>' a
     "editUnion and moveUnion share the one edit — never a forked implementation");
 });
 
-test("the menu groups by what each item changes: [Rename+colours] / [Tags, Move, split] / [switches+Billing] / [Browse] (the user 2026-09-11)", () => {
+test("the menu groups by what each item changes: [Rename+colours] / [Tags, Move] / [switches+Billing] / [Browse] (the user 2026-09-11)", () => {
   // supersedes the 2026-08-24 three-section ruling: membership and location (Tags, Move to folder…) leave
   // the switches for a section of their own. tab-menu-sections.test.ts is the one pin of the whole grouping;
   // this pins Rename's dress and the two dividers around the Tags section

@@ -5763,6 +5763,23 @@ function applyTabStatus(tab: HTMLElement, s: { status: Partial<Status> }): ChipS
   return st;
 }
 
+// THE SHELL'S DROP ZONES (the user 2026-09-11, who asked for a tab dragged to the right edge to make a column and
+// onto another column to move it): for the gesture's length the shell (kernel.py _LANDING_SPLIT_JS) mounts hit areas
+// over the other columns and at the right edge, so it hears the drag's start and end from here. The sid and the name
+// ride the message — the shell reads nothing from dataTransfer — and stripH is the strip's bottom in this page's
+// pixels, so the edge zone over THIS pane starts under the strip and leaves it to the live reorder. Nothing is posted
+// outside the shell (standalone, VS Code: no row to split). A drop on a zone moves the session through the shell's
+// __rompMoveTab; this page's dragend then finds no commit and re-renders from the new sets, so the tab is gone here.
+function postTabDrag(on: boolean, id?: string): void {
+  if (!inRompShell()) return;
+  try {
+    if (!on || !id) { window.parent.postMessage({ romp: "tabDrag", on: false }, "*"); return; }
+    const name = tabMeta.get(id)?.name || sessions.get(id)?.name || "";
+    const bar = document.getElementById("tabbar");
+    window.parent.postMessage({ romp: "tabDrag", on: true, sid: id, name, stripH: bar ? bar.getBoundingClientRect().bottom : 0 }, "*");
+  } catch (e) { /* no shell to tell */ }
+}
+
 // Drag-to-reorder (synced with the timeline via the shared session-order file), shared by loaded and skeleton
 // tabs — a skeleton is a real live session, so reordering it is legitimate. Lifted verbatim out of renderTabs.
 function wireTabDrag(tab: HTMLElement, id: string): void {
@@ -5780,6 +5797,7 @@ function wireTabDrag(tab: HTMLElement, id: string): void {
     tab.classList.add("dragging");
     hideTabTip();                        // defect 2 (2026-08-28): the hover popover pinned open through the gesture
     snapshotDragGeometry(tab);           // widths once at dragstart — the virtual hit-test's stable input (dragslot.ts)
+    postTabDrag(true, id);               // the shell mounts its drop zones: the other columns, the right edge (the chat split, 2026-09-11)
   });
   // dragend closes EVERY drag (drop, Escape, released outside). The pointerdown that started the
   // drag latched tabPointerHeld, and the drag swallowed the matching pointerup — so the hold is
@@ -5794,6 +5812,7 @@ function wireTabDrag(tab: HTMLElement, id: string): void {
     tabPointerHeld = false;
     const pending = renderPendingWhilePressed;
     renderPendingWhilePressed = false;
+    postTabDrag(false);                  // the shell's zones go, whatever ended the drag (after its drop, when there was one)
     if (cancelled) flipTabs(() => renderTabs());
     else if (pending) setTimeout(() => renderTabs(), 0);
   });
@@ -6435,7 +6454,7 @@ function setSessionColor(id: string, bg: string) {
 
 // Small inline-SVG icon for the tab menu's toggle items (trusted constant markup; `off` slashes + dims it,
 // matching the timeline lane toggles). 16-unit viewBox; currentColor so .ctx-icon/.off set the tint.
-function ctxIcon(kind: "feed" | "mail" | "bell" | "bill" | "folder" | "tag" | "pencil" | "split", off: boolean): HTMLElement {
+function ctxIcon(kind: "feed" | "mail" | "bell" | "bill" | "folder" | "tag" | "pencil", off: boolean): HTMLElement {
   const span = el("span", "ctx-icon" + (off ? " off" : ""));
   const slash = off ? '<line x1="1.6" y1="14.4" x2="14.4" y2="1.6"/>' : "";
   const body = kind === "feed"
@@ -6448,8 +6467,6 @@ function ctxIcon(kind: "feed" | "mail" | "bell" | "bill" | "folder" | "tag" | "p
           ? '<path d="M2 4.5 A1.2 1.2 0 0 1 3.2 3.3 L6.2 3.3 L7.6 4.9 L12.8 4.9 A1.2 1.2 0 0 1 14 6.1 L14 11.5 A1.2 1.2 0 0 1 12.8 12.7 L3.2 12.7 A1.2 1.2 0 0 1 2 11.5 Z"/>'  // folder (browse files)
         : kind === "tag"
           ? '<path d="M2 3.4 A1.4 1.4 0 0 1 3.4 2 L7.6 2 A1.4 1.4 0 0 1 8.6 2.4 L13.6 7.4 A1.4 1.4 0 0 1 13.6 9.4 L9.4 13.6 A1.4 1.4 0 0 1 7.4 13.6 L2.4 8.6 A1.4 1.4 0 0 1 2 7.6 Z"/><circle cx="5.4" cy="5.4" r="1.1"/>'  // luggage tag (session tags)
-        : kind === "split"
-          ? '<rect x="2" y="3" width="5" height="10" rx="1"/><rect x="9" y="3" width="5" height="10" rx="1"/>'  // two columns side by side (open in a new split)
         : kind === "pencil"
           ? '<path d="M3 13 L3.6 10.4 L10.8 3.2 A1.3 1.3 0 0 1 12.8 5.2 L5.6 12.4 Z"/><line x1="9.8" y1="4.2" x2="11.8" y2="6.2"/>'  // pencil (rename)
           : '<path d="M8 2 C5.9 2.2 4.7 3.8 4.7 5.8 L4.7 8 L3.4 9.9 L12.6 9.9 L11.3 8 L11.3 5.8 C11.3 3.8 10.1 2.2 8 2 Z"/><path d="M6.6 11.6 A1.5 1.5 0 0 0 9.4 11.6"/>';  // bell (system notifications)
@@ -6505,10 +6522,10 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
     menu.appendChild(row);
   }
   menu.appendChild(el("div", "ctx-sep"));
-  // ── 2. WHERE IT BELONGS: Tags (flyout); Move to folder…; Move to a new column. Membership and location
+  // ── 2. WHERE IT BELONGS: Tags (flyout); Move to folder…. Membership and location
   // are functional: they change what the kernel and the file system know about the session, and the
-  // user placed Move beside Tags. The column item sits third here until the drag lands (the partition
-  // made a column a place a session belongs, 2026-09-11; the drag makes the item redundant).
+  // user placed Move beside Tags. A session's chat COLUMN is placed by dragging its tab (the shell's drop
+  // zones, 2026-09-11), so no menu item for it sits here.
   // TAGS (the user 2026-08-24, overruling the earlier skip: tag editing belongs everywhere a
   // session is in front of you — you might not have the timeline open and still want to organize
   // or dispatch). A compact one-line row — the current tag names as the sub-line — with the
@@ -6811,27 +6828,6 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
     mv.appendChild(bodyEl);
     mv.addEventListener("click", (ev) => { ev.stopPropagation(); dismissTabMenu(); showMovePrompt(id); });
     menu.appendChild(mv);
-  }
-  // Move to a new column (the user 2026-09-08, who wanted several sessions open at once instead of tabbing; the
-  // partition 2026-09-11): this session leaves this column for a new one at the right, alone. The shell moves it
-  // (_LANDING_SPLIT_JS __rompMoveTab, which also carries the draft); this pane only asks. Shell-hosted only —
-  // standalone and VS Code have no row to split — and only a shell that carries the split script.
-  const shellCanSplit = (() => {   // a shell with the split script, and one that can take another column right now (the cap, the phone)
-    try { const p = window.parent as any; return inRompShell() && typeof p.__rompSplitChat === "function" && (typeof p.__rompCanSplit !== "function" || !!p.__rompCanSplit()); }
-    catch (e) { return false; }
-  })();
-  if (shellCanSplit) {
-    const split = el("div", "ctx-item ctx-item-toggle");
-    split.appendChild(ctxIcon("split", false));
-    const bodyEl = el("span", "ctx-item-body");
-    const l = el("span", "ctx-item-label"); l.textContent = "Move to a new column"; bodyEl.appendChild(l);
-    const sb = el("span", "ctx-item-sub"); sb.textContent = "a new chat column at the right, holding just this session"; bodyEl.appendChild(sb);
-    split.appendChild(bodyEl);
-    split.addEventListener("click", (ev) => {
-      ev.stopPropagation(); dismissTabMenu();
-      try { window.parent.postMessage({ romp: "openSplit", sid: id }, "*"); } catch (e) { /* no shell to ask */ }
-    });
-    menu.appendChild(split);
   }
   menu.appendChild(el("div", "ctx-sep"));
   // ── 3. WHAT REACHES YOU: Hide from feed / Show in feed; Mute mail / Rejoin mail; Notify me / Stop

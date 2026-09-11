@@ -140,3 +140,21 @@ test("the old landing marker is fully retired", () => {
     assert.ok(!/drop-(?:before|after)/.test(src), name + " carries no landing-marker classes");
   }
 });
+
+test("the shell hears the drag: tabDrag on at dragstart after the geometry snapshot, off at dragend ahead of the cancel branch (the chat split, 2026-09-11)", () => {
+  // the shell (kernel.py _LANDING_SPLIT_JS) mounts its drop zones — the other columns, the right edge — for the
+  // gesture's length; the sid and the name ride the message, so it reads nothing from dataTransfer
+  const ds = between('tab.addEventListener("dragstart"', "});");
+  assert.match(ds, /draggedId = id; draggedEl = tab; tabDragCommitted = false;/, "the pinned head is unchanged (tab-groups and tab-strip-skip pin it)");
+  const snap = ds.indexOf("snapshotDragGeometry(tab);"), post = ds.indexOf("postTabDrag(true, id);");
+  assert.ok(snap > 0 && post > snap, "the shell is told after the snapshot");
+  const de = between('tab.addEventListener("dragend"', "});");
+  const off = de.indexOf("postTabDrag(false);"), cancel = de.indexOf("if (cancelled) flipTabs(() => renderTabs());");
+  assert.ok(off > 0 && cancel > off, "the off ahead of the cancel branch: the zones go before the strip re-renders from the new sets");
+  const fn = between("function postTabDrag(", "\n}");
+  assert.match(fn, /if \(!inRompShell\(\)\) return;/, "nothing posted outside the shell");
+  assert.match(fn, /window\.parent\.postMessage\(\{ romp: "tabDrag", on: false \}, "\*"\)/);
+  assert.match(fn, /const bar = document\.getElementById\("tabbar"\);/, "stripH is the strip's bottom in this page's pixels");
+  assert.match(fn, /window\.parent\.postMessage\(\{ romp: "tabDrag", on: true, sid: id, name, stripH: bar \? bar\.getBoundingClientRect\(\)\.bottom : 0 \}, "\*"\)/);
+  assert.doesNotMatch(fn, /dataTransfer/, "the sid rides the message, never dataTransfer");
+});

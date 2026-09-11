@@ -24,7 +24,11 @@ driver run walks the whole story in order, each step landing in its own assertio
   5. column 2's new-session picker lifts ITS iframe and pane (.lifted), never column 1's, and unlifts on toggle;
   6. a reload restores the v2 store: column 2 on B at the dragged width, column 1 without B;
   7. the cross on the last later column returns B to column 1 and leaves {v:2, cols:[]};
-  8. the whole story runs well under half a minute (the driver waits on conditions, never on fixed sleeps).
+  8. the whole story runs well under half a minute (the driver waits on conditions, never on fixed sleeps);
+  9. THE DRAG (the user 2026-09-11): a real pointer drag of B's tab in column 1 into the shell's edge zone — the
+     zone mounted on the page's tabDrag message, the rectangle shown at the pane's right half with B's name while
+     the pointer is over the zone, hidden after the drop — opens column 2 on B and column 1 lists no B; B's tab
+     dragged from column 2 onto column 1's pane wears the cue there and, dropped, comes home and column 2 closes.
 Skips LOUDLY when the extension deps or a playwright browser are absent (CI installs none). Synthetic only:
 placeholder sids, invented notes-api prompt text, no real session data."""
 import json
@@ -314,6 +318,55 @@ await waitTabs("f-chat", [cfg.sidA, cfg.sidB, cfg.sidC]);
 out.s7 = await shell();
 out.s7.pane2Gone = await page.evaluate(() => !document.getElementById("chat-pane-2") && !document.getElementById("gv-chat-2") && !document.getElementById("f-chat-2"));
 out.s7.col1Tabs = await tabsIn("f-chat");
+// ---- 9. THE DRAG: B's tab from column 1 into the right edge opens column 2 on B; from column 2 onto column 1's pane it comes home ----
+// A real pointer drag: mouse down on the tab, a move past the drag threshold starts the page's dragstart (its tabDrag
+// message mounts the shell's zones), moves carry the drag over the zone (Chromium's intercepted drag dispatches
+// dragenter/dragover there), the release drops. The shell reads nothing from dataTransfer, so the zones see exactly
+// what a hand drag gives them.
+const rectOf = (sel) => page.evaluate((sel) => { const e = document.querySelector(sel); if (!e) return null; const r = e.getBoundingClientRect(); return { left: r.left, top: r.top, width: r.width, height: r.height }; }, sel);
+const dragStart = async (fid, sid) => {
+  const t = await rectIn(fid, '#tabs .tab[data-id="' + sid + '"]');
+  if (!t) await die("no tab for " + sid + " in " + fid);
+  await page.mouse.move(t.x + t.w / 2, t.y + t.h / 2);
+  await page.mouse.down();
+  await page.mouse.move(t.x + t.w / 2 + 24, t.y + t.h / 2 + 6, { steps: 4 });   // past the drag threshold: dragstart fires in the page
+};
+const zones = () => page.evaluate(() => Array.from(document.querySelectorAll(".col-drop")).map((z) => {
+  const r = z.getBoundingClientRect();
+  return { cls: z.className, pane: z.parentElement.id, col: z.getAttribute("data-col"), refused: z.getAttribute("data-refused"), top: z.style.top, left: r.left, right: r.right, rtop: r.top, width: r.width, height: r.height };
+}));
+if ((await activeIn("f-chat")) !== cfg.sidA) { await clickTab("f-chat", cfg.sidA); await waitActive("f-chat", cfg.sidA); }
+out.s9 = { pane1: await rectOf("#chat-pane"), row: await rectOf(".row"), stripBottom: (await rectIn("f-chat", "#tabbar")) };
+await dragStart("f-chat", cfg.sidB);
+await waitFn(() => !!document.querySelector(".col-drop.col-drop-edge"), null, "the edge zone never mounted for B's drag");
+out.s9.zones = await zones(); out.s9.tabdrag = await page.evaluate(() => document.body.classList.contains("tabdrag"));
+const edge = out.s9.zones.find((z) => z.cls.includes("col-drop-edge"));
+if (!edge) await die("no edge zone among " + JSON.stringify(out.s9.zones));
+await page.mouse.move(edge.left + edge.width / 2, edge.rtop + edge.height / 2, { steps: 8 });
+await waitFn(() => document.getElementById("col-ghost").classList.contains("on"), null, "the rectangle never showed over the edge zone");
+out.s9.ghost = await page.evaluate(() => { const g = document.getElementById("col-ghost"); const r = g.getBoundingClientRect(); const cs = getComputedStyle(g);
+  return { cls: g.className, text: g.textContent, left: r.left, top: r.top, width: r.width, height: r.height, display: cs.display, bg: cs.backgroundColor, shadow: cs.boxShadow, font: cs.fontSize + "/" + cs.fontWeight }; });
+// the light theme's twin, read while the rectangle is up: the ring follows --accent, the wash is the light value
+out.s9.light = await page.evaluate(() => { document.body.classList.add("theme-light"); const cs = getComputedStyle(document.getElementById("col-ghost")); const o = { bg: cs.backgroundColor, shadow: cs.boxShadow }; document.body.classList.remove("theme-light"); return o; });
+await page.mouse.up();
+await waitTabs("f-chat-2", [cfg.sidB]); await waitActive("f-chat-2", cfg.sidB); await waitNoTabs("f-chat", [cfg.sidB]);
+out.s9.after = await shell();
+out.s9.afterDrop = await page.evaluate(() => { const g = document.getElementById("col-ghost"); return { cls: g.className, display: getComputedStyle(g).display, zones: document.querySelectorAll(".col-drop").length, tabdrag: document.body.classList.contains("tabdrag") }; });
+out.s9.col1Tabs = await tabsIn("f-chat"); out.s9.col2Tabs = await tabsIn("f-chat-2"); out.s9.col1Active = await activeIn("f-chat");
+out.s9.pane1W = await width("chat-pane"); out.s9.pane2W = await width("chat-pane-2");
+// …and back: B's tab from column 2 (its only member: no edge zone) onto column 1's pane
+await dragStart("f-chat-2", cfg.sidB);
+await waitFn(() => !!document.querySelector('#chat-pane > .col-drop'), null, "column 1's zone never mounted for the drag back");
+out.s9.backZones = await zones();
+const z1 = out.s9.backZones.find((z) => z.pane === "chat-pane");
+await page.mouse.move(z1.left + z1.width / 2, z1.rtop + z1.height / 2, { steps: 8 });
+await waitFn(() => { const z = document.querySelector("#chat-pane > .col-drop"); return !!z && z.classList.contains("over"); }, null, "column 1's zone never wore the cue");
+out.s9.overBack = await page.evaluate(() => Array.from(document.querySelectorAll(".col-drop.over")).map((z) => z.parentElement.id));
+out.s9.ghostBack = await page.evaluate(() => document.getElementById("col-ghost").className);
+await page.mouse.up();
+await waitGone("chat-pane-2"); await waitTabs("f-chat", [cfg.sidA, cfg.sidB, cfg.sidC]); await waitActive("f-chat", cfg.sidB);
+out.s9.home = await shell(); out.s9.homeTabs = await tabsIn("f-chat"); out.s9.homeActive = await activeIn("f-chat");
+out.s9.homeZones = await page.evaluate(() => document.querySelectorAll(".col-drop").length);
 out.ms = Date.now() - out.t0;
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
@@ -587,6 +640,53 @@ class ServedChatSplit(unittest.TestCase):
     def test_8_the_whole_story_runs_in_well_under_half_a_minute(self):
         r = self._r()
         self.assertLess(r["ms"], 30000, "the driver waits on conditions, never on fixed sleeps: %d ms" % r["ms"])
+
+    def test_9_a_tab_dragged_into_the_right_edge_opens_a_column_and_dragged_onto_another_column_moves_there(self):
+        """The drag (the user 2026-09-11): a real pointer drag, the shell's zones mounted on the page's tabDrag message,
+        the rectangle honest to the drop's geometry, the drops through __rompMoveTab, everything unmounted after."""
+        s = self._r()["s9"]
+        p1, row = s["pane1"], s["row"]
+        # one column: the first is the source AND the rightmost, so the edge zone alone, under the strip, a fifth of the pane
+        self.assertEqual(len(s["zones"]), 1, "no column zone on the source pane, none on the other panes: %r" % s["zones"])
+        e = s["zones"][0]
+        self.assertEqual(e["cls"], "col-drop col-drop-edge"); self.assertEqual(e["pane"], "chat-pane"); self.assertIsNone(e["refused"])
+        self.assertTrue(s["tabdrag"], "body.tabdrag for the gesture")
+        want_w = max(72, min(180, 0.2 * p1["width"]))
+        self.assertLessEqual(abs(e["width"] - want_w), 1, "the edge is a fifth of the pane, 72 to 180 px: %r for a pane %r wide" % (e["width"], p1["width"]))
+        self.assertLessEqual(abs(e["right"] - (p1["left"] + p1["width"])), 1, "flush with the pane's right edge: %r" % e)
+        strip_bottom = s["stripBottom"]["y"] + s["stripBottom"]["h"]
+        self.assertLessEqual(abs(e["rtop"] - strip_bottom), 2, "the source pane's edge starts under its strip (stripH from the page): %r vs %r" % (e["rtop"], strip_bottom))
+        self.assertTrue(e["top"].endswith("px"), "the top is set inline, in px: %r" % e["top"])
+        self.assertLessEqual(abs(float(e["top"][:-2]) - (strip_bottom - p1["top"])), 2, "…to the strip's bottom in the pane's own pixels: %r" % e["top"])
+        # the rectangle over the edge: the pane's right half at the row's height, B's name as its line, the accent dress
+        g = s["ghost"]
+        self.assertEqual(g["cls"], "on"); self.assertEqual(g["display"], "flex")
+        self.assertEqual(g["text"], "api", "the dragged session's name, no verb")
+        self.assertLessEqual(abs(g["left"] - (p1["left"] + p1["width"] / 2)), 1, "left = the pane's middle: %r vs %r" % (g, p1))
+        self.assertLessEqual(abs(g["width"] - p1["width"] / 2), 1, "width = half the pane: %r vs %r" % (g, p1))
+        self.assertLessEqual(abs(g["top"] - row["top"]), 1); self.assertLessEqual(abs(g["height"] - row["height"]), 1)
+        self.assertEqual(g["bg"], "rgba(156, 210, 255, 0.12)", "the accent wash")
+        self.assertIn("rgb(156, 210, 255)", g["shadow"]); self.assertIn("2px", g["shadow"]); self.assertIn("inset", g["shadow"])
+        self.assertEqual(g["font"], "11px/600", "the rail's label dress")
+        self.assertEqual(s["light"]["bg"], "rgba(194, 65, 12, 0.1)", "the light twin's wash")
+        self.assertIn("rgb(194, 65, 12)", s["light"]["shadow"], "the ring resolves through --accent under the light theme: %r" % s["light"])
+        # the drop: column 2 on B, column 1 without B, the honest half; everything unmounted, the rectangle hidden
+        a = s["after"]
+        self.assertEqual(a["frameIds"], ["f-chat", "f-chat-2"]); self.assertEqual(json.loads(a["cols"]), {"v": 2, "cols": [{"n": 2, "ids": [SID_B]}]})
+        self.assertEqual(s["col2Tabs"], [SID_B]); self.assertNotIn(SID_B, s["col1Tabs"]); self.assertEqual(s["col1Active"], SID_A, "column 1 keeps A")
+        self.assertLessEqual(abs(s["pane2W"] - (p1["width"] - 7) / 2), SLACK_PX, "the new column is the half the rectangle promised: %r vs %r" % (s["pane2W"], p1))
+        d = s["afterDrop"]
+        self.assertEqual(d["cls"], "", "the rectangle hidden after the drop"); self.assertEqual(d["display"], "none")
+        self.assertEqual(d["zones"], 0, "every zone unmounted"); self.assertFalse(d["tabdrag"])
+        # back: from column 2, alone, onto column 1's pane — one zone (no edge for a twin), the cue on it, the drop brings B home and closes column 2
+        self.assertEqual([(z["pane"], z["col"], z["cls"]) for z in s["backZones"]], [("chat-pane", "", "col-drop")], "column 1's whole-pane zone alone: %r" % s["backZones"])
+        z1 = s["backZones"][0]
+        self.assertLessEqual(abs(z1["width"] - s["pane1W"]), 1, "the zone covers the whole pane"); self.assertEqual(z1["top"], "")
+        self.assertEqual(s["overBack"], ["chat-pane"], "the cue on the zone under the pointer"); self.assertEqual(s["ghostBack"], "", "no rectangle for a column zone")
+        h = s["home"]
+        self.assertEqual(h["frameIds"], ["f-chat"]); self.assertEqual(json.loads(h["cols"]), {"v": 2, "cols": []}); self.assertEqual(h["sets"], {})
+        self.assertIn(SID_B, s["homeTabs"]); self.assertEqual(s["homeActive"], SID_B, "the move's focus shows B where it landed")
+        self.assertEqual(s["homeZones"], 0)
 
 
 if __name__ == "__main__":

@@ -3,8 +3,8 @@
 // comments and here. This file is the ONE pin of the grouping: it slices showTabMenu by the menu's
 // divider appends and checks each section's members in order. Source pins (no jsdom for render.ts).
 //   1. How it shows: Rename; the colour swatches (the label and tint, nothing about the session)
-//   2. Where it belongs: Tags (flyout); Move to folder…; Move to a new column (membership and location, which
-//      the kernel and the file system know about; the column item sits here until the drag lands)
+//   2. Where it belongs: Tags (flyout); Move to folder… (membership and location, which the kernel and the file
+//      system know about; the column item left with the drag, 2026-09-11: a tab is placed by dragging it)
 //   3. What reaches you: the feed, mail and bell switches; Billing (how the session takes part in the
 //      dashboard's surfaces, and who pays)
 //   4. Files: Browse files (a different kind of thing: it opens another surface; web only, alone, last)
@@ -22,7 +22,6 @@ const MARKERS: Record<string, string> = {
   colours: 'el("div", "ctx-colors")',
   Tags: 'l.textContent = "Tags"',
   Move: 'l.textContent = "Move to folder…"',
-  split: 'l.textContent = "Move to a new column"',   // relabelled 2026-09-11, once the partition made the split a move
   feed: 'toggle("feed"',
   mail: 'toggle("mail"',
   bell: 'toggle("bell"',
@@ -55,8 +54,8 @@ test("section 1, how it shows: Rename, then the colour swatches", () => {
   assert.deepEqual(membersOf(sections()[0]), ["Rename", "colours"]);
 });
 
-test("section 2, where it belongs: Tags, Move to folder…, Move to a new column", () => {
-  assert.deepEqual(membersOf(sections()[1]), ["Tags", "Move", "split"]);
+test("section 2, where it belongs: Tags, Move to folder… (the column item left with the drag, 2026-09-11)", () => {
+  assert.deepEqual(membersOf(sections()[1]), ["Tags", "Move"]);
 });
 
 test("section 3, what reaches you: the feed, mail and bell switches, then Billing", () => {

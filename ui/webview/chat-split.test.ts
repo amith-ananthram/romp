@@ -5,8 +5,8 @@
 // the repo convention):
 //   * render.ts stands down on a focus, a revive prompt or the feed's click echo for a session another column
 //     holds, hands a consumed parked reveal (`own`) to that column once, routes a pick of a session living
-//     elsewhere to its owner ahead of the drafts swap, hands a moved tab's drafts over and adopts them, asks the
-//     shell to move a session from the tab menu, and measures ITS OWN pane when lifted;
+//     elsewhere to its owner ahead of the drafts swap, hands a moved tab's drafts over and adopts them, tells the
+//     shell when a tab drags (the shell's drop zones move it), and measures ITS OWN pane when lifted;
 //   * palette-main.ts aims every chat-directed command at the column last worked in, registers the move and
 //     close commands under their new meanings, and wires its chords on a column made later;
 //   * commands.ts keeps the move-to-a-new-column on the editor convention, the rest unbound.
@@ -84,25 +84,17 @@ test("drafts travel with a moved tab: the source hands over what it holds, synch
   assert.match(RENDER, /if \(m\.romp === "adopt"\) \{ adoptSessionState\(m\.sid, m\.state\); return; \}/, "the shell's message lands in the same relay as chatNav");
 });
 
-test("the tab menu offers Move to a new column when a shell that can split hosts the pane", () => {
-  const i = RENDER.indexOf('l.textContent = "Move to a new column"');
-  assert.ok(i > 0, "the item exists (relabelled 2026-09-11: the partition made the split a move)");
-  assert.ok(!RENDER.includes("Open in new split"), "the old label is gone");
-  const block = RENDER.slice(RENDER.lastIndexOf("const shellCanSplit", i), RENDER.indexOf("menu.appendChild(split);", i));
-  // a shell with the split script, and one that can take another column right now (the cap, the phone)
-  assert.match(block, /inRompShell\(\) && typeof p\.__rompSplitChat === "function" && \(typeof p\.__rompCanSplit !== "function" \|\| !!p\.__rompCanSplit\(\)\)/);
-  assert.match(block, /if \(shellCanSplit\) \{/);
-  assert.match(block, /ctxIcon\("split", false\)/);
-  assert.match(block, /window\.parent\.postMessage\(\{ romp: "openSplit", sid: id \}, "\*"\)/);   // the shell's listener runs __rompMoveTab(sid, "new") until the drag lands
-  // it closes the where-it-belongs section (Tags, Move to folder…, then this), ahead of the switches
-  // (the user 2026-09-11, who regrouped the menu by what each item changes; tab-menu-sections.test.ts)
+test("the tab menu offers no column item and the page never asks the shell to open a split: a tab is placed by dragging it (2026-09-11)", () => {
   const menuAt = RENDER.indexOf("function showTabMenu(");
-  const tagsAt = RENDER.indexOf('l.textContent = "Tags"', menuAt);
-  const moveAt = RENDER.indexOf('l.textContent = "Move to folder…"', menuAt);
-  assert.ok(tagsAt > 0 && tagsAt < moveAt && moveAt < i, "after Tags and Move to folder…");
-  assert.ok(i < RENDER.indexOf('toggle("feed"', menuAt), "before the switches");
-  // the icon: two columns side by side
-  assert.match(RENDER, /kind === "split"\n\s*\? '<rect x="2" y="3" width="5" height="10" rx="1"\/><rect x="9" y="3" width="5" height="10" rx="1"\/>'/);
+  const menu = RENDER.slice(menuAt, RENDER.indexOf("document.body.appendChild(menu);", menuAt));
+  assert.ok(!menu.includes("Move to a new column") && !menu.includes("Open in new split"), "no column item in the menu");
+  assert.ok(!RENDER.includes("shellCanSplit"), "the shell probe went with the item");
+  assert.ok(!RENDER.includes("openSplit"), "the page never posts openSplit");
+  assert.ok(!KERNEL.includes("openSplit"), "…and the shell has no listener for it: __rompMoveTab's doors are the drop zones, the palette and the cross");
+  assert.doesNotMatch(RENDER, /kind === "split"/, "the two-columns glyph went with the item");
+  // the drag tells the shell instead (tab-drag-live.test.ts pins the posts; tests/test_chat_split.py runs the zones)
+  assert.match(RENDER, /\{ romp: "tabDrag", on: true, sid: id, name, stripH/);
+  assert.match(KERNEL, /if\(m\.romp==='tabDrag'\)\{/);
 });
 
 test("a lifted column measures ITS OWN pane, never the first column's", () => {
