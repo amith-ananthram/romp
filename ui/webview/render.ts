@@ -20,7 +20,8 @@ import { ctxFallbackColor, pickTone, readableRgb } from "./ctx-color";
 import { applyTheme } from "./theme";
 import { applyDenseChrome } from "./dense-chrome";
 import { SessionViews, viewVisible, viewsKey, revealIn, viewTagUnion, viewTags, type TagUnion, type SessionTag } from "./session-views";
-import { prependHead, appendMore, mergeWindow, historyLabel, indexOfUuid, keyOf, windowDetached, fullFrameMerges, afterMore } from "./chat-window";   // the uuid-anchored wire (T323 stage 4b)
+import { prependHead, appendMore, mergeWindow, historyLabel, indexOfUuid, keyOf, windowDetached, fullFrameMerges, afterMore } from "./chat-window";
+import { SUBAGENT_OPEN_WAIT_MS, subagentStallText, subagentStalled } from "./subagent-wait";   // the viewer's wait bound and its stall (T355)   // the uuid-anchored wire (T323 stage 4b)
 import { mintWriteId, ackOutcome, adoptViews, seqOf, capsAdopts, announcedSeq, announcedAfter, createInFlight, rederivePending, lensBlob, applyLensFields, type InflightWrite, type LensFields, type TagEditOp, type ViewsAck } from "./views-writes";
 import { lensVisible, surfaceLens } from "./tag-lens";
 import { openTagMenu, tagMenuButton, syncTagFilter, tagChip } from "./tag-menu";
@@ -330,7 +331,8 @@ interface Session { id: string; name: string; color: Color | null; events: ChatE
 // agent's own transcript, fed by {type:"subagent"} frames. Client-only — the kernel never lists it in
 // tabOrder (reconcileTabOrder keeps a known, never-kernel-seen id), so it lives exactly as long as the
 // viewer. anchorUuid = the parent's Agent tool head, for the header's link back.
-interface SubInfo { parentId: string; agentId: string; meta: SubMeta | null; running: boolean; truncated: boolean; error: string | null; loaded: boolean; anchorUuid: string | null; }
+interface SubInfo { parentId: string; agentId: string; meta: SubMeta | null; running: boolean; truncated: boolean; error: string | null; loaded: boolean; anchorUuid: string | null;
+                    stalled?: boolean; askedAt?: number; }   // stalled: the ask went unanswered past SUBAGENT_OPEN_WAIT_MS (T355)
 
 const vscodeApi =
   typeof (window as any).acquireVsCodeApi === "function" ? (window as any).acquireVsCodeApi() : undefined;
@@ -10886,6 +10888,13 @@ function syncViewInner(id: string, atBottom?: boolean): View {
         // the kernel could not open the agent's file: its sentence, loud, in the pane (never a blank)
         ph.textContent = s.sub.error;
         ph.classList.add("tx-revive-failed");
+      } else if (s.sub && !s.sub.loaded && s.sub.stalled) {
+        // the ask went unanswered past the wait (T355): say so and offer the retry, never a loader for good
+        ph.textContent = subagentStallText();
+        ph.classList.add("tx-revive-failed");
+        const retry = document.createElement("button"); retry.className = "picker-action confirm-btn"; retry.type = "button";
+        retry.textContent = "Retry"; retry.onclick = () => askSubagent(id);
+        ph.appendChild(document.createElement("br")); ph.appendChild(retry);
       } else if (s.sub && !s.sub.loaded) {
         // the viewer's first frame is in flight → the romp loader holds the pane (the wait-state rule)
         ph.classList.add("tx-starting");
@@ -12901,9 +12910,39 @@ function openSubagentView(parentId: string, agentId: string, anchorUuid: string 
     });
     if (!order.includes(id)) order.push(id);
     vscodeApi?.postMessage({ type: "openSubagent", id: parentId, agentId });
+    armSubagentWait(id);   // the frame is expected within SUBAGENT_OPEN_WAIT_MS (T355)
   } else if (anchorUuid && cur.sub) cur.sub.anchorUuid = anchorUuid;
   setActive(id);
 }
+
+// The viewer's ask, with its wait (T355): the frame is expected on this socket within SUBAGENT_OPEN_WAIT_MS; past that the
+// pane shows the stall and a retry in place of the loader (a frame that never arrives left "opening…" up for good).
+function askSubagent(id: string): void {
+  const s = sessions.get(id);
+  if (!s || !s.sub) return;
+  vscodeApi?.postMessage({ type: "openSubagent", id: s.sub.parentId, agentId: s.sub.agentId });
+  armSubagentWait(id);
+}
+function armSubagentWait(id: string): void {
+  const s = sessions.get(id);
+  if (!s || !s.sub) return;
+  const p = s.sub;
+  p.loaded = false; p.stalled = false; p.askedAt = Date.now();
+  const asked = p.askedAt;
+  window.setTimeout(() => {
+    const cur = sessions.get(id);
+    if (!cur || !cur.sub || cur.sub.askedAt !== asked) return;   // answered, retried or closed meanwhile
+    if (!subagentStalled(cur.sub.loaded, Date.now() - asked)) return;
+    cur.sub.stalled = true;
+    const v = views.get(id);
+    if (v) { v.rendered = 0; v.stale = true; }
+    if (activeId === id) showActive();
+  }, SUBAGENT_OPEN_WAIT_MS);
+}
+// A socket coming back: the reconnected kernel holds no viewer registry for this client, so every open viewer asks again
+// (a frame lost to a restart between the ask and its answer arrives on the retry; the frames the agent's file changes
+// bring keep coming afterwards). The asks are bookkeeping: the pane shows what it holds meanwhile.
+window.addEventListener("romp:wsup", () => { for (const [id, s] of sessions) if (s.sub) askSubagent(id); });
 
 function closeSubagentView(id: string): void {
   const p = subParts(id);
