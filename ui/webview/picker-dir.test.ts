@@ -32,7 +32,7 @@ test("createSession carries the chosen dir, alongside name + backend", () => {
   // 2026-06-23). The whole request goes through startCreate, which remembers it so a missing directory
   // can be created and the SAME create re-sent (the user 2026-07-28).
   // (…and the Tags row's picks since tab groups, 2026-09-04 — omitted like auth when nothing is picked)
-  assert.match(RENDER, /const backend = beSel\?\.dataset\.be \|\| effectiveDefaultBackend\(loadSettings\(\)\.backend, kernelTmuxBackend\);/);   // the EFFECTIVE default since T288
+  assert.match(RENDER, /const backend = beSel\?\.dataset\.be \|\| effectiveDefaultBackend\(loadSettings\(\)\.backend\);/);   // the EFFECTIVE default since T288
   assert.match(RENDER, /startCreate\(\{ name, backend,\s*\n\s*dir: dirInput\.value\.trim\(\), host: hostSel, \.\.\.\(auth \? \{ auth \} : \{\}\), \.\.\.\(tags\.length \? \{ tags \} : \{\}\) \}\)/);
   assert.match(RENDER, /vscodeApi\.postMessage\(\{ type: "createSession", \.\.\.req/);
 });

@@ -1,6 +1,6 @@
 // The "queued" indicator (the user's messages submitted while a session is still working). It's the SAME
 // generic {kind:"queued"} ChatEvent for BOTH backends — the kernel feeds it from the transcript queue-ops
-// for tmux and from SdkBackend.pending_queued for SDK (business 2026-06-23). So pinning the one render path
+// from SdkBackend.pending_queued (business 2026-06-23). So pinning the one render path
 // confirms the dot shows for either backend. The renderer has no jsdom harness, so pin the wiring at source.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";

@@ -46,7 +46,7 @@ const MODELS = { models: [{ value: "opus", label: "Opus", versions: [] }, { valu
 // Haiku with its box on too (a kept value on a tier that cannot run fast: greyed, not lost); the CLI declined the
 // distilling tier's last fast ask
 const VERSION = { judgeModel: "opus", judgeEffort: "", indexModel: "haiku", indexEffort: "low", distillModel: "triage", distillEffort: "triage",
-  judgeConcurrency: "", commentModel: "session", commentEffort: "session", commentFast: "session", tmuxBackend: "off",
+  judgeConcurrency: "", commentModel: "session", commentEffort: "session", commentFast: "session",
   judgeFast: "on", distillFast: "on", indexFast: "on", fastRefused: { distill: { reason: "sdk_opt_in_required", model: "opus", t: 1 } },
   autoNudge: true, settingsGt: {}, updateMode: "off" };
 

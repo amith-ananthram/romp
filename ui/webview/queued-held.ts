@@ -5,7 +5,7 @@
 // reader within that height of the bottom, and the landed card then grows the tail back below them: a card above
 // the bottom, follow mode off, the jump chip shown. So a vanished copy is HELD in place, marked landing, until the
 // atom that carries its identity arrives (T252c: the queued copy's `qid` is the landed atom's `qid`, or one of its
-// `qids`), and the atom then takes the copy's slot in the same frame. A copy with no id (an older kernel, the tmux
+// `qids`), and the atom then takes the copy's slot in the same frame. A copy with no id (an older kernel
 // route, a copy the backend queued itself) is held by TEXT for the one push it vanished on, and dropped at the
 // next push that carries the queue if nothing claimed it — never a phantom. A held identified copy is dropped the
 // moment a LATER landing shows the CLI has passed it (the queue is first-in-first-out: had the copy landed, its

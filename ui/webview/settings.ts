@@ -1,3 +1,4 @@
+import { effectiveDefaultBackend } from "./backend-names";
 // Shared, persisted webview settings (the user 2026-06-14): one global settings store, surfaced via a
 // gear → modal. localStorage-backed so same-origin views (the browser's /chat, /feed, /timeline tabs)
 // share ONE setting, and a `storage` event live-syncs a change across the other open tabs. Keep this
@@ -13,7 +14,7 @@ export interface RompSettings {
   showIndexJudges: boolean;
   showTriageJudges: boolean;
   debug?: boolean;    // LEGACY (the user 2026-06-17): the old single judging-band toggle; read as the migration fallback for the two judge-set toggles when those are unset. The ↻ restart button is always-visible (decoupled).
-  backend: "tmux" | "sdk" | "codex";   // which backend a NEWLY-created session uses (the user 2026-06-22): "tmux" (terminal), "sdk" (Agent SDK), "codex" (OpenAI Codex, docs/codex.md). Both coexist; this is only the default for the + button. Read at createSession time (render.ts). Default sdk (the user 2026-07-13).
+  backend: "sdk" | "codex";   // which backend a NEWLY-created session uses (the user 2026-06-22): "sdk" (Claude Code through the Agent SDK), "codex" (OpenAI Codex, docs/codex.md); a stored value of the retired terminal backend reads as sdk (loadSettings). Both coexist; this is only the default for the + button. Read at createSession time (render.ts). Default sdk (the user 2026-07-13).
   defaultDir: string;        // default working directory PREFILLED in the new-session field (the user 2026-06-22). A session starts there; the tab menu's "Move to folder…" can change it later. Empty → the kernel's serve dir. ~ / $VAR expanded server-side.
   showBranch: boolean;       // chat bottom-bar: show the session's git branch (if any) beside the dir (the user 2026-06-23). OFF by default (the user 2026-08-10, trimming the statusline for narrow panes; an explicit stored true keeps showing it).
   showSessionBadge: boolean; // chat bottom-bar: a small badge with the session's NAME on its identity colour before Awaiting / Ready / Working (session-badge.ts). OFF by default (the maintainers via the user, 2026-09-10: the composer's placeholder already names the session; the badge is an opt-in second reading of it where the state shows).
@@ -87,6 +88,7 @@ export function loadSettings(): RompSettings {
       delete (s as Record<string, unknown>).filesControl;   // the T317-era key (merged in by that gear's whole-object save): never read, gone on the next save
       s.chatScheme = chatScheme(s.chatScheme);   // unknown/legacy values normalize to "default"
       s.panes = paneSet(s.panes);   // every optional pane present; only an explicit false hides one
+      s.backend = effectiveDefaultBackend(s.backend);   // a saved default of the retired terminal backend (or any unknown value) reads as Claude Code, never undefined (T331)
       // theme migration (2026-08-28): a store from before `theme` existed seeds it from the old
       // tab-strip pick, so a yatharth strip stays a yatharth strip. chatTabTheme itself is DERIVED
       // from theme ever after (one axis of truth; older readers keep working off the alias).

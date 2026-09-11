@@ -1,6 +1,6 @@
 // Slash-command autocomplete (the user 2026-06-29): typing "/" at the start of the composer opens a
 // filterable, arrow-navigable menu of the session's slash commands (name + description + arg hint), sourced
-// from the kernel's /commands (the Agent SDK's get_server_info — works for tmux + SDK alike). Enter/Tab/click
+// from the kernel's /commands (the Agent SDK's get_server_info — for every backend). Enter/Tab/click
 // FILLS "/name " so the user adds args then sends. Source-level pins (no jsdom for the chat renderer).
 import { test } from "node:test";
 import * as assert from "node:assert/strict";

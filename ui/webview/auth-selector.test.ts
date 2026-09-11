@@ -24,12 +24,12 @@ const INTENT = fs.readFileSync(path.join(ROOT, "vscode-extension", "src", "pipe-
 
 test("the picker's Billing row shows for SDK whenever availability is known", () => {
   // one known choice is enough to SHOW the row (the user 2026-08-09) — the both-test only decides
-  // buttons vs written-out text; the backend toggle still re-decides the row (tmux CLIs live in the
-  // tmux server's env, which the kernel doesn't control)
+  // buttons vs written-out text; the backend toggle still re-decides the row (Billing is a Claude Code
+  // matter, so the Codex pick hides it)
   // (pickerBackendChoice reads the Backend row's chip alone since tab groups, 2026-09-04 — the Tags
   // row wears the same chip grammar, and a selected tag must never read as the backend)
   assert.match(RENDER, /const show = !pickMode && !!\(a && \(a\.login \|\| a\.key\)\) && pickerBackendChoice\(\) === "sdk";/);
-  assert.match(RENDER, /function pickerBackendChoice\(\): string \{\s*\n\s*const beSel = document\.querySelector\("#picker \.picker-backend:not\(\.picker-host\):not\(\.picker-auth\):not\(\.picker-tags\) \.picker-be-opt\.sel"\) as HTMLElement \| null;\s*\n\s*return beSel\?\.dataset\.be \|\| effectiveDefaultBackend\(loadSettings\(\)\.backend, kernelTmuxBackend\);/);
+  assert.match(RENDER, /function pickerBackendChoice\(\): string \{\s*\n\s*const beSel = document\.querySelector\("#picker \.picker-backend:not\(\.picker-host\):not\(\.picker-auth\):not\(\.picker-tags\) \.picker-be-opt\.sel"\) as HTMLElement \| null;\s*\n\s*return beSel\?\.dataset\.be \|\| effectiveDefaultBackend\(loadSettings\(\)\.backend\);/);
   assert.match(RENDER, /const both = !!\(a!\.login && a!\.key\);/);
   assert.match(RENDER, /auWrap\.style\.display = "none";\s*\/\/ hidden until a sessionList reply carries authAvail/);
   assert.match(RENDER, /beWrap\.addEventListener\("click", \(\) => \{ syncPickerAuth\(\); syncPickerTags\(\); \}\);/);   // the Tags row follows the backend pick too (tab groups)
@@ -93,8 +93,7 @@ test("no key material reaches the webview — no tail plumbing survives anywhere
 });
 
 test("the chat tab hover says Billing whenever the backend reports it, naming the login", () => {
-  // ungated on machine shape (the user 2026-08-09: one-auth machines included; only a tmux session,
-  // whose CLI env romp does not control, reports nothing) — and 'Login (account)' when known
+  // ungated on machine shape (the user 2026-08-09: one-auth machines included) — and 'Login (account)' when known
   assert.match(RENDER, /s\.status\.auth === "key" \? "API key"\s*\n\s*: \(s\.status\.authAcct \? `Login \(\$\{s\.status\.authAcct\}\)` : "Login"\)\]\);/);
   assert.match(RENDER, /: s\.status\.authPickUnavailable === s\.status\.auth\s*\n(?:\s*\/\/[^\n]*\n)*\s*\? `⚠ /);   // 2026-09-08: a pick this box cannot bill is said on the hover too
   // …and the row tells the TRUTH in every landing shape (T124, superseding the quiet-parenthetical
@@ -102,8 +101,8 @@ test("the chat tab hover says Billing whenever the backend reports it, naming th
   // window, and a wrong-side landing read as an aside). A PENDING pick says "applying — not
   // confirmed yet"; a CONFIRMED contradiction (authLive on the other side — a key found via
   // apiKeyHelper on a login launch) LEADS with the warning and names what is actually billed.
-  // Anchored at the gate + label: a no-auth session (tmux — the exclusion above) must never grow a
-  // fabricated Billing row, so the `if (s.status.auth)` guard is part of the pinned behavior.
+  // Anchored at the gate + label: a session reporting no auth must never grow a fabricated Billing row,
+  // so the `if (s.status.auth)` guard is part of the pinned behavior.
   assert.match(RENDER, /if \(s\.status\.auth\) rows\.push\(\["Billing",\s*\n\s*s\.status\.authPending\s*\n\s*\? \(s\.status\.auth === "key" \? "API key" : "Login"\) \+ " \(applying — not confirmed yet\)"/,
     "the reconnect window renders as pending intent, never as applied fact");
   assert.match(RENDER, /⚠ \$\{s\.status\.auth === "key" \? "API key" : "Login"\} picked, but the CLI reports `\s*\n\s*\+ `\$\{s\.status\.authLive === "key" \? "the API key" : "the login"\} — this session bills that`/,

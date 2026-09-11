@@ -660,7 +660,7 @@ test("the parity bundle (2026-08-26): dividers, owner-scoped in-turn controls, t
   assert.match(UI, /function owningSidOf\(el0: HTMLElement \| null\): string \| null \{/);
   assert.match(UI, /const sidQ = owningSidOf\(el\) \|\| activeId;/);   // resolved once — the optimistic arm reuses it
   assert.match(UI, /\{ type: "cancelQueued", id: sidQ, md: qmd \}/);
-  assert.match(UI, /\{ type: "dismissDialog", id: owningSidOf\(b\) \}/);   // the delegate's handler (2026-09-08), still owner-scoped
+  assert.match(UI, /const own = owningSidOf\(b\);\s*\n\s*if \(vscodeApi\) vscodeApi\.postMessage\(\{ type: "apiRetry", id: own, manual: true \}\);/);   // the api-error card's delegate handler (2026-09-08), still owner-scoped
 });
 
 test("the thread's running turn offers the chat's stop affordance, owner-scoped to the THREAD (T138)", () => {

@@ -1,7 +1,7 @@
 // A new session shows its chat box immediately and starts behind it (the user 2026-07-30).
 //
 // Creating a session used to raise an "Opening session…" modal over the pane: the kernel resolved the
-// directory, spawned tmux or connected the SDK, and the first transcript poll came back — seconds you
+// directory, connected the session, and the first transcript poll came back — seconds you
 // could do nothing with, watching three bouncing dots. Now the tab is there from the first click with a
 // live composer; anything typed is HELD and flushed the moment the real session lands; and a create that
 // fails says so in a dialog carrying the kernel's own words, instead of the cue silently timing out.

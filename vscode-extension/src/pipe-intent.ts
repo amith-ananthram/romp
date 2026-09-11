@@ -15,7 +15,7 @@ export const INTENT_OPS: ReadonlySet<string> = new Set([
   "setModel", "setEffort", "setMode", "setFast", "setAuth",
   "renameSession", "moveSession", "endSession", "reviveSession",
   "nodeOverride", "askClear", "undoClear", "cardMove", "cardNotify", "redistill",
-  "answerAsk", "submitAsk", "toggleAsk", "navAsk", "cancelAsk",
+  "answerAsk", "submitAsk", "toggleAsk", "cancelAsk",
   "setSessionFlag", "setSessionColor", "setGlobalRetryPaused", "setTimelineViews", "tagEdit", "openTagsDialog",
   // the REMOTE-tag edit (a tag homed on another kernel). Dropped with the view chatter it was simply
   // lost: the reconnect's reload wipes the pane's optimistic mirror too, and the resynced pane showed

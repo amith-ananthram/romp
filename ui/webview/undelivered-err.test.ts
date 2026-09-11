@@ -1,5 +1,5 @@
 // The kernel's LOUD channel (the user 2026-07-29). An op naming a session this kernel doesn't have used to
-// degrade into a no-op — the tmux backend typed at a pane that wasn't there — so typed messages vanished with
+// degrade into a no-op — a send with nothing behind it — so typed messages vanished with
 // no bubble, no error and no record. The kernel now refuses and emits `err`; this pins the two panes that can
 // fire such an op rendering it as a DIALOG rather than a fading toast, and handing the text back.
 //

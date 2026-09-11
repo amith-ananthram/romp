@@ -747,8 +747,9 @@ class Script(unittest.TestCase):
         self.assertNotIn("headWords", JS, "no summary head line: the per-machine lines do the work")
         self.assertEqual(sb._AH_COUNTED, ("ok", "429", "529", "5xx", "other"),
                          "requests excludes 'none', so requests plus noStatus counts every attempt once")
-        self.assertIn("rows.forEach(function(r){h+=rowHTML(r,full);});h+='</div>';}\nh+=histHTML();\nif(m.tmux>0)h+=", JS,
-                      "the section sits after the sessions waiting and before the tmux line, in hover and detail alike")
+        self.assertIn("rows.forEach(function(r){h+=rowHTML(r,full);});h+='</div>';}\nh+=histHTML();\nif(full)h+=", JS,
+                      "the section sits after the sessions waiting and before the footer, in hover and detail alike")
+        self.assertNotIn("tmux session", JS, "T331: the terminal-coverage line is gone (the frame's count stays until the kernel side goes)")
 
     def test_the_card_names_every_machine_with_its_counts_in_their_colours_and_the_window_once(self):
         # T316: no head sentence; one line per machine (the dot in its state, the kernel's own name, the counts as coloured

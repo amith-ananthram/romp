@@ -91,18 +91,23 @@ class SettingsSectionsTest(unittest.TestCase):
 
     def test_the_sdk_backend_is_labelled_plain_sdk(self):
         # the backends as the user reads them (T288, the user 2026-09-09): "Claude Code" (the default, no
-        # qualifier — never "SDK" in copy a person reads), "Claude Code (tmux)", "Codex"
+        # qualifier — never "SDK" in copy a person reads) and "Codex"; the terminal backend is no longer offered
+        # (T331, the user 2026-09-10: the tmux backend is being removed), and its gear switch is gone
         h = _gear_src()
-        self.assertIn("<option value=sdk>Claude Code</option><option value=tmux>Claude Code (tmux)</option><option value=codex>Codex</option>", h)
+        self.assertIn("<option value=sdk>Claude Code</option><option value=codex>Codex</option>", h)
+        self.assertNotIn("Claude Code (tmux)", h)
+        self.assertNotIn("rs-tmuxbackend", h)
         self.assertNotIn("headless", h)
         self.assertNotIn(">SDK<", h)
         self.assertNotIn("SDK runs via", h)
         self.assertNotIn("new SDK session", h)
-        # the tmux backend's offer: a checkbox in Updates & debug, off by default, stamped and propagated like the
-        # judge knobs; the Default backend list follows it in the same modal (paintBackendOffer)
-        self.assertTrue(h.index(">Updates & debug<") < h.index("id=rs-tmuxbackend") < h.index("id=rs-judges-index"))
-        self.assertIn("<b>Enable Claude Code tmux backend <span class=rs-mixed hidden></span></b>", h)
-        self.assertIn("id=rs-backend-note", h, "the sub-line that says a saved tmux default is set aside")
+        # T331: the terminal backend's offer switch and the set-aside note are gone from the gear; the Default backend
+        # select is static and painted from the saved preference through the shared rule (a retired value reads as
+        # Claude Code)
+        self.assertNotIn("Enable Claude Code tmux backend", h)
+        self.assertNotIn("id=rs-backend-note", h)
+        self.assertNotIn("paintBackendOffer", h)
+        self.assertIn("bk.value = BN.effectiveDefaultBackend(load().backend);", h)
 
     def test_judge_rows_are_one_line_label_plus_picker(self):
         # label + picker share the line (the user 2026-07-12): nine .rs-jrow rows — six judge rows

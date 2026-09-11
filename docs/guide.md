@@ -414,20 +414,12 @@ Sessions run on one of these backends, chosen per session:
 
 - **Claude Code (the default, strongly recommended).** The kernel runs the
   Claude Code session itself, through the Claude Agent SDK.
-- **Claude Code (tmux).** A Claude Code session running in a terminal inside
-  tmux. Run `romp new -t <name>` and that terminal session joins the interface
-  like any other, so you can work in the terminal directly and still see it in
-  Romp. The cost is that Romp has no direct connection to it: it reads what
-  appears in the terminal and on disk, and sends messages and nudges by
-  injecting keystrokes. That makes it less reliable and less responsive than
-  Claude Code itself, since scraping a terminal has edge cases a real API does
-  not, and updates wait on the transcript reaching disk. The new-session picker
-  and the gear's Default backend list offer it only while **Enable Claude Code
-  tmux backend** is on in the gear's Updates & debug section (off by default);
-  sessions already running on it keep working either way.
 - **Codex.** An OpenAI Codex agent; see [docs/codex.md](codex.md).
 
-The backends interleave freely, so terminal sessions and Claude Code sessions
+The terminal backend (a Claude Code session in a tmux pane that Romp followed by
+reading the terminal) is being removed: the new-session picker and the gear's
+Default backend list no longer offer it, and a saved default of it reads as
+Claude Code. The backends interleave freely, so Claude Code and Codex sessions
 sit side by side in the interface and message each other like any other pair.
 
 ## The Romp kernel (the back end)

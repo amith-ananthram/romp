@@ -14,7 +14,7 @@ a browser (CI installs none).
 
 Executed here, beyond the rendering: the newest read wins a race, a fresh show drops the last answer, a pin
 after the hover reads once, the answer waits under a held pointer, the section's place between the sessions
-and the tmux line, the family-only bucket name, the dated stamp and the hour and day durations; Escape
+the family-only bucket name, the dated stamp and the hour and day durations; Escape
 dismisses the focus-shown hover, tooltip and dialog roles by mode, a window-refocus does not pop the hover,
 and the geometry at 830 px wide and on a short window. The window-refocus trigger itself cannot be produced
 headless (bringToFront fires no window focus in Playwright's chromium), so that case drives the mechanism with
@@ -467,8 +467,8 @@ await step("race", async () => {
   await variant("storm");
 });
 await step("order", async () => {
-  // 11. with a waiting session and a tmux session in the frame, the section sits after Sessions waiting and
-  //     before the tmux line
+  // 11. with a waiting session (and a terminal count the frame still carries), the section sits after Sessions
+  //     waiting, and no terminal-coverage line follows it (T331)
   await ev((f) => { window.__rompApiHealth(f); }, frame({ state: "degraded", cls: "429", text: "rate limited · 1 waiting", waiting: 1, retrying: 1, since: NOW_PLACEHOLDER, tmux: 1, seq: 1,
     sessions: [{ sid: "SID_PLACEHOLDER", name: "web", color: null, kind: "retrying", cls: "429", status: 429, since: NOW_PLACEHOLDER, suppressed: false }] }));
   await enter(); await waitRows();
@@ -933,10 +933,10 @@ class ServedHistory(unittest.TestCase):
         self.assertEqual(R["recovered"]["head"]["word"], '35 successful requests · 9 429s · 1 5xx', "the next successful read replaces the failure")
         self.assertIsNone(R["recovered"]["head"]["err"])
 
-    def test_the_section_sits_between_the_sessions_waiting_and_the_tmux_line(self):
+    def test_the_section_sits_after_the_sessions_waiting_and_no_terminal_coverage_line_follows(self):
         order = self.R["order"]
         self.assertEqual(order[:3], ["API health", "Sessions waiting", "History"])
-        self.assertTrue(order[3].startswith("1 tmux session is seen"), order)
+        self.assertFalse(any("tmux" in o for o in order), "T331: the frame's tmux count draws no line: %r" % order)
 
     def test_focus_shows_the_hover_and_blur_hides_it(self):
         R = self.R

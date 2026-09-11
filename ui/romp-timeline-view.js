@@ -714,7 +714,7 @@ function badgeFor(s) {
   let m = null;
   if (s.state === 'working') {
     // Live Task-subagent count (SDK only) rides the WORKING badge —
-    // so "what's actually running" is glanceable, the transparency the tmux backend never had. Blank when none.
+    // so "what's actually running" is glanceable. Blank when none.
     const n = (s.subagents && s.subagents.length) || 0;
     m = { label: n ? 'Working · ' + n + (n === 1 ? ' subagent' : ' subagents') : 'Working', kind: 'working' };
   }
@@ -761,7 +761,7 @@ function ctxInfo(s) {
 }
 
 // Model + effort, e.g. "Opus 4.8 xhigh" — the SAME string the Claude status bar shows.
-// statusline.sh publishes @claude-model/@claude-effort to tmux; the data layer reads them onto the
+// the kernel publishes model and effort per lane from the session's own row; the data layer reads them onto the
 // session. Rendered as muted secondary text between the name and the state chip. '' when unknown
 // (historical/dead lanes never reported it, and some models carry no effort level).
 // ---- theme palette (the opt-in LIGHT theme, 2026-08-28) ----------------------------------------
@@ -877,7 +877,7 @@ function modelLabel(s) {
 
 // The model + effort labels are little drop-down pickers (mirror of the chat statusline's): on a
 // LIVE lane, clicking the model or effort word opens a menu whose pick injects the matching /model or
-// /effort slash command into that session's pane (see _sendCommand → tmux, like _compactSession). The
+// /effort setting to that session through the kernel (_sendCommand, like _compactSession). The
 // label refreshes on the next poll when the TUI republishes @claude-model/@claude-effort; _metaPending
 // dims the word in the gap. Values mirror the extension's allowlist (extension.ts META_VALUES) verbatim.
 // (META_HOVER_FG — brighten the word + reveal its caret on hover — is a palette binding, declared
@@ -1459,7 +1459,7 @@ class TimelinePanel {
     } catch (e) {}
 
     // model/effort drop-down pickers: the open menu element + per-lane optimistic "pending" cues
-    // ('sid:kind' → {was, until}) that dim a word until the tmux var actually flips (or 20s elapses).
+    // ('sid:kind' → {was, until}) that dim a word until the session republishes the value (or 20s elapses).
     // _laneMenu = the per-lane GEAR drop-down (feed/postal/notify toggles — the user 2026-07-28).
     this._metaMenu = null; this._metaPending = {}; this._laneMenu = null;
     this._onDocClick = () => { this._closeMetaMenu(); this._closeLaneMenu(); this._closeViewsMenu(); };
@@ -2196,7 +2196,7 @@ class TimelinePanel {
   }
 
   update(data) {
-    if (!data || data.unavailable || !data.sessions) { this.data = data; this.drawMessage(data && data.unavailable ? 'Timeline needs a desktop Obsidian with tmux.' : 'No romp activity.'); this._signalReady(); return; }
+    if (!data || data.unavailable || !data.sessions) { this.data = data; this.drawMessage('No romp activity.'); this._signalReady(); return; }
     const _only = _rompOnlyTag();   // demo/recording view filter: keep only matching-name lanes (the user 2026-07-14)
     if (_only) data = Object.assign({}, data, { sessions: data.sessions.filter((s) => _rompMatchesOnly(s.name, _only)) });
     // The kernel ships the timeline as TWO messages (the user 2026-06-25): {type:"data"} carries the LANES
@@ -2919,8 +2919,8 @@ class TimelinePanel {
   }
 
   // Click the context battery → send `/compact` to that session's terminal. VS Code: hand the session
-  // name to the extension host (no Node in the webview); Obsidian: shell tmux directly. Types the slash
-  // command literally then submits it. (Targets the tmux session by name, like romp-postal-service's inject.)
+  // name to the extension host (no Node in the webview); Obsidian: POST /compact to the kernel over HTTP
+  // (_kernelPost, the same door `romp compact` uses). The kernel owns the transport to the session.
   // (Removed _smilBegin: the working-badge breathe no longer uses an in-SVG SMIL <animate> — a phase resync
   // couldn't fix the CADENCE, so even phase-correct it stuttered/truncated at the irregular redraw rate. It's
   // now a persistent CSS-animated overlay div (see _positionWorkLabel), like the compacting sweep — the user
@@ -3033,46 +3033,29 @@ class TimelinePanel {
       if (typeof window !== 'undefined' && typeof window.__rompTimelineCompact === 'function') {
         window.__rompTimelineCompact(name); return;
       }
-      const cp = require('child_process'), tmux = this._tmuxPath();
-      cp.execFile(tmux, ['send-keys', '-t', name, '-l', '/compact'], (err) => {
-        if (!err) cp.execFile(tmux, ['send-keys', '-t', name, 'Enter']);
-      });
-    } catch (e) { /* no host hook + no Node → can't send */ }
+      // bare Obsidian (no host hook): the kernel's compact route, which parks mid-turn like the click in the chat
+      // does; _kernelPost never rejects and names the refusal, and the lane's next poll shows the result
+      this._kernelPost('/compact', { name }).then((r) => { if (r && r.ok === false && r.error) console.warn('romp timeline: /compact ' + r.error); });
+    } catch (e) { /* no host hook + no Electron → can't send */ }
   }
-  // Inject a slash command into a session's pane (the model/effort pickers). VS Code surface: hand it
-  // to the host hook if present; Obsidian: shell tmux. We BRACKETED-PASTE the command (set-buffer +
-  // paste-buffer -p) rather than send-keys -l, then submit with a delayed Enter — mirroring the
-  // the extension's sendToSession. A literal type would feed "/model …" to Claude Code's slash-command
-  // AUTOCOMPLETE char-by-char and an immediate Enter would race the TUI; a bracketed paste lands the
-  // whole string atomically (no autocomplete), and the 250ms gap lets the paste arrive before Enter.
+  // Send a slash command to a session (the model/effort pickers). VS Code surface: hand it to the host hook
+  // if present (the shell socket's sendCommand op, which carries the op flags); Obsidian: POST /send to the
+  // kernel over HTTP (_kernelPost), the same door `romp send` uses: a typed /model, /effort or /fast takes
+  // the kernel's setters there too, and anything else parks like a composer send. The kernel owns the
+  // transport to the session, so the model switch's confirmation is the kernel's to handle.
   //
-  // confirm=true → send a SECOND Enter after the submit. /model doesn't switch on submit: it opens a
-  // "Switch model?" picker (cursor pre-seated on "Yes, switch …") that fires no hook and waits — so the
-  // one Enter only OPENS the dialog and the model never changes. The extra Enter accepts the default
-  // "Yes". /effort and /compact apply directly (no cache-invalidation confirmation), so they don't pass
-  // it. The extra Enter is harmless even if a build skips the dialog (an empty composer submit is a no-op).
+  // `confirm` is kept in the signature for the callers (the model pick passes it); the kernel needs no
+  // second keystroke. `extra` is op flags for the kernel bridge (the Latest row's `{ floating: true }`);
+  // the HTTP route carries the bare command, so a Latest pick through it applies the alias without forgetting
+  // the family's pin (the shell socket path does both).
   _sendCommand(name, cmd, confirm, extra) {
     if (!name || !cmd) return;
     try {
-      // `extra` is op flags for the kernel bridge (the Latest row's `{ floating: true }`); the direct
-      // tmux paste below has no kernel to carry them to, so it sends the bare command
       if (typeof window !== 'undefined' && typeof window.__rompTimelineSendCommand === 'function') {
         window.__rompTimelineSendCommand(name, cmd, extra || undefined); return;
       }
-      const cp = require('child_process'), tmux = this._tmuxPath();
-      const env = Object.assign({}, process.env, { LANG: 'en_US.UTF-8', LC_ALL: 'en_US.UTF-8', LC_CTYPE: 'en_US.UTF-8' });
-      const run = (args, cb) => cp.execFile(tmux, args, { timeout: 4000, encoding: 'utf8', env }, (err, out) => { if (cb) cb(err, out); });
-      const enter = () => run(['send-keys', '-t', name, 'Enter']);
-      const BUF = 'romp-timeline';
-      const submit = () => { enter(); if (confirm) setTimeout(enter, 600); };   // 2nd Enter → accept "Switch model? Yes"
-      const paste = () => run(['set-buffer', '-b', BUF, cmd], () =>
-        run(['paste-buffer', '-b', BUF, '-d', '-p', '-t', name], () => setTimeout(submit, 250)));
-      // exit copy-mode first if the pane is scrolled, so the paste + Enter actually land
-      run(['display-message', '-p', '-t', name, '#{pane_in_mode}'], (err, out) => {
-        if (!err && String(out || '').trim() === '1') run(['send-keys', '-t', name, '-X', 'cancel'], paste);
-        else paste();
-      });
-    } catch (e) { /* no host hook + no Node → can't send */ }
+      this._kernelPost('/send', { name, text: cmd }).then((r) => { if (r && r.ok === false && r.error) console.warn('romp timeline: /send ' + r.error); });
+    } catch (e) { /* no host hook + no Electron → can't send */ }
   }
 
   _closeMetaMenu() { if (this._metaMenu) { if (this._metaMenu._sub) this._metaMenu._sub.remove(); this._metaMenu.remove(); this._metaMenu = null; } }
@@ -5310,8 +5293,8 @@ class TimelinePanel {
     // Electron (Obsidian) only: a bare-node run (the test runner) and a browser page (which has its host
     // hooks) have no kernel to post to from here — the guard the file writers wore (the user 2026-07-02)
     if (typeof process === 'undefined' || !process.versions || !process.versions.electron) return null;
-    // the requires sit INSIDE a try, like every Node require in this file (_tmuxPath, the shell-outs, the
-    // writers this replaced): this file is also bundled for the BROWSER (esbuild, platform browser, the
+    // the requires sit INSIDE a try, like every Node require in this file (the http posts, the writers this
+    // replaced): this file is also bundled for the BROWSER (esbuild, platform browser, the
     // webview's timeline-main.ts inlines it), and esbuild leaves an unresolvable require alone only when
     // a try/catch wraps it — a bare one fails the build (PR #1078's first CI run). The guard above keeps
     // the page from ever evaluating them.
@@ -5466,12 +5449,7 @@ class TimelinePanel {
     } catch (e) {}
   }
 
-  _tmuxPath() {
-    if (this._tmux) return this._tmux;
-    this._tmux = 'tmux';
-    try { const fs = require('fs'); for (const p of ['/opt/homebrew/bin/tmux', '/usr/local/bin/tmux', '/usr/bin/tmux', '/bin/tmux']) if (fs.existsSync(p)) { this._tmux = p; break; } } catch (e) {}
-    return this._tmux;
-  }
+
 
   // Items that aren't themselves a conversational line (awaiting/compaction spans, message
   // connectors) borrow the deep-link anchor of the session's nearest work period to `t`.

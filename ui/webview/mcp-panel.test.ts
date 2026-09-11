@@ -2,7 +2,7 @@
 // interactive TUI an SDK-driven session cannot render, so it replied "use a terminal". The SDK exposes
 // the same facts and repairs as designed control requests — get_mcp_status, toggle_mcp_server,
 // reconnect_mcp_server — so romp intercepts the command and renders its own panel from them. Fails
-// LOUDLY: a tmux session or a disconnected CLI is NAMED, never an empty list that reads as
+// LOUDLY: a disconnected-CLI session or a disconnected CLI is NAMED, never an empty list that reads as
 // "no servers configured". No jsdom harness → source pins (the repo convention).
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
@@ -36,7 +36,7 @@ test("the panel reads the SDK's designed control requests through the kernel", (
   assert.ok(KERNEL.includes('json.dumps({"servers": servers, "error": err})'));
   assert.ok(KERNEL.includes('elif t == "mcpAction" and msg.get("server"):'));
   assert.ok(KERNEL.includes('"mcpAction"'), "routes by session id like every session op (ID_OPS)");
-  // tmux says so explicitly rather than returning a misleading empty list
+  // disconnected-CLI says so explicitly rather than returning a misleading empty list
   assert.ok(ABC.includes("def mcp_status(self, sid: str):"));
   assert.ok(ABC.includes("use /mcp there"));
 });

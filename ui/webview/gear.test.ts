@@ -47,7 +47,7 @@ test("every gear fetch routes through the kernel base + token (VS Code's webview
 test("the gear posts kernel ops through ONE shared channel (never re-acquires the VS Code API)", () => {
   assert.ok(!GEAR.includes("acquireVsCodeApi"), "a second acquire throws in a real webview");
   for (const op of ["setAutoNudge", "setJudgeModel", "setIndexModel", "setJudgeEffort", "setIndexEffort", "setJudgeConcurrency",
-    "setDistillModel", "setDistillEffort", "setCommentModel", "setCommentEffort", "setCommentFast", "setTmuxBackend",
+    "setDistillModel", "setDistillEffort", "setCommentModel", "setCommentEffort", "setCommentFast",
     "setJudgeFast", "setDistillFast", "setIndexFast", "setFileEditing", "setColormap", "setPalette", "setDefaultDir", "browseDir"])
     assert.ok(GEAR.includes(`'${op}'`), `gear must post ${op}`);
 });

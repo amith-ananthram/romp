@@ -40,7 +40,7 @@ import { markerLabel } from "./time-marker";
 // position: a send parked in the kernel's own queue (compaction, a usage-limit hold) had no id at all until
 // the drain, and text cannot tell a press-time copy from a same-text copy another client queued later. Where
 // the frame shows the id NOWHERE (the kernel has not received the send yet; a kernel that mints its own; the
-// tmux route, whose copies carry none), text and order decide for that push, exactly as before ids existed.
+// whose copies carry none), text and order decide for that push, exactly as before ids existed.
 //
 // THE ANCHOR (2026-09-06 review): every decision is read from the events AFTER the send, never from a
 // count of tail events. At the first reconcile after the press the entry records the uuid of the last
@@ -82,7 +82,7 @@ export type PendingSend = {
                        //   queued copy, its echo atom (whose uuid IS the id) and the landed atom's qid/qids wear it, so
                        //   the landing, the cover and the hidden copy are decided by id wherever the frame shows it (an
                        //   event that carries an id is ours only if it carries THIS one); an event without an id (an
-                       //   older kernel, tmux) and a push in which the frame carries this id nowhere decide by text
+                       //   older kernel) and a push in which the frame carries this id nowhere decide by text
   cover?: string;      // the id of the kernel's queued copy that covered this send BY TEXT on the last push: the kernel
                        //   identifies that copy otherwise (an older kernel minted its own id for it), so a ✕ on that copy
                        //   is a ✕ on this send (dropPending). Re-read every push and cleared where the cover is by id
@@ -285,7 +285,7 @@ const namesSend = (e: TailEvent, qid: string | undefined): boolean =>
  *  read this send's own echo as background (our dashed bubble beside the kernel's echo until the landing;
  *  a never-delivered verdict that never ended the bubble) and its own landing as its anchor (a bubble
  *  that never ended). Below the first event that names the send, and throughout a frame that names it
- *  nowhere, the stamp bound decides as before for records that carry no id (an older kernel, the tmux
+ *  nowhere, the stamp bound decides as before for records that carry no id (an older kernel
  *  route) or another send's id. The bound is confined to the late stamp because that is the only stamp
  *  that can meet the send's own records, and because at a press-time stamp it could only misfire (an
  *  identical message that landed within the press's second would read as this send's). */
@@ -360,7 +360,7 @@ export type Reconciled = {
  *  Identity first (T252c): every send carries the id it was pressed with (newPending), and the kernel's copies
  *  of it wear that id (the queued copy's `qid`, the echo's uuid, the landed atom's `qid`/`qids`), so landing,
  *  cover and loss are decided by the id wherever the frame shows it. Text and order remain the reading for
- *  copies the kernel gave no id (an older kernel, the tmux route, a notice it queued itself) and for a push
+ *  copies the kernel gave no id (an older kernel, a notice it queued itself) and for a push
  *  in which the frame carries the send's id nowhere (the kernel has not received it yet, or minted its own);
  *  the COUNT of confirmed sends is then what the kernel's records support. Nothing latches: an id a kernel
  *  copy wears that is not this send's is another send's, whatever its text says.
@@ -547,7 +547,7 @@ export function dropPending(list: PendingSend[], text: string, ts?: number, qid?
 /** Which copy of `text` in a kernel queued group the caller hides for a send drawn at its own slot: the NEWEST
  *  copy not already hidden (the group lists the queue in order; ours is the latest press with that text), or -1
  *  when there is none — including when the only copies are ones the kernel marked cancelable:false (no recall
- *  exists there: a tmux queue). That copy stays the one bubble shown, with its honest tooltip, and ours is
+ *  exists there: the session's own queue). That copy stays the one bubble shown, with its honest tooltip, and ours is
  *  suppressed as before: hidden behind our bubble's ✕ it offered a cancel the kernel would refuse (review of the
  *  first cut). */
 export function queuedCopyToHide(texts: { md?: string; cancelable?: boolean; hiddenByPending?: boolean; optimistic?: boolean; qid?: string }[], text: string, qid?: string): number {

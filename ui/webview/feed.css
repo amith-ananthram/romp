@@ -1053,7 +1053,7 @@ body { display: flex; flex-direction: column; position: relative; }   /* column 
 /* ---------- liveness anomaly rings (2026-06-11) ---------- */
 /* The OUTLINE ring marks a card whose LIVE state disagrees with the column it's
    filed in (agreement = no ring; the user's simplification). Host-computed from
-   live tmux state + open handoffs; colors only, decides nothing. The border
+   live session state + open handoffs; colors only, decides nothing. The border
    keeps the recency tint; focus/pin keep box-shadow.
    green  = settled-but-in-Asks (nothing can move it without you — likely done)
    dashed = stalled-in-Asks (unfinished handoff, nobody working)

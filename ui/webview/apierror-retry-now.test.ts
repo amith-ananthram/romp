@@ -11,7 +11,7 @@ import * as path from "node:path";
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 // isolate the Retry button's click handler — since 2026-09-08 (the notice-vocabulary pass) it lives on the
 // document.body delegate (apiRetryNow), not on a per-node listener the tail rebuild destroyed mid-press
-const H = (RENDER.match(/apiRetryNow: \(el\) => \{[\s\S]*?\},\n    dismissDialog:/) || [""])[0];
+const H = (RENDER.match(/apiRetryNow: \(el\) => \{[\s\S]*?\},\n    stopAllRetries:/) || [""])[0];   // the next delegate act (Dismiss dialog went with the terminal backend, T331)
 
 test("Retry now posts an explicit MANUAL override so it fires even when auto-retry is paused/suppressed", () => {
   assert.ok(H, "found the Retry button block");

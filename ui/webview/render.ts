@@ -298,7 +298,7 @@ type PeerIdent = { name: string; host?: string; sid?: string; color?: { bg: stri
 // which billing sides this box can bill, and why not for the other (kernel _auth_avail, 2026-09-08): the
 // Billing submenu lists both and greys the unavailable one with the reason in its hover
 interface AuthAvail { login?: boolean; key?: boolean; loginWhy?: string; keyWhy?: string; acct?: string; default?: string }
-interface Status { state: ChipState; sinceEpoch: number | null; awaitingWhy?: string | null; awaitingKind?: string | null; awaitingPeers?: PeerIdent[] | null; awaitingTasks?: string[]; awaitingTaskIds?: string[]; awaitingCount?: number | null; awaitingItems?: AwaitRow[]; effort?: string; model?: string; modelPending?: boolean; effortPending?: boolean; mode?: string; fast?: string; auth?: string; authLive?: string; authPending?: boolean; authBoth?: boolean; authAvail?: AuthAvail; authPickUnavailable?: string; authPickFell?: string; authAcct?: string; ctx?: string; ctxOver?: boolean; ctxColor?: number[]; modelColor?: number[]; effortColor?: number[]; modelTone?: number[]; effortTone?: number[]; ctxTone?: number[]; faded?: boolean; backend?: string; apiTooLong?: boolean; apiSpendLimit?: boolean; apiModelLimit?: boolean; apiAuthErr?: boolean; apiRefusal?: boolean; retrySuppressed?: boolean; retryNextAt?: number | null; retryTries?: number | null; }   // awaitingWhy/awaitingTasks = what an awaitingBg session is waiting on (kernel _session_awaiting's phrasing + the live awaited task descriptions) — the #bg-tasks box renders it as the header of the in-flight rows (renderBgTasks; the user 2026-08-13, who moved it out of the statusline the same day PR #350 put it there)   // retrySuppressed = the user interrupted this thread's API-error storm → romp's auto-retry stays OFF for it until a successful turn re-arms (the user 2026-07-06). backend = "tmux" | "sdk"; apiTooLong = the "blocked" is a "prompt is too long" error (on you → red tab) vs a transient API error (amber/retrying); apiSpendLimit = a monthly spend cap (on you → raise it; NEVER auto-retried — retrying can't fix it, the user 2026-07-14); apiModelLimit = this session's MODEL is out of allowance (on you → switch model or add credits; not auto-retried either, the user 2026-08-01); apiRefusal = the model's safeguards refused the prompt itself (on you → rewrite it or drop the thread; never auto-retried — a refusal is deterministic on the same input, so a retry just manufactures the same refusal, the user 2026-08-15); ctxColor = the GLOBAL colormap's RGB for the context%, computed server-side; modelColor/effortColor = the same map's RGB tint for the model name + effort (by capability/effort rank), server-computed; modelPending = a /model switch is resolving → the badge shows switching-dots until the new name lands (server-driven, event-based, the user 2026-07-03); fast = the CLI's fast-mode state ("on"/"off"/"cooldown", from the SDK init's fast_mode_state; absent = unknown/unavailable → no fast badge)
+interface Status { state: ChipState; sinceEpoch: number | null; awaitingWhy?: string | null; awaitingKind?: string | null; awaitingPeers?: PeerIdent[] | null; awaitingTasks?: string[]; awaitingTaskIds?: string[]; awaitingCount?: number | null; awaitingItems?: AwaitRow[]; effort?: string; model?: string; modelPending?: boolean; effortPending?: boolean; mode?: string; fast?: string; auth?: string; authLive?: string; authPending?: boolean; authBoth?: boolean; authAvail?: AuthAvail; authPickUnavailable?: string; authPickFell?: string; authAcct?: string; ctx?: string; ctxOver?: boolean; ctxColor?: number[]; modelColor?: number[]; effortColor?: number[]; modelTone?: number[]; effortTone?: number[]; ctxTone?: number[]; faded?: boolean; backend?: string; apiTooLong?: boolean; apiSpendLimit?: boolean; apiModelLimit?: boolean; apiAuthErr?: boolean; apiRefusal?: boolean; retrySuppressed?: boolean; retryNextAt?: number | null; retryTries?: number | null; }   // awaitingWhy/awaitingTasks = what an awaitingBg session is waiting on (kernel _session_awaiting's phrasing + the live awaited task descriptions) — the #bg-tasks box renders it as the header of the in-flight rows (renderBgTasks; the user 2026-08-13, who moved it out of the statusline the same day PR #350 put it there)   // retrySuppressed = the user interrupted this thread's API-error storm → romp's auto-retry stays OFF for it until a successful turn re-arms (the user 2026-07-06). backend = "sdk" | "codex"; apiTooLong = the "blocked" is a "prompt is too long" error (on you → red tab) vs a transient API error (amber/retrying); apiSpendLimit = a monthly spend cap (on you → raise it; NEVER auto-retried — retrying can't fix it, the user 2026-07-14); apiModelLimit = this session's MODEL is out of allowance (on you → switch model or add credits; not auto-retried either, the user 2026-08-01); apiRefusal = the model's safeguards refused the prompt itself (on you → rewrite it or drop the thread; never auto-retried — a refusal is deterministic on the same input, so a retry just manufactures the same refusal, the user 2026-08-15); ctxColor = the GLOBAL colormap's RGB for the context%, computed server-side; modelColor/effortColor = the same map's RGB tint for the model name + effort (by capability/effort rank), server-computed; modelPending = a /model switch is resolving → the badge shows switching-dots until the new name lands (server-driven, event-based, the user 2026-07-03); fast = the CLI's fast-mode state ("on"/"off"/"cooldown", from the SDK init's fast_mode_state; absent = unknown/unavailable → no fast badge)
 
 // The side a pick this box cannot bill actually fell to ("login" | "key"), "" when nothing did: the kernel's
 // authPickFell (the launch's own decision, 2026-09-09). An older kernel without the field is read the way the
@@ -1149,9 +1149,9 @@ interface View { el: HTMLElement; rendered: number; scrollTop: number; stick: bo
 const views = new Map<string, View>();
 
 // Pending pickers (AskUserQuestion / tool-permission) keyed by session id. These
-// live ONLY in the session's tmux pane (Claude Code doesn't write a pending
-// prompt to the transcript until it's answered), so the host captures+parses the
-// pane and pushes them here. Kept OUT of the transcript `events` list so syncView
+// never reach the transcript (Claude Code doesn't write a pending prompt to it until
+// it's answered): the SDK pushes the pending question over the control channel and
+// the kernel forwards it here as askLive. Kept OUT of the transcript `events` list so syncView
 // never clobbers them; rendered into the dedicated #live-ask region instead.
 // The pending prompt per session (its `kind` selects the widget). Kept OUT of the
 // transcript events so syncView can't clobber it. A stored null = awaiting an
@@ -3323,10 +3323,9 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
         bubble.classList.add("undelivered-bubble");
         const note = el("div", "undelivered-note");
         // covers BOTH dropped-echo populations (the copy predated the 2026-08-26 widening and claimed a
-        // process death for every loss): an SDK echo really is a send its CLI died holding, but a tmux
-        // echo settles dropped when the session simply moved past it — a keystroke the pane dropped, or
-        // a delivery the transcript recorded under different text. Say what is KNOWN (it never made the
-        // conversation), not a cause that is only sometimes true.
+        // process death for every loss): an echo really is a send its CLI died holding, or the session simply
+        // moved past it (a delivery the transcript recorded under different text). Say what is KNOWN (it never
+        // made the conversation), not a cause that is only sometimes true.
         setTip(note, "This message never made it into the conversation: the session moved on without recording it (a dropped keystroke, a process that died holding it, or a delivery recorded under different text).");
         const label = el("span", "undelivered-label");
         label.textContent = "never delivered";
@@ -3375,7 +3374,7 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
         // RESTORE-FILES affordance (the user 2026-08-04): put the WORKSPACE back the way it was just
         // before this message — the SDK's file-checkpoint rewind (rewind_files). The conversation is
         // untouched; edit/delete cover that. Same two-click arm as delete (destructive — every miss
-        // fails toward "not restored"); the kernel warns on a refusal (tmux, disconnected).
+        // fails toward "not restored"); the kernel warns on a refusal (disconnected).
         const rf = el("button", "msg-restorefiles") as HTMLButtonElement;
         rf.type = "button";
         rf.textContent = "restore files";
@@ -4324,7 +4323,7 @@ function renderQueued(ev: Extract<ChatEvent, { kind: "queued" }>): HTMLElement {
     else if (t.landing) { bubble.classList.add("landing"); bubble.title = "the session has taken this — it joins the conversation as soon as its record lands"; }
     // a queued entry with NO ✕ (the user 2026-07-20): the queue lives inside the session's own CLI —
     // there is no recall — so instead of a cancel that would only ever say "too late", the tooltip says
-    // where the message actually is. (SDK mid-turn forwards and every tmux queued message land here.)
+    // where the message actually is. (SDK mid-turn forwards land here.)
     else if (!t.cancelable && t.idx !== undefined)
       bubble.title = "queued in the session — it can't be recalled, and joins the conversation at the session's next step";
     const isCmd = renderSlashCmd(bubble, t.md);
@@ -4408,7 +4407,7 @@ function renderQueued(ev: Extract<ChatEvent, { kind: "queued" }>): HTMLElement {
     // undiscoverable AND hung on a node every push rebuilds, so mid-press rebuilds silently ate the
     // click). The ✕ carries data-act="qx" → the ONE document.body delegate (click-safe per CLAUDE.md);
     // a MESSAGE returns to the composer to re-edit, a slash COMMAND just cancels. Covers both queues:
-    // the backend's own (idx; SDK only — tmux's queue lives inside Claude Code, no recall) and ops
+    // the backend's own (idx; the SDK's) and ops
     // PARKED during compaction/model switches (park; romp-owned on every backend).
     if (t.cancelable && (t.idx !== undefined || t.park !== undefined || t.optimistic)) {
       const x = el("button", "queued-x");
@@ -4496,11 +4495,7 @@ function renderApiError(ev: Extract<ChatEvent, { kind: "apiError" }>): HTMLEleme
   const countdown = el("span", "notice-meta api-countdown");
   countdown.textContent = "retrying soon…";
   // A SPEND-CAP block gets no Retry (the user 2026-07-16, mirroring the feed card's 2026-07-14 call):
-  // retrying can't lift a billing cap, and on a tmux session it's worse than useless — the CLI is parked
-  // on an interactive menu that eats the injected "retry" as navigation keystrokes. There the real
-  // unblock is dismissing that dialog, so the tmux card offers exactly that (the kernel verifies the
-  // menu is up, then sends Esc — cancel, never a billing change). An SDK spend-cap card names the fix
-  // (raise the cap) with no dead button at all.
+  // retrying can't lift a billing cap. The card names the fix (raise the cap) with no dead button at all.
   const st = activeId ? liveSession(activeId)?.status : undefined;
   // A spent MODEL allowance gets no Retry either (the user 2026-08-01): "retry" re-fails until the model
   // changes or its own window resets, so the card names the fix instead of offering a button that cannot work.
@@ -4513,13 +4508,10 @@ function renderApiError(ev: Extract<ChatEvent, { kind: "apiError" }>): HTMLEleme
   const spendCap = !!st?.apiSpendLimit || !!st?.apiModelLimit || !!st?.apiAuthErr || refusal;
   const acts: HTMLElement[] = [];
   // every action is a data-act word button on the button vocabulary; the document.body delegate acts
-  // (apiRetryNow / dismissDialog / stopAllRetries) and acknowledges at once — the tail rebuilds on every
+  // (apiRetryNow / stopAllRetries) and acknowledges at once — the tail rebuilds on every
   // push, and the per-node listeners this replaced ate mid-press clicks (CLAUDE.md click-safety)
   if (!spendCap) {
     acts.push(noticeAct("Retry now", "apiRetryNow", "send “retry” into this session right now (also resets the auto-retry countdown)"));
-  } else if (st?.backend === "tmux" && !refusal) {
-    // (a refusal parks no menu — the Esc-sender is for the CLI's spend-limit dialog only)
-    acts.push(noticeAct("Dismiss dialog", "dismissDialog", "the terminal is showing the spend-limit menu — send Esc to close it (cancels; changes no billing setting)"));
   }
   // Global auto-retry pause (the user 2026-06-30) — no per-session off-switch. "Retry now" + sending a message still work.
   const paused = globalRetryPaused;
@@ -5285,10 +5277,9 @@ function showTabTip(tab: HTMLElement, s: Session): void {
   if (s.status.effort) rows.push(["Effort", s.status.effort]);
   // Backend is a plain labelled FIELD now, under the others (the user 2026-07-08 — no longer a coloured
   // "SDK backend" badge at the top of the tooltip; it reads as one of the session's config fields).
-  if (be === "sdk" || be === "tmux" || be === "codex") rows.push(["Backend", backendLabel(be)]);   // the shared names (T288); a tmux session keeps its label whatever the offer setting says
+  if (be === "sdk" || be === "codex") rows.push(["Backend", backendLabel(be)]);   // the shared names (T288)
   // Billing: whether this tab bills the API key or the Claude login — and WHICH login account (the
-  // user 2026-08-09: shown whenever the backend reports it, one-auth machines included; only a tmux
-  // session, whose CLI env romp does not control, reports nothing). No key material, ever.
+  // user 2026-08-09: shown whenever the backend reports it, one-auth machines included). No key material, ever.
   // When the CLI's own init landed on the OTHER side (authLive — say, a key found via apiKeyHelper
   // on a session launched for the login), the row carries the live truth beside the intent instead
   // of wearing the lie (the user 2026-08-15). The account name yields its parenthetical then: it is
@@ -6331,21 +6322,18 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
   }
   // Move to folder… sits with Rename (the user 2026-09-01: a subproject became its own repo and the
   // session should follow it) — the same dress, the sub-line saying what a move KEEPS. The dialog does
-  // the rest (showMovePrompt); the kernel wraps the CLI's own relocation. SDK sessions only: a terminal
-  // session has no relocation primitive, so its row says so rather than failing after a click.
+  // the rest (showMovePrompt); the kernel wraps the CLI's own relocation. Every session moves (T331: the
+  // terminal backend, which had no relocation primitive, is no longer offered).
   {
-    const sTm = sessions.get(id);
-    const isTmux = !!(sTm && sTm.status && sTm.status.backend === "tmux");
-    const mv = el("div", "ctx-item ctx-item-toggle" + (isTmux ? " ctx-item-off" : ""));
-    mv.appendChild(ctxIcon("folder", isTmux));
+    const mv = el("div", "ctx-item ctx-item-toggle");
+    mv.appendChild(ctxIcon("folder", false));
     const bodyEl = el("span", "ctx-item-body");
     const l = el("span", "ctx-item-label"); l.textContent = "Move to folder…"; bodyEl.appendChild(l);
     const sb = el("span", "ctx-item-sub");
-    sb.textContent = isTmux ? "terminal sessions can't move — start a new one in that folder"
-                            : "the conversation, mail, goals and history stay with the session";
+    sb.textContent = "the conversation, mail, goals and history stay with the session";
     bodyEl.appendChild(sb);
     mv.appendChild(bodyEl);
-    if (!isTmux) mv.addEventListener("click", (ev) => { ev.stopPropagation(); dismissTabMenu(); showMovePrompt(id); });
+    mv.addEventListener("click", (ev) => { ev.stopPropagation(); dismissTabMenu(); showMovePrompt(id); });
     menu.appendChild(mv);
   }
   // Colors join Rename in the AESTHETIC section (the user 2026-08-24, the final by-kind grouping:
@@ -6799,7 +6787,7 @@ window.addEventListener("scroll", dismissTabMenu, true);
 window.addEventListener("blur", () => dismissTabMenu());
 
 // "Rename" (tab context menu): swap the tab's label for an inline input. Enter
-// or clicking away commits (the host renames the tmux session and confirms with
+// or clicking away commits (the kernel renames the session and confirms with
 // a "renamed" message — the label only changes once that lands), Esc cancels.
 function startTabRename(id: string, copy?: string) {   // `copy`: which copy of a multi-tag session to edit in place (T264b); the first one when it is gone
   const s = sessions.get(id);
@@ -7124,7 +7112,7 @@ let pickAllowNew = false;
 
 // The session you just created gets its TAB AND COMPOSER IMMEDIATELY, and starts behind them (the user
 // 2026-07-30). This replaced an "Opening session…" modal that covered the pane while the kernel resolved
-// the directory, spawned tmux or connected the SDK, and the first transcript poll came back — seconds you
+// the directory, connected the session, and the first transcript poll came back — seconds you
 // could do nothing with, watching three dots. See ./provisional.ts for why the id carries no colon.
 //
 // `pendingNewSession` is the NAME the created session will arrive under; it is the only join available,
@@ -7402,14 +7390,9 @@ function dirPrefill(host: string): string {
 // The capability rides in on the local sessionList; assume yes until a kernel says otherwise, so an older
 // kernel that doesn't send it keeps the button it always had.
 let kernelNativeDialogs = true;
-// Whether the + picker OFFERS "Claude Code (tmux)" (T288, the user 2026-09-09): a kernel setting, off by default,
-// carried on the local sessionList reply. It gates the offer alone: an existing tmux session keeps working and
-// keeps its tooltip label whatever it says. Assumed off until a kernel says on (an older kernel sends none).
-let kernelTmuxBackend = false;
 // whether the user clicked a Backend toggle during THIS open of the picker: the sessionList reply, which lands after
-// the open reset the row, re-applies the effective default only while no explicit pick stands (the review's find:
-// a saved tmux default with the setting on landed on Claude Code on the first open, since the reset ran before
-// the reply said the toggle was on offer), and never undoes a pick the user made
+// the open reset the row, re-applies the effective default only while no explicit pick stands, and never undoes a
+// pick the user made
 let pickerBackendPicked = false;
 
 // The two cases are shown differently, because one of them can change and the other cannot. A REMOTE host
@@ -7445,48 +7428,34 @@ function requestSessionList(host: string): void {
 // manager environment carries. The row is ALWAYS there for an SDK session (the user 2026-08-09):
 // segmented BUTTONS when the selected host offers both, and when it offers ONE, the same spot just
 // writes out which it is — informative, never a one-option selector (what the earlier disappearing
-// rule was really against). The row still disappears when the backend toggle says tmux (that CLI
-// lives in the tmux server's environment, which the kernel does not control) and until the host's
-// sessionList reply carries authAvail (an older kernel never answers with one).
+// rule was really against). The row still disappears until the host's sessionList reply carries authAvail
+// (an older kernel never answers with one), and on the Codex pick (Billing is a Claude Code matter).
 let pickerAuthAvail: AuthAvail | null = null;
 
 // the picker's selected Backend chip — the Backend row alone (the Billing, Host and Tags rows wear the
 // same chip grammar, and a selected tag chip must never read as a backend)
 function pickerBackendChoice(): string {
   const beSel = document.querySelector("#picker .picker-backend:not(.picker-host):not(.picker-auth):not(.picker-tags) .picker-be-opt.sel") as HTMLElement | null;
-  return beSel?.dataset.be || effectiveDefaultBackend(loadSettings().backend, kernelTmuxBackend);
+  return beSel?.dataset.be || effectiveDefaultBackend(loadSettings().backend);
 }
 
-// The Backend row offers "Claude Code (tmux)" only while the kernel setting is on (T288): the toggle hides
-// otherwise, and a hidden toggle that was selected hands the selection to the effective default, so the create
-// can never send a backend the picker does not show. Re-run on every open and on the local sessionList reply.
+// The Backend row offers Claude Code and Codex. Until the user picks this open, the selected toggle follows the
+// effective default (a saved default that is no longer offered reads as Claude Code, effectiveDefaultBackend), so
+// the create can never send a backend the picker does not show. Re-run on every open and on the local sessionList reply.
 function syncPickerBackends(): void {
   const wrap = document.querySelector("#picker .picker-backend:not(.picker-host):not(.picker-auth):not(.picker-tags)") as HTMLElement | null;
   if (!wrap) return;
-  const tmuxBtn = wrap.querySelector('.picker-be-opt[data-be="tmux"]') as HTMLElement | null;
-  if (tmuxBtn) tmuxBtn.style.display = kernelTmuxBackend ? "" : "none";
-  // the effective default is re-applied while the user has not picked this open (so a saved tmux default lands
-  // once the reply says the toggle is on offer), and always when the selected toggle went off offer
-  const def = effectiveDefaultBackend(loadSettings().backend, kernelTmuxBackend);
+  const def = effectiveDefaultBackend(loadSettings().backend);
   const cur = wrap.querySelector(".picker-be-opt.sel") as HTMLElement | null;
-  if (!pickerBackendPicked || (!kernelTmuxBackend && cur?.dataset.be === "tmux")) {
-    if (cur?.dataset.be !== def) {
-      wrap.querySelectorAll(".picker-be-opt").forEach((x) => x.classList.toggle("sel", (x as HTMLElement).dataset.be === def));
-      syncPickerAuth(); syncPickerTags();
-    }
+  if (!pickerBackendPicked && cur?.dataset.be !== def) {
+    wrap.querySelectorAll(".picker-be-opt").forEach((x) => x.classList.toggle("sel", (x as HTMLElement).dataset.be === def));
+    syncPickerAuth(); syncPickerTags();
   }
 }
 
-// the backends whose create takes `tags`: the kernel applies parent/tags on an SDK or a Codex create
-// (the tag store keys on the registry sid, not the backend), and a tmux create takes none — a
-// terminal session's id is unknown until it starts, so the kernel refuses tags on one. One predicate
-// for the Tags row's state and for the create handler's payload, so the two cannot disagree about
-// which backend a chip is for.
-function backendTakesTags(be: string): boolean { return be === "sdk" || be === "codex"; }
-
-// the Tags row is for SDK and Codex sessions (tab groups, 2026-09-04): on the tmux pick the row stays
-// in place but disabled behind a short note, and the create handler sends no `tags`. Without this a
-// chip prefilled from a tagged active tab turns every terminal create into a refusal.
+// the Tags row (tab groups, 2026-09-04): every offered backend's create takes `tags` (the kernel applies parent/tags
+// on a Claude Code or a Codex create; the tag store keys on the registry sid, not the backend), so the row is never
+// disabled and the create handler always sends the selected chips.
 // The Tags row's option paints as the tag chip itself (T321, the user 2026-09-10): the thin border in the tag's own
 // colour that the tab strip, the feed and the outline draw, and on versus off by the visual the tag toggles already
 // use, the faded chip (tagChip's `off`, TAG_CHIP_OFF_CLASS at 0.45), never a dot and never the Backend row's accent
@@ -7498,11 +7467,9 @@ function paintPickerTagChip(b: HTMLButtonElement, u: { name: string; color?: str
 function syncPickerTags(): void {
   const wrap = document.querySelector("#picker .picker-tags") as HTMLElement | null;
   if (!wrap) return;
-  const takes = backendTakesTags(pickerBackendChoice());
-  wrap.classList.toggle("disabled", !takes);
-  wrap.querySelectorAll<HTMLButtonElement>(".picker-be-opt").forEach((b) => { b.disabled = !takes; });
-  const note = wrap.querySelector(".picker-tags-note") as HTMLElement | null;
-  if (note) note.style.display = takes ? "none" : "";
+  // every offered backend takes tags: the chips are always live (the disabled state and its note went with the
+  // terminal backend, T331)
+  wrap.querySelectorAll<HTMLButtonElement>(".picker-be-opt").forEach((b) => { b.disabled = false; });
 }
 
 function syncPickerAuth(): void {
@@ -7789,7 +7756,7 @@ function openPicker(pick = false, prompt?: string, allowNew = false) {
     dirField.appendChild(dirInput); dirField.appendChild(dirHint);
     dirWrap.appendChild(dirField); dirWrap.appendChild(browseBtn);
     dirWrap.appendChild(dirMenu);
-    // per-session BACKEND picker (the user 2026-06-23): a tmux | SDK segmented toggle, defaulting to the
+    // per-session BACKEND picker (the user 2026-06-23): a Claude Code | Codex segmented toggle, defaulting to the
     // gear's Default backend but overridable for THIS new session. Hidden in pick-mode (like dirWrap).
     const beWrap = el("div", "picker-backend");
     const beLabel = el("span", "picker-backend-label"); beLabel.textContent = "Backend";
@@ -7799,13 +7766,11 @@ function openPicker(pick = false, prompt?: string, allowNew = false) {
       b.addEventListener("click", () => { pickerBackendPicked = true; beWrap.querySelectorAll(".picker-be-opt").forEach((x) => x.classList.toggle("sel", x === b)); });
       return b;
     };
-    // the labels come from backend-names.ts (T288): "Claude Code" (the default, no qualifier), "Claude Code (tmux)"
-    // (offered only while the kernel setting is on — syncPickerBackends), "Codex"; the ids are unchanged
+    // the labels come from backend-names.ts (T288): "Claude Code" (the default, no qualifier) and "Codex"; the ids
+    // are unchanged
     beWrap.append(beLabel, mkBe("sdk", backendLabel("sdk"), "The default: romp runs the Claude Code session itself, with the same full chat."),   // first — the de-facto default (the user 2026-07-02)
-                  mkBe("tmux", backendLabel("tmux"), "Drives a Claude Code session in a real terminal pane (tmux); offered while the tmux backend is enabled in the gear."),
                   mkBe("codex", backendLabel("codex"), "Runs an OpenAI Codex agent (the host needs romp-codex-setup + codex login)."));
-    // the billing row exists only for SDK sessions, the Tags row only for backends whose create takes
-    // tags (backendTakesTags) — re-decide both on every backend toggle
+    // the billing row exists only for Claude Code sessions — re-decide it (and the Tags row's paint) on every backend toggle
     beWrap.addEventListener("click", () => { syncPickerAuth(); syncPickerTags(); });
     // per-session BILLING row (the user 2026-08-08): Login | API key buttons when the selected host
     // offers both; with ONE real choice the same spot writes it out as plain text (the user
@@ -7829,17 +7794,11 @@ function openPicker(pick = false, prompt?: string, allowNew = false) {
     // VISIBLE and editable, never a silent inherit (the user's ruling): a session started beside the
     // one you are looking at joins its group unless you unpick it. Chips in the Backend row's
     // grammar, each toggling on its own (a session may hold several tags); rebuilt per open
-    // (openPicker below), hidden with no tags to offer and in pick-mode. SDK and Codex sessions
-    // (backendTakesTags): on the tmux pick the chips disable behind a note and no `tags` ride the
-    // create (syncPickerTags) — the kernel refuses tags on a terminal create, and a prefilled chip
-    // would turn one into a refusal.
+    // (openPicker below), hidden with no tags to offer and in pick-mode. Every offered backend's create takes
+    // the chips (syncPickerTags paints them).
     const tgWrap = el("div", "picker-backend picker-tags");
     const tgLabel = el("span", "picker-backend-label"); tgLabel.textContent = "Tags";
     tgWrap.appendChild(tgLabel);
-    const tgNote = el("span", "picker-auth-fixed picker-tags-note");   // the Billing row's written-out text style
-    tgNote.textContent = `Tags apply to ${backendLabel("sdk")} and ${backendLabel("codex")} sessions`;   // the shared names (T288)
-    tgNote.style.display = "none";
-    tgWrap.appendChild(tgNote);
     // per-session HOST picker (federation, the user 2026-07-02): local | each attached SSH host — the new
     // session is created BY that host's kernel (over its tunnel) and appears prefixed `host:name`. The
     // options are rebuilt on every open (hosts attach/detach live); the row hides with no hosts attached.
@@ -7879,12 +7838,9 @@ function openPicker(pick = false, prompt?: string, allowNew = false) {
       const auth = pickerAuthChoice();
       // tags: the Tags row's selected chips (prefilled from the active tab, edited or not) ride the
       // create as names; the owning kernel resolves them by name, minting a missing one like POST /tag.
-      // SDK and Codex creates (backendTakesTags) — a tmux create carries none (the row is disabled for
-      // it, and the kernel refuses tags on a terminal create)
-      const backend = beSel?.dataset.be || effectiveDefaultBackend(loadSettings().backend, kernelTmuxBackend);
-      const tags = backendTakesTags(backend)
-        ? Array.from(tgWrap.querySelectorAll<HTMLElement>(".picker-be-opt.sel")).map((x) => x.dataset.tag || "").filter(Boolean)
-        : [];
+      // Every offered backend's create takes them (the kernel applies parent/tags on a Claude Code or a Codex create).
+      const backend = beSel?.dataset.be || effectiveDefaultBackend(loadSettings().backend);
+      const tags = Array.from(tgWrap.querySelectorAll<HTMLElement>(".picker-be-opt.sel")).map((x) => x.dataset.tag || "").filter(Boolean);
       startCreate({ name, backend,
                     dir: dirInput.value.trim(), host: hostSel, ...(auth ? { auth } : {}), ...(tags.length ? { tags } : {}) });
     });
@@ -7941,7 +7897,7 @@ function openPicker(pick = false, prompt?: string, allowNew = false) {
   if (beWrapEl) {   // reset the backend toggle to the gear default each open (overridable for this session)
     beWrapEl.style.display = pick ? "none" : "";
     pickerBackendPicked = false;   // a fresh open: the row follows the effective default until the user picks
-    const def = effectiveDefaultBackend(loadSettings().backend, kernelTmuxBackend);   // a saved tmux default while it is off → Claude Code
+    const def = effectiveDefaultBackend(loadSettings().backend);   // a saved default no longer offered → Claude Code
     beWrapEl.querySelectorAll(".picker-be-opt").forEach((x) => x.classList.toggle("sel", (x as HTMLElement).dataset.be === def));
     syncPickerBackends();
   }
@@ -8002,7 +7958,7 @@ function openPicker(pick = false, prompt?: string, allowNew = false) {
         ? `the session you are looking at is in ${u.name} — the new one joins it too unless you unpick this`
         : `put the new session in ${u.name}`;
       b.addEventListener("click", () => { b.classList.toggle("sel"); paintPickerTagChip(b, u); });   // multi-select: each chip on its own
-      tgWrapEl.insertBefore(b, tgWrapEl.querySelector(".picker-tags-note"));   // chips before the tmux note
+      tgWrapEl.appendChild(b);
     }
     syncPickerTags();   // the backend toggle was just reset to the gear default above
   }
@@ -9847,7 +9803,7 @@ function loadMcpPanel(sid: string, body: HTMLElement): void {
       if (mcpPanelSid !== sid) return;   // panel closed (or reopened for another tab) while loading
       body.textContent = "";
       const servers: any[] = Array.isArray(d?.servers) ? d.servers : [];
-      // FAIL LOUDLY: a refusal (tmux session, disconnected CLI) is named, never an empty list that
+      // FAIL LOUDLY: a refusal (a disconnected CLI) is named, never an empty list that
       // reads as "no servers configured".
       if (d?.error) {
         const e = el("div", "mcp-err"); e.textContent = String(d.error); body.appendChild(e);
@@ -10040,7 +9996,7 @@ function renderPicker(items: any[]) {
     if (it.hiddenTab) {   // open as a tab but filtered out of the CURRENT view (tagged) → picking jumps to its view
       time.textContent = "other view";
       time.style.opacity = "0.7";
-    } else if (it.running) {   // a live session (SDK/tmux backend) whose tab is closed → a green "running" badge
+    } else if (it.running) {   // a live session whose tab is closed → a green "running" badge
       time.classList.add("picker-running-badge");
       time.append(el("span", "picker-run-dot"), document.createTextNode("running"));
     } else {
@@ -13191,11 +13147,11 @@ function renderLiveAsk() {
   host.style.display = "";
   const ask = liveAsks.get(activeId) ?? null;
   setComposerAskMode();   // picker with a free-text path → the composer becomes "add your own answer…"
-  if (!ask) renderUnknownCard();
-  else if (ask.kind === "multi") renderMultiCard(ask);
+  if (!ask) { host.style.display = "none"; setComposerAskMode(); return; }   // no typed ask (the kernel clears instead): nothing to draw
+  if (ask.kind === "multi") renderMultiCard(ask);
   else if (ask.kind === "submit") renderSubmitCard(ask);
   else renderSingleCard(ask);
-  renderAskPreview();   // focus-aware: the FOCUSED option's own preview (SDK) or the single scraped one (tmux)
+  renderAskPreview();   // focus-aware: the FOCUSED option's own preview
   // Reveal the picker if the user is parked at the bottom — it's part of the scroll flow now, so new/taller
   // pickers would otherwise land below the fold. Never yank a user who has scrolled UP to read context.
   const v = activeId ? views.get(activeId) : undefined;
@@ -13206,10 +13162,9 @@ function renderLiveAsk() {
 // 2026-06-13). The TUI draws it to the RIGHT of the options; the chat rail is narrow, so it sits BELOW the
 // card and scrolls sideways if wider than the rail. FOCUS-AWARE (the user 2026-06-22): on a single-select
 // card it shows the CURRENTLY-FOCUSED option's preview, so ↑/↓ swaps the picture like the terminal —
-// instantly when the option carries its OWN preview (the SDK backend sends one per option), else from
-// ParsedAsk.preview (the one the tmux scrape captured for the focused row, which paintLiveAskFocus keeps
-// current by nudging the terminal cursor). REPLACES rather than appends, so stepping never stacks
-// duplicates. textContent, never innerHTML: the pane text is untrusted terminal output.
+// instantly, from the option's OWN preview (the SDK sends one per option; ParsedAsk.preview stands in only
+// for an older kernel's single preview). REPLACES rather than appends, so stepping never stacks
+// duplicates. textContent, never innerHTML: the preview is untrusted tool output.
 function renderAskPreview() {
   const host = document.getElementById("live-ask"); if (!host) return;
   const card = host.querySelector(".ask-card") as HTMLElement | null; if (!card) return;
@@ -13462,46 +13417,10 @@ function insertClipboardText(text: string) {
   inp.dispatchEvent(new Event("input", { bubbles: true })); // keep liveTextValue/draft sync
   inp.focus();
 }
-// Safeguard: the session is awaiting input but the parser can't map the screen to
-// a known widget (an unrecognized prompt, a free-text editor, etc.). Warn loudly
-// so a prompt is never silently missed — and offer a best-effort text input in
-// case it IS a plain text prompt.
-function renderUnknownCard() {
-  const card = askCard("ask-live-unknown");
-  const warn = el("div", "ask-warn");
-  warn.textContent = "⚠ Waiting on a prompt the panel can’t read — answer it in the terminal.";
-  card.appendChild(warn);
-  // Free text goes through the NORMAL message box below now (composerAnswersAsk → "text" → askText); no
-  // separate inline input (the user 2026-07-09).
-  const hint = el("div", "ask-custom-hint-text");
-  hint.textContent = "…or, if it’s a text prompt, type it in the message box below + ⏎.";
-  card.appendChild(hint);
-}
-
 function paintLiveAskFocus() {
   const rows = document.querySelectorAll("#live-ask .ask-live-opt");
   rows.forEach((r, i) => r.classList.toggle("focus", i === liveAskFocus));
-  renderAskPreview();   // step the preview to the newly-focused option (instant for per-option SDK previews)
-  // tmux scrape path: the focused option has no preview of its own, but the ask carries the one scraped for
-  // the cursor row — so nudge the TERMINAL cursor onto this option, and the next scrape captures ITS preview.
-  // That's the only way to "see the other ones" without selecting (the user 2026-06-22). Debounced in
-  // navLiveAsk so a fast ↑↑↑ only drives the final option. SDK options carry their own preview → no nudge.
-  const ask = activeId ? liveAsks.get(activeId) : null;
-  if (ask && ask.kind === "single") {
-    const opts = singleOptions(ask);
-    const o = opts[Math.max(0, Math.min(liveAskFocus, opts.length - 1))];
-    if (o && !o.preview && ask.preview) navLiveAsk(o.n);
-  }
-}
-
-// Move the TUI cursor to `target` WITHOUT selecting, so the tmux-scraped preview follows ↑/↓. Debounced so
-// a fast keyboard sweep drives only the final option; NOT sendingGuard'd (it's navigation, not a commit).
-let navTimer: ReturnType<typeof setTimeout> | undefined;
-function navLiveAsk(target: number) {
-  if (!activeId || !vscodeApi) return;
-  const id = activeId;
-  if (navTimer) clearTimeout(navTimer);
-  navTimer = setTimeout(() => { navTimer = undefined; vscodeApi?.postMessage({ type: "navAsk", id, target }); }, 110);
+  renderAskPreview();   // step the preview to the newly-focused option (instant: every option carries its own)
 }
 
 // Single-select keyboard: ↑/↓ highlight (preview follows), Enter confirms, number jumps to + confirms.
@@ -13567,14 +13486,14 @@ function elapsedMs(sinceMs: number | null): string {
 }
 
 // Right side of the status line: "Opus 4.8 xhigh" (model + effort) — the context %
-// is shown separately as a battery bar (ctxBar). Sourced from the @claude-model /
-// @claude-effort / @claude-context tmux vars. Shown in EVERY state, not just working.
-// Each value is a little dropdown: picking an entry has the host inject the matching
-// /model or /effort slash command into the session's pane; the label then updates
-// when the TUI's statusline republishes the tmux vars (meta-pending bridges the gap).
+// is shown separately as a battery bar (ctxBar). Sourced from the session's own row
+// (the kernel publishes model, effort and context per session). Shown in EVERY state, not just working.
+// Each value is a little dropdown: picking an entry has the kernel apply the matching
+// /model or /effort setting to the session; the label then updates
+// when the session republishes the value (meta-pending bridges the gap).
 type MetaKind = "mode" | "model" | "effort" | "fast";
 // One dropdown entry. `sub` is the second line for a choice whose consequence is not obvious from its
-// label; `sdkOnly` drops the entry on a tmux session, whose backend cannot apply it.
+// label; `sdkOnly` drops the entry on a backend that cannot apply it (Codex).
 interface MetaChoice { label: string; value: string; sub?: string; sdkOnly?: boolean; color?: number[] | null;
   versions?: { label: string; value: string; learned?: boolean }[]; default?: string }   // model families only (the
   // user 2026-08-25). `default` is the family's remembered version pin, else the family ALIAS; `learned`
@@ -13655,11 +13574,9 @@ function modelChoiceLabel(value: string): { label: string; color?: number[] | nu
   }
   return { label: value };
 }
-// Permission mode. A tmux session has no slash command for it — the host cycles shift+tab the right
-// number of times (the user 2026-06-16) — so the four CYCLE modes are all that backend can reach.
-// An SDK session sets it outright over the control channel (set_permission_mode), which is what makes
-// Bypass offerable there and only there: on tmux the click would land on a mode the cycle cannot
-// express, and _cycle_mode would drop it. `sdkOnly` is the filter, applied in toggleMetaMenu.
+// Permission mode. A Claude Code session sets it outright over the control channel (set_permission_mode),
+// which is what makes Bypass offerable there and only there (a Codex session has its own vocabulary and
+// cannot express it). `sdkOnly` is the filter, applied in toggleMetaMenu.
 // Permission-mode GLYPHS (the user 2026-08-28): each mode gets a small line icon beside its text —
 // the statusline badge and the picker rows carry it, always WITH the label (an icon alone is a
 // riddle). House icon style (the tag-glyph convention): 16-unit viewBox, stroke currentColor 1.4,
@@ -13707,8 +13624,8 @@ const MODE_CHOICES: MetaChoice[] = [
 ];
 // Fast mode (the CLI's /fast — Opus-only research preview): a two-state toggle offered as the same
 // dropdown shape as the other badges. The badge exists only when the session REPORTS a fast state
-// (st.fast, from the SDK init's fast_mode_state) — a session that can't run it, or a tmux session
-// whose statusline doesn't publish it yet, shows no dead control. The options speak the BADGE's two
+// (st.fast, from the SDK init's fast_mode_state) — a session that doesn't report a fast state shows no
+// dead control. The options speak the BADGE's two
 // words — Fast/Slow, never On/Off (the user 2026-08-11: a badge reading "Slow" opened a menu of
 // "On"/"Off", two vocabularies for one toggle; prettyFast is the one wording, the values stay the
 // wire's on/off).
@@ -13791,8 +13708,8 @@ function isCurrentMeta(kind: MetaKind, st: Status, value: string): boolean {
   return (st.model || "").toLowerCase().startsWith(value);
 }
 
-// "<sessionId>:<kind>" → set when the user picks a value, cleared when the tmux
-// var actually changes (or after 20s, if the TUI rejected/ignored the command).
+// "<sessionId>:<kind>" → set when the user picks a value, cleared when the session
+// republishes the value (or after 20s, if the CLI rejected/ignored the command).
 const metaPending = new Map<string, { was: string; until: number }>();
 function isMetaPending(kind: MetaKind, st: Status): boolean {
   if (!activeId) return false;
@@ -13960,7 +13877,7 @@ function toggleMetaMenu(kind: MetaKind, btn: HTMLElement, forSid?: string | null
   };
   let subEl: HTMLElement | null = null;
   const closeSub = () => { subEl?.remove(); subEl = null; };
-  // An sdkOnly entry is dropped on tmux rather than shown-and-refused: the backend cannot apply it,
+  // An sdkOnly entry is dropped on Codex rather than shown-and-refused: the backend cannot apply it,
   // and a menu that lists a mode you can't have is worse than one that doesn't. Codex sessions read
   // their own vocabulary via metaChoices (docs/codex.md) before the same filter.
   const rows = metaChoices(kind, s.status).filter((c) => !c.sdkOnly || s.status.backend === "sdk");
@@ -16572,9 +16489,6 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
       kernelNativeDialogs = m.nativeDialogs;
       applyBrowseState(pickerHost());
     }
-    // the tmux backend's offer (T288): the LOCAL kernel's setting; the Backend row follows it while the picker
-    // is on screen (the reply lands after the open), and an older kernel that sends none leaves the row as it was
-    if (typeof m.tmuxBackend === "boolean" && !from) { kernelTmuxBackend = m.tmuxBackend; syncPickerBackends(); }
     // the selected host's billing choices ride its own list reply — this is what arms (or hides) the
     // picker's Billing row (the user 2026-08-08); an older kernel sends none and the row stays away
     pickerAuthAvail = (m.authAvail && typeof m.authAvail === "object") ? m.authAvail : null;
@@ -17315,7 +17229,7 @@ function setupComposer() {
 
   // ── slash-command autocomplete (the user 2026-06-29) ── a "/" at the START of the box opens a filterable,
   // arrow-navigable menu of THIS session's slash commands (name + description + arg hint), sourced from the
-  // kernel's /commands (the Agent SDK's get_server_info, per-cwd — works for tmux + SDK alike). Enter/Tab/click
+  // kernel's /commands (the Agent SDK's get_server_info, per-cwd, for every backend). Enter/Tab/click
   // FILLS "/name " so you add arguments then send yourself; Esc closes. The list is fetched per active session
   // and cached; while the kernel warms its (slow) probe the menu shows the romp loader. Modeled on the VS Code
   // client's command palette + the terminal UI.
@@ -18401,13 +18315,6 @@ setupSettings();
       b.disabled = true;
       b.textContent = "Retrying…";
       setTimeout(() => { if (b.isConnected) { b.disabled = false; b.textContent = "Retry now"; } }, 2500);
-    },
-    dismissDialog: (el) => {
-      const b = el as HTMLButtonElement;
-      if (vscodeApi) vscodeApi.postMessage({ type: "dismissDialog", id: owningSidOf(b) });
-      b.disabled = true;
-      b.textContent = "Dismissing…";
-      setTimeout(() => { if (b.isConnected) { b.disabled = false; b.textContent = "Dismiss dialog"; } }, 2500);
     },
     stopAllRetries: () => {
       globalRetryPaused = !globalRetryPaused;

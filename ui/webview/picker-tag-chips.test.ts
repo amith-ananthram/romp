@@ -36,21 +36,15 @@ test("the option wears no button chrome around the chip, selected or hovered, so
   assert.ok(CSS.indexOf(".picker-be-opt.sel { background: var(--accent)") < CSS.indexOf(".picker-tags .picker-be-opt.sel {"), "the tag rule follows the generic one in the sheet");
 });
 
-test("the tmux pick greys the row without stacking a second fade on the off chips, so on and off still read", () => {
-  assert.match(CSS, /\n\.picker-tags\.disabled \.picker-be-opt \{ filter: grayscale\(1\); cursor: default; pointer-events: none; \}\n/,
-    "grey says disabled; the off chip's 0.45 stays the only fade");
-  assert.doesNotMatch(CSS, /\.picker-tags\.disabled \.picker-be-opt \{ opacity: 0\.45;/, "the old 0.45 over 0.45 left an off chip at a fifth");
-});
-
 test("the off visual is the one the tag toggles use: TAG_CHIP_OFF_CLASS at the inline opacity, defined on both sheets", () => {
   assert.match(MENU, /export const TAG_CHIP_OFF_CLASS = "tag-chip-off";/);
   assert.match(MENU, /export const TAG_CHIP_OFF_OPACITY = "0\.45";/);
   for (const [name, sheet] of [["styles.css", CSS], ["feed.css", FEED_CSS]] as const) assert.match(sheet, /\n\.tag-chip-off \{ opacity: 0\.45; \}\n/, name);
 });
 
-test("what the create reads is unchanged: the selected options' data-tag, only when the backend takes tags", () => {
-  assert.match(RENDER, /const tags = backendTakesTags\(backend\)\s*\n\s*\? Array\.from\(tgWrap\.querySelectorAll<HTMLElement>\("\.picker-be-opt\.sel"\)\)\.map\(\(x\) => x\.dataset\.tag \|\| ""\)\.filter\(Boolean\)/);
+test("what the create reads is unchanged: the selected options' data-tag (every offered backend takes tags)", () => {
+  assert.match(RENDER, /const tags = Array\.from\(tgWrap\.querySelectorAll<HTMLElement>\("\.picker-be-opt\.sel"\)\)\.map\(\(x\) => x\.dataset\.tag \|\| ""\)\.filter\(Boolean\)/);
   assert.match(REBUILD, /b\.type = "button"; b\.dataset\.tag = u\.name;/);
   const sync = RENDER.slice(RENDER.indexOf("function syncPickerTags("), RENDER.indexOf("function syncPickerAuth("));
-  assert.match(sync, /\.forEach\(\(b\) => \{ b\.disabled = !takes; \}\);/, "the tmux pick still disables the buttons themselves");
+  assert.match(sync, /\.forEach\(\(b\) => \{ b\.disabled = false; \}\);/, "every chip stays live: no pick disables the buttons (T331)");
 });
