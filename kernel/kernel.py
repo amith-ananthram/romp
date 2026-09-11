@@ -8993,15 +8993,16 @@ def _persist_tick_seen(force=False):
 def _tick_job_check(job, s):
     """T323 stage 1: (skip, stat) for an event-keyed tick job, one whose answer is a pure function of the
     session's transcript, state log and goal store, never of the wall clock. `skip` is True when those files
-    are UNCHANGED since the job's last COMPLETED evaluation (_tick_job_done), and, before any, unchanged since
-    this kernel BOOTED. Why the boot baseline: before this, every such job parsed every alive session on the
-    first cycle after a restart to re-derive what the previous kernel had already filed in the store (the
-    interrupt block marker, the working note), a full parse per session for nothing new (T311: 388 chats'
-    worth of parses in five minutes). A session that moved under the previous kernel's death is evaluated;
-    one that did not keeps the store's verdict, which is what the card reads. Nothing is recorded here: the
-    caller marks the evaluation done only once its store work landed, so a fault mid-tick (an unproved ledger,
-    a refused marker write) leaves the session to the next tick exactly as before (the fault-boundary tests
-    pin that). A job with a wall-clock leg (the nudge's timers) must not use this."""
+    are UNCHANGED since the job's last COMPLETED evaluation (_tick_job_done) on record, this kernel's or a
+    previous one's (the memo persists, _TICK_SEEN_FILE); a session no kernel on record has looked at is
+    evaluated once. Why: before this, every such job parsed every alive session on the first cycle after a
+    restart to re-derive what the previous kernel had already filed in the store (the interrupt block marker,
+    the working note), a full parse per session for nothing new (T311: 388 chats' worth of parses in five
+    minutes). A session that moved since its last look is evaluated; one that did not keeps the store's
+    verdict, which is what the card reads. Nothing is recorded here: the caller marks the evaluation done only
+    once its store work landed, so a fault mid-tick (an unproved ledger, an unreadable store, a refused marker
+    write) leaves the session to the next tick exactly as before (the fault-boundary tests pin that). A job
+    with a wall-clock leg (the nudge's timers) must not use this."""
     st = _session_files_stat(s)
     if not st[0]:
         return False, st                      # no transcript to stat: nothing is known about it, so never a skip
@@ -9093,6 +9094,15 @@ def _interrupt_block_tick(now, tmux):
                 continue
             _auto_nudge_resume()
             ib = _intr_blocked(sid)                      # once per interrupt episode (the intrBlocked marker) —
+            if ib:
+                # an UNREADABLE store keeps the marker (_intr_block_stands reads a fault as standing, by design)
+                # but is no evidence the block holds its card, so it is no completed evaluation either: the
+                # session stays unmarked and the next tick reads again (review find, 2026-09-11: marking it
+                # done here skipped the session for good, across a graceful restart, with its new focus top in
+                # Working while it sat stopped)
+                _store, _fault = jd.load_goals_shared_or_fault(sid)
+                if _fault is not None:
+                    continue
             if ib and not _intr_block_stands(sid, ib):   # but VERIFY the marked block still holds its card (see
                 _set_intr_blocked(sid, None)             # _intr_block_stands): a stale marker is the 'already
                 ib = None                                # surfaced' claim with its evidence gone
@@ -9114,9 +9124,10 @@ def _interrupt_block_tick(now, tmux):
                     # the tag check above and here refuses the marker, the next tick stands down at the check,
                     # and the first healed tick re-mints the marker (_record_interrupt_block hands back the
                     # gid of a card our own block already holds, appending nothing)
-                    _set_intr_blocked(sid, g)
-                    _tick_job_done("interrupt-block", s, files_st)   # filed and marked: evaluated (a refused
-                    #                                                    record leaves the session to the next tick)
+                    if _set_intr_blocked(sid, g) is not False:       # False: the marker write was refused (an unproved
+                        _tick_job_done("interrupt-block", s, files_st)   # ledger snapshot); the next tick re-mints it.
+                    #                                                    Filed AND marked: evaluated (a refused record
+                    #                                                    leaves the session to the next tick as well)
         else:                                            # working / re-engaged / machine cut → lift OUR block if any
             ib = _intr_blocked(sid)
             if not ib:

@@ -221,6 +221,48 @@ class TickJobsKeyOnAChange(unittest.TestCase):
             km._interrupt_block_tick(int(time.time()), {})
         self.assertNotIn(("interrupt-block", SID_OLD), km._TICK_SEEN, "a parse failure bails out unmarked")
 
+    def test_a_faulting_store_read_on_the_standing_path_leaves_the_session_unmarked(self):
+        """Review find: _intr_block_stands keeps the marker on an unreadable store by design; that is not evidence
+        the block still holds its card, so the tick must not mark the session evaluated (the persisted memo would
+        carry the skip across a restart while the new focus top sat in Working)."""
+        d = tempfile.mkdtemp()
+        r = _row(d, SID_OLD, old=True)
+        stopped = [{"id": "t1", "t": 1000, "atoms": [{"t": 1000, "type": "user"}]}]
+        common = dict(_alive_sessions=lambda now, tmux: [r], _session_flag=lambda sid, flag: False,
+                      _compacting_now=lambda *a, **k: False, _api_error=lambda path: False,
+                      _interrupt_marks=lambda turns, sid, family="judge": (1000, 900), _session_working=lambda turns: False,
+                      _auto_nudge_resume=lambda: None, _auto_nudge_data=lambda: {}, _intr_blocked=lambda sid=None: "g1")
+        with mock.patch.multiple(km, **common), \
+             mock.patch.object(km.jd, "parsed_session", side_effect=lambda sid, paths, now: {"turns": stopped}), \
+             mock.patch.object(km.jd, "load_goals_shared_or_fault", side_effect=lambda sid: (None, OSError("transient"))):
+            km._interrupt_block_tick(int(time.time()), {})
+        self.assertNotIn(("interrupt-block", SID_OLD), km._TICK_SEEN, "a faulted store read is not a standing block: unmarked")
+        with mock.patch.multiple(km, **common), \
+             mock.patch.object(km.jd, "parsed_session", side_effect=lambda sid, paths, now: {"turns": stopped}), \
+             mock.patch.object(km.jd, "load_goals_shared_or_fault", side_effect=lambda sid: ({"nodes": {"g1": {"blocked": True}}}, None)):
+            km._interrupt_block_tick(int(time.time()), {})
+        self.assertIn(("interrupt-block", SID_OLD), km._TICK_SEEN, "a readable store whose block still holds its card: evaluated")
+
+    def test_a_refused_marker_write_leaves_the_session_unmarked(self):
+        """Review find: _set_intr_blocked returns False when its own ledger read is unproved; marking the session
+        done on that would leave the block on the card with no marker ever minted."""
+        d = tempfile.mkdtemp()
+        r = _row(d, SID_OLD, old=True)
+        stopped = [{"id": "t1", "t": 1000, "atoms": [{"t": 1000, "type": "user"}]}]
+        common = dict(_alive_sessions=lambda now, tmux: [r], _session_flag=lambda sid, flag: False,
+                      _compacting_now=lambda *a, **k: False, _api_error=lambda path: False,
+                      _interrupt_marks=lambda turns, sid, family="judge": (1000, 900), _session_working=lambda turns: False,
+                      _auto_nudge_resume=lambda: None, _auto_nudge_data=lambda: {}, _intr_blocked=lambda sid=None: None,
+                      _record_interrupt_block=lambda sid, ev: "g1")
+        for refused, marked in ((False, False), (True, True)):
+            km._TICK_SEEN.clear()
+            with mock.patch.multiple(km, **common), \
+                 mock.patch.object(km, "_set_intr_blocked", side_effect=lambda sid, gid: refused), \
+                 mock.patch.object(km.jd, "parsed_session", side_effect=lambda sid, paths, now: {"turns": stopped}):
+                km._interrupt_block_tick(int(time.time()), {})
+            self.assertEqual(("interrupt-block", SID_OLD) in km._TICK_SEEN, marked,
+                             "marker write returned %r → marked %r" % (refused, marked))
+
     def test_the_two_event_keyed_ticks_gate_before_their_parse_and_the_nudge_does_not(self):
         for fn, job in ((km._interrupt_block_tick, "interrupt-block"), (km._clear_done_working_notes, "working-notes")):
             src = inspect.getsource(fn)
