@@ -1683,7 +1683,7 @@ def injected_source(author, origin, reminders=(), preamble=""):
 def _th(text):
     """The carry's text key: sha1 of the text. The dedup sets compare for equality only, so a hash serves them, and
     the assembly checkpoint can carry the sets without carrying every prompt ever typed (T323 stage 4)."""
-    return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()
+    return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:16]
 
 
 def _emit_state():
@@ -3242,7 +3242,7 @@ def _segment_id(rompuuid, seg_t, atoms, trigger_uuid):
 def _has_text(atom):
     lz = atom.get("lazy")
     if lz is not None:
-        return bool(lz.get("nt"))
+        return lz.get("nt", True)
     return bool(_text_of(_content(atom.get("message"))))
 
 
@@ -3792,10 +3792,27 @@ def _atom_scalars(a):
 def _lazy_of(a, kind, rec_index):
     """The identity scalars a lazy atom carries in place of its body (what the ids, the segmentation and the gates read)."""
     text = _text_of(_content(a.get("message"))) if a.get("message") is not None else ""
-    lz = {"k": kind, "i": rec_index, "h": hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:8],
-          "nt": bool(text), "mw": _machine_written(a), "ir": is_interrupt_record(a),
-          "sr": (a.get("message") or {}).get("stop_reason") if isinstance(a.get("message"), dict) else None,
-          "tur": "toolUseResult" in a}
+    lz = {"k": kind, "h": hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:8]}
+    if not text:
+        lz["nt"] = False                        # defaults left out: text present, not machine-written, not an interrupt,
+    if _machine_written(a):                     #  no stop reason, no structured tool result, no model
+        lz["mw"] = True
+    if is_interrupt_record(a):
+        lz["ir"] = True
+    msg = a.get("message") if isinstance(a.get("message"), dict) else None
+    if msg is not None and msg.get("stop_reason") is not None:
+        lz["sr"] = msg["stop_reason"]
+    if msg is not None and msg.get("model"):
+        lz["mdl"] = msg["model"]                # the model stamp a few readers test (synthetic replies, the settle)
+    if "toolUseResult" in a:
+        lz["tur"] = True
+    blocks = _content(msg) if msg is not None else []
+    tu = [[b.get("id"), b.get("name")] for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use"]
+    tr = [b.get("tool_use_id") for b in blocks if isinstance(b, dict) and b.get("type") == "tool_result"]
+    if tu:
+        lz["tu"] = tu                           # tool calls and results by id: what the settle gates and the task
+    if tr:                                      #  pairings read, so they need no body
+        lz["tr"] = tr
     if kind == "c":
         lz["disp"] = text                       # the invocation's display text is short: inline, no read to rebuild it
     return lz
@@ -3936,15 +3953,15 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
                         scal.pop(k_, None)
                 if scal.get("type") == {"u": "user", "a": "assistant", "s": "system"}.get(rr[2]):
                     scal.pop("type", None)
-            row = {"s": scal, "i": idx}
+            row = {"i": idx}
+            if scal:
+                row["s"] = scal
             if ri is not None:
                 row["r"] = ri
             if a.get("_seq", sq) != sq:
                 row["seq"] = a.get("_seq", sq)             # an adopted boundary's emit order differs from its read order
             if kind in _LAZY_KINDS:
                 row["lz"] = _lazy_of(a, kind, idx)
-                if row["lz"]["k"] == "u" and not row["lz"].get("tur"):
-                    row["lz"].pop("tur", None)
             pre_atoms.append(row)
         # the pre-cut spine, root to cut
         chain, u, guard_n = [], ad.leaf_uuid, 0
@@ -3952,7 +3969,7 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
             if ad.seq_of.get(u, 0) < cut_seq and u in ad.by_uuid:
                 chain.append(u)
             u = ad.parent_of.get(u); guard_n += 1
-        spine = list(reversed(chain))
+        spine = [row_of[u] for u in reversed(chain) if u in row_of]   # record indexes, root to cut
         seq_ts = None
         i = bisect.bisect_left(ad._seq_ts, (cut_seq,)) - 1
         if i >= 0:
@@ -3969,7 +3986,6 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
         for q in ad.qatts:
             if q["seq"] < cut_seq and q["ts"] is not None and (q["uuid"] is None or q["uuid"] in entry["kept"]):
                 st["absorbed_keys"].add((q["ts"], _th(" ".join(q["text"].split()))))
-        st = dict(st); st.pop("postal_miss_rec", None); st.pop("postal_miss_att", None)
         fsids = files_order.get("_", [])
         pre_lazy = _restore_prefix_atoms(pre_atoms, rompuuid, rows, fsids)
         identity = _pre_tree_identity(pre_lazy, rompuuid)
@@ -3979,7 +3995,7 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
                "gates": {"prompt_ids": sorted(ad.prompt_ids), "boundary_pids": sorted(ad.boundary_pids),
                          "skill_use_ids": sorted(ad.skill_use_ids), "src_tool_links": sorted(ad.src_tool_links),
                          "dangling": sorted(ad.dangling)},
-               "carry": _ckpt_encode(st), "identity": identity, "t": time.time()}
+               "carry": _carry_encode(st), "identity": identity, "t": time.time()}
         try:
             text = json.dumps(doc, separators=(",", ":"))
         except TypeError:
@@ -3998,6 +4014,50 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
         return True
 
 
+def _carry_encode(st):
+    """The emit carry as the document holds it: sets as lists, (second, hash) pairs as lists, the postal heal state
+    left out (a restored entry heals only the tail it emits itself)."""
+    return {"replay": sorted(st["replay"]), "seen_exact": sorted([list(k) for k in st["seen_exact"]]),
+            "seen_text": sorted(st["seen_text"]), "compacted": bool(st["compacted"]), "restoring": bool(st["restoring"]),
+            "last_boundary": st["last_boundary"], "summaries": dict(st["summaries"]), "skill_ids": sorted(st["skill_ids"]),
+            "cmd_names": {k: sorted(v) for k, v in st["cmd_names"].items()},
+            "absorbed_keys": sorted([list(k) for k in st["absorbed_keys"]]), "max_ppt": st["max_ppt"]}
+
+
+def _carry_decode(c):
+    return {"replay": set(c["replay"]), "seen_exact": {tuple(k) for k in c["seen_exact"]}, "seen_text": set(c["seen_text"]),
+            "compacted": bool(c["compacted"]), "restoring": bool(c["restoring"]), "last_boundary": c.get("last_boundary"),
+            "summaries": dict(c.get("summaries") or {}), "skill_ids": set(c.get("skill_ids") or []),
+            "cmd_names": {k: set(v) for k, v in (c.get("cmd_names") or {}).items()},
+            "absorbed_keys": {tuple(k) for k in c.get("absorbed_keys") or []}, "max_ppt": float(c.get("max_ppt") or 0),
+            "postal_miss_rec": set(), "postal_miss_att": set()}
+
+
+def atom_tool_uses(atom):
+    """[(tool_use id, name)] of an atom's tool calls, from the body or, for a lazy atom, its scalars: no hydration."""
+    lz = atom.get("lazy")
+    if lz is not None:
+        return [tuple(x) for x in lz.get("tu") or []]
+    return [(b.get("id"), b.get("name")) for b in _content(atom.get("message")) if isinstance(b, dict) and b.get("type") == "tool_use"]
+
+
+def atom_tool_results(atom):
+    """[tool_use id] of an atom's tool results, from the body or the lazy scalars."""
+    lz = atom.get("lazy")
+    if lz is not None:
+        return list(lz.get("tr") or [])
+    return [b.get("tool_use_id") for b in _content(atom.get("message")) if isinstance(b, dict) and b.get("type") == "tool_result"]
+
+
+def atom_model(atom):
+    """The model stamp of an atom's message (None when absent), from the body or the lazy scalars."""
+    lz = atom.get("lazy")
+    if lz is not None:
+        return lz.get("mdl")
+    msg = atom.get("message")
+    return msg.get("model") if isinstance(msg, dict) else None
+
+
 def _restore_prefix_atoms(pre_atoms, rompuuid, rows, fsids):
     """The pre-cut atoms as the tree holds them: the identity fields from the record row (uuid, type, t, fsid, session,
     parentUuid), the recorded scalars over them, a _LazyBody where a message was, the lazy scalars under `lazy`, and
@@ -4014,11 +4074,11 @@ def _restore_prefix_atoms(pre_atoms, rompuuid, rows, fsids):
             seq = rr[4]
         else:
             seq = row.get("seq", 0)
-        a.update(row["s"])
+        a.update(row.get("s") or {})
         a["_seq"] = row.get("seq", seq)
         lz = row.get("lz")
         if lz is not None:
-            a["lazy"] = dict(lz)
+            a["lazy"] = dict(lz, i=row["i"])
             a["message"] = _LazyBody(a.get("uuid"))
         out.append(a)
     return out
@@ -4077,7 +4137,7 @@ def _asm_restore(key, leaf_path, candidate_files, links, rompuuid, postal_index,
     try:
         verdict_of = {"a": "active", "r": "rewind", "e": "eclipsed", "c": "clear", "b": "broken"}
         type_of = {"u": "user", "a": "assistant", "s": "system", "t": "attachment"}
-        seed = {"seq_base": int(doc["cutSeq"]) - 1, "verdicts": {}, "types": {}, "spine": list(doc["spine"]),
+        seed = {"seq_base": int(doc["cutSeq"]) - 1, "verdicts": {}, "types": {}, "spine": [doc["records"][i][0] for i in doc["spine"]],
                 "prompt_ids": set(doc["gates"]["prompt_ids"]), "boundary_pids": set(doc["gates"]["boundary_pids"]),
                 "skill_use_ids": set(doc["gates"]["skill_use_ids"]), "src_tool_links": set(doc["gates"]["src_tool_links"]),
                 "dangling": set(doc["gates"]["dangling"]), "seq_ts": doc.get("seqTs"), "last_ts": doc.get("lastTs"), "cuts": {},
@@ -4098,7 +4158,7 @@ def _asm_restore(key, leaf_path, candidate_files, links, rompuuid, postal_index,
         ad = FileAdapter(candidate_files, leaf_path, resume_links=links, seed=seed)
         ad.sdk_human = sdk_human
         st = _emit_state()
-        st.update(_ckpt_decode(doc["carry"]))
+        st.update(_carry_decode(doc["carry"]))
         kept = ad.kept_uuids(ad.active_path())
         order = _chrono(ad, kept)
         ad._prepass(order, st)

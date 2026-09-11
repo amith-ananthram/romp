@@ -641,6 +641,7 @@ def _open_turn_progress(turns):
     (Analyzing…, Awaiting…, the stall chip, the Blocked floors) own every idle beat, so this covers
     exactly the case that used to be mute — an ordinary working card with its turn open. Derived from
     the same cached parse as the working dot; a tool use is an assistant record's tool_use block."""
+    em.hydrate(turns[-1].get("atoms") or []) if turns else None   # the last turn (T323 stage 4a)
     if not turns:
         return None
     lt = turns[-1]
@@ -717,6 +718,7 @@ def _interrupt_cause(nxt_atom):
     cuts romp itself caused and is already continuing (via the injected resume notice) — never a
     user-chosen stop, so they must not suppress the nudge nor paint the "you stopped this" badge (the
     user 2026-07-14). Pure per-atom classifier; _machine_cut_cause owns FINDING the notice."""
+    if nxt_atom.get("lazy") is not None: em.hydrate([nxt_atom])   # a body before the assembly cut: read on demand (T323 stage 4a)
     body = (_atom_user_text(nxt_atom) or "") if nxt_atom else ""
     if INTR_RESTART_SIG in body:
         return "restart"
@@ -13874,6 +13876,7 @@ def _turn_landed(turn, cut_t=0.0):
     the backend's newest machineCut stamp (_last_machine_cut): an interrupt record at or before it is a
     cut ROMP made and is resuming (crash / restart), not the user's stop — the turn stays in progress
     (T237 review: otherwise the mark flapped yellow → green → yellow across every resume)."""
+    em.hydrate(turn.get("atoms") or [])   # bodies before the assembly cut: read on demand (T323 stage 4a)
     atoms = turn.get("atoms") or []
     # the CLI's null settle ("No response requested.", model "<synthetic>") follows every stop record it
     # writes — the same signals _interrupt_settle reads; it is part of the stop, never the reply, so the tail
@@ -25320,6 +25323,7 @@ def _seg_of_tool_uses(ps, store, tool_ids):
     every id is found; seam-aware (_segs_seam) so the ids match the judge's placement keys."""
     found, want = {}, set(tool_ids)
     for turn in reversed(ps.get("turns") or []):
+        em.hydrate(turn.get("atoms") or [])      # bodies before the assembly cut: read on demand, newest turns first (T323 stage 4a)
         if not want:
             break
         for seg in _segs_seam(turn, store):
@@ -25807,6 +25811,7 @@ def _retry_gaveups(sid):
 def _atom_md(a):
     """Joined text-block content of an assistant atom (thinking/tool_use skipped) — for the orphan-reply
     dedup, which compares a lost reply's text against what the transcript actually kept."""
+    if a.get("lazy") is not None: em.hydrate([a])   # a body before the assembly cut: read on demand (T323 stage 4a)
     msg = a.get("message") or {}
     c = msg.get("content")
     if isinstance(c, str):
@@ -27642,6 +27647,7 @@ def _fold_tasks_turn(atoms):
     the content of the turn's tool_result blocks (a TaskCreate's carries 'Task #N'); rejected: the
     tool_use_ids whose result came back is_error (the CLI refused the call: nothing created, nothing moved);
     ops: the turn's TaskCreate and TaskUpdate tool_use blocks in order, as (name, input, tool_use_id)."""
+    em.hydrate(atoms)   # bodies before the assembly cut: read on demand (T323 stage 4a)
     results, rejected, ops = {}, set(), []
     for a in atoms:
         if a.get("type") == "user":
@@ -31890,6 +31896,7 @@ def _atom_user_text(a):
     """The plain text of a user atom (for deduping the optimistic input echo against the transcript), keyed
     by sb.echo_text_key — the ONE rule the SDK backend's by-text prune and its landing scan share with the
     keys built here (2026-09-06: the scan matched a collapsed text the prune's raw comparison never could)."""
+    if a.get("lazy") is not None: em.hydrate([a])   # a body before the assembly cut: read on demand (T323 stage 4a)
     if a.get("type") != "user":
         return None
     c = (a.get("message") or {}).get("content")
@@ -31917,6 +31924,7 @@ def _atom_user_texts(a):
     the arguments; the typed echo meets that atom under the command key whatever whitespace it carried
     (2026-09-10). The backend's _landed_texts adds the same key to the raw records its landing scan reads,
     so the two agree."""
+    if a.get("lazy") is not None: em.hydrate([a])   # a body before the assembly cut: read on demand (T323 stage 4a)
     if a.get("type") != "user":
         return ()
     out = []
@@ -32486,6 +32494,7 @@ def _interrupt_settle(events, txt, atom=None):
       transcripts whose settle carries a real model id).
     A substantive reply after an interrupt ("stopped; the partial edit is reverted") stays a normal
     bubble either way."""
+    if atom is not None and atom.get("lazy") is not None: em.hydrate([atom])   # one body (T323 stage 4a)
     if txt.strip() != "No response requested.":
         return False
     if (((atom or {}).get("message") or {}).get("model")) == "<synthetic>":
@@ -32858,6 +32867,8 @@ def build_session(sid, now, tmux=None, path_override=None, tail_cap_t=None, side
                             "why": _fold_why or ""}
     # per-turn seg maps for the turns this build reshapes (the prefix's came with the entry)
     _seg_by_turn = {}                         # turn index → its (uuid2seg, seg_anchors, seg_trig, seg_work) items
+    em.hydrate([a for _t in _turns[_fk:] for a in _t["atoms"]])   # the turns this build renders (T323 stage 4a): the
+    #                                                                fold's tail in the steady state, every turn on a demote
     for _ti in range(_fk, len(_turns)):
         turn = _turns[_ti]
         _u2s, _sa, _st, _sw = {}, {}, {}, {}
@@ -38116,6 +38127,7 @@ def _seg_anchors(atoms):
     (isApiErrorMessage, tagged isApiError by em), so it carries text and would otherwise WIN the
     reply anchor — deep-linking a done/blocked goal to an 'API Error: …' line instead of its real
     reply. An error is a failure, not a reply, and is never a jump target (the user 2026-06-18)."""
+    em.hydrate(atoms)   # bodies before the assembly cut: read on demand (T323 stage 4a)
     work = reply = settle = None
     for a in atoms:
         if a.get("type") != "assistant" or a.get("isApiError"):
@@ -38151,6 +38163,7 @@ def _atom_prose_chars(a):
     """Chars of assistant prose on one atom — 0 for a non-assistant, API-error, or prose-less atom. The
     ONE measure behind both "substantive" reads: _seg_last_text's fallback floor and build_feed's
     citation gate (both against jd.CITE_MIN_CHARS), so the two can never drift."""
+    if a.get("lazy") is not None: em.hydrate([a])   # a body before the assembly cut: read on demand (T323 stage 4a)
     if a.get("type") != "assistant" or a.get("isApiError"):
         return 0
     blocks = (a.get("message") or {}).get("content", [])
@@ -38173,6 +38186,7 @@ def _seg_last_text(atoms):
     function rewrite:"), so it sits just above them. API-error atoms are skipped (like _seg_anchors: a
     failed turn carries text but is never a jump target). (None, False) when the segment has no
     assistant prose."""
+    em.hydrate(atoms)   # bodies before the assembly cut: read on demand (T323 stage 4a)
     last_any, last_sub = None, None
     for a in atoms:
         n = _atom_prose_chars(a)
@@ -38193,6 +38207,7 @@ def _seg_jump(atoms):
     assistant output so far a thinking block (the user 2026-07-21, the romp_docs recording-suggestions
     card). None when the segment has nothing landable yet → the payload's ev_t time-nav, the same
     graceful family as every other zone."""
+    em.hydrate(atoms)   # bodies before the assembly cut: read on demand (T323 stage 4a)
     work, reply = _seg_anchors(atoms)
     if reply:
         return reply
@@ -38528,6 +38543,7 @@ def _expand_judging(wire):
 
 def _seg_prompt(seg):
     """The segment's request text (its trigger/opener atom) for the prompt-dot tooltip."""
+    em.hydrate(seg.get("atoms") or [])   # bodies before the assembly cut: read on demand (T323 stage 4a)
     trig = seg.get("trigger")
     atoms = seg["atoms"]
     a = next((x for x in atoms if x.get("uuid") == trig), None) if trig else None
@@ -38573,6 +38589,7 @@ def _seg_mids(seg):
     a check_inbox tool_result) — joins a recipient's WORK segment to the message that triggered it, so
     the timeline connector can bind to the true process-start. Called per segment on every timeline
     build, so it reads the blocks in place (_encoded_mids) rather than encoding them."""
+    em.hydrate(seg.get("atoms") or [])   # bodies before the assembly cut: read on demand (T323 stage 4a)
     ids = []
     for a in seg.get("atoms", []):
         msg = a.get("message") or {}

@@ -202,8 +202,8 @@ def draw(rows, out):
         xs = [r["worldBytes"] / 1e6 for r in rs]
         ax.line(xs, [r["second"]["total"] / 1e6 for r in rs], label=label, color=cols[i % len(cols)], marker="o")
         ax2.line(xs, [r["second"]["rssDelta"] / 1e6 for r in rs], label=label, color=cols[i % len(cols)], marker="o")
-    ax.clean(xlabel="Files on disk (MB): transcripts, agent files,\nstates logs and the postal log", ylabel="Bytes a restarted kernel reads (MB)")
-    ax2.clean(xlabel="Same worlds (MB)", ylabel="Resident size the parses and folds add (MB)")
+    ax.clean(xlabel="Files on disk (MB)", ylabel="Bytes a restarted kernel reads (MB)")
+    ax2.clean(xlabel="Same worlds (MB)", ylabel="Resident size the parses\nand folds add (MB)")
     ax.set_xlim(0, None); ax.set_ylim(0, None); ax2.set_xlim(0, None); ax2.set_ylim(0, None)
     newest = labels[-1]
     rs = sorted([r for r in rows if r["label"] == newest and not r.get("error")], key=lambda r: r["worldBytes"])
@@ -212,7 +212,7 @@ def draw(rows, out):
         ax3.line([r["worldBytes"] / 1e6 for r in rs], [r["second"]["byClass"][c] / 1e6 for r in rs], label=names[c], color=cols[(j + 2) % len(cols)], marker="o")
     ax3.clean(xlabel="Same worlds (MB)", ylabel="Bytes read at the restart on %s,\nper file class (MB)" % newest)
     ax3.set_xlim(0, None); ax3.set_ylim(0, None)
-    f.subplots_adjust(wspace=0.5)
+    f.subplots_adjust(wspace=0.6)
     f.text(0.5, -0.16, "One measurement per point. Bytes are counted at the reader, documents included; resident size is the process's current VmRSS\n"
                        "after the parses and folds, not a peak. Agent files get no assembly document until stage 5. Hydration of an old body is on demand\n"
                        "and none happens at a boot; it is a cost the figure does not carry.", ha="center", va="top", fontsize=8, color="#555555", transform=f.transFigure)

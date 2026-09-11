@@ -206,6 +206,55 @@ class Fallbacks(Harness):
         d = json.loads(cp.read_text()); d["identity"] = "0" * 40; cp.write_text(json.dumps(d))
 
 
+class KernelOverRestored(Harness):
+    """The kernel's and the judges' body readers over a restored tree: every consumer the audit named hydrates what it
+    reads, so the same answers come from the restored tree as from the whole parse, with no LazyBodyRead."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ.setdefault("ROMP_KERNEL_NO_OPEN", "1")
+        cls.km = load_source("romp_kernel_t323s4a", os.path.join(BIN, "romp-kernel"))
+        cls.jd = cls.km.jd
+
+    def answers(self, tree):
+        km, jd = self.km, self.jd
+        segs = [seg for t in tree["turns"] for seg in em.segments(t)]
+        store = {"placements": {}, "nodes": {}, "seq": 0}
+        return {
+            "anchors": [km._seg_anchors(seg["atoms"]) for seg in segs],
+            "jumps": [km._seg_jump(seg["atoms"]) for seg in segs],
+            "prompts": [km._seg_prompt(seg) for seg in segs],
+            "lastText": [km._seg_last_text(seg["atoms"]) for seg in segs],
+            "prose": [km._atom_prose_chars(a) for t in tree["turns"] for a in t["atoms"]],
+            "userTexts": [km._atom_user_texts(a) for t in tree["turns"] for a in t["atoms"] if a.get("type") == "user"],
+            "progress": km._open_turn_progress(tree["turns"]),
+            "tasks": km._fold_tasks(tree),
+            "landed": [km._turn_landed(t) for t in tree["turns"]],
+            "units": [(u[0], u[1]) for u in jd.plan_units(tree, store)],
+            "unitText": [jd._unit_text(seg["atoms"]) for seg in segs],
+            "asstWork": [jd._has_asst_work(seg["atoms"]) for seg in segs],
+            "bgHold": jd._awaiting_bg_hold(SID, "", tree, store, now=NOW),
+        }
+
+    def test_kernel_and_judge_readers_answer_the_same_over_the_restored_tree(self):
+        for name in COMPACTING:
+            with self.subTest(scenario=name):
+                records, sent = G.SINGLE_FILE[name]
+                path = self.write(name, records(), sent=sent)
+                self.fresh()
+                whole = self.parse(path)
+                cold = json.loads(json.dumps(self.answers(whole), default=str))
+                self.assertTrue(em.asm_checkpoint_write(path, SID))
+                self.fresh()
+                modes = []
+                tree = self.parse(path, modes)
+                self.assertEqual(modes, ["restore"])
+                self.assertTrue(any(a.get("lazy") is not None for t in tree["turns"] for a in t["atoms"]), "lazy atoms in play")
+                got = json.loads(json.dumps(self.answers(tree), default=str))   # every reader hydrated what it needed
+                self.assertEqual(got, cold)
+                self.assertGreater(em.asm_checkpoint_stats()["hydratedAtoms"], 0, "the readers hydrated on demand")
+
+
 class LazyBodies(Harness):
     def test_a_body_read_before_hydration_is_loud_and_hydration_counts(self):
         records, _ = G.SINGLE_FILE["compaction_atom"]

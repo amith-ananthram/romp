@@ -2494,6 +2494,7 @@ def gist_llm(prompt_text, judge="gister"):
 
 # ───────────────────────── unit text (caption input) ─────────────────────────
 def _atom_text(atom):
+    if atom.get("lazy") is not None: em.hydrate([atom])   # a body before the assembly cut: read on demand (T323 stage 4a)
     msg = atom.get("message") or {}
     return " ".join(b.get("text", "") for b in msg.get("content", [])
                     if isinstance(b, dict) and b.get("type") == "text").strip()
@@ -2556,6 +2557,7 @@ def _unit_text(atoms, marker=None):
     ([m3]) so the model can CITE the one message its takeaway is grounded in (see _split_source).
     Sub-floor stubs (< CITE_MIN_CHARS) still ride along as context, just unlabeled — uncitable by
     construction."""
+    em.hydrate(atoms)   # bodies before the assembly cut: read on demand (T323 stage 4a)
     user_said, asst_said, tools, results, reported = [], [], [], [], []
     for a in atoms:
         if a["type"] == "user" and a.get("author") is not None:
@@ -2648,6 +2650,7 @@ def _has_asst_work(atoms):
     retry turn, a flood of judge calls captioning nothing but error noise. Skipping isApiError atoms means a
     turn whose only assistant output is the error is work-less → no caption; a turn that did real work THEN
     errored still captions the real work."""
+    em.hydrate(atoms)   # bodies before the assembly cut: read on demand (T323 stage 4a)
     for a in atoms:
         if a.get("type") == "assistant" and not a.get("isApiError"):
             if _atom_text(a):
@@ -6615,6 +6618,7 @@ def _seg_launches(seg):
     review agent the turn waited on) is not a launch: counting it demoted a user's second ask under the first
     (a review finding on this change). A Workflow's words come from its script's meta (description, else name)
     or its scriptPath's file name; an agent's from its description, else the first line of its prompt."""
+    em.hydrate(seg.get("atoms") or [])   # bodies before the assembly cut: read on demand (T323 stage 4a)
     atoms = seg.get("atoms") or []
     acks = {}
     for a in atoms:
@@ -8814,6 +8818,12 @@ def _awaiting_bg_hold(fsid, path, session, store, now=None):
     launch_turn = {}                      # tool_use id -> the turn that dispatched it (launch or its ack)
     for turn in reversed(session.get("turns") or []):
         for a in turn["atoms"]:
+            if a.get("lazy") is not None:         # an atom before the assembly cut carries its tool ids as scalars (T323 stage 4a)
+                for tid, _name in em.atom_tool_uses(a):
+                    launch_turn.setdefault(tid, turn.get("id"))
+                for tid in em.atom_tool_results(a):
+                    launch_turn.setdefault(tid, turn.get("id"))
+                continue
             blocks = (a.get("message") or {}).get("content")
             if not isinstance(blocks, list):
                 continue
@@ -16538,6 +16548,7 @@ def _human_prompt_record(a, sender):
     an attachment record (a queued_command wrapping what the user dictated mid-turn) exactly when
     it carries no postal or romp-injected marker. Everything else — mail, romp's own lines, the
     agent's assistant atoms, machine input — is None."""
+    if a.get("lazy") is not None: em.hydrate([a])   # a body before the assembly cut: read on demand (T323 stage 4a)
     if a.get("author") == "human":
         if em.is_interrupt_record(a):
             return None
