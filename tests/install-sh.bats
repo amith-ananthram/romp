@@ -157,6 +157,56 @@ PY
     [ "$(cat "$HOME/.claude/hooks/romp-summarize.sh")" = "mine" ]
 }
 
+@test "install.sh: the retired-hook prune leaves a user's own empty and matcher-only groups alone" {
+    # The prune drops only a group OUR removal emptied and an event it left with no groups. A user's
+    # placeholder group (a matcher with no hooks yet, an empty group on an event romp never registers)
+    # is theirs and must survive both a fresh install (which writes the file) and an upgrade re-run.
+    mkdir -p "$HOME/.claude"
+    cat > "$HOME/.claude/settings.json" <<'JSON'
+{
+  "hooks": {
+    "PreToolUse": [ { "matcher": "Bash", "hooks": [] } ],
+    "SubagentStart": [ { "hooks": [] } ],
+    "Stop": [ { "hooks": [
+      { "type": "command", "command": "~/.claude/hooks/romp-summarize.sh", "timeout": 10, "async": true } ] } ]
+  }
+}
+JSON
+    for _pass in fresh upgrade; do
+        run "$ROMP_DIR/install.sh"
+        [ "$status" -eq 0 ]
+        python3 - "$HOME/.claude/settings.json" <<'PY'
+import json, sys
+s = json.load(open(sys.argv[1]))["hooks"]
+assert s["PreToolUse"] == [{"matcher": "Bash", "hooks": []}], s.get("PreToolUse")
+assert s["SubagentStart"] == [{"hooks": []}], s.get("SubagentStart")
+stop = [h["command"] for g in s["Stop"] for h in g["hooks"]]
+assert not any(c.endswith("romp-summarize.sh") for c in stop), stop
+assert any(c.endswith("tmux-status.sh") for c in stop), stop
+PY
+    done
+}
+
+@test "install.sh: a symlink to someone else's live script of the retired hook's name survives" {
+    # Only a link install.sh could have written goes: one into this checkout, or a dangling one of that
+    # shape (a checkout since moved). A user's own live script linked from their dotfiles is theirs.
+    mkdir -p "$HOME/dotfiles/hooks" "$HOME/.claude/hooks"
+    echo "mine" > "$HOME/dotfiles/hooks/romp-summarize.sh"
+    ln -s "$HOME/dotfiles/hooks/romp-summarize.sh" "$HOME/.claude/hooks/romp-summarize.sh"
+    run "$ROMP_DIR/install.sh"
+    [ "$status" -eq 0 ]
+    [ -L "$HOME/.claude/hooks/romp-summarize.sh" ]
+    [ "$(cat "$HOME/.claude/hooks/romp-summarize.sh")" = "mine" ]
+    [[ "$output" != *"retired romp-summarize.sh"* ]]
+    # ...while a DANGLING link of that shape (a romp checkout that has since moved) is still removed
+    rm "$HOME/.claude/hooks/romp-summarize.sh"
+    ln -s "$HOME/old-romp/hooks/romp-summarize.sh" "$HOME/.claude/hooks/romp-summarize.sh"
+    run "$ROMP_DIR/install.sh"
+    [ "$status" -eq 0 ]
+    [ ! -L "$HOME/.claude/hooks/romp-summarize.sh" ]
+    [ ! -e "$HOME/.claude/hooks/romp-summarize.sh" ]
+}
+
 @test "install.sh: preflight fails clearly when node is missing" {
     ROMP_NODE=romp-test-no-such-node run "$ROMP_DIR/install.sh"
     [ "$status" -ne 0 ]

@@ -1242,6 +1242,9 @@ _stale_server_globals() {
 @test "provisioning installs no key bindings and no mail-badge hook (the tmux-only interrupt heal and badge went 2026-09-11)" {
     run run_romp new -t myproject
     [ "$status" -eq 0 ]
+    # the surviving server glue is installed (so the absences below are read off a provisioning that ran)
+    grep -q 'set-hook -g after-rename-session' "$MOCK_LOG"
+    grep -q 'set-hook -g session-closed' "$MOCK_LOG"
     run grep -E 'bind -n (C-c|Escape)|romp-interrupt-reset|client-session-changed|romp-mail-clear' "$MOCK_LOG"
     [ "$status" -ne 0 ]
 }

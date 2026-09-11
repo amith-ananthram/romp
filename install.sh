@@ -87,15 +87,22 @@ echo "  Symlinked romp hooks into ~/.claude/hooks/"
 # Retired hooks. hooks/romp-summarize.sh (the live tmux phrase, off by default since 2026-07-24)
 # left the repo 2026-09-11 with the tmux backend's dead leaves. An install from before still has
 # the symlink, now dangling, and Claude Code would shell the missing path on every prompt and every
-# turn end; upgrading removes the link. Only ever a SYMLINK whose target is a romp hooks/ file of
-# that name (what install.sh once wrote), never a real file someone else put there.
+# turn end; upgrading removes the link. Only ever a SYMLINK, and only one install.sh could have
+# written: a link into THIS checkout's hooks/ (the manager-skill retirement below matches the same
+# way), or a link of that shape into a checkout that has since moved or gone, which is dangling. A
+# link to someone's own LIVE script of that name (their dotfiles) is theirs and stays.
 for h in romp-summarize.sh; do
     if [ -L "$HOME/.claude/hooks/$h" ]; then
-        case "$(readlink "$HOME/.claude/hooks/$h")" in
-            */hooks/"$h")
-                rm -f "$HOME/.claude/hooks/$h"
-                echo "  Removed the retired $h hook link" ;;
+        _rh_target="$(readlink "$HOME/.claude/hooks/$h")"
+        _rh_gone=""
+        case "$_rh_target" in
+            "$ROMP_DIR"/hooks/"$h") _rh_gone=1 ;;
+            */hooks/"$h") [ -e "$HOME/.claude/hooks/$h" ] || _rh_gone=1 ;;
         esac
+        if [ -n "$_rh_gone" ]; then
+            rm -f "$HOME/.claude/hooks/$h"
+            echo "  Removed the retired $h hook link"
+        fi
     fi
 done
 
@@ -156,27 +163,34 @@ except FileNotFoundError:
 hooks = settings.setdefault("hooks", {})
 
 # Hooks this repo no longer ships (retired 2026-09-11 with the tmux backend's dead leaves). An
-# install from before registered them; drop those entries wherever they sit and prune the groups
-# and events that empty out (the way bin/romp-uninstall does), so no `"Stop": [{"hooks": []}]`
-# litter is left behind. Matched on the exact command string install.sh once wrote.
+# install from before registered them; drop those entries wherever they sit, matched on the exact
+# command string install.sh once wrote. Only a group OUR removal emptied is dropped, and only an
+# event our removal left with no groups, so no `"Stop": [{"hooks": []}]` litter is left behind
+# while a user's own empty or matcher-only group, on any event, stays exactly as found.
 RETIRED = {"romp-summarize.sh"}
 removed = []
 for event in list(hooks):
-    groups = hooks.get(event) or []
-    for g in groups:
-        keep = []
+    kept, touched = [], False
+    for g in (hooks.get(event) or []):
+        keep, hit = [], False
         for h in g.get("hooks", []):
             cmd = h.get("command", "")
             if cmd.startswith("~/.claude/hooks/") and cmd.rsplit("/", 1)[-1] in RETIRED:
                 removed.append(event + ":" + cmd.rsplit("/", 1)[-1])
+                hit = True
             else:
                 keep.append(h)
-        g["hooks"] = keep
-    groups = [g for g in groups if g.get("hooks")]
-    if groups:
-        hooks[event] = groups
-    else:
-        hooks.pop(event, None)
+        if hit:
+            touched = True
+            if not keep:
+                continue                                # a group we emptied goes
+            g["hooks"] = keep
+        kept.append(g)
+    if touched:
+        if kept:
+            hooks[event] = kept
+        else:
+            hooks.pop(event, None)                      # an event we emptied goes
 
 added = []
 for event, entries in WANT.items():

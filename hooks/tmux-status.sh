@@ -142,7 +142,7 @@ if [[ -n "$sid" && "$prev" != "$state" ]]; then
     printf '{"t":%s,"state":"%s"}\n' "$now" "$state" >> "$sdir/$sid.jsonl"
 fi
 
-# Everything below is DISPLAY: tmux vars, the ghostty dot watcher, the /color
+# Everything below is DISPLAY: tmux vars, the ghostty tab dot, the /color
 # push. A headless session has none of these surfaces.
 [[ "$DISPLAY_TMUX" == 1 ]] || exit 0
 
