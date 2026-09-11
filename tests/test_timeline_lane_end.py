@@ -131,6 +131,25 @@ class LaneEndsAtActivity(unittest.TestCase):
         self.assertTrue(bars[0].get("open"), "an unended turn on a live lane is the open bar")
         self.assertEqual(bars[0]["end"], T0 + 10)
 
+    def test_a_follow_up_absorbed_mid_turn_leaves_no_hole_before_it_and_the_tail_still_ends_at_the_stop(self):
+        # the review find on the first cut: a follow-up that lands while the turn is inside a tool call (the reply
+        # stopped on tool_use, so the parse ABSORBS the new input into the same turn) cuts the turn into two
+        # segments; the first piece must run to the follow-up's time, contiguous, not retract to its last record
+        # (on the live echo road that follow-up is stamped at send time, minutes ahead of the tool result, and the
+        # retraction was a hole in a working lane until the result landed); the tail piece ends at the Stop
+        self._write([_ask(T0, "u1", "Cover the notes endpoint."),
+                     _reply(T0 + 10, "a1", "Running the three cases now.", "u1", stop="tool_use"),
+                     _ask(T0 + 20, "f1", "Add the pagination case too.", "a1"),
+                     _reply(T0 + 30, "a2", "All four cases pass.", "f1")],
+                    [{"t": T0, "state": "working"}, {"t": T0 + 31, "state": "waiting"}])
+        self.live[SID] = dict(self.live[SID], since=T0 + 31)
+        _lane, bars = self._bars()
+        self.assertEqual([b["start"] for b in bars], [T0, T0 + 20], "one turn, two pieces: cut at the absorbed follow-up")
+        self.assertEqual(bars[0]["end"], T0 + 20, "the first piece runs to the follow-up, no hole before it (it read %s)" % bars[0]["end"])
+        self.assertGreaterEqual(bars[1]["end"], T0 + 30)
+        self.assertLessEqual(bars[1]["end"], T0 + 31, "the tail piece ends at the Stop, not the boot an hour later (it read %s)" % bars[1]["end"])
+        self.assertFalse(any(b.get("open") for b in bars))
+
     def test_the_lane_s_last_activity_is_the_bar_end_too(self):
         # last_t feeds the lane `since` when the liveness snapshot has none: the same event, never the clock
         self._write([_ask(T0, "u1", "Write the notes API page."),

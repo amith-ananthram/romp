@@ -38671,13 +38671,19 @@ def _lane_segments(sid, session, goals, caps, live, bft, full_prompts=None):
             # atom times go in too: an awake stretch with NO activity in it is a dark-wake sliver, not
             # work, and drawing it redrew this segment's summary all night long (the user 2026-07-23).
             acts = [a.get("t") for a in seg["atoms"]]
-            # The bar's END is the segment's last recorded EVENT, never the segment's `end` (T324, the user 2026-09-10):
-            # a finished turn's end stretches over the trailing idle atom (synthesize_idle) to the NEXT state record,
-            # or, for the tail turn, to the PARSE CLOCK, and the parse is cached until the transcript moves, so every
-            # dormant session's last bar reached the same instant, the first build after the last kernel boot, and
-            # the board read as every session stopping at once. The idle atom's own `t` is the Stop transition, the
-            # moment work ended, so it stays in; an open turn has no idle atom and ends at its newest record as before.
-            bar_end = min(seg["end"], max(seg["t"], max((t for t in acts if t is not None), default=seg["end"])))
+            # A bar stretched by an IDLE atom ends at the segment's last recorded EVENT instead (T324, the user
+            # 2026-09-10): a finished turn's end is its trailing idle atom's end (synthesize_idle), the NEXT state
+            # record, or, for the tail turn, the PARSE CLOCK, and the parse is cached until the transcript moves, so
+            # every dormant session's last bar reached the same instant, the first build after the last kernel boot,
+            # and the board read as every session stopping at once. Only a segment whose end IS an idle span's end is
+            # clipped (the idle atom's own `t` is the Stop transition, the moment work ended, so it stays in): a
+            # segment cut at the next input keeps that input's time as its end, so a follow-up absorbed mid-turn on
+            # the live echo road (stamped at send time, minutes ahead of the tool result the turn is inside) leaves
+            # no hole before it (review find on the first cut), and an open turn has no idle atom and ends at its
+            # newest record as before.
+            bar_end = seg["end"]
+            if any(a.get("type") == "idle" and a.get("end") == seg["end"] for a in seg["atoms"]):
+                bar_end = max(seg["t"], max((t for t in acts if t is not None), default=seg["end"]))
             spans = _awake_spans(seg["t"], bar_end, acts)
             last_t = max(last_t or 0, spans[-1][1])            # the true work END (last recorded activity) — drives the lane `since`
             seg_ends[seg["t"]] = spans[-1][1]                  # a completion mark lands at its segment's END (after the work)
