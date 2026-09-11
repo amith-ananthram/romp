@@ -11675,10 +11675,12 @@ class SdkBackend:
             # behind a stand-down takes _reg_lock alone and sees no session yet; the commit-15 review's third
             # item): re-seed from a fresh read under _reg_lock now that the insert is visible, so the mirror and
             # the live list cannot diverge and the next _persist_queue erases nothing
-            with self._reg_lock:
-                fresh = read_reg(self.state_dir, sid)
-            if fresh is not None:
-                s._adopt_queue_mirror(fresh)
+            adopt = getattr(s, "_adopt_queue_mirror", None)    # a test stand-in for SdkSession may carry no queue
+            if adopt is not None:
+                with self._reg_lock:
+                    fresh = read_reg(self.state_dir, sid)
+                if fresh is not None:
+                    adopt(fresh)
             s.start()
             return s
 
