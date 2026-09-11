@@ -16,6 +16,12 @@ sys.path.insert(0, os.path.join(ROOT, "cli"))
 import spend_repair as rp  # noqa: E402
 
 A, B = "aaaaaaaa-1111-2222-3333-444444444444", "bbbbbbbb-1111-2222-3333-444444444444"
+T = "cccccccc-1111-2222-3333-444444444444"          # a comment thread of A (the registry's threadOf)
+
+
+def reg(state, sid, **fields):
+    (state / "sdk").mkdir(exist_ok=True)
+    (state / "sdk" / ("%s.json" % sid)).write_text(json.dumps({"sid": sid, **fields}))
 DAY = "2026-09-11"
 
 
@@ -129,6 +135,7 @@ class Plan(unittest.TestCase):
                            "%sT11" % DAY: {"usd": 515.0, "turns": 1, "key": {"usd": 515.0}, "bySid": {A: {"usd": 515.0, "turns": 1, "key": {"usd": 515.0}}}}},
                  "days": {DAY: {"usd": 1035.0, "turns": 7, "bySid": {A: {"usd": 1031.0}, B: {"usd": 4.0}}}}}
         (state / "spend.json").write_text(json.dumps(spend))
+        reg(state, A, name="web", apiKeyAuth=True)          # web bills an API key: its key split follows
         import io, contextlib
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -141,6 +148,10 @@ class Plan(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             self.assertEqual(rp.main(["--day", DAY, "--state", d, "--apply"]), 0)
         self.assertIn("applied: spend.json rewritten, 2 turn row(s) corrected", out.getvalue())
+        baks = sorted(state.glob("spend.json.bak-*")) + sorted(state.glob("turns.jsonl.bak-*"))
+        self.assertEqual(len(baks), 2, "the copies beside the files, in the tool")
+        self.assertEqual(json.loads(baks[0].read_text()), spend, "the copy is the ledger before the write")
+        self.assertEqual(len(baks[1].read_text().splitlines()), 7)
         after = json.loads((state / "spend.json").read_text())
         self.assertEqual(after["hours"]["%sT10" % DAY]["usd"], 16.0)
         self.assertEqual(after["hours"]["%sT10" % DAY]["bySid"][A]["usd"], 12.0)
@@ -196,6 +207,84 @@ class Plan(unittest.TestCase):
         self.assertEqual(rp.parse_since(""), None)
         with self.assertRaises(ValueError):
             rp.parse_since("yesterday-ish")
+
+    def test_a_threads_correction_reaches_its_owners_bysid_and_an_unkeyed_session_leaves_the_key_split_alone(self):
+        d = tempfile.mkdtemp()
+        state = Path(d)
+        # thread T of web: an ordinary turn, a restart, its lifetime; the kernel billed the thread's turns to web's bySid
+        turns = [row(T, "web", at(10, 0), 3.0), row(T, "web", at(10, 40), 507.0), row(T, "web", at(10, 50), 2.0), row(T, "web", at(11, 10), 515.0)]
+        restarts = [at(10, 30), at(11, 0)]
+        (state / "turns.jsonl").write_text("".join(json.dumps(r) + "\n" for r in turns))
+        (state / "restart-cuts.jsonl").write_text("".join(json.dumps({"t": t, "cutTurns": [], "reason": "main-converge"}) + "\n" for t in restarts))
+        spend = {"hours": {"%sT10" % DAY: {"usd": 512.0, "turns": 3, "key": {"usd": 512.0}, "bySid": {A: {"usd": 512.0, "turns": 3, "key": {"usd": 512.0}}}},
+                           "%sT11" % DAY: {"usd": 515.0, "turns": 1, "key": {"usd": 515.0}, "bySid": {A: {"usd": 515.0, "turns": 1, "key": {"usd": 515.0}}}}},
+                 "days": {DAY: {"usd": 1027.0, "turns": 4, "key": {"usd": 1027.0}, "bySid": {A: {"usd": 1027.0, "key": {"usd": 1027.0}}}}}}
+        (state / "spend.json").write_text(json.dumps(spend))
+        reg(state, A, name="web")                           # web: a login session, no key
+        reg(state, T, name="web", threadOf=A)               # T bills web
+        import io, contextlib
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(rp.main(["--day", DAY, "--state", d, "--apply", "--no-backup"]), 0)
+        after = json.loads((state / "spend.json").read_text())
+        self.assertEqual(after["hours"]["%sT10" % DAY]["usd"], 7.5, "507 -> the typical 2.5 (the median of 3 and 2): 3 + 2.5 + 2")
+        self.assertEqual(after["hours"]["%sT10" % DAY]["bySid"][A]["usd"], 7.5, "the thread's correction reached its owner's row")
+        self.assertEqual(after["hours"]["%sT11" % DAY]["bySid"][A]["usd"], 6.0)
+        self.assertEqual(after["days"][DAY]["bySid"][A]["usd"], 13.5)
+        self.assertEqual(after["hours"]["%sT10" % DAY]["key"]["usd"], 512.0, "no apiKeyAuth on record: the key split stands as recorded")
+        self.assertEqual(after["days"][DAY]["bySid"][A]["key"]["usd"], 1027.0)
+        self.assertIn("2 corrected row(s) belong to sessions the registry does not mark as API-key billed: their buckets' key split is left as recorded", out.getvalue())
+        self.assertNotIn("no bySid entry", out.getvalue())
+        self.assertEqual(sorted(state.glob("*.bak-*")), [], "--no-backup")
+
+    def test_a_fixed_kernels_first_result_rows_are_never_steps_and_a_missed_instant_is_tolerated_on_a_shown_chain(self):
+        # web: 3, restart, 507 (first cumulative), 2, restart, 515 (a step), then at 12:10 a row at 530 with NO restart
+        # instant on record (a crash leaves no audit row): 530 >= 515 + 0 on a chain already shown, a step of 15
+        turns = self.turns[:5] + [row(A, "web", at(12, 10), 530.0)]
+        p = rp.plan(turns, self.restarts, DAY)
+        got = {c["t"]: (c["corrected"], c["reason"]) for c in p["rows"]}
+        self.assertEqual(got[at(12, 10)][0], 15.0)
+        self.assertIn("no restart instant on record, the staircase's signature alone", got[at(12, 10)][1])
+        # a session with no chain shown does not take the signature alone: api's honest 40 at 10:50 (no restart between
+        # its 10:45 row and it) after 1.5 and a fresh 2.5 stands
+        turns2 = self.turns + [row(B, "api", at(10, 50), 40.0)]
+        self.assertNotIn(at(10, 50), {c["t"] for c in rp.plan(turns2, self.restarts, DAY)["rows"]})
+        # the fixed kernel's rows: a first result naming its baseline is right as written, whatever its size
+        fixed = self.turns + [row(A, "web", at(12, 10), 480.0) | {"spendBaseline": "seeded"}]
+        self.assertNotIn(at(12, 10), {c["t"] for c in rp.plan(fixed, self.restarts + [at(12, 0)], DAY)["rows"]})
+
+    def test_a_ledger_that_moved_between_the_plan_and_the_write_is_folded_as_it_stands(self):
+        d = tempfile.mkdtemp()
+        state = Path(d)
+        (state / "turns.jsonl").write_text("".join(json.dumps(r) + "\n" for r in self.turns))
+        (state / "restart-cuts.jsonl").write_text("".join(json.dumps({"t": t, "cutTurns": [], "reason": "main-converge"}) + "\n" for t in self.restarts))
+        spend = {"hours": {"%sT10" % DAY: {"usd": 520.0, "turns": 6, "bySid": {A: {"usd": 516.0}}},
+                           "%sT11" % DAY: {"usd": 515.0, "turns": 1, "bySid": {A: {"usd": 515.0}}}},
+                 "days": {DAY: {"usd": 1035.0, "turns": 7, "bySid": {A: {"usd": 1031.0}}}}}
+        (state / "spend.json").write_text(json.dumps(spend))
+        # the kernel folds a $9 result into hour 11 between the plan's read and the write: apply_to_spend is called
+        # once for the plan (the notes) and again on the fresh text; the write carries the $9
+        real = rp.read_text
+        calls = []
+        def read_text(path):
+            calls.append(path.name)
+            if path.name == "spend.json" and calls.count("spend.json") == 2:
+                moved = json.loads(json.dumps(spend))
+                moved["hours"]["%sT11" % DAY]["usd"] = 524.0; moved["days"][DAY]["usd"] = 1044.0
+                path.write_text(json.dumps(moved))
+            return real(path)
+        rp.read_text = read_text
+        try:
+            import io, contextlib
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(rp.main(["--day", DAY, "--state", d, "--apply", "--no-backup"]), 0)
+        finally:
+            rp.read_text = real
+        self.assertIn("spend.json moved since the plan's read", out.getvalue())
+        after = json.loads((state / "spend.json").read_text())
+        self.assertEqual(after["hours"]["%sT11" % DAY]["usd"], 15.0, "524 less the 509 correction: the $9 result kept")
+        self.assertEqual(after["days"][DAY]["usd"], 31.0)
 
     def test_the_restart_instants_come_from_both_ledgers(self):
         cuts = [{"t": 100, "cutTurns": [], "reason": "main-converge"}, {"t": 150, "firstServe": 1}]      # a bootSettled row is not a restart

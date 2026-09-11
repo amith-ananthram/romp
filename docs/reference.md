@@ -1382,6 +1382,29 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   the harness's own skill load): `filesRead` and `bytesRead` (transcripts read raw this
   boot, appended tails only once the persisted index holds a file), `filesIndexed`, and
   `checked` (prompt anchors known not to be a wrapper, never read again).
+- `chatPages`: the rendered pages of chat history before a session's render
+  floor (the chat wire's `loadOlder`, `loadAround` and `loadNewer` answers, below):
+  `hits`, `misses`, `evictions`, `pages` and `bytes` resident (a bound of 32
+  pages or 16 MB per kernel), `renderMs` spent rendering; the warming, after
+  the pusher's send stage (`push.warm`), with a board client and a proto-2 chat
+  client connected: `warmed` pages rendered ahead of a click for the feed's
+  cards' anchors (the distilled summary's own targets first, a completed card's
+  too, then the active cards' heads and open rows; the feed's first 32 anchors,
+  so a late session's summaries can fall past the cap; the warm SET is bounded
+  to half the cache in pages and in bytes: anchors past it wait for the next
+  board change, and a set that fits settles, an unchanged board costing one
+  probe of its remembered keys; a set with an anchor whose session has no
+  render floor yet is never remembered as settled, so the floor's return
+  warms), `warmPending` (anchors waiting past the bound), `warmMs` (the
+  probes' time included),
+  `warmCycles`, and `warmSkipped` (cycles the warm stood down because the
+  pusher's last cycle ran over 1.5 s). A page's cache key reads what a
+  pre-floor render reads and none of the live tail (the reg's fork value, not
+  the reg file, which every send rewrites), so a warmed page survives the turns
+  that stream after it until the session's next judge publish (the goal store's
+  identity is a component: the segment anchors come from it); the postal
+  caption map is not a component, so a pre-floor page holding a card rendered
+  before its caption landed keeps the caption-less card until an eviction.
 - `parses`: the cold event-model parses through the one parse store the
   kernel and the judges share: `total` (every miss, whoever asked), `kernel`
   (the display's asks among them, with `bytes`, the parsed files' sizes, and
@@ -1570,6 +1593,60 @@ a copy of a state directory and with no live kernel, `tools/perf-bench.py`
 loads a checkout's kernel in-process and reports each builder's cost on
 real-sized data; two checkouts can run against one copy for a before-and-after
 comparison. Its module docstring is the reference.
+
+### The chat wire's two protocols
+
+A chat page announces the protocol it speaks in its `ready` frame. A bundle
+that sends `{type: "ready"}` (an older page or extension) gets today's INDEX
+frames: a session frame trimmed to the last 250 events with `headFrom` and
+`headTotal` as indexes, `chatTail` deltas by index, `loadOlder` by index
+answered by `chatHead`, all from a build over the whole transcript (its render
+floor at turn 0 while such a client is connected). A bundle that sends
+`{type: "ready", proto: 2}` gets the uuid-anchored frames, and the kernel
+announces `chatProto2` in its `caps`:
+
+- the session frame carries `proto: 2`, the post-boundary tail (the events from
+  the assembly cut on, at most 250), `firstUuid` and `lastUuid`, `headKnown`
+  (false until the head has been reached) and `headTotal` (a count only when
+  the head is known, else null: the page shows no number); the cards above the
+  first event (the system card, a `/clear` notice) ride as `headCards`;
+- `chatTail` names the last unchanged event by `afterUuid`: the page truncates
+  after it and appends; an anchor it does not hold is a gap (`needFull`);
+- `loadOlder {id, before: <oldest resident uuid>}` is answered by `chatHead {id,
+  beforeUuid, events, more}`; `more: false` is the head;
+- `loadAround {id, uuid}` is answered by `chatWindow {id, anchor, events,
+  moreBefore, moreAfter}` in one round trip (`missing: true` when the anchor is
+  in no page); a window with `moreAfter` leaves the client DETACHED: it gets no
+  delta until `loadNewer {id, after: <newest resident uuid>}`, answered by
+  `chatMore {id, afterUuid, events, more}`, reaches the tail (`more: false`,
+  the reply then carries the frame's status and ledger), or a `needFull`
+  re-attaches it (the page's "Return to live" strip and its jump chip ask for
+  one, and the full frame answering that ask merges into the held run it
+  overlaps, so the pages the reader walked stay, the kernel's base keeping the
+  run's older first edge with it; every other full frame replaces the run, its
+  in-list events being the fresh copies); a reconnect's `ready` starts a fresh
+  base. A window that overlaps the run the client holds
+  through the live tail, by turn span, keeps it attached (`connected`; a
+  `loadOlder` advances the run's first edge, so the kernel's picture of the run
+  follows the page's). A
+  detached run whose edges left the transcript (a `/clear`, a fork, a rewind)
+  gets a full frame; a `missing` reply on a held key is a gap the page answers
+  with `needFull`. A reply that reaches the head carries the head cards first.
+  Every slice of the list is turn-aligned. A remote kernel learns the protocol
+  from a `ready` the page sends on each host socket's open; a redialed local
+  socket carries it on its dial term (`&proto=`), since a redial posts no
+  `ready`, and a page whose `ready` the kernel never answered posts it again on
+  its next fresh dial. A socket whose `ready` has not arrived has no protocol
+  yet and moves no render floor for its first thirty seconds; past that it
+  counts as an index client.
+
+The pages before the render floor are rendered on demand from the parse's
+lazy atoms (a page hydrates its own turns), memoized in a bounded cache
+(`/perf` `chatPages`), and equal the whole build's slice byte for byte
+(`tests/test_chat_pages.py`). Every event carries a uuid, and a
+`key` unique within its list (the uuid, or `uuid#n` for a second event built
+from one record); the notes romp adds (a retry recovered, an effort change, an
+orphan reply) carry synthetic uuids keyed by their second and ordinal.
 
 ## Browser-side performance telemetry
 
@@ -2378,37 +2455,6 @@ message written but never placed, a store record never finished), closes each
 one's receipt as refused, and says so once. The sidecars are yours to inspect
 or delete.
 
-## The spend ledger across a host re-attach
-
-A session under a host keeps its CLI process across a kernel restart, and the
-CLI's `total_cost_usd` is cumulative per process. The kernel folds only each
-result's delta over a watermark, so every result persists that watermark on the
-session's registry row (`costState`: the cumulative total, the token
-watermarks, and the CLI's identity as pid and start time). A kernel that
-attaches to a surviving host reads it at the first result and, when it names
-that same CLI, seeds the watermarks from it, so the first result records only
-its own turn; a fresh process still starts at zero and records its whole first
-total. A surviving process with no matching watermark on record (a kernel
-before this rule wrote none) records nothing for that first result, since its
-total is the lifetime's and the turn's share is unknowable; the kernel log says
-so, and the watermark is written from there. Each `turns.jsonl` row carries
-`cumulativeUsd`, the CLI's own total at that result, and a first result's
-`spendBaseline` (`fresh`, `seeded` or `attach-unknown`). Before this rule every
-restart re-billed each hosted session's lifetime as one turn (2026-09-11: a
-staircase of rows from $436 to $953 on one session across 21 restarts).
-`romp spend-repair [--day D]` recomputes a day's `spend.json` hour and day
-buckets and `turns.jsonl` dollars from that staircase. A session's first
-result after a restart is cumulative when it stands at or above the previous
-cumulative plus the rows recorded between (a process's total grows by at least
-what its own rows recorded; a figure below that is a fresh process's first turn
-and stands), and its true cost is the cumulative less the previous cumulative
-less the rows between; the day's first cumulative row counts as a typical turn
-(the median of the session's rows that follow no restart) and only when a
-staircase follows it. It prints before and after per hour and per session and
-changes nothing unless `--apply` is given; a corrected row keeps the kernel's
-figure as `usdRecorded`, so a later run judges it again on that figure and
-restores it when the judgement no longer holds.
-
 ## Restart metrics
 
 `romp restart-metrics` reads what kernel restarts do to the sessions, from the
@@ -2470,6 +2516,40 @@ output directory outside your state root, because real session names are
 private and must not reach a repository, an issue or a pull request; `--named`
 shows them, and inside your own state root they show by default. Without
 cleanplots the script says so and draws nothing.
+
+## Repairing the spend ledger
+
+`romp spend-repair [--day D] [--since INSTANT] [--apply]` recomputes a day's
+`spend.json` hour and day buckets, their per-session rows and `turns.jsonl`
+dollars after the re-attach re-bill (the section above on the ledger across a
+host re-attach: before the fix, every kernel restart recorded each hosted
+session's whole CLI lifetime as one turn, a staircase of rows on each session).
+It reads the turn rows and the restart instants (`restart-cuts.jsonl` and
+`restart-audit.jsonl`) and judges each session's first result after a restart:
+it is that process's cumulative when it stands at or above the previous
+cumulative plus the rows recorded between (a process's total grows by at least
+what its own rows recorded; a figure below that is a fresh process's first turn
+and stands), and its true cost is the cumulative less the previous cumulative
+less those rows. The day's first cumulative row counts as a typical turn (the
+median of the session's rows that follow no restart) and only when a staircase
+follows it. A row bearing the signature with no restart instant on record (a
+crash leaves no audit row) is taken as a step only on a chain the session has
+already shown. `--since` is the instant the per-session hosts came on: before
+it every restart killed the CLI, so nothing there is a step. Rows the fixed
+kernel writes (`cumulativeUsd`, `spendBaseline`) are never touched.
+
+It prints before and after per hour and per session and changes nothing unless
+`--apply` is given. A corrected row keeps the kernel's figure as `usdRecorded`,
+and every run judges a repaired row again on that figure, so a tightened rule
+or a later `--since` restores what an earlier run took, and a run over a
+repaired day changes nothing. Per-session figures fold under the session a row
+bills (a comment thread's owner, the registry's `threadOf`), and the buckets'
+`key` split moves only for sessions the registry marks as API-key billed; the
+report says how many rows' split was left as recorded. The kernel may be
+running: `--apply` copies both files beside themselves first
+(`spend.json.bak-<stamp>`, `turns.jsonl.bak-<stamp>`), reads `spend.json`
+again right before the write and recomputes the fold on what is there, and
+rewrites `turns.jsonl` carrying every row appended since its read.
 
 ## Switches
 

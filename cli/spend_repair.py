@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import statistics
+import shutil
 import sys
 import time
 from datetime import datetime, timezone
@@ -81,6 +82,41 @@ def _typical(usds: list) -> float:
     return float(statistics.median(usds)) if usds else 0.0
 
 
+def read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def parse_spend(text: str) -> dict:
+    try:
+        v = json.loads(text) if text else {}
+    except ValueError:
+        v = {}
+    return v if isinstance(v, dict) else {}
+
+
+def registry_maps(state: Path):
+    """From the registry (sdk/<sid>.json): {thread sid: owner sid} for comment threads (threadOf, the session the
+    kernel billed the thread's turns to) and the set of sids whose CLI bills an API key (apiKeyAuth, the persisted
+    init truth). Both are the registry's CURRENT word; a session that changed auth mid-day is read as it is now."""
+    owners, keyed = {}, set()
+    for f in sorted((state / "sdk").glob("*.json")) if (state / "sdk").is_dir() else []:
+        try:
+            r = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(r, dict):
+            continue
+        sid = str(r.get("sid") or f.stem)
+        if r.get("threadOf"):
+            owners[sid] = str(r["threadOf"])
+        if r.get("apiKeyAuth"):
+            keyed.add(sid)
+    return owners, keyed
+
+
 def parse_since(text: str):
     """--since: an ISO instant (2026-09-11T14:09:56Z, or a local date-time without a zone) or epoch seconds; None when empty."""
     if not text:
@@ -100,14 +136,19 @@ def parse_since(text: str):
     raise ValueError(text)
 
 
-def plan(turns: list, restarts: list, day: str, since=None) -> dict:
+def plan(turns: list, restarts: list, day: str, since=None, owners=None, keyed=None) -> dict:
     """The corrections for `day`: {"rows": [{sid, name, t, hour, recorded, corrected, reason}], "hours": {hour: {before,
     after}}, "days": {day: {before, after}}, "bySid": {sid: {name, before, after}}}, computed from the turn rows alone
     (the buckets' before/after are the sums over the day's rows, so a bucket the rows do not explain is left alone).
     A row is a staircase candidate when a restart instant lies after the session's previous row and at or before it
     (or, for the session's first row of the day, at or before it that day). `since` (epoch seconds) is the instant the
     per-session hosts came on: before it every restart killed the CLI, so a first result after a restart is a fresh
-    process's own turn and never a step (a row corrected by an earlier run without the bound is restored)."""
+    process's own turn and never a step (a row corrected by an earlier run without the bound is restored). `owners`
+    maps a comment thread's sid to the session it bills (the registry's threadOf: the kernel folds a thread's turns
+    into its owner's bySid); `keyed` names the sids whose turns bill an API key (the registry's apiKeyAuth), whose
+    corrections reach the buckets' `key` split too; a row whose session neither map knows is folded on its own sid
+    and its keyed split is left as recorded."""
+    owners, keyed = owners or {}, keyed or set()
     rows = [r for r in turns if isinstance(r.get("t"), (int, float)) and isinstance(r.get("usd"), (int, float))
             and local_day(r["t"]) == day]
     rows.sort(key=lambda r: (str(r.get("sid") or ""), float(r["t"])))
@@ -138,8 +179,11 @@ def plan(turns: list, restarts: list, day: str, since=None) -> dict:
             t, usd = float(r["t"]), float(r["usd"])
             restarted = id(r) in firsts
             step = False
-            if isinstance(r.get("cumulativeUsd"), (int, float)):
-                prev_cum = float(r["cumulativeUsd"]); between = []
+            if isinstance(r.get("cumulativeUsd"), (int, float)) or r.get("spendBaseline"):
+                # written by a kernel that carries the CLI's cumulative on the row, or names a first result's
+                # baseline (the fix): already right, never a step; the cumulative, where named, is the chain's baseline
+                if isinstance(r.get("cumulativeUsd"), (int, float)):
+                    prev_cum = float(r["cumulativeUsd"]); between = []
                 prev_t = t
                 continue
             repaired = isinstance(r.get("usdRecorded"), (int, float))
@@ -162,8 +206,14 @@ def plan(turns: list, restarts: list, day: str, since=None) -> dict:
                     step = rec >= prev_cum + sum(between) - 1e-6
                 else:
                     step = rec >= max(MIN_STAIRCASE_USD, TYPICAL_MULTIPLE * typical) if typical else rec >= MIN_STAIRCASE_USD
+            elif steps and prev_cum is not None and rec >= max(prev_cum + sum(between) - 1e-6, MIN_STAIRCASE_USD):
+                # no restart instant on record between this row and the last (a crash leaves no audit row), yet the
+                # row bears the staircase's signature on a chain this session has already shown: at or above the
+                # previous cumulative plus every turn between, and no small figure. Taken as a step, said in the
+                # reason; without an established chain the signature alone is not believed
+                step = "no-instant"
             if step:
-                steps.append((r, rec, usd, prev_cum, list(between)))
+                steps.append((r, rec, usd, prev_cum, list(between), step == "no-instant"))
                 prev_cum = rec
                 between = []
             elif restarted or repaired:
@@ -181,7 +231,7 @@ def plan(turns: list, restarts: list, day: str, since=None) -> dict:
             # the day's first cumulative row is believed only when a staircase FOLLOWS it (a later row at or above it
             # plus the turns between); alone, a big first result after a restart is as likely a fresh process's long
             # first turn, and it stands (restored, when an earlier run took it)
-            r, rec, usd, _, _ = steps.pop()
+            r, rec, usd, _, _, _ = steps.pop()
             if isinstance(r.get("usdRecorded"), (int, float)) and abs(rec - usd) > 1e-9:
                 restores.append((r, rec, usd, None, []))
         marked[sid] = (steps, restores, typical)
@@ -189,18 +239,21 @@ def plan(turns: list, restarts: list, day: str, since=None) -> dict:
     day_typical = _typical(all_ordinary)
 
     def entry(r, sid, rec, cur, corrected, reason, **extra):
-        return {"sid": sid, "name": str(r.get("name") or sid[:8]), "t": int(r["t"]), "hour": local_hour(r["t"]),
+        return {"sid": sid, "owner": owners.get(sid, sid), "keyed": sid in keyed,
+                "name": str(r.get("name") or sid[:8]), "t": int(r["t"]), "hour": local_hour(r["t"]),
                 "recorded": round(rec, 6), "current": round(cur, 6), "corrected": round(corrected, 6), "reason": reason, **extra}
 
     for sid, (steps, restores, typical) in marked.items():
         typical = typical or day_typical
-        for r, rec, cur, prev_cum, between in steps:
+        for r, rec, cur, prev_cum, between, no_instant in steps:
             if prev_cum is None:
                 corrected, reason = typical, "the day's first cumulative row: a typical turn (median %.4f)" % typical
             else:
-                corrected = max(0.0, rec - prev_cum - sum(between))
-                reason = "cumulative %.4f less the previous cumulative %.4f less %d row(s) between (%.4f)" % (
-                    rec, prev_cum, len(between), sum(between))
+                corrected = rec - prev_cum - sum(between)      # >= 0 by the bound that made this a step, to float noise
+                if corrected < 0:
+                    corrected = 0.0
+                reason = "cumulative %.4f less the previous cumulative %.4f less %d row(s) between (%.4f)%s" % (
+                    rec, prev_cum, len(between), sum(between), "; no restart instant on record, the staircase's signature alone" if no_instant else "")
             if abs(corrected - cur) < 1e-6:
                 continue                       # already right: a run over repaired rows
             corrections.append(entry(r, sid, rec, cur, corrected, reason))
@@ -217,51 +270,65 @@ def plan(turns: list, restarts: list, day: str, since=None) -> dict:
     hours, sids = {}, {}
     for r in rows:
         h, sid = local_hour(r["t"]), str(r.get("sid") or "")
+        owner = owners.get(sid, sid)                    # a thread's turns count under the session it bills
         hours.setdefault(h, {"before": 0.0, "after": 0.0})
-        sids.setdefault(sid, {"name": str(r.get("name") or sid[:8]), "before": 0.0, "after": 0.0})
+        sids.setdefault(owner, {"name": str(r.get("name") or sid[:8]) if owner == sid else owner[:8], "before": 0.0, "after": 0.0})
+        if owner == sid:
+            sids[owner]["name"] = str(r.get("name") or sid[:8])
         hours[h]["before"] += float(r["usd"]); hours[h]["after"] += float(r["usd"])
-        sids[sid]["before"] += float(r["usd"]); sids[sid]["after"] += float(r["usd"])
+        sids[owner]["before"] += float(r["usd"]); sids[owner]["after"] += float(r["usd"])
     for c in corrections:
         d = c["corrected"] - c["current"]
         hours[c["hour"]]["after"] += d
-        sids[c["sid"]]["after"] += d
+        sids[c["owner"]]["after"] += d
     for m in list(hours.values()) + list(sids.values()):
         m["before"], m["after"] = round(m["before"], 6), round(m["after"], 6)
     before = round(sum(h["before"] for h in hours.values()), 6)
     after = round(sum(h["after"] for h in hours.values()), 6)
     return {"day": day, "since": since, "rows": sorted(corrections, key=lambda c: c["t"]), "hours": dict(sorted(hours.items())),
+            "unkeyedRows": sum(1 for c in corrections if not c["keyed"]),
             "days": {day: {"before": before, "after": after}}, "bySid": sids, "restarts": len([x for x in restarts if local_day(x) == day])}
 
 
 def apply_to_spend(spend: dict, p: dict) -> dict:
     """spend.json with the plan's deltas folded into the day's hour buckets, its day bucket and their bySid maps
-    (dollars only; turns and tokens stay). A bucket the ledger lacks is left alone, said in the plan's notes."""
+    (dollars only; turns and tokens stay). A row's delta reaches bySid under the session it BILLS (a comment
+    thread's owner, the registry's threadOf, as the kernel folded it) and the `key` split only when that session
+    bills an API key (the registry's apiKeyAuth; turn rows carry no keyed flag of their own), else the split is left as
+    recorded and the plan's notes say for how many rows. A bucket the ledger lacks is left alone, said in the notes."""
     out = json.loads(json.dumps(spend or {}))
     hours = out.setdefault("hours", {}) if isinstance(out.get("hours"), dict) else out.__setitem__("hours", {}) or out["hours"]
     days = out.setdefault("days", {}) if isinstance(out.get("days"), dict) else out.__setitem__("days", {}) or out["days"]
 
-    def fold(bucket, sid, delta):
+    def fold(bucket, owner, delta, keyed):
         if not isinstance(bucket, dict):
             return False
         bucket["usd"] = round(max(0.0, float(bucket.get("usd") or 0) + delta), 6)
         k = bucket.get("key")
-        if isinstance(k, dict) and isinstance(k.get("usd"), (int, float)):
+        if keyed and isinstance(k, dict) and isinstance(k.get("usd"), (int, float)):
             k["usd"] = round(max(0.0, float(k["usd"]) + delta), 6)
         by = bucket.get("bySid")
-        if isinstance(by, dict) and isinstance(by.get(sid), dict):
-            by[sid]["usd"] = round(max(0.0, float(by[sid].get("usd") or 0) + delta), 6)
-            sk = by[sid].get("key")
-            if isinstance(sk, dict) and isinstance(sk.get("usd"), (int, float)):
+        if isinstance(by, dict) and isinstance(by.get(owner), dict):
+            by[owner]["usd"] = round(max(0.0, float(by[owner].get("usd") or 0) + delta), 6)
+            sk = by[owner].get("key")
+            if keyed and isinstance(sk, dict) and isinstance(sk.get("usd"), (int, float)):
                 sk["usd"] = round(max(0.0, float(sk["usd"]) + delta), 6)
+        elif isinstance(by, dict):
+            return "no bySid entry for %s" % owner[:8]
         return True
 
     notes = []
     for c in p["rows"]:
         delta = c["corrected"] - c["current"]      # against the row as it stands now (a repaired row's current figure)
-        if not fold(hours.get(c["hour"]), c["sid"], delta):
-            notes.append("no hour bucket %s for %s" % (c["hour"], c["name"]))
-        if not fold(days.get(p["day"]), c["sid"], delta):
-            notes.append("no day bucket %s" % p["day"])
+        for where, bucket in (("hour %s" % c["hour"], hours.get(c["hour"])), ("day %s" % p["day"], days.get(p["day"]))):
+            got = fold(bucket, c["owner"], delta, c["keyed"])
+            if got is False:
+                notes.append("no bucket for %s (%s)" % (where, c["name"]))
+            elif got is not True:
+                notes.append("%s: %s" % (where, got))
+    if p.get("unkeyedRows"):
+        notes.append("%d corrected row(s) belong to sessions the registry does not mark as API-key billed: their buckets' "
+                     "key split is left as recorded" % p["unkeyedRows"])
     p["notes"] = sorted(set(notes))
     return out
 
@@ -269,7 +336,9 @@ def apply_to_spend(spend: dict, p: dict) -> dict:
 def apply_to_turns(path: Path, p: dict) -> int:
     """turns.jsonl (and its predecessor) rewritten with each corrected row's usd, the kernel's figure kept as
     usdRecorded (a row corrected twice keeps the original); a restored row gets the kernel's figure back and loses its
-    repair marks. Returns the rows changed. Atomic per file."""
+    repair marks. Returns the rows changed. The kernel appends to this file while it runs (one open-append-close per
+    result): the file is read again just before the replace and every line past the count first read rides along,
+    and read once more after it, so a row that landed in the replace's own window is appended back. Atomic per file."""
     want = {(c["sid"], c["t"], c["current"]): c for c in p["rows"]}
     changed = 0
     for f in (path.with_name(path.name + ".1"), path):
@@ -297,17 +366,26 @@ def apply_to_turns(path: Path, p: dict) -> int:
                     o["repairedT"] = int(time.time())
                 changed += 1
             out.append(json.dumps(o))
-        # a result the kernel appended between the read and this write rides along: the file is read again just
-        # before the replace and any line past the count first read is kept (the window left is the replace itself)
         try:
             now_lines = f.read_text(encoding="utf-8").splitlines()
         except OSError:
             now_lines = lines
         if len(now_lines) > n_read and now_lines[:n_read] == lines:
             out.extend(now_lines[n_read:])
+            n_read = len(now_lines)
         tmp = f.with_name(f.name + ".repair.tmp")
         tmp.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
         os.replace(tmp, f)
+        # the replace's own window: a row the kernel appended to the OLD file between the second read and the replace
+        # is in neither; the old file is gone, so it can only be found where the kernel wrote it if the kernel held it
+        # open... it does not (open-append-close), so a row that landed after the second read went to the NEW file
+        # already. The check below is the belt for that reasoning: the new file must hold every line written.
+        try:
+            after = f.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            after = out
+        if len(after) < len(out):
+            f.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
     return changed
 
 
@@ -318,6 +396,9 @@ def report(p: dict) -> str:
     if p.get("since") is not None:
         lines.append("rows before %s (the hosts' start, --since) are fresh processes' turns, never steps"
                      % datetime.fromtimestamp(p["since"]).strftime("%Y-%m-%d %H:%M:%S"))
+    else:
+        lines.append("no --since: every first result after a restart is judged, the hosts' start unknown (a plain child's "
+                     "long first turn can pass the bound by chance; pass the instant the hosts came on)")
     lines.append("")
     lines.append("per session (dollars before -> after):")
     for sid, m in sorted(p["bySid"].items(), key=lambda kv: -kv[1]["before"]):
@@ -351,6 +432,7 @@ def main(argv=None) -> int:
     ap.add_argument("--since", help="the instant the per-session hosts came on (ISO, Z or local; or epoch seconds): a first result "
                     "after a restart before it is a fresh process's turn, never a step; default: the whole day")
     ap.add_argument("--json", action="store_true", help="the plan as JSON")
+    ap.add_argument("--no-backup", action="store_true", help="--apply without the spend.json.bak-<stamp> and turns.jsonl.bak-<stamp> copies")
     a = ap.parse_args(argv)
     state = Path(a.state) if a.state else state_dir()
     day = a.day or local_day(time.time())
@@ -366,11 +448,10 @@ def main(argv=None) -> int:
         return 2
     turns = read_jsonl(state / "turns.jsonl")
     restarts = restart_instants(read_jsonl(state / "restart-cuts.jsonl"), read_jsonl(state / "restart-audit.jsonl"))
-    try:
-        spend = json.loads((state / "spend.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        spend = {}
-    p = plan(turns, restarts, day, since)
+    owners, keyed = registry_maps(state)
+    spend_text = read_text(state / "spend.json")
+    spend = parse_spend(spend_text)
+    p = plan(turns, restarts, day, since, owners, keyed)
     new_spend = apply_to_spend(spend, p)      # computed either way, for the notes; written only with --apply
     if a.json:
         sys.stdout.write(json.dumps(p, indent=1, sort_keys=True) + "\n")
@@ -383,6 +464,21 @@ def main(argv=None) -> int:
         sys.stdout.write("\nnothing to apply\n")
         return 0
     sp = state / "spend.json"
+    # the kernel may be running and folding results as this runs (the same race bin/romp-spend-rebuild states): the
+    # ledger is read again right before the write and the fold recomputed on what is there now, so a turn folded
+    # since the plan's read is kept; the window left is the replace itself. The copies beside the files are the
+    # undo: spend.json.bak-<stamp> and turns.jsonl.bak-<stamp>.
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    if not a.no_backup:
+        for name in ("spend.json", "turns.jsonl"):
+            src = state / name
+            if src.exists():
+                shutil.copy2(src, src.with_name("%s.bak-%s" % (name, stamp)))
+        sys.stdout.write("\nbackups: spend.json.bak-%s, turns.jsonl.bak-%s (beside the files)\n" % (stamp, stamp))
+    fresh_text = read_text(sp)
+    if fresh_text != spend_text:
+        new_spend = apply_to_spend(parse_spend(fresh_text), p)
+        sys.stdout.write("spend.json moved since the plan's read (a result folded meanwhile): the fold was recomputed on the file as it stands\n")
     tmp = sp.with_name("spend.json.repair.tmp")
     tmp.write_text(json.dumps(new_spend), encoding="utf-8")
     os.replace(tmp, sp)
