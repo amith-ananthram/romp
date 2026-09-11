@@ -103,6 +103,9 @@ class Harness(unittest.TestCase):
         with km._page_lock:
             km._PAGE_CACHE.clear(); km._PAGE_STATS.update(hits=0, misses=0, evictions=0, pages=0, bytes=0, renderMs=0.0)
         km._live_scope.chat_floor0 = None
+        with em._MAT_LOCK:                                                # the lazy index's LRU and counters (stage 4c)
+            em._MAT_LRU.clear()
+            em._ASM_INDEX_STATS.update(materialized=0, materializedBy={}, resident=0, evictions=0, restoredTurns=0)
 
     def write(self, recs):
         Path(self.leaf).write_text("".join(json.dumps(r) + "\n" for r in recs))
@@ -120,7 +123,8 @@ class Harness(unittest.TestCase):
     def document(self):
         self.fresh()
         km.build_session(SID, NOW, {}, floor=0)                          # a whole parse, then its document
-        self.assertTrue(em.asm_checkpoint_write(self.leaf, SID), em.asm_checkpoint_stats())
+        self.assertTrue(em.asm_checkpoint_write(self.leaf, SID, tree=km._parse(self.leaf, SID, NOW)), em.asm_checkpoint_stats())   # the
+        #                                                                  store's tree gives the turns section (stage 4c)
 
     def restored(self):
         """A fresh process with the document: the floor'd build (the pusher's, no proto-1 client)."""
@@ -558,6 +562,31 @@ class KeyCounts(unittest.TestCase):
         src = open(os.path.join(BIN, "romp-kernel")).read()
         i = src.index('"keyCounts": _key_counts(events[:_b])')
         self.assertIn("_uniq_event_uuids(events[_pref_len:_b], events[:_pref_len],", src[i - 1200:i], "the pass precedes the commit")
+
+
+class ZeroMaterialization(Harness):
+    """T323 stage 4c: the chat's first open of a restored session builds no pre-cut atom. The floor'd build reads the turns
+    before the floor through their own scalars (_cursors_before, _turn_index_of_events, _fold_tasks, the cut) and hydrates
+    the tail's atoms only; a page then builds exactly its own turns' atoms."""
+
+    def test_the_floored_build_builds_no_pre_cut_atom_and_a_page_builds_its_own_turns(self):
+        recs = transcript(NOW - 86400, turns=120, compact_every=25)
+        self.write(recs)
+        self.document()
+        m = self.restored()                                               # fresh() zeroed the index's counters
+        self.assertGreater(m["floor"], 0)
+        tree = km._parse(self.leaf, SID, NOW)
+        self.assertTrue(all(isinstance(tree["turns"][i], em.PreTurn) for i in range(m["floor"])), "the pre-cut turns are the index's")
+        st = em.asm_index_stats()
+        self.assertEqual(st["materialized"], 0, "the first open built no pre-cut atom: %s" % st["materializedBy"])
+        page = km._chat_history_page(SID, 16, 32, NOW)
+        self.assertTrue(page)
+        st = em.asm_index_stats()
+        built = sum(len(tree["turns"][i]["uuids"]) for i in range(16, 32 + km._PAGE_FILL_TURNS))
+        self.assertLessEqual(st["materialized"], built, "a page builds its turns and its fill turns, no more: %s" % st["materializedBy"])
+        self.assertGreater(st["materialized"], 0)
+        r = km._chat_history_reply(SID, {"type": "loadOlder", "id": SID, "before": m["events"][0]["uuid"]}, NOW)
+        self.assertTrue(r["events"])
 
 
 class UniqueUuids(Harness):

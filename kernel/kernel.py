@@ -536,6 +536,7 @@ class _PerfStats:
                 # T323 stage 4a: the assembly documents: written, restored, fallbacks per reason, skips per reason (noEntry,
                 # restored, noBoundary, unsplittable, oversize, ...), hydrated bodies and bytes since boot
                 "asmCheckpoint": em.asm_checkpoint_stats(),
+                "asmIndex": em.asm_index_stats(),          # the lazy index (T323 stage 4c): atoms built, by caller, resident
                 "chatPages": dict(_PAGE_STATS)}   # the pre-floor history pages (T323 stage 4b): hits, misses, evictions, resident
 
 
@@ -9112,8 +9113,9 @@ def _persist_checkpoints(now):
         if mine:
             written += em.checkpoint_write_dirty(sorted(mine))
         try:                                   # the assembly document for the leaf (T323 stage 4a): from a whole entry
-            if em.asm_checkpoint_write(leaf, sid, _display_sdk_human(sid)):   # with a compaction boundary, else a
-                written += 1                   #  counted skip; the tree it comes from is the store's live tree
+            if em.asm_checkpoint_write(leaf, sid, _display_sdk_human(sid), tree=_parse(leaf, sid, now)):   # with a compaction
+                written += 1                   #  boundary, else a counted skip; the store's live tree gives the document its
+        #                                          turns section (T323 stage 4c: a restore builds the turns without an atom)
         except Exception:
             sys.stderr.write("assembly checkpoint: %s\n" % traceback.format_exc())
         _CKPT_SETTLE_SEEN[sid] = key
@@ -26728,6 +26730,8 @@ def _fold_tasks(session, sid=None):
         if ent is not None and ent[0] is atoms and ent[1] == fp:
             _chat_memo_bump(_task_fold_stats, "hit")
             part = ent[2]
+        elif turn.get("pre") and not any(n in ("TaskCreate", "TaskUpdate") for _i, n in turn.get("tools") or ()):
+            part = ({}, set(), [])                       # a restored pre-cut turn with no task call: nothing built (stage 4c)
         else:
             _chat_memo_bump(_task_fold_stats, "miss")
             part = _fold_tasks_turn(atoms)
@@ -27221,6 +27225,13 @@ def _cursors_before(turns, k, note_lists, model0):
     turns' scalars alone (uuid, t, the lazy model stamp): no body is read."""
     last_t, tmax, last_model = None, None, model0
     for t in turns[:k]:
+        if t.get("pre"):                                  # a restored pre-cut turn (T323 stage 4c): its own scalars, no atom built
+            if t.get("lastT"):
+                last_t = t["lastT"]
+                tmax = t["maxT"] if tmax is None else max(tmax, t["maxT"])
+            if t.get("lastModel"):
+                last_model = t["lastModel"]
+            continue
         for a in t.get("atoms") or []:
             at = a.get("t")
             if at:
@@ -27288,6 +27299,9 @@ def _chat_turn_fp(turn):
     """A cheap per-turn fingerprint: the turn's identity plus its atom count and end. A fold (the
     parse's own append path) only ever ADDS atoms, so any change to an earlier turn's atoms shows
     up here as a count or an end that moved; a full parse is excluded upstream by _parse_mode."""
+    if turn.get("pre"):                                   # a restored pre-cut turn (T323 stage 4c): the same tuple from its scalars
+        us = turn.get("uuids") or []
+        return (turn.get("id"), len(us), us[0] if us else None, us[-1] if us else None, turn.get("lastT"), bool(turn.get("ended")))
     atoms = turn.get("atoms") or []
     return (turn.get("id"), len(atoms), atoms[0].get("uuid") if atoms else None,
             atoms[-1].get("uuid") if atoms else None, atoms[-1].get("t") if atoms else None,
@@ -31827,6 +31841,8 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     gestures = _past_floor(_cmd_gestures(sid)); _cgi = 0
     _live_cmd_keys = set()
     for _t in session["turns"]:
+        if _t.get("pre"):
+            continue                              # a live chip rides the backend's live tail, never a pre-cut turn (stage 4c: no atom built)
         for _a in _t["atoms"]:
             if _a.get("command") and _a.get("_echo_text"):
                 _live_cmd_keys.add((int(_a.get("t") or 0), _a["_echo_text"]))
@@ -40845,6 +40861,10 @@ def _turn_of_uuid(turns, uuid):
     if base.startswith("branch:"):                     # a fork's departure chip sits after its cut event
         base = base[len("branch:"):]
     for i, t in enumerate(turns):
+        if t.get("pre"):                                  # a restored pre-cut turn (T323 stage 4c): its uuids, no atom built
+            if base in (t.get("uuids") or ()):
+                return i
+            continue
         for a in t.get("atoms") or []:
             if a.get("uuid") == base:
                 return i
@@ -40852,6 +40872,10 @@ def _turn_of_uuid(turns, uuid):
     if m:
         nt = int(m.group(2))
         for i, t in enumerate(turns):
+            if t.get("pre"):
+                if (t.get("maxT") or 0) >= nt:
+                    return i
+                continue
             if any((a.get("t") or 0) >= nt for a in t.get("atoms") or []):
                 return i
         return len(turns) - 1 if turns else None
@@ -41082,8 +41106,7 @@ def _turn_index_of_events(evs, turns):
     it, the head cards -1), so a slice of the list can be snapped to turn boundaries (review find J)."""
     u2t = {}
     for i, t in enumerate(turns):
-        for a in t.get("atoms") or []:
-            u = a.get("uuid")
+        for u in (t.get("uuids") if t.get("pre") else (a.get("uuid") for a in t.get("atoms") or [])):   # a pre-turn's uuids: no atom built
             if u and u not in u2t:
                 u2t[u] = i
     out, cur = [], -1
@@ -56129,9 +56152,11 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
     except Exception:
         pass
     try:                                  # the assembly documents of every session's leaf (T323 stage 4a): a whole entry
-        for _s in _drain_sessions:        # with a boundary writes, the rest are counted skips; bounded by the drain
-            em.asm_checkpoint_write(_s["path"], _s["sid"], _display_sdk_human(_s["sid"]))
-    except Exception:
+        _asm_t0 = time.monotonic()        # with a boundary writes, the rest are counted skips; bounded by the drain. The
+        for _s in _drain_sessions:        # store's tree gives the turns section (stage 4c) while a 2 s budget holds; past it
+            _tree = _parse(_s["path"], _s["sid"], int(time.time())) if time.monotonic() - _asm_t0 < 2.0 else None   # a turnless
+            em.asm_checkpoint_write(_s["path"], _s["sid"], _display_sdk_human(_s["sid"]), tree=_tree)   # document, rewritten
+    except Exception:                     #  with its turns at the next settle after the boot
         pass
     try:
         if be is not None and hasattr(be, "drain"):
