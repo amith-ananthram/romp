@@ -9089,13 +9089,28 @@ def _session_fold_files(sid, leaf):
     return out
 
 
+def _prime_leaf_folds(leaf):
+    """Bring every checkpointed fold over a leaf transcript current before its checkpoints are written, so a fold this
+    process never happened to run for the file (a kernel stopped before a judges' pass reached it) still leaves its
+    cursor for the next process: without one, that fold's first run after the restart reads the file whole (measured
+    in the served test: the judges' background-task fold upgraded a restored tail entry to the whole leaf, 3.8 MB).
+    Over the resident whole entry a first fold costs its step over the records and no read; a current cursor costs a
+    stat. The leaf's folds: the kernel's two background-task views, the judges' pairing, the session meta and the
+    agent launch state (the agent files' and the logs' folds are their own callers'). Best-effort per fold."""
+    for fn in (_bg_scan_cached, _bg_scan_all_cached, jd._bg_scan, _session_meta, _agent_launch_state):
+        try:
+            fn(leaf)
+        except Exception:
+            pass
+
+
 def _persist_checkpoints(now):
     """Write the fold checkpoints whose files belong to a session with NEW settle evidence: its turn-end key (the
     Stop hook's lastStopAt, else a stopped states transition) or its states log's stat moved since the last write for
     it. A session whose turn runs for hours still writes at every states-log row (a working/awaiting transition is an
     event; a timer is not). Only dirty checkpoints are written; a session with no evidence change writes nothing.
+    Every leaf fold is brought current first (_prime_leaf_folds), so the write holds a cursor for each of them.
     Exit writes everything dirty (_drain_and_exit). Returns how many files were written."""
-    dirty = set(em.checkpoint_dirty())
     written = 0
     for s in _sessions(now):
         sid, leaf = s.get("sid"), s.get("path")
@@ -9104,10 +9119,11 @@ def _persist_checkpoints(now):
         key = (_turn_end_key(sid), _stat_key(jd.STATE / "states" / (sid + ".jsonl")))
         if _CKPT_SETTLE_SEEN.get(sid) == key:
             continue
+        _prime_leaf_folds(leaf)
+        dirty = set(em.checkpoint_dirty())
         mine = _session_fold_files(sid, leaf) & dirty
         if mine:
             written += em.checkpoint_write_dirty(sorted(mine))
-            dirty -= mine
         try:                                   # the assembly document for the leaf (T323 stage 4a): from a whole entry
             if em.asm_checkpoint_write(leaf, sid, _display_sdk_human(sid)):   # with a compaction boundary, else a
                 written += 1                   #  counted skip; the tree it comes from is the store's live tree
@@ -56181,13 +56197,18 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
     except Exception:
         pass
     try:
+        _drain_sessions = [_s for _s in _sessions(time.time()) if _s.get("sid") and _s.get("path")]
+    except Exception:
+        _drain_sessions = []
+    for _s in _drain_sessions:            # every leaf fold current, so each leaves a cursor for the next kernel
+        _prime_leaf_folds(_s["path"])
+    try:
         em.checkpoint_write_dirty()       # every fold checkpoint that moved since its last write (T323 stage 3)
     except Exception:
         pass
     try:                                  # the assembly documents of every session's leaf (T323 stage 4a): a whole entry
-        for _s in _sessions(time.time()):   # with a boundary writes, the rest are counted skips; bounded by the drain
-            if _s.get("sid") and _s.get("path"):
-                em.asm_checkpoint_write(_s["path"], _s["sid"], _display_sdk_human(_s["sid"]))
+        for _s in _drain_sessions:        # with a boundary writes, the rest are counted skips; bounded by the drain
+            em.asm_checkpoint_write(_s["path"], _s["sid"], _display_sdk_human(_s["sid"]))
     except Exception:
         pass
     try:

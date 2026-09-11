@@ -98,7 +98,7 @@ class RestartOverACheckpointedSession(unittest.TestCase):
     def _boot(self):
         port = _free_port()
         env = _lab.kernel_env(self.lab, self.claude, self.dist, port, self.token, ROMP_HOST_NAME="TESTHOST",
-                              ROMP_READER_TRACE=os.environ.get("ROMP_READER_TRACE", ""))   # a diagnosis aid: one stderr line per read
+                              ROMP_READER_TRACE="1")   # one stderr line per byte-pulling read, quoted when a bound fails
         logp = os.path.join(self.lab, "kernel-%d.log" % port)
         k = subprocess.Popen([os.path.join(BIN, "romp-kernel")], stdout=open(logp, "w"), stderr=subprocess.STDOUT, env=env)
         for _ in range(200):
@@ -137,6 +137,12 @@ class RestartOverACheckpointedSession(unittest.TestCase):
         finally:
             client.close()
 
+    def _leaf_trace(self, logp):
+        """The kernel's trace lines about the leaf (reads that pulled bytes, chain answers), for a failure message."""
+        leaf = os.path.basename(self.leaf)
+        with open(logp, errors="replace") as f:
+            return "\n" + "\n".join(l.rstrip() for l in f if leaf in l and (l.startswith("reader:") or l.startswith("chain:")))
+
     def _stop(self, k):
         k.send_signal(signal.SIGTERM)
         k.wait(timeout=30)
@@ -155,6 +161,15 @@ class RestartOverACheckpointedSession(unittest.TestCase):
         import gzip
         doc = json.loads(gzip.decompress(open(os.path.join(self.state, "checkpoints", docs[0]), "rb").read()))
         self.assertEqual(doc["path"], os.path.realpath(self.leaf))
+        folds = {}                                          # the fold names the first kernel's exit left per file
+        for f in os.listdir(os.path.join(self.state, "checkpoints")):
+            if f.endswith(".json"):
+                with open(os.path.join(self.state, "checkpoints", f)) as fh:
+                    d = json.load(fh)
+                folds[os.path.basename(d.get("path", f))] = sorted((d.get("folds") or {}).keys())
+        self.assertLessEqual({"agentLaunches", "bgAll", "bgJudge", "bgRunning", "sessionMeta"}, set(folds.get(os.path.basename(self.leaf), [])),
+                         "the exit leaves every leaf fold's cursor, the judges' included, whether or not a pass reached it while the "
+                         "kernel lived: a fold with no cursor reads the leaf whole at its first run after the restart; left: %s" % folds)
         size = os.path.getsize(self.leaf)
         k2, p2, log2 = self._boot()
         try:
@@ -168,7 +183,8 @@ class RestartOverACheckpointedSession(unittest.TestCase):
             self.assertGreaterEqual(asm["restored"], 1, "the parse came from the document: %s" % asm)
             leaf_read = by.get(os.path.realpath(self.leaf), by.get(self.leaf, 0))
             self.assertLessEqual(leaf_read, size + 8 * 64, "the leaf was never read whole: %d of %d bytes (the tail, the guards, and the "
-                                                            "frame's hydration of the atoms it renders)" % (leaf_read, size))
+                                                            "frame's hydration of the atoms it renders); the folds the first kernel left: %s; the leaf's reads and chain answers: %s"
+                                                            % (leaf_read, size, folds, self._leaf_trace(log2)))
             self.assertLess(leaf_read - asm["hydratedBytes"], size / 4, "without the frame's hydration the leaf cost its tail and guards only: "
                                                                         "%d read, %d hydrated, %d whole" % (leaf_read, asm["hydratedBytes"], size))
             self.assertGreater(len(frame.get("events") or []), 0, "the frame carries events")

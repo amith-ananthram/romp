@@ -590,6 +590,26 @@ class KernelFolds(Base):
         finally:
             km._sessions, km._turn_end_key = saved_sessions, saved_turn
 
+    def test_the_settle_write_leaves_a_cursor_for_every_leaf_fold_whether_or_not_it_ran(self):
+        """A fold no caller happened to run before the write (a kernel stopped before a judges' pass reached its
+        background-task pairing) would have no cursor for the next process, whose first run of it would read the leaf
+        whole: the settle write and the exit drain bring every leaf fold current first (_prime_leaf_folds)."""
+        self.write_all(tail=False)
+        self.fresh_process()
+        km._session_meta(self.leaf)                               # the one fold a build happened to run
+        rows = [{"sid": SID, "path": self.leaf}]
+        saved_sessions, saved_turn = km._sessions, km._turn_end_key
+        km._sessions = lambda now: rows
+        km._turn_end_key = lambda sid, reg=None: 0
+        try:
+            self.assertGreaterEqual(km._persist_checkpoints(TS0), 1)
+        finally:
+            km._sessions, km._turn_end_key = saved_sessions, saved_turn
+        self.assertEqual(sorted(self.doc(self.leaf)["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgRunning", "sessionMeta"],
+                         "the leaf's document holds every leaf fold, the judges' pairing included")
+        src = open(os.path.join(BIN, "romp-kernel")).read()
+        self.assertIn("_prime_leaf_folds(_s[\"path\"])", src, "the exit drain primes every session's leaf before its write")
+
     def test_perf_carries_the_checkpoint_counters_and_the_kernel_wires_the_three_events(self):
         snap = km._PERF_STATS.snapshot()
         self.assertEqual(sorted(snap["checkpoints"]), ["dirty", "documentBytes", "droppedRestores", "fallbacks", "oversizeFolds", "readByPath",
