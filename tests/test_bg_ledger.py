@@ -204,11 +204,11 @@ class KernelSeamEnrichesTheStream(unittest.TestCase):
         cls.km = load_source("romp_kernel_ledger", os.path.join(BIN, "romp-kernel"))
 
     def setUp(self):
-        self.km._tmux_sessions_saved = self.km._live_map
+        self.km._live_map_saved = self.km._live_map
         (self.km.jd.STATE / "sdk").mkdir(parents=True, exist_ok=True)
 
     def tearDown(self):
-        self.km._live_map = self.km._tmux_sessions_saved
+        self.km._live_map = self.km._live_map_saved
         try:
             (self.km.jd.STATE / "sdk" / (SID + ".json")).unlink()
         except OSError:

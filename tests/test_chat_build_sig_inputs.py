@@ -175,6 +175,7 @@ DOTTED = {
     "em.parse_teammate_message": ("pure", "over a text"),
     "em.injected_source": ("pure", "over a message record"),
     "em.strip_harness_preamble": ("pure", "over a text"),
+    "em.hydrate": ("pure", "over the tree's atoms: fills a body before the assembly cut from the transcript the parse key already covers (T323 stage 4a)"),
     "sb.echo_text_key": ("pure", "over a text"),
     "cm.context_rgb": ("pure", "over a percentage"),
     "cm.ramp": ("pure", "over a fraction and the colormap's stops"),

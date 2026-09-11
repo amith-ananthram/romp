@@ -389,10 +389,10 @@ class SendPathsPark(unittest.TestCase):
     def test_ws_drive_paths_use_the_parks(self):
         with open(os.path.join(BIN, "romp-kernel")) as f:
             src = f.read()
-        self.assertIn('_send_or_park(be, sid, str(msg["text"]), echo="human", qid=_client_qid(msg, sid, be))', src,
-                      "the composer send parks mid-compaction")
+        self.assertIn('_send_or_park(be, sid, str(msg["text"]), echo="human", qid=_client_qid(msg, sid, be), user=True)', src,
+                      "the composer send parks mid-compaction, and speaks as the user (T315)")
         self.assertIn("_send_or_park(be, sid, body,", src, "the follow-up/nudge send parks mid-compaction")
-        self.assertIn("_send_or_park(be, sid, cmd)", src, "the timeline sendCommand parks mid-compaction")
+        self.assertIn("_send_or_park(be, sid, cmd, user=True)", src, "the timeline sendCommand parks mid-compaction; the user typed it")
         self.assertIn('_set_effort_or_park(be, sid, str(msg["value"]))', src,
                       "the setEffort drive op parks mid-compaction (the user 2026-07-02: it slipped through)")
         self.assertIn("_set_effort_or_park(be, sid, value)    # mid-compaction → parked as a queued command", src,
@@ -855,6 +855,120 @@ class SlashCommandParksWhileTurnOpen(unittest.TestCase):
         self.assertEqual(self.be.calls, [("send", "/autocompact auto")],
                          "idle → a fresh top-level prompt already, nothing to park")
         self.assertNotIn(SID, km._pending_ops)
+
+
+class WhoSpeaks(unittest.TestCase):
+    """T315 (the commit-13 review's third item): the caller that knows who speaks classifies a send, never the
+    route. The composer, the phone and an untagged `romp send` hand the backend user=True (the word that retries a
+    stood-down attach); a watch notice through _pr_watch_deliver hands nothing; a parked user send remembers it on
+    its fifth slot and the replay hands it on; a tagged `romp send` is a machine's."""
+
+    class Speaking:
+        def __init__(self):
+            self.calls = []; self.ok = True
+        def send(self, sid, text, qid=None, user=False):
+            self.calls.append((text, user)); return self.ok
+        def forwards_sends(self):
+            return True                 # the SDK's shape: a run of parked sends is delivered one by one
+        def pending_queued(self, sid):
+            return []
+
+    def setUp(self):
+        self.be = self.Speaking()
+        self._saved = (km._compacting_now, km.Sessions.backend_for, km._push_all, km._working_now, km._limit_hold)
+        km.Sessions.backend_for = staticmethod(lambda sid: self.be)
+        km._push_all = lambda *a, **k: None
+        km._working_now = lambda sid: False
+        km._compacting_now = lambda sid: False
+        km._limit_hold = lambda sid: None
+        km._pending_ops.pop(SID, None)
+
+    def tearDown(self):
+        (km._compacting_now, km.Sessions.backend_for, km._push_all, km._working_now, km._limit_hold) = self._saved
+        km._pending_ops.pop(SID, None)
+
+    def test_the_user_route_hands_user_true_and_a_watch_notice_hands_nothing(self):
+        km._send_or_park(self.be, SID, "the user's words", echo="human", user=True)
+        self.assertEqual(self.be.calls, [("the user's words", True)])
+        self.assertTrue(km._pr_watch_deliver(SID, "romp watch: the condition holds"))
+        self.assertEqual(self.be.calls[-1], ("romp watch: the condition holds", False), "a watch notice is romp's, never the user's")
+        km._send_or_park(self.be, SID, "a scripted send <!-- romp-tag: nightly -->")
+        self.assertEqual(self.be.calls[-1][1], False, "a machine caller passes nothing")
+
+    def test_a_parked_user_send_remembers_who_spoke_and_the_replay_hands_it_on(self):
+        km._compacting_now = lambda sid: True
+        km._send_or_park(self.be, SID, "queued words", echo="human", user=True)
+        km._send_or_park(self.be, SID, "a queued notice")
+        ops = km._pending_ops.get(SID)
+        self.assertEqual([km._op_user(o) for o in ops], [True, False])
+        self.assertEqual(ops[0][:3], ("send", "queued words", "human"), "the first three slots are as they were")
+        self.assertIsNone(km._op_qid(ops[0]), "a None fourth slot reads as no id")
+        km._compacting_now = lambda sid: False
+        km._deliver_send_batch(self.be, SID, list(ops))
+        self.assertEqual(self.be.calls, [("queued words", True), ("a queued notice", False)])
+
+    def test_a_parked_command_replays_through_the_drain_with_its_speaker_and_a_refusal_is_visible(self):
+        # the commit-14 review's sixth item (the command replay's classification, driven) and third (a refused
+        # replay used to stamp the echo and the compacting cue anyway)
+        km._compacting_now = lambda sid: True
+        km._send_or_park(self.be, SID, "/frobnicate", echo="human", user=True)
+        km._send_or_park(self.be, SID, "/compact-later <!-- romp-tag: cron -->")
+        self.assertEqual([km._op_user(o) for o in km._pending_ops[SID]], [True, False])
+        km._compacting_now = lambda sid: False
+        saved = (km._mark_compacting, km._send_to_app, km._after_turn_opening)
+        marks, warns = [], []          # no kernel-side echo exists since the tmux backend's removal: the backend echoes inside send
+        km._mark_compacting = lambda sid: marks.append(sid)
+        km._send_to_app = lambda app, m: warns.append((app, m))
+        km._after_turn_opening = lambda *a, **k: None
+        try:
+            km._apply_pending_ops()
+            self.assertEqual(self.be.calls[-1], ("/frobnicate", True), "the parked command replays as the user's")
+            self.assertEqual(warns, [])
+            # the second op (a machine's command) is refused by the backend: no echo, a visible refusal naming it, popped
+            self.assertEqual([o[1] for o in km._pending_ops[SID]], ["/compact-later <!-- romp-tag: cron -->"], "the machine command waits its turn")
+            self.be.ok = False
+            km._apply_pending_ops()
+            self.assertEqual(self.be.calls[-1], ("/compact-later <!-- romp-tag: cron -->", False))
+            self.assertEqual([m["type"] for _, m in warns], ["warn"], "the refusal reaches the chat")
+            self.assertIn("/compact-later", warns[0][1]["text"])
+            self.assertEqual(km._pending_ops.get(SID) or [], [], "popped, never replayed forever")
+            # and a refused parked compact click: no compacting cue
+            km._pending_ops[SID] = [("compact",)]
+            km._apply_pending_ops()
+            self.assertEqual(marks, [], "no compacting cue for a compaction that never started")
+            self.assertEqual(len(warns), 2)
+        finally:
+            km._mark_compacting, km._send_to_app, km._after_turn_opening = saved
+
+    def test_the_manual_retry_is_the_users_gesture_and_the_automatic_one_is_not(self):
+        # the fifth item: the Retry click sent RETRY_MSG with no user keyword, so on a stood-down session it queued
+        saved = (km._note_retry_sent, km._retry_paused_on, km._session_retry_suppressed, km._retry_suppress_unknown,
+                 km._api_error, km._path_of, km._retry_gate_state, dict(km._auto_retried))
+        km._note_retry_sent = lambda *a, **k: None
+        km._retry_paused_on = lambda: False
+        km._session_retry_suppressed = lambda sid: False
+        km._retry_suppress_unknown = lambda: False
+        km._api_error = lambda path: {"uuid": "err-1", "text": "API error"}   # an api-blocked session: the auto arm sends
+        km._path_of = lambda sid, now=None: "/synthetic/transcript.jsonl"
+        km._retry_gate_state = lambda sid: (0, 0)
+        km._auto_retried.pop(SID, None)
+        try:
+            self.assertTrue(km._fire_api_retry(SID, self.be, manual=True))
+            self.assertEqual(self.be.calls[-1], (km.RETRY_MSG, True))
+            km._auto_retried.pop(SID, None)
+            n = len(self.be.calls)
+            self.assertTrue(km._fire_api_retry(SID, self.be, manual=False))
+            self.assertEqual(self.be.calls[n:], [(km.RETRY_MSG, False)], "the automatic retry sends, and never as the user")
+        finally:
+            (km._note_retry_sent, km._retry_paused_on, km._session_retry_suppressed, km._retry_suppress_unknown,
+             km._api_error, km._path_of, km._retry_gate_state, prev) = saved
+            km._auto_retried.clear(); km._auto_retried.update(prev)
+
+    def test_the_send_route_treats_an_untagged_send_as_the_users_and_a_tagged_one_as_a_machines(self):
+        src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "kernel", "kernel.py")).read()
+        self.assertIn('user="<!-- romp-tag: " not in body["text"]', src, "POST /send: untagged is the user's, `romp send --tag` is a machine's")
+        self.assertIn("user=not msg.get(\"nudge\")", src, "a follow-up is the user's; a nudge is romp's")
+        self.assertIn('_send_or_park(be, sid, text) is not None', src, "the watch deliverer passes nothing")
 
 
 if __name__ == "__main__":

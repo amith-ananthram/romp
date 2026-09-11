@@ -44,9 +44,9 @@ class JsonlCacheEviction(unittest.TestCase):
         # scans nothing, so "no new spy entries" == "served from cache".
         self._real_scan = em._scan_jsonl_bytes
         self.scans = []
-        def spy(data, base_offset):
+        def spy(data, base_offset, *a, **k):     # the reader hands the scan an offsets array too (T323 stage 4)
             self.scans.append((len(data), base_offset))
-            return self._real_scan(data, base_offset)
+            return self._real_scan(data, base_offset, *a, **k)
         em._scan_jsonl_bytes = spy
 
     def tearDown(self):

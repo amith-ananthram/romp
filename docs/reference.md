@@ -976,10 +976,29 @@ sent row, would make the document a second copy of the file); it cold-folds
 at first touch, while the bounded folds beside it restore. Checkpoints
 are written when a session's turn settles or its states log moves, and all of
 them at exit; checkpoints of files that no longer exist are swept at boot. A
-compaction appends records and changes nothing here. The parse trees and the
-record cache the parse reads through are unchanged by this: a restart still
-parses a session's leaf transcript whole (the checkpoint work that follows
-addresses the parse itself). The gain is one tree per session, about
+compaction appends records and changes nothing here.
+
+The assembly checkpoint (2026-09-11) does the same for the parse itself. When a
+session's tree holds a compaction boundary, a second document beside the fold
+checkpoint records everything before the cut (the turn that holds the last
+boundary, or the `/compact` command's turn for a manual one) as identities and
+record locations: each record's uuid, verdict, type, order, time and file, each
+emitted atom's scalar fields and the identity facts the ids and the turn
+segmentation read, the kept chain, the gate facts, the emit carry with its text
+sets as hashes, each file's witness and where its tail starts, and a hash over
+the pre-cut turn ids, segment ids and atom uuids. A fresh kernel verifies the
+document, rebuilds the pre-cut turns as atoms without bodies, reads the leaf
+from the cut's byte offset only and parses that tail, proves the prefix by the
+hash, and hands the judges and the display one tree. A body before the cut is
+read on demand from its record when a consumer asks for it, through a
+byte-capped memo; a consumer that reads one without asking fails loudly rather
+than seeing an empty message. A compaction after the document demotes to a
+whole parse as before, and the next settle writes a new document; a rewrite
+under the cut's guard, a shrunk or moved file, another session, other inputs,
+a wrong version, a corrupt or unprovable document, or a document past 16 MB
+each mean a whole parse, counted per reason in `/perf` and said once. The
+agent files (the subagents' transcripts) get no document yet; that is the next
+stage's. The gain is one tree per session, about
 a quarter of the record cost the T311 report measured (0.25 GB of 6.6); the
 record cache itself, the bulk, is the checkpoint work's target.
 
@@ -1038,6 +1057,48 @@ JSON line in `session-events.jsonl` under the state directory, the shape the
 restart monitors read. Two CLIs on one conversation is the boot sweep's own row
 there. The CLI takes no lock on a transcript it resumes, so the one writer per
 conversation is entirely the lease's to keep.
+
+A session can outlive the kernel that started it. With the `session-hosts`
+setting on (a bare value file under the state directory, `on` or `off`, off
+by default; the devbox opts in first), a new session's CLI runs under a small
+per-session host process, `bin/romp-session-host`, instead of as the kernel's
+child. The host spawns the CLI from a spawn specification the kernel writes
+(`hosts/<sid>/spawn.json`, the plain fields of the SDK's options, at mode 0600
+in a 0700 directory, since it carries the environment overlay), through the
+SDK's own subprocess transport, so the command line and the environment are
+the SDK's byte for byte. It reads the CLI's stdout without pause and appends
+every message to an append-only journal (`hosts/<sid>/journal-<n>.jsonl`, one
+JSON object per line, offsets that are the record's ordinal since the CLI
+started, 64 MB segments rotated at turn boundaries, acknowledged segments
+deleted), serves one Unix socket (`hosts/<sid8>.sock`, mode 0600), and holds
+the session's lease as the holder. The kernel keeps the SDK client, its hooks
+and its permission callback and speaks to the host over the socket. On a
+restart the drain detaches from every host instead of ending its CLI: the
+host keeps the CLI and its turn, journals what it says, parks any permission
+request or hook callback the CLI raises (a permission waits without expiry; a
+hook the kernel registers with a 540 second timeout is answered by the host
+itself with the event's neutral output after 480 seconds of parking, and each
+such answer becomes a problem row when a kernel next attaches, since the
+kernel never saw that hook), and the next kernel attaches by the lease,
+replays the journal from the offset it last acknowledged in the registry
+(`hostAck` on `sdk/<sid>.json`, written by the kernel, the registry's only
+writer), and sends its own initialize, which the CLI accepts as a replacement
+of its hook table. The turn was never cut: no continuation notice, no
+`cutTurns` entry, and a `host.attached` row in `session-events.jsonl` for
+every attach, at boot or later. The interrupt escalation's signal rungs and a
+kill or a conserve close become requests to the host; a graceful end closes
+the CLI's stdin and waits (an idle CLI exits at once, a busy one after its
+turn), with SIGKILL only past a settable grace. A host whose kernel never
+returns ends an idle CLI after `session-host-grace` seconds (900 by default).
+If a host dies, its CLI finishes its turn on stdin end-of-file and exits; the
+kernel files a `host.died` row, waits for that exit, replays the orphan
+journal through the same path a live attach uses, and only then resumes the
+session from the transcript, so a conversation never has two writers. On
+Linux the host runs in a transient scope of its own (`romp-host-<sid8>-<t>`)
+outside the service cgroup and starts the CLI through `bin/romp-cli-scope` as
+before, so the CLI's own scope and its memory limits are unchanged; the boot
+sweep stops a dead host's scope by its lease. On macOS the host is a plain
+detached process and everything else is the same.
 
 A message the kernel cannot handle does not end the session's CLI. The kernel
 handles each streamed message on its own: when a handler raises, it logs the
@@ -1290,7 +1351,11 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   folds resumed from one), `restoredFolds` (restores per fold name), `writes`,
   `swept` (checkpoints of vanished files removed at boot), `skippedFolds`
   (fold states the codec could not encode), `oversizeFolds` (per fold name,
-  states over the 64 KB cap left out of a document), `droppedRestores` (a
+  states over the 64 KB cap: the document keeps that fold's cursor without its
+  state, and the next kernel starts the fold cold at the cut over the tail
+  only), `coldFolds` (per fold name, folds that started cold that way this
+  boot), `coldWrites` (per fold name, writes that kept such a tail-only state
+  out of the document so no later kernel restores it as complete), `droppedRestores` (a
   restore lost to a read that replaced the entry under it; the reader
   serializes reads per path, so this should stay at zero), `documentBytes`
   (what reading the checkpoint documents themselves cost since boot),
@@ -1298,6 +1363,13 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `corrupt`), `dirty` (files whose folds moved since their last write),
   `readBytes` and `readByPath` (what the JSONL reader pulled off disk since
   boot, in total and per file).
+- `asmCheckpoint`: the assembly documents since boot: `written`, `restored`,
+  `fallbacks` per reason (`version`, `session`, `inputs`, `lineage`, `shrunk`,
+  `rewrite`, `guard`, `identity`, `corrupt`, `restore`), `skipped` per reason
+  (`noEntry`, `restored`, `written`, `noBoundary`, `unsplittable`,
+  `reconstruction`, `oversize`, `unencodable`, `offsets`, `stat`, `write`),
+  `hydratedAtoms` and `hydratedBytes` (bodies read on demand for atoms before
+  a cut) and `hydratedBy` (those bytes per calling function).
 - `skillLoadIndex`: the judge's skill-load boot pass (the tops older stores minted from
   the harness's own skill load): `filesRead` and `bytesRead` (transcripts read raw this
   boot, appended tails only once the persisted index holds a file), `filesIndexed`, and

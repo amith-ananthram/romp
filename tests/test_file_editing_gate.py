@@ -96,7 +96,7 @@ class TheOwningSessionIsTold(unittest.TestCase):
         self.td.cleanup()
 
     def _with_sessions(self, mapping, fn):
-        """Run fn with _tmux_sessions/_cwd_of faked to `mapping` ({sid: dir})."""
+        """Run fn with _live_map/_cwd_of faked to `mapping` ({sid: dir})."""
         old_t, old_c = km._live_map, km._cwd_of
         km._live_map = lambda: {s: {} for s in mapping}
         km._cwd_of = lambda s: mapping.get(s, "")

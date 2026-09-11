@@ -72,6 +72,20 @@ class CommentMerge(unittest.TestCase):
         self.assertEqual(self._row().get("status"), "merged")
         self.assertEqual(self.be.killed, [TSID], "the CLI has nothing left; its work is folded back")
 
+    def test_a_refused_handoff_reverts_the_latch_and_kills_nothing(self):
+        # T315 (the commit-13 review's second item): the merge sent with the default and checked only for an
+        # exception, so a parent whose backend refused the handoff was still marked merged and its thread's CLI
+        # ended; the merge is the user's gesture (user=True when the send takes it) and a False reverts
+        class Refusing(FakeBE):
+            def send(self, sid, text, user=False):
+                self.sent.append((sid, text, user)); return False
+        self.be = Refusing()
+        err = km._comment_merge(PARENT, TSID)
+        self.assertIn("refused", err or "")
+        self.assertEqual(self._row().get("status"), "open", "nothing marked merged on a refusal")
+        self.assertEqual(self.be.killed, [], "the thread's CLI lives on: its discussion is not folded back yet")
+        self.assertEqual([u for _, _, u in self.be.sent], [True], "the merge speaks as the user")
+
     def test_nothing_to_merge_reverts_the_latch_loudly(self):
         km._thread_messages = lambda tsid, cut, floor_t=0: []
         err = km._comment_merge(PARENT, TSID)

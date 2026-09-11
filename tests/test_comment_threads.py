@@ -28,7 +28,6 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
-os.environ["ROMP_TMUX_AVAILABLE"] = "1"
 os.environ["ROMP_SERVE_TOKEN"] = "testtok"
 em = load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
 jd = load_source("romp_judge", os.path.join(BIN, "romp-judge"))
