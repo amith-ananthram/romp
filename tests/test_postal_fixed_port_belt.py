@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""The bus refuses the machine's fixed port away from the machine's own bus (2026-09-10, widened 2026-09-11):
-`romp-postal-service serve` and `ensure` will not bind it when the state root is not the machine's own (the XDG default
-under the home directory, or ROMP_STATE_DIR when the service names one), or sits under a temporary directory (a test
-runner's romp-tests- root, or the system's temporary directory at all), or PYTEST_CURRENT_TEST is set, unless
-ROMP_POSTAL_PORT names the port this process read at import AND ROMP_POSTAL_HERMETIC marks it as the run's own; an
-inherited name (a machine whose bus runs on a named port hands it to every shell) does not count, and neither does the
-fixed port named outright. They say why on stderr, and the kernel's ensure runner copies a refusal into its own log.
+"""The bus refuses the machine's fixed port under a test (2026-09-10, widened 2026-09-11): `romp-postal-service serve` and
+`ensure` will not bind it when the state root sits under a temporary directory (a test runner's romp-tests- root, or the
+system's temporary directory at all, which is where a module run directly with unittest puts its state) or when
+PYTEST_CURRENT_TEST is set, unless ROMP_POSTAL_PORT names the port this process read at import AND ROMP_POSTAL_HERMETIC
+marks it as the run's own; an inherited name (a machine whose bus runs on a named port hands it to every shell) does
+not count, and neither does the fixed port named outright. A real install that relocates its state (XDG_STATE_HOME or
+ROMP_STATE_DIR, the documented knobs) binds as ever. They say why on stderr, and the kernel's ensure runner copies a
+refusal into its own log.
 
 Three leaks in one afternoon put a hermetic bus on the shared port while the real bus was down for a restart: two lab
 kernels started as processes without kernel_env's trio, and one kernel module loaded inside a test process whose
@@ -28,11 +29,11 @@ PROBE = ("import importlib.util as u, importlib.machinery as m, sys; s = u.spec_
 
 
 # state roots that are NEVER created: the refusal precedes every mkdir and the probe only imports the module, so these are
-# strings the bus reads, not directories. The bare environment's home never exists either, so its XDG default root
-# (<home>/.local/state/romp) is the machine's own root for that process: the machine's case. A lab root elsewhere, a test
-# runner's root shape and the system's temporary directory are the three signals. No temp API, nothing written.
+# strings the bus reads, not directories. The bare environment's home never exists either; a relocated root elsewhere is a
+# real install's documented case, a test runner's root shape and the system's temporary directory are the two root
+# signals. No temp API, nothing written.
 HOME = "/nonexistent/belt-home"
-LAB_ROOT = "/nonexistent/belt-lab/xdg"
+MOVED_ROOT = "/nonexistent/belt-moved/state"
 TESTS_ROOT = "/nonexistent/romp-tests-belt/lab"
 TEMP_ROOT = "/tmp/tmpbelt-never-made"
 
@@ -71,18 +72,17 @@ class FixedPortBelt(unittest.TestCase):
         self.assertIsNotNone(why)
         self.assertIn("under the temporary directory", why)
 
-    def test_a_state_root_that_is_not_the_machines_own_is_refused_with_no_other_signal(self):
-        """the strongest signal, the one a module run directly with unittest still trips: no runner, no PYTEST_CURRENT_TEST,
-        a root that is neither temporary nor the machine's"""
-        why = _refusal(_env(XDG_STATE_HOME=LAB_ROOT))
-        self.assertIsNotNone(why)
-        self.assertIn("is not the machine's own (/nonexistent/belt-home/.local/state/romp)", why)
+    def test_a_relocated_real_state_root_is_the_machines_own(self):
+        """XDG_STATE_HOME (or ROMP_STATE_DIR) is the documented way an install moves its state: a root elsewhere that is not
+        temporary is a real bus's, and it binds the fixed port as ever"""
+        self.assertIsNone(_refusal(_env(XDG_STATE_HOME=MOVED_ROOT)))
+        self.assertIsNone(_refusal(_env(ROMP_STATE_DIR=MOVED_ROOT + "/romp")))
 
     def test_the_runs_own_port_is_allowed_under_a_test(self):
         self.assertIsNone(_refusal(_env(PYTEST_CURRENT_TEST="tests/test_x.py::T::t (call)", ROMP_POSTAL_PORT="45678", ROMP_POSTAL_HERMETIC="1")),
                           "a hermetic bus that names its own port, marked as the run's own, is what the labs run")
-        self.assertIsNone(_refusal(_env(XDG_STATE_HOME=LAB_ROOT, ROMP_POSTAL_PORT="45678", ROMP_POSTAL_HERMETIC="1")),
-                          "…under a lab root as well")
+        self.assertIsNone(_refusal(_env(XDG_STATE_HOME=TEMP_ROOT + "/xdg", ROMP_POSTAL_PORT="45678", ROMP_POSTAL_HERMETIC="1")),
+                          "…under a temporary root as well (the shell suite's shape: its setup marks its port)")
 
     def test_an_inherited_port_name_does_not_count_under_a_test(self):
         """a machine whose bus runs on a named port hands ROMP_POSTAL_PORT to every shell; a test run from one carries it"""
@@ -96,7 +96,7 @@ class FixedPortBelt(unittest.TestCase):
                     _env(PYTEST_CURRENT_TEST="tests/test_x.py::T::t (call)", ROMP_POSTAL_PORT="25302", ROMP_POSTAL_HERMETIC="1")):
             why = _refusal(env)
             self.assertIsNotNone(why)
-            self.assertIn("25302", why)
+            self.assertIn("names the machine's fixed port itself", why, "its own message, not the inherited-name one: %r" % why)
 
     def test_the_named_port_must_be_the_one_this_process_bound(self):
         """a port named AFTER the module read its own (PORT is frozen at import) does not license the fixed one: the
@@ -120,8 +120,8 @@ class FixedPortBelt(unittest.TestCase):
     def test_outside_a_test_nothing_is_refused(self):
         self.assertIsNone(_refusal(_env()), "the machine's own bus binds the fixed port as ever")
         self.assertIsNone(_refusal(_env(ROMP_POSTAL_PORT="25400")), "…and a machine whose bus runs on a named port binds that")
-        self.assertIsNone(_refusal(_env(ROMP_STATE_DIR="/nonexistent/named-root", XDG_STATE_HOME=LAB_ROOT)),
-                          "a service that names its state root names the machine's own root")
+        self.assertIsNone(_refusal(_env(ROMP_STATE_DIR="/nonexistent/named-root", XDG_STATE_HOME=MOVED_ROOT)),
+                          "a service that names its state root binds as ever")
 
     def test_serve_exits_loudly_before_binding(self):
         env = _env(PYTEST_CURRENT_TEST="tests/test_x.py::T::t (call)")

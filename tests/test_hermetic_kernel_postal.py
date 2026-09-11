@@ -18,7 +18,9 @@ PostalPeerTunnels.test_notify_bus_peer_is_guarded (an in-process kernel, a peer 
 here scans every process spawn whose argv names the kernel (Popen, run, check_output, check_call, call; the argument
 span read across lines, whatever spells the path, a path held in a name included), and the in-process shape is met in
 the bus itself: `romp-postal-service serve` and `ensure` refuse the fixed port under a test (PYTEST_CURRENT_TEST set, or the
-state root under a temporary directory) unless ROMP_POSTAL_PORT names the port, pinned by tests/test_postal_fixed_port_belt.py.
+state root under a temporary directory) unless ROMP_POSTAL_PORT names the port as the run's own (ROMP_POSTAL_HERMETIC beside
+it, as the runner, the shell suite's setup and kernel_env set; an inherited name does not count), pinned by
+tests/test_postal_fixed_port_belt.py.
 A module that loads the kernel in-process and exercises the bus still carries the trio, before its load (the tunnel
 tests) or around the call that provokes the revive (the peer-notify test), so its kernel never even asks.
 
