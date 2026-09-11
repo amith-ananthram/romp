@@ -5511,6 +5511,19 @@ class SdkSession:
         self._wake_feeder()                                      # the edited copy goes on the next pass
         return old
 
+    def _adopt_queue_mirror(self, reg: dict) -> None:
+        """Take the registry mirror's queue as this session's, when it holds more than the seed did (a text
+        queued behind a stand-down between the constructor's reg read and the insert into the backend's
+        sessions): texts and their identities from reg['queue'] + reg['queueMeta'], the seed's own reading."""
+        texts = [t for t in (reg.get("queue") or []) if isinstance(t, str) and t]
+        with self._lock:
+            if len(texts) <= len(self._pending) or texts[:len(self._pending)] != list(self._pending):
+                return
+            metas = queue_meta_from_reg(reg)
+            for t, m in zip(texts[len(self._pending):], metas[len(self._pending):]):
+                self._pending.append(t)
+                self._pending_meta.append(m)
+
     def _persist_queue(self):
         """Mirror _pending to the registry (reg['queue']) so queued turns survive a kernel death —
         the boot reconcile resumes any session whose persisted queue is non-empty and the __init__
@@ -11658,6 +11671,14 @@ class SdkBackend:
             s = SdkSession(self, reg)
             s.on_boot_settled = on_boot_settled
             self.sessions[sid] = s
+            # the queue mirror can grow between the reg read above and this insert (an automatic message queued
+            # behind a stand-down takes _reg_lock alone and sees no session yet; the commit-15 review's third
+            # item): re-seed from a fresh read under _reg_lock now that the insert is visible, so the mirror and
+            # the live list cannot diverge and the next _persist_queue erases nothing
+            with self._reg_lock:
+                fresh = read_reg(self.state_dir, sid)
+            if fresh is not None:
+                s._adopt_queue_mirror(fresh)
             s.start()
             return s
 
@@ -12558,15 +12579,32 @@ class SdkBackend:
         lease = read_lease(self.state_dir, sid)
         if ht.host_lease_state(lease, time.time()) != "attach":
             return False
+        with self._lock:
+            threads = self.__dict__.setdefault("_end_threads", {})
+            prev = threads.get(sid)
+            if prev is not None and prev.is_alive():
+                self._log("host (%s): an end through the lease is already under way" % sid[:8])
+                return True                     # one end thread per sid: a second End click starts no second socket
         sock = ht.host_sock(self.state_dir, sid)
         ident = self._kernel_identity()
         async def go():
             t = ht.HostTransport(str(sock), kernel=ident, ack=-1, end_grace=ht.sh.END_GRACE_KILL_S)
             try:
-                await t.connect()
-                await t.close()
+                # a bounded hello: a host whose loop is stalled accepts the connection from the backlog and never
+                # writes hello (the lease TTL is 12 s; a live host answers in milliseconds)
+                await asyncio.wait_for(t.connect(), timeout=5.0)
+            except asyncio.TimeoutError:
+                self._log("host (%s): end by lease: no hello within 5 s; the host's loop is stalled (its lease lapses in %.0f s)"
+                          % (sid[:8], LEASE_TTL_S))
+                try:
+                    await t.close()
+                except Exception:
+                    pass
+                return
             except Exception as e:
                 self._log("host (%s): end by lease failed: %s: %s" % (sid[:8], type(e).__name__, e))
+                return
+            await t.end_and_close()             # `end` with the kill bound, whatever the initialize gate says
         def run():
             try:
                 asyncio.run(go())
@@ -12574,7 +12612,10 @@ class SdkBackend:
                 self._log("host (%s): end by lease thread failed: %s" % (sid[:8], e))
         self._log("host (%s): kill with no session object; ending the live host (pid %s) through its lease"
                   % (sid[:8], ((lease or {}).get("holder") or {}).get("pid")))
-        threading.Thread(target=run, name="romp-end-host-" + sid[:8], daemon=True).start()
+        th = threading.Thread(target=run, name="romp-end-host-" + sid[:8], daemon=True)
+        with self._lock:
+            self.__dict__.setdefault("_end_threads", {})[sid] = th
+        th.start()
         return True
 
     def running_sids(self) -> list:

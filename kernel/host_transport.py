@@ -258,6 +258,25 @@ class HostTransport(_Base):
             return          # the kernel is leaving; the host keeps the CLI running
         await self._send({"t": "end", "grace": self.end_grace})
 
+    async def end_and_close(self) -> None:
+        """End the host's CLI and leave, from a transport that never ran a Query (the kernel's kill of a
+        session with no object, T315): `end` with this transport's grace whatever the initialize gate says
+        (close() alone reads an unanswered initialize as a connect that never completed and DETACHES, which
+        keeps the CLI: the commit-15 review's first item), a bounded wait for the exit frame, then the socket."""
+        if self.journal_dir or self._closed or not self._writer:
+            return
+        try:
+            await self._send({"t": "end", "grace": self.end_grace})
+            await self._wait_exit(self.end_grace + 5.0)
+        except Exception:
+            pass
+        self._closed = True
+        try:
+            self._writer.close()
+            await asyncio.wait_for(self._writer.wait_closed(), timeout=2.0)
+        except Exception:
+            pass
+
     async def close(self) -> None:
         if self._closed:
             return

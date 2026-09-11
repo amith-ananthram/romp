@@ -145,12 +145,21 @@ class HeadlessRoutes(unittest.TestCase):
             self.assertFalse(km._op_user(op), "a tagged send is a machine's: no fifth slot")
             fake.send.assert_not_called()
             km._pending_ops.clear()
-            with mock.patch.object(km.Sessions, "backend_for", staticmethod(lambda sid: fake)), \
+            class Speaking:                       # a send that TAKES the keyword, so the route's decision is what is recorded
+                def __init__(self): self.calls = []
+                def busy(self, sid): return None
+                def send(self, sid, text, qid=None, user=False):
+                    self.calls.append((text, user)); return True
+            spk = Speaking()
+            with mock.patch.object(km.Sessions, "backend_for", staticmethod(lambda sid: spk)), \
                  mock.patch.object(km, "_compacting_now", lambda sid, **k: False), \
                  mock.patch.object(km, "_working_now", lambda sid: False):
                 code, resp = self._post("/send", {"id": "sid-q", "text": "a scripted note", "tag": "cron"})
-            self.assertEqual(code, 200)
-            self.assertNotIn("user", fake.send.call_args.kwargs, "handed over with no user flag: it lifts no stand-down")
+                self.assertEqual(code, 200)
+                self.assertEqual(spk.calls[-1][1], False, "a tagged send is handed over as a machine's: it lifts no stand-down")
+                code, resp = self._post("/send", {"id": "sid-q", "text": "typed by hand"})
+                self.assertEqual(code, 200)
+                self.assertEqual(spk.calls[-1], ("typed by hand", True), "an untagged send is the user's")
         finally:
             km._pending_ops.clear()
 

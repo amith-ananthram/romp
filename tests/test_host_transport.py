@@ -691,6 +691,69 @@ class BackendHostRules(unittest.TestCase):
             self.assertTrue(be.send(SID, "romp watch: the condition holds"))
         self.assertEqual((sb.read_reg(Path(d), SID) or {}).get("queue"), ["romp watch: the condition holds"] * 2)
 
+    def test_kill_sends_end_to_the_stood_down_host_and_a_second_kill_starts_no_second_thread(self):
+        # the commit-15 review's first item: the end-by-lease connected and closed with no request written, and a
+        # transport whose initialize was never answered DETACHES on close (the host kept its CLI); it sends `end`
+        # with the kill bound now, bounded on hello, one thread per sid
+        d, be = self._be()
+        self._marked(d); self._host_lease(d)
+        sock = str(ht.host_sock(d, SID))
+        os.makedirs(os.path.dirname(sock), exist_ok=True)   # the host's directory, which a real spawn creates
+        host = FakeHost(sock, [])
+        loop = asyncio.new_event_loop()
+        import threading
+        started = threading.Event()
+        def serve():
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(host.start()); started.set()
+            loop.run_forever()
+        threading.Thread(target=serve, daemon=True).start()
+        self.assertTrue(started.wait(5), "the fake host serves its socket")
+        try:
+            with mock.patch.object(sb, "proc_start", lambda p, run=None: {999999997: "1", 999999996: "2"}.get(p)):
+                self.assertEqual(ht.host_lease_state(sb.read_lease(d, SID), time.time()), "attach", "the fixture's lease reads live: %r" % sb.read_lease(d, SID))
+                self.assertTrue(be.kill(SID))
+                self.assertIn(SID, getattr(be, "_end_threads", {}), "the end thread was started; log: %r" % be._test_logs[-4:])
+                th = be._end_threads[SID]
+                th.join(10)
+                self.assertFalse(th.is_alive(), "the end thread finishes: the fake host answers `end` with an exit frame")
+                kinds = [f.get("t") for f in host.got]
+                self.assertIn("end", kinds, "the host receives END, not a detach: %r; log: %r" % (kinds, be._test_logs[-6:]))
+                self.assertNotIn("detach", kinds)
+                self.assertEqual(next(f for f in host.got if f.get("t") == "end")["grace"], sh.END_GRACE_KILL_S)
+                self.assertNotIn("hostAttachFailed", sb.read_reg(Path(d), SID) or {})
+                # a second End while an end is under way starts no second thread
+                gate = threading.Event()
+                holder = threading.Thread(target=gate.wait, daemon=True); holder.start()
+                be._end_threads[SID] = holder
+                n = len(host.got)
+                self.assertTrue(be._end_host_by_lease(SID))
+                self.assertIs(be._end_threads[SID], holder, "the running end thread stays registered: no second one started")
+                time.sleep(0.3)
+                self.assertEqual(len(host.got), n, "no second socket while the first end runs")
+                gate.set()
+        finally:
+            loop.call_soon_threadsafe(host.close); loop.call_soon_threadsafe(loop.stop)
+
+    def test_a_message_queued_between_the_ensure_read_and_the_insert_reaches_the_live_session(self):
+        # the third item: _ensure seeded the SdkSession from a reg dict read before the insert; a queue-behind on
+        # _reg_lock alone could append in between (no session yet), and the seed missed it. The seed is re-read
+        # under _reg_lock after the insert.
+        d, be = self._be()
+        sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "alive": True, "lastSid": SID, "cwd": d, "queue": ["first"]})
+        def append_between(sid, reg=None):
+            with be._reg_lock:                          # what a racing queue-behind does, after _ensure's read
+                cur = sb.read_reg(Path(d), sid)
+                cur["queue"] = (cur.get("queue") or []) + ["<!-- romp-injected --> a nudge"]
+                sb.write_reg(Path(d), sid, cur)
+            return False
+        with mock.patch.object(be, "_attach_stand_down_holds", append_between), \
+             mock.patch.object(sb.SdkSession, "start", lambda self: None):
+            s = be._ensure(SID)
+        self.assertIsNotNone(s)
+        self.assertEqual(list(s._pending), ["first", "<!-- romp-injected --> a nudge"], "the live list carries the mirror's late text")
+        self.assertEqual(len(s._pending_meta), 2, "identities stay aligned")
+
     def test_a_boot_leaves_a_stood_down_session_alone_and_counts_no_attach(self):
         # the fourth item: the boot counted an attach, added the sid to the boot set and wrote the reconcile.boot row
         # before the stagger's ensure refused; the attach a later send made then filed host.attached with boot=True
