@@ -791,8 +791,8 @@ class ServedHistory(unittest.TestCase):
         self.assertIsNone(h["since"], "the frame is ok: no since on the line")
         self.assertRegex(h["ago"], r"^read (now|\d+ minutes? ago)$", "the read's age in words on one clock, never a clock stamp")
         self.assertEqual(h["names"], ["History", "State changes"])
-        self.assertEqual(h["legend"], ["429 = the API told us to slow down (rate limit)", "5xx = the API itself failed (server error)"],
-                         "vertical: one line each, 429 then 5xx; no gray line when the range holds no such failure")
+        self.assertEqual(h["legend"], ["429 rate limit: the API told us to slow down", "5xx server error: the API itself failed"],
+                         "vertical: one line each, 429 then 5xx; no other line when the range holds no such failure")
         self.assertEqual((h["graphs"], h["bars"], h["big"]), (1, 96, False), "the day as 96 quarter-hour bars, small in the hover")
         self.assertFalse(h["unknown"], "the word never reaches the user")
         self.assertEqual([(r["k"], r["w"], r["v"], r["boot"]) for r in rows],
@@ -901,7 +901,7 @@ class ServedHistory(unittest.TestCase):
         h, rows = self.R["offline"]["head"], self.R["offline"]["rows"]
         self.assertEqual((h["word"], h["dot"]), ("6 successful requests · 2 429s · 7 no connection", "errors"),
                          "attempts without a status are counted as no connection; the machine's word (unknown) is never said")
-        self.assertEqual(h["legend"][-1], "gray = no connection, or another error", "the gray line joins the legend when the range holds such failures")
+        self.assertEqual(h["legend"][-1], "other no connection, or another error", "the other line joins the legend when the range holds such failures")
         self.assertEqual(len(h["legend"]), 3)
         self.assertFalse(h["unknown"])
 

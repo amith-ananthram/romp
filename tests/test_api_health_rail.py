@@ -467,7 +467,7 @@ class Detail(unittest.TestCase):
         # sentence are gone, and the state machine's word never reaches the user
         self.assertNotIn("API %s this machine" % MDOT, self.JS)
         self.assertNotIn("No session is waiting on the API.", self.JS)
-        self.assertIn("429 = the API told us to slow down (rate limit)", self.JS)
+        self.assertIn("['r429','429','rate limit: the API told us to slow down']", self.JS)   # T340: the token in its ink, the words beside it
 
     def test_the_pause_button_is_the_chat_card_s_and_acknowledges_before_the_round_trip(self):
         self.assertIn("'Resume all auto-retries'", self.JS)

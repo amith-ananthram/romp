@@ -407,7 +407,7 @@ class CellCss(unittest.TestCase):
         self.assertNotIn("'unknown'", js.replace("unknown:'quiet'", ""), "the word appears only as the key the plain word replaces")
         self.assertNotIn("API · this machine", js)
         self.assertIn("var HIST_ROWS=4;", js)
-        self.assertIn("429 = the API told us to slow down (rate limit)", js)
+        self.assertIn("['r429','429','rate limit: the API told us to slow down']", js)   # T340: the token in its ink, the words beside it
 
 
 if __name__ == "__main__":
