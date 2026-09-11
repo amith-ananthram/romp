@@ -48401,6 +48401,10 @@ function spSeries(d){var ser=d[SP.range==='day'?'hours':SP.range];if(!ser)return
 function spTail(ser,keep){var n=(ser.keys||[]).length,cut=Math.max(0,n-keep);
 return {keys:(ser.keys||[]).slice(cut),epochs:(ser.epochs||[]).slice(cut),stacks:(ser.stacks||[]).map(function(s){var o={};for(var k in s)o[k]=s[k];o.usd=(s.usd||[]).slice(cut);o.tok=(s.tok||[]).slice(cut);if(s.turns)o.turns=s.turns.slice(cut);if(s.keyUsd)o.keyUsd=s.keyUsd.slice(cut);
 if(s.hosts){o.hosts={};Object.keys(s.hosts).forEach(function(h){o.hosts[h]={usd:(s.hosts[h].usd||[]).slice(cut),tok:(s.hosts[h].tok||[]).slice(cut)};});}return o;})};}
+// the hosts whose rows in THIS range view show a dash for turns (an older build's stacks carry none): a session row's
+// host, or the fold's hosts when the fold's turns are unknown; the local machine's own rows always carry turns
+function spDashedHosts(d){var dashed={};(d.sessions||[]).forEach(function(s){if(s.turns==null)dashed[String(s.host||d.host||'')]=1;});
+if(d.other&&d.other.turns==null&&(d.other.usd>0||d.other.tok>0))(d.other.hosts||[]).forEach(function(hn){dashed[hn]=1;});return Object.keys(dashed).filter(function(x){return x;}).sort();}   // a fold with nothing in range draws no row, so no dash
 // The list FOLLOWS THE CHART (T353, the user 2026-09-11): the per-session rows are summed from the SAME buckets the
 // chart draws (spSeries: the range's tail of the ledger's series), so the list's total is the chart's total by
 // construction for every range, dollars, tokens and turns alike, and the key-billed column too (keyUsd). The
@@ -48519,6 +48523,10 @@ if(un&&(un.usd>0||un.tok>0))h+='<tr class=rsp-dead>'
 +'<td class=rsp-name><i class="rsp-sw rsp-hatch"></i> unattributed<span class=ru-tip-reset> \u00b7 recorded before per-session tracking</span></td>'
 +'<td class=n>'+fmtUsd(un.usd)+'</td>'+(keyCol?'<td class=n>\u2014</td>':'')+'<td class=n>'+(un.turns==null?'\u2014':(un.turns||0))+'</td><td class=n>'+fmtTok(un.tok||0)+'</td></tr>';
 h+='</tbody></table>';
+// the older-build note (T353 review): only where THIS range shows a dashed row, naming those hosts, and naming key
+// dollars only when the key column is drawn; it lives in the table's node so a range switch re-decides it
+var dh=spDashedHosts(d);
+if(dh.length)h+='<div class=rsp-note>'+dh.map(esc).join(', ')+': older build, '+(dh.length===1?'its':'their')+' sessions\u2019 turns'+(keyCol?' and key-billed dollars':'')+' in this range are unknown (a dash)</div>';
 if(model.multi)h+='<div class=rsp-note>'+model.multi+(model.multi===1?' session carries':' sessions carry')+' several tags and count'+(model.multi===1?'s':'')+' under each of them, so the rows add up past the totals.</div>';
 return h;}
 // 1. the SAME window numbers the hover shows — the sums across every machine, rows only (one renderer).
@@ -48559,7 +48567,7 @@ var rule=sk.length===1?(sk[0]==='keyed'?'key-billed turns':sk[0]==='computed'?'c
 h+='<div class=rsp-sec><div class=ru-tip-name><span>By session'+(many?' \u00b7 '+ok.length+' machines':'')+'</span>'
 +'<span class=ru-tip-reset>'+rule+' \u00b7 <span id=rsp-range-note>'+spRangeWords(spSeries(d))+'</span></span></div>';
 // a machine that could not join is NAMED, never silently missing: down, timed out, refused, or too old
-((d.hosts)||[]).forEach(function(x){if(x.status==='ok'){if(x.noTurns)h+='<div class=rsp-note>'+esc(x.host)+': older build, its sessions\u2019 turns and key-billed dollars per range are unknown (a dash)</div>';return;}
+((d.hosts)||[]).forEach(function(x){if(x.status==='ok')return;
 h+='<div class=rsp-note>'+esc(x.host)+': '+(x.status==='older'?'older build, no per-session data':'not reachable')+(x.detail?' \u2014 '+esc(x.detail):'')+'</div>';});
 h+='<div id=rsp-table>'+sessionTable(spRangeView(d))+'</div></div>';   // the list over the chart's own range (T353)
 spPanel.innerHTML=h;renderChart();spSizePane();}

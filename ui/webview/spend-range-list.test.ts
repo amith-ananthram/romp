@@ -36,7 +36,7 @@ function fn(start: string): string {
 
 const SRC = ["var SP_RANGE_BUCKETS=", "function spSeries(d){", "function spTail(ser,keep){", "function spKey(d,s){",
   "function spSumArr(a){", "function spRound4(v){", "function spRangeView(d){", "function spRangeWords(ser){",
-  "function spOrdered(d){", "function spRows(d){", "function spStackOrderRows(d,stacks,rows){",
+  "function spOrdered(d){", "function spRows(d){", "function spStackOrderRows(d,stacks,rows){", "function spDashedHosts(d){",
   "function spStacks(d,ser,model){"].map(fn).join("\n");
 
 type Payload = Record<string, any>;
@@ -44,7 +44,7 @@ function lift(range: string, order = "spend", merge = false) {
   const SP = { range, measure: "usd", order, merge };
   // eslint-disable-next-line @typescript-eslint/no-implied-eval
   return new Function("SP", "spApplyViewOrder", "spViewOrder",
-    SRC + "\n; return {spSeries, spRangeView, spRangeWords, spRows, spStacks, SP_RANGE_BUCKETS};")(SP, (s: string[]) => s, () => []);
+    SRC + "\n; return {spSeries, spRangeView, spRangeWords, spRows, spStacks, spDashedHosts, SP_RANGE_BUCKETS};")(SP, (s: string[]) => s, () => []);
 }
 
 /** 192 hourly buckets and 90 daily ones; web spends every bucket, api every other, tests only in the OLDEST hours (so the
@@ -164,6 +164,23 @@ test("a turns-only session keeps its row AND its stack, and a tag with an unknow
   assert.equal(st.turns, undefined, "the tag's stack carries no turns either");
 });
 
+test("the older-build note names only the hosts with a dashed row in the range shown", () => {
+  const { spRangeView, spDashedHosts } = lift("day");
+  assert.deepEqual(spDashedHosts(spRangeView(payload())), ["OLDHOST"], "the older peer's session and fold show dashes in the day view");
+  // the same peer with nothing in the last 24 hours: no row, no dash, no note in the day view; the 90-day view keeps it
+  const quiet = payload();
+  for (const st of quiet.hours.stacks) if (st.host === "OLDHOST") { st.usd = st.usd.map((v: number, i: number) => (i >= 168 ? 0 : v)); st.tok = st.tok.map((v: number, i: number) => (i >= 168 ? 0 : v)); }
+  assert.deepEqual(spDashedHosts(spRangeView(quiet)), []);
+  assert.deepEqual(lift("days").spDashedHosts(lift("days").spRangeView(quiet)), ["OLDHOST"]);
+  // a genuine zero is not a dash: a local session with zero turns in range names no host
+  const z = payload();
+  z.hours.stacks[1].turns = z.hours.stacks[1].turns.map(() => 0);   // api: dollars, no turns
+  for (const st of z.hours.stacks) if (st.host === "OLDHOST") { st.usd = st.usd.map(() => 0); st.tok = st.tok.map(() => 0); }
+  const zv = spRangeView(z);
+  assert.equal(zv.sessions.find((s: any) => s.name === "api").turns, 0, "a real zero prints 0");
+  assert.deepEqual(spDashedHosts(zv), []);
+});
+
 test("the range is named from the buckets the chart draws, and the renderer hands the table the range view", () => {
   const { spSeries, spRangeWords } = lift("day");
   assert.equal(spRangeWords(spSeries(payload())), "last 24 hours");
@@ -179,7 +196,11 @@ test("the range is named from the buckets the chart draws, and the renderer hand
   assert.ok(USAGE_JS.includes("(s.turns==null?'\\u2014':(s.turns||0))"), "a session row's dash");
   assert.ok(USAGE_JS.includes("(oth.turns==null?'\\u2014':(oth.turns||0))"), "the fold's dash");
   assert.ok(USAGE_JS.includes("(un.turns==null?'\\u2014':(un.turns||0))"), "the unattributed row's dash");
-  assert.ok(USAGE_JS.includes("if(x.noTurns)h+='<div class=rsp-note>'+esc(x.host)+': older build, its sessions\\u2019 turns and key-billed dollars per range are unknown (a dash)</div>'"), "the note names the host");
+  // the older-build note lives in the table's node (a range switch re-decides it), names only the hosts with a dashed
+  // row in THIS range, and promises a key-billed dash only when the key column is drawn
+  assert.ok(USAGE_JS.includes("var dh=spDashedHosts(d);"), "the note is computed from the range view's rows");
+  assert.ok(USAGE_JS.includes("if(dh.length)h+='<div class=rsp-note>'+dh.map(esc).join(', ')+': older build, '+(dh.length===1?'its':'their')+' sessions\\u2019 turns'+(keyCol?' and key-billed dollars':'')+' in this range are unknown (a dash)</div>';"), "the note's words");
+  assert.ok(!USAGE_JS.includes("if(x.noTurns)"), "no range-independent note from the hosts rows");
   assert.ok(USAGE_JS.includes("s.kind==='sid'&&(any(s.usd)||any(s.tok)||any(s.turns))"), "the stack predicate is the row's");
   // spTail cuts the two new arrays with the keys
   assert.ok(USAGE_JS.includes("if(s.turns)o.turns=s.turns.slice(cut);if(s.keyUsd)o.keyUsd=s.keyUsd.slice(cut);"));
