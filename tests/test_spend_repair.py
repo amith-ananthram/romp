@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """romp spend-repair (T354): the arithmetic over a synthetic day's turn ledger, the buckets' before and after, the
 dry run writing nothing, --apply writing the corrected buckets and rows. Synthetic ids and figures only."""
+import inspect
 import json
 import os
 import sys
@@ -431,6 +432,64 @@ class Plan(unittest.TestCase):
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             self.assertEqual(rp.main(["--day", DAY, "--state", d, "--apply", "--no-backup"]), 2)
         self.assertIn("1 unparseable line(s) in", err.getvalue()); self.assertIn("--apply is refused until the journal is whole", err.getvalue())
+
+    def test_the_recovery_folds_clamp_is_said_the_folded_set_is_unbounded_and_the_journal_entry_precedes_the_rows_replace(self):
+        # round five of the review: (1) a clamp INSIDE the recovery fold was silent (fold_deltas discarded its notes);
+        # (2) the folded set kept 500 refs while the journal kept every entry, so the 501st run re-folded the oldest;
+        # (3) a death between the rows replace and the journal append left nothing for a later run to fold
+        d = tempfile.mkdtemp()
+        state = Path(d)
+        (state / "turns.jsonl").write_text("".join(json.dumps(r) + chr(10) for r in self.turns))
+        (state / "restart-cuts.jsonl").write_text("".join(json.dumps({"t": t, "firstServe": t, "settleS": 0.1, "pid": 1}) + chr(10) for t in self.restarts))
+        spend = {"hours": {"%sT10" % DAY: {"usd": 520.0, "turns": 6, "bySid": {A: {"usd": 516.0}}},
+                           "%sT11" % DAY: {"usd": 515.0, "turns": 1, "bySid": {A: {"usd": 515.0}}}},
+                 "days": {DAY: {"usd": 1035.0, "turns": 7, "bySid": {A: {"usd": 1031.0}}}}}
+        (state / "spend.json").write_text(json.dumps(spend))
+        import io, contextlib
+        # (3): the journal entry is written before the rows replace, so a death between them leaves the deltas journaled
+        real_apply = rp.apply_to_turns
+        calls = []
+        def dying(path, p, write=True):
+            calls.append(write)
+            if write:
+                raise OSError("disk gone between the writes")
+            return real_apply(path, p, write=False)
+        rp.apply_to_turns = dying
+        try:
+            with self.assertRaises(OSError):
+                rp.main(["--day", DAY, "--state", d, "--apply", "--no-backup"])
+        finally:
+            rp.apply_to_turns = real_apply
+        self.assertEqual(calls, [False, True], "the dry match first, then the write")
+        journal = [json.loads(l) for l in (state / rp.REPAIR_JOURNAL).read_text().splitlines()]
+        self.assertEqual([j["phase"] for j in journal], ["rows"], "journaled ahead of the rewrite that never happened")
+        self.assertEqual(json.loads((state / "spend.json").read_text()), spend, "nothing folded")
+        self.assertEqual(len([r for r in (json.loads(l) for l in (state / "turns.jsonl").read_text().splitlines()) if "usdRecorded" in r]), 0, "no row rewritten")
+        # the next run: the entry is pending, its rows still hold the former figures (present less former = 0), the plan
+        # corrects the rows itself; the buckets end on the truth, once
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(rp.main(["--day", DAY, "--state", d, "--apply", "--no-backup"]), 0)
+        after = json.loads((state / "spend.json").read_text())
+        self.assertEqual((after["hours"]["%sT10" % DAY]["usd"], after["hours"]["%sT11" % DAY]["usd"], after["days"][DAY]["usd"]), (16.5, 6.0, 22.5))
+        self.assertIn("2 delta(s) from 1 earlier run(s) whose bucket write did not complete were folded now; 2 against the row's present figure", out.getvalue())
+        self.assertEqual(len(after["repairJournal"]["folded"]), 2, "both entries marked folded inside the ledger")
+        # (1): a recovery fold that would take a bucket below zero says so (the ledger restored from an older, smaller copy)
+        small = {"hours": {"%sT10" % DAY: {"usd": 1.0, "turns": 6, "bySid": {A: {"usd": 1.0}}}, "%sT11" % DAY: {"usd": 1.0, "turns": 1, "bySid": {A: {"usd": 1.0}}}},
+                 "days": {DAY: {"usd": 2.0, "turns": 7, "bySid": {A: {"usd": 2.0}}}}}
+        (state / "spend.json").write_text(json.dumps(small))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(rp.main(["--day", DAY, "--state", d, "--apply", "--no-backup"]), 0)
+        self.assertIn("note (recovery fold): hour %sT10 would go" % DAY, out.getvalue(), "the clamp inside the recovery is said")
+        self.assertIn("below zero; held at zero", out.getvalue())
+        self.assertEqual(json.loads((state / "spend.json").read_text())["hours"]["%sT10" % DAY]["usd"], 0.0)
+        # (2): the folded set is unbounded
+        many = rp.mark_folded({"repairJournal": {"folded": list(range(600))}}, [600.5])
+        self.assertEqual(len(many["repairJournal"]["folded"]), 601)
+        src = inspect.getsource(rp.main)
+        self.assertLess(src.index('journal_append(state, {"t": stamp_t, "phase": "rows"'), src.index('done = apply_to_turns(state / "turns.jsonl", p)'),
+                        "the journal entry precedes the rows replace")
 
     def test_a_fold_that_would_take_a_bucket_below_zero_is_said_not_hidden(self):
         spend = {"hours": {"%sT10" % DAY: {"usd": 1.0, "turns": 1, "bySid": {A: {"usd": 1.0}}}}, "days": {DAY: {"usd": 1.0, "turns": 1, "bySid": {A: {"usd": 1.0}}}}}

@@ -126,13 +126,14 @@ def journal_pending(state: Path, spend: dict, bad: list = None) -> list:
 
 
 def mark_folded(spend: dict, refs: list) -> dict:
-    """The fold's completion recorded inside the ledger (the last 500 refs kept)."""
+    """The fold's completion recorded inside the ledger. Unbounded (a few hundred small numbers a day): a cap dropped
+    the oldest ref while the journal kept its rows entry, and that entry read as pending again, a double debit."""
     rj = spend.setdefault("repairJournal", {}) if isinstance(spend.get("repairJournal"), dict) else spend.__setitem__("repairJournal", {}) or spend["repairJournal"]
     have = list(rj.get("folded") or [])
     for r in refs:
         if r not in have:
             have.append(r)
-    rj["folded"] = have[-500:]
+    rj["folded"] = have
     return spend
 
 
@@ -166,7 +167,8 @@ def fold_deltas(spend: dict, deltas: list, day: str, turns: list) -> tuple:
         else:
             take.append(dict(d, current=0.0, corrected=float(d["delta"]), name=d.get("name") or ""))
     p = {"day": day, "rows": take}
-    return apply_to_spend(spend, p), moved, skipped
+    out = apply_to_spend(spend, p)
+    return out, moved, skipped, list(p.get("notes") or [])   # the fold's notes ride out: a clamp here is said too (round five)
 
 
 def read_text(path: Path) -> str:
@@ -452,7 +454,7 @@ def apply_to_spend(spend: dict, p: dict) -> dict:
     return out
 
 
-def apply_to_turns(path: Path, p: dict) -> list:
+def apply_to_turns(path: Path, p: dict, write: bool = True) -> list:
     """turns.jsonl (and its predecessor) rewritten with each corrected row's usd, the kernel's figure kept as
     usdRecorded (a row corrected twice keeps the original); a restored row gets the kernel's figure back and loses its
     repair marks. Returns the plan rows actually rewritten (matched by sid, second and the figure the row held), so the
@@ -487,8 +489,9 @@ def apply_to_turns(path: Path, p: dict) -> list:
                     o["repairRule"] = REPAIR_RULE
                 done.append(c)
             out.append(json.dumps(o))
-        if not done:
-            continue                                  # nothing of the plan in this file: leave it untouched
+        if not done or not write:
+            continue                                  # nothing of the plan in this file, or a dry match (write False: the
+            #                                           caller journals exactly the rows the rewrite will touch, first)
         try:
             now_lines = f.read_text(encoding="utf-8").splitlines()
         except OSError:
@@ -617,13 +620,17 @@ def main(argv=None) -> int:
     # judges it afresh; before this the buckets moved for every planned row and a row the rewrite missed had its
     # delta folded again on the next run. The deltas are journaled between the two writes (low D): a failure there
     # leaves rows corrected and buckets unfolded, and the next run folds the journaled deltas first
-    done = apply_to_turns(state / "turns.jsonl", p)
-    missed = len(p["rows"]) - len(done)
+    # the rows the rewrite will find as planned are journaled BEFORE the rewrite (round five of the review): a death
+    # between the rows replace and a journal append left rows corrected, buckets unfolded and nothing for a later run to
+    # fold; an entry ahead of a rewrite that never happens is harmless (the recovery folds present less former: zero)
+    planned = apply_to_turns(state / "turns.jsonl", p, write=False)
     stamp_t = time.time()
     deltas = [{"sid": c["sid"], "t": c["t"], "hour": c["hour"], "owner": c["owner"], "keyed": c["keyed"], "name": c["name"],
-               "delta": round(c["corrected"] - c["current"], 6), "corrected": round(c["corrected"], 6)} for c in done]
+               "delta": round(c["corrected"] - c["current"], 6), "corrected": round(c["corrected"], 6)} for c in planned]
     if deltas:
         journal_append(state, {"t": stamp_t, "phase": "rows", "day": day, "deltas": deltas})
+    done = apply_to_turns(state / "turns.jsonl", p)
+    missed = len(p["rows"]) - len(done)
     fresh_text = read_text(sp)
     try:
         base = parse_spend(fresh_text)
@@ -638,17 +645,20 @@ def main(argv=None) -> int:
     if pending:
         n_folded = n_moved = n_skipped = 0
         for o in pending:
-            base, moved, skipped = fold_deltas(base, o["deltas"], str(o.get("day") or day), turns)   # the rows as the plan read them
+            base, moved, skipped, notes = fold_deltas(base, o["deltas"], str(o.get("day") or day), turns)   # the rows as the plan read them
             n_folded += len(o["deltas"]) - skipped; n_moved += moved; n_skipped += skipped
+            for n in notes:
+                sys.stdout.write("note (recovery fold): %s\n" % n)         # a clamp inside the recovery is said too (round five)
         sys.stdout.write("%d delta(s) from %d earlier run(s) whose bucket write did not complete were folded now%s%s\n"
                          % (n_folded, len(pending),
                             "; %d against the row's present figure, which moved since" % n_moved if n_moved else "",
                             "; %d skipped, their rows are gone" % n_skipped if n_skipped else ""))
     p2 = dict(p, rows=done)
     new_spend = apply_to_spend(base, p2)
-    for n in p2.get("notes") or []:
-        if "below zero" in n:
-            sys.stdout.write("note: %s\n" % n)
+    if fresh_text != spend_text:
+        for n in p2.get("notes") or []:               # the report above already said the plan's own notes; on a moved ledger the
+            if "below zero" in n:                     # fold ran on other figures, so its clamps are said once more
+                sys.stdout.write("note: %s\n" % n)
     mark_folded(new_spend, [o["t"] for o in pending] + ([stamp_t] if deltas else []))   # the completion rides the same write
     tmp = sp.with_name("spend.json.repair.tmp")
     tmp.write_text(json.dumps(new_spend), encoding="utf-8")
