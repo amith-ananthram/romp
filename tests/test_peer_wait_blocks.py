@@ -9,6 +9,7 @@ here on synthetic stores, postal logs and names (placeholder uuids, the notes-ap
   the text names the user (the manager relays); a standalone session's block stays the user's, exactly as before;
 - rows already filed convert once per boot; the manager debtor's escalation waits for its idle turn."""
 import contextlib
+import inspect
 import io
 import json
 import os
@@ -303,6 +304,18 @@ class CloserBlocks(_Peer):
         self.assertEqual(list(st["nodes"][step]["awaitingPeers"] or ()), [MANAGER])
 
 
+class RefusalInTheBrief(unittest.TestCase):
+    """A refused relay's note reaches the card: the block brief is fed the owed question with the note in brackets."""
+
+    def test_the_owed_question_carries_the_refusal(self):
+        self.assertEqual(jd._owed_why({"blockWhy": "which client?", "relayRefusal": "web could not be asked: no live session"}),
+                         "which client? (web could not be asked: no live session)")
+        self.assertEqual(jd._owed_why({"blockWhy": "which client?"}), "which client?", "no refusal, the why alone")
+        src = inspect.getsource(jd._distill_session)
+        self.assertIn("_owed_why(d)", src, "the several-blocks list feeds it")
+        self.assertIn("_owed_why(blkd[0])", src, "the lone block feeds it")
+
+
 class UsersFollowUp(_Peer):
     """The user's own follow-up on a delegated card (follow up pressed on the worker's card): a block after it is theirs,
     never a peer wait, never relayed; a follow-up older than the delegation changes nothing."""
@@ -476,7 +489,7 @@ class RelayEndToEnd(_RelayFixture):
         nd = jd.load_goals(WORKER)["nodes"][step]
         self.assertTrue(nd["blocked"], "the needs-you is back")
         self.assertIn("cannot move further without you", nd["blockWhy"])
-        self.assertIn("relay to web was refused", nd["relayRefusal"])
+        self.assertIn("web could not be asked", nd["relayRefusal"])
         self.assertNotIn("relayWanted", nd)
         self.assertEqual(nd["mt"], NOW, "bumped like every other block writer")
         self.assertEqual(nd["relayDone"]["outcome"], "refused", "the removal is a record the merge honours")
@@ -1362,13 +1375,15 @@ class MergeCarriesTheRelay(_Peer):
         mem = json.loads(json.dumps(st)); disk = json.loads(json.dumps(st))
         mem["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "q", "t": T0 + 400, "id": "mk-a", "attempts": 1, "unknownAt": NOW}
         disk["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "q", "t": T0 + 400, "id": "mk-a", "attempts": 2,
-                                              "unknownAt": NOW + 40, "pendingMid": "px-1", "pendingAt": NOW + 41, "pendingHost": "TESTHOST"}
+                                              "unknownAt": NOW + 40, "pendingMid": "px-1", "pendingAt": NOW + 41, "pendingHost": "TESTHOST",
+                                              "recallUnknownAt": NOW + 42}
         (jd.GOALDIR / (WORKER + ".json")).write_text(json.dumps(disk))
         jd._rebase_onto_disk(WORKER, mem)
         rw = mem["nodes"][step]["relayWanted"]
         self.assertEqual({k: rw[k] for k in jd.RELAY_TICK_KEYS},
-                         {"pendingMid": "px-1", "pendingAt": NOW + 41, "pendingHost": "TESTHOST", "unknownAt": NOW + 40, "attempts": 2})
-        self.assertEqual(jd.RELAY_TICK_KEYS, ("pendingMid", "pendingAt", "pendingHost", "unknownAt", "attempts"), "named once")
+                         {"pendingMid": "px-1", "pendingAt": NOW + 41, "pendingHost": "TESTHOST", "unknownAt": NOW + 40, "attempts": 2,
+                          "recallUnknownAt": NOW + 42})
+        self.assertEqual(jd.RELAY_TICK_KEYS, ("pendingMid", "pendingAt", "pendingHost", "unknownAt", "attempts", "recallUnknownAt"), "named once")
 
     def test_a_recall_done_on_the_disk_filters_the_holders_owed_list_though_the_disk_owes_none(self):
         st, top, step = self.store(delegated=True)
@@ -1620,6 +1635,42 @@ class SaverFlushesItsOwn(_RelayFixture):
         nd = jd.load_goals(WORKER)["nodes"][step]
         self.assertEqual([(d["mid"], d["outcome"]) for d in nd["relayRecalled"]],
                          [("px-ret-2", "carried: could not be withdrawn")], "a carried recall says so: the stale question reached the manager")
+
+    def test_an_owed_recall_never_loses_its_entry_to_the_live_markers_send(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "first question", T0 + 400)
+        self._save(st)
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "px-owe-1", "parked": "TESTHOST"})
+        self.assertEqual(km._relay_tick(NOW), 0)           # M1 handed to the far host
+        st = jd.load_goals(WORKER)
+        jd.record_verdict(st, st["nodes"][step], "romp", "awaiting", NOW + 5, why="", lift=True, end_ev=NOW + 5)
+        self._close(st, step, "second question", NOW + 60)   # M1 retired (a recall owed), M2 minted, one entry file
+        self._save(st)
+        km._bus_recall_relay = lambda sid, mid: "unknown"  # the bus is restarting: the recall cannot be asked
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "to": payload["to"]})
+        self.assertEqual(km._relay_tick(NOW + 70), 1, "M2's question goes out")
+        self.assertEqual(len(self._queue()), 1, "the entry is not spent while a recall is owed")
+        self.assertEqual(json.loads((jd._relay_queue_dir() / self._queue()[0]).read_text())["marker"], "recall", "it became the recall's own")
+        recalls = []
+        km._bus_recall_relay = lambda sid, mid: recalls.append(mid) or "withdrawn"
+        self.assertEqual(km._relay_tick(NOW + 70 + km.RELAY_UNKNOWN_HOLD), 0)
+        self.assertEqual(recalls, ["px-owe-1"], "the recall is asked again once the hold passed")
+        self.assertEqual(self._queue(), [], "and the recall's entry is spent once done")
+
+    def test_the_boot_pass_requeues_a_node_that_owes_recalls(self):
+        st, top, step = self.store(delegated=True)
+        st["nodes"][step]["relayRecall"] = [{"id": "mk-old", "peer": MANAGER, "pendingMid": "px-boot", "pendingHost": "TESTHOST"}]
+        st["rev"] = 3
+        (jd.GOALDIR / (WORKER + ".json")).write_text(json.dumps(st))   # recalls owed, no marker, no entry (a lost entry)
+        self.assertEqual(jd._requeue_relays_all(), 1)
+        entry = json.loads((jd._relay_queue_dir() / self._queue()[0]).read_text())
+        self.assertEqual((entry["marker"], entry["rev"]), ("recall", 3))
+        self.assertEqual(jd._requeue_relays_all(), 0, "idempotent")
+        recalls = []
+        km._bus_recall_relay = lambda sid, mid: recalls.append(mid) or "carried"
+        self.assertEqual(km._relay_tick(NOW), 0)
+        self.assertEqual(recalls, ["px-boot"])
+        self.assertEqual(self._queue(), [])
 
     def test_an_unknown_recall_owed_is_held_like_a_send(self):
         st, top, step = self.store(delegated=True)

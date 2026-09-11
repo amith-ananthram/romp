@@ -245,8 +245,10 @@ bounce's own time, so a follow-up of yours between the bounce and the tick
 outranks it; the refusal is noted beside the block, never in its words); a
 pending relay whose wait ended another way is withdrawn from the far host's
 outbox, and one the judge retired while it was parked is recalled the same
-way; a parked question completes only on the far host's delivered row, never
-on a later message; a dead worker's block is not relayed; each record lands
+way (its entry is never spent while the recall is owed, and the boot pass
+re-queues a node that owes one); a parked question completes only on the far
+host's delivered row, never on a later message; a refused relay's note reaches
+the card's brief beside the question it could not carry; a dead worker's block is not relayed; each record lands
 before its entry is spent; a send the bus answered late is never repeated
 (the bus answers the send it holds, and the tick holds off after an unknown
 outcome and reads the bus's row). A block filed again after the

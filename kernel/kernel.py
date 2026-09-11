@@ -3137,7 +3137,7 @@ def _relay_revert(store, nd, rw, err, now, ev_t=None):
     peer = str(rw.get("peer") or "")
     if jd.record_verdict(store, nd, "romp", "block", int(ev_t or now), why=str(rw.get("why") or "").strip()):
         nd["mt"] = int(now)
-    nd["relayRefusal"] = "a relay to %s was refused: %s" % (_name_of(peer) or peer[:8], str(err)[:160])
+    nd["relayRefusal"] = "%s could not be asked: %s" % (_name_of(peer) or peer[:8], str(err)[:160])
     _relay_settle(nd, rw, now, "relayDone", outcome="refused")
     _mark_views_dirty()
 
@@ -3351,7 +3351,12 @@ def _relay_store(sid, ents, now, alive_ids=None):
             jd.rollup_status(store, False)
             jd.save_goals(sid, store)                      # the record lands first; a raise here keeps the entry
         if spent:
-            _relay_spend(f, e)
+            nd = store["nodes"].get(str(e["nid"]))
+            if isinstance(nd, dict) and nd.get("relayRecall"):   # a recall still owed on this node (the bus could not be asked):
+                jd._relay_write_entry(sid, str(e["nid"]), "recall", int(store.get("rev") or 0))   # the entry becomes the
+                quiet = False                              #   recall's own, never spent with the marker's send (eighth review)
+            else:
+                _relay_spend(f, e)
     return n, quiet
 
 

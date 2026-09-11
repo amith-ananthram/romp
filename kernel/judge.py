@@ -12970,7 +12970,7 @@ def _relay_retire_marker(store, nd):
 
 
 RELAY_SETTLED_CAP = 8        # settled marker ids a node remembers (relaySettled), newest last
-RELAY_TICK_KEYS = ("pendingMid", "pendingAt", "pendingHost", "unknownAt", "attempts")   # the kernel's tick owns these
+RELAY_TICK_KEYS = ("pendingMid", "pendingAt", "pendingHost", "unknownAt", "attempts", "recallUnknownAt")   # the tick owns these
 #                                                                                        on a marker; the judge never writes them
 
 
@@ -13075,8 +13075,9 @@ def _relay_flush(fsid, store, pending):
 
 def _requeue_relays_all():
     """Once per boot: every node carrying relayWanted with no queue entry gets one (a marker whose entry was lost to a
-    failed write, a kernel restart between the publish and the flush, or a stale merge would otherwise wait forever).
-    Returns the number re-queued."""
+    failed write, a kernel restart between the publish and the flush, or a stale merge would otherwise wait forever),
+    and so does every node that owes recalls (relayRecall) with no entry, so a parked question retired by the judge is
+    withdrawn whatever became of its entry (the manager's eighth review). Returns the number re-queued."""
     n = 0
     for p in (sorted(GOALDIR.glob("*.json")) if GOALDIR.is_dir() else []):
         try:
@@ -13084,8 +13085,12 @@ def _requeue_relays_all():
         except Exception:
             continue
         for nid, nd in ((raw or {}).get("nodes") or {}).items():
-            if isinstance(nd, dict) and isinstance(nd.get("relayWanted"), dict) and not _relay_entry_path(p.stem, nid).exists():
+            if not isinstance(nd, dict) or _relay_entry_path(p.stem, nid).exists():
+                continue
+            if isinstance(nd.get("relayWanted"), dict):
                 n += 1 if _relay_write_entry(p.stem, nid, nd["relayWanted"].get("id") or "", (raw or {}).get("rev") or 0) else 0
+            elif nd.get("relayRecall"):                 # recalls owed with no marker: an entry brings the tick to them
+                n += 1 if _relay_write_entry(p.stem, nid, "recall", (raw or {}).get("rev") or 0) else 0
     return n
 
 
@@ -15812,6 +15817,16 @@ def review_boundary(nd):
     return b
 
 
+def _owed_why(nd):
+    """The owed question the block brief is fed for a blocked node: its blockWhy, and, when a relay of that question to
+    the peer that delegated the work was refused (relayRefusal, the kernel's note beside the block: nobody could be
+    asked), that note in brackets after it, so the brief can say why the decision came back to the user (the manager's
+    eighth review: the note was written and read by nothing)."""
+    why = str((nd or {}).get("blockWhy") or "")
+    ref = str((nd or {}).get("relayRefusal") or "").strip()
+    return "%s (%s)" % (why, ref) if ref else why
+
+
 def _distill_session(fsid, path, now):
     """Distill each newly-(re)resolved TOP goal of ONE session, COMPLETED and BLOCKED alike (the user
     2026-06-18). Gather the goal's full WORK history — the text of every segment in its trail and its whole
@@ -15998,8 +16013,8 @@ def _distill_session(fsid, path, now):
             proc_whys = [d.get("blockWhy") for d in blkd if procedural_block_why(d.get("blockWhy"))]
             proc_only = bool(blkd) and len(proc_whys) == len(blkd)
             blkd = [d for d in blkd if not procedural_block_why(d.get("blockWhy"))]
-            owed = ([(d.get("text", ""), d.get("blockWhy", "")) for d in blkd] if len(blkd) > 1
-                    else blkd[0]["blockWhy"] if blkd else "")
+            owed = ([(d.get("text", ""), _owed_why(d)) for d in blkd] if len(blkd) > 1
+                    else _owed_why(blkd[0]) if blkd else "")
             if proc_only:                              # no SUBSTANTIVE decision is owed — but a card in Blocked
                 # must still say where things stand (the user 2026-07-23: every blocked card presents a
                 # distilled summary; the bare red chip over silence left look-alike cards inconsistent). A
