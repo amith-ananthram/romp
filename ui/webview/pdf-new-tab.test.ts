@@ -106,7 +106,7 @@ test("wiring: every click on a PDF carries its gesture; modified → the tab, pl
   // never opens a tab (a relayed viewFile, a Reload: no gesture, the viewer). The gesture is read BEFORE the
   // host's relay (render.ts hands a plain click to the shell for the Files pane): a modified click on a PDF
   // takes its own tab whichever pane the plain click would have landed in.
-  assert.match(VIEW, /export function openFileClick\(ev: MouseEvent \| KeyboardEvent \| null \| undefined, path: string, sid\?: string \| null,\n\s*relay\?: \(path: string, sid: string \| null\) => void\): void \{\n  if \(wantsOwnTab\(ev\) && openPdfTab\(path, sid \?\? null\)\) return;\n  if \(relay\) \{ relay\(path, sid \?\? null\); return; \}\n  openFileView\(path, sid\);\n\}/);
+  assert.match(VIEW, /export function openFileClick\(ev: MouseEvent \| KeyboardEvent \| null \| undefined, path: string, sid\?: string \| null,\n\s*relay\?: \(path: string, sid: string \| null, frag: string \| null\) => void, frag\?: string \| null\): void \{\n  if \(wantsOwnTab\(ev\) && openPdfTab\(path, sid \?\? null\)\) return;\n  if \(relay\) \{ relay\(path, sid \?\? null, frag \?\? null\); return; \}\n  openFileView\(path, sid, \{ frag: frag \?\? null \}\);[^\n]*\n\}/);
   // no click site bypasses the gesture reader: the chat and the browser never call openFileView themselves
   assert.equal((RENDER.match(/openFileView\(/g) || []).length, 0, "render.ts opens files through openFileClick only");
   assert.equal((BROWSE.match(/openFileView\(/g) || []).length, 0, "file-browse.ts opens files through openFileClick only");
@@ -128,11 +128,11 @@ test("wiring: every click on a PDF carries its gesture; modified → the tab, pl
   assert.match(BROWSE, /list\.addEventListener\("auxclick", \(ev\) => \{[\s\S]*?if \(ev\.button !== 1\) return;[\s\S]*?const row = fileRowOf\(ev\);[\s\S]*?onAct\(row, ev\);/);
   assert.match(BROWSE, /if \(active\) \{ e\.preventDefault\(\); onAct\(active, e\); \}/, "Enter on a row carries its modifiers: Cmd/Ctrl+Enter on a PDF → its own tab");
   assert.match(BROWSE, /if \(row\.dataset\.act === "file"\) \{ openFileClick\(ev, p, curSid, openPick \?\? undefined\); return; \}/);   // the host's open, when it has one, sits UNDER the gesture (browse-route.test.ts)
-  assert.match(RENDER, /function openPath\(path: string, sid\?: string \| null, ev\?: MouseEvent \| null\): void \{[\s\S]*?const to = sid \|\| activeId \|\| null;[\s\S]*?openFileClick\(ev, path, to, route === "pane" \? \(\) => \{/);   // the gesture first, whichever pane the plain click lands in (the Files pane's relay is the fourth argument)
+  assert.match(RENDER, /function openPath\(path: string, sid\?: string \| null, ev\?: MouseEvent \| null, frag\?: string \| null\): void \{[\s\S]*?const to = sid \|\| activeId \|\| null;[\s\S]*?openFileClick\(ev, path, to, route === "pane" \? \(\) => \{/);   // the gesture first, whichever pane the plain click lands in (the Files pane's relay is the fourth argument)
   assert.match(RENDER, /function onMiddleClick\(a: HTMLElement, fn: \(e: MouseEvent\) => void\): void \{\n  a\.addEventListener\("mousedown", \(e\) => \{ if \(e\.button === 1\) e\.preventDefault\(\); \}\);\n  a\.addEventListener\("auxclick", \(e\) => \{ if \(e\.button !== 1\) return; e\.stopPropagation\(\); fn\(e\); \}\);/);
   assert.match(RENDER, /x\.addEventListener\("auxclick", \(e\) => e\.stopPropagation\(\)\);/, "a middle-click on the composer attachment's ✕ is inert, never the box's open");
   assert.equal((RENDER.match(/onMiddleClick\(/g) || []).length, 5, "the declaration and the four path pills: tool file, image path, path link, composer attachment");
-  assert.equal((RENDER.match(/openPath\([^)]*, e\)/g) || []).length, 8, "each pill passes its click AND its middle-click");
+  assert.equal((RENDER.match(/openPath\([^)]*, e(?:, a\.dataset\.frag \|\| null)?\)/g) || []).length, 8, "each pill passes its click AND its middle-click (the path link's two carry the section anchor, T351)");
 });
 
 test("the kernel serves a PDF inline WITH its name, so the tab is titled and a Save names the file", () => {

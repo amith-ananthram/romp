@@ -1563,6 +1563,100 @@ loads a checkout's kernel in-process and reports each builder's cost on
 real-sized data; two checkouts can run against one copy for a before-and-after
 comparison. Its module docstring is the reference.
 
+## The file preview popover
+
+Hovering a local file link in the chat (or focusing it from the keyboard) pops up
+a card with the rendered head of the file, or the section a `path#slug` link
+names, after a short dwell; it closes when the pointer leaves (with a grace to
+cross into the card), on Escape, on a scroll, on a click elsewhere and at every
+tab-strip rebuild. The card is the comment popover's card (its surface and its
+fractions of the pane) and is never draggable or resizable; the romp loader shows
+first and the text replaces it the moment it lands. "open" opens the full file
+viewer, scrolled to the section.
+
+**What a hover may fetch.** A hover is a gesture the user did not choose, so the
+popover is stricter than the viewer (whose own rule, that any path the agent
+named opens, is untouched). The kernel decides per link when it builds the
+message and ships the verdict as `pathPreview` beside `pathLinks`, a map from
+the message's token to the kind it may show: `markdown`, `image`, `code` or
+`pdf`. Every judgement is of the **real** path (a symlink is what it points at,
+and a link whose own name claims another kind than its target is refused; a hard
+link is another name for the same bytes and no path check can see its other
+names, so a `notes.md` hard-linked onto a `.env` passes the name rules and is
+caught only by the content belt below). A
+link absent from the map gets the text-only card (the path as words plus "open")
+and **no request**: a path outside the session's folder and the user's home, one
+the kernel could not verify, a secrets-shaped name (the `.env` family, `.netrc`,
+`.npmrc`, `.pypirc`, any name carrying `credential`, `token`, `secret` or
+`password`, `id_*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, key stores, and any file
+under `.ssh`, `.gnupg`, `.aws`, `.docker`, `.kube`, `.azure`, `.gcloud`,
+`.config/gh` or `.config/gcloud` in the home, matched without regard to case), a
+kind the card cannot show, or a file over the caps (2 MB of text, 50 MB of
+media). Under the name rules sits a content belt: a text shaped like a
+credential (a private-key block, a key or token assignment, a provider token, a
+JWT) is refused with "looks like a secret" and never cached. The belt reads the
+file's first 64 KB at load (so at warm time) and the served slice itself on the
+route, so a section past that mark is read too.
+
+**The slice route.** `GET /file?path=…&sid=…&slice=1[&anchor=slug]` answers JSON
+for a text kind: `kind`, `title` (the file's name), `text` (the file's head, or
+the section from the heading whose slug matches through the line before the next
+heading of the same or a higher level; capped at 64 KB, `truncated` when cut),
+`found` (false when the anchor names no heading: the head is served and the card
+says so in one line), `heading` (the section's own: level, text, slug, line),
+`size`, `mtimeNs`, `hit` (the slice came from the cache); the heading index
+stays on the kernel's side. The card stamps `data-render-ms` (the dwell's end to
+its rendered content) and `data-slice-hit` on itself, so the served test reads
+the latency off the card and pins the cached markdown case under 250 ms. For an image or
+a PDF the same route answers the metadata only; the bytes ride the plain route.
+A path the popover may not render answers 403 with `why` (the content belt
+included); a text kind whose bytes are not text answers 415. Heading
+slugs follow GitHub's rule, the same one the file viewer gives its headings
+(`md-links.ts`), duplicates numbered `-1`, `-2`; the two ports are pinned over
+`tests/fixtures/heading_slugs.json`.
+
+**Near-instant.** The kernel keeps the text of recently linked markdown and code
+files with their heading index, keyed on the path and its `mtime_ns` (a rewrite
+is a new entry and the old one goes), bounded to 64 entries and 8 MB, least
+recently read out first. The cache is warmed on the pusher's path: when the
+message builder verifies a markdown link in a message about to ship, the file is
+read and indexed then, so the hover's fetch is a hit. Never on a timer, never a
+watcher: the events are the message build and the hover. `GET /perf` reports the
+route under `fileSlice`: `hit`, `miss`, `bytes` served and `warm` (entries the
+builder filled ahead of a hover).
+
+**The content contract** (`ui/webview/file-preview.ts PreviewContent`). The card
+renders one shape whoever fills it, so another provider can land its answer in
+the same card:
+
+```
+{ kind: "markdown" | "section" | "image" | "code" | "pdf" | "text" | "term",
+  title: string, subtitle?: string,
+  body: { markdown?: string, html?: string, text?: string, url?: string, lang?: string },
+  note?: string,
+  open?: { label: string, path: string, frag?: string } }
+```
+
+Stage 1 fills it from the slice route (`markdown`, `section`, `code`) and the
+bytes route (`image` at its natural size capped to the card, `pdf` as its first
+page), or with the text-only card. A previewed document renders on the
+sanitizer's inert DOM and is stripped of every remote load there, before its
+nodes join the page: an image's `src` or `srcset`, a picture's sources, a video's
+poster or source, an audio, an SVG image, in any spelling the URL parser
+resolves to another origin (a protocol-relative `//host`, backslashes, a tab or
+newline anywhere in the value, which the browser deletes before it reads the
+URL). An image becomes its alt text and the rest go, so a hover never sends a
+request elsewhere; a previewed document's images load only from this kernel
+(the file route, a relative path, a data: URI). The card closes when the link it
+is anchored to leaves the document (a re-render, a tab pick), not on the tab
+strip's rebuilds. The markdown grammar renders `[[wikilinks]]`
+as their plain text and callout blockquotes (`> [!NOTE] …`) as blockquotes with
+the kind as a small label, in the chat and in the viewer alike. Pending the lab
+team's glossary format: a per-project glossary file whose headings (and their
+aliases) are linkified in assistant text, mail bodies and cards at render time,
+and a `GET /glossary/<term>` route answering `{title, markdown, source_path,
+anchor}` that fills the `term` kind of the same card.
+
 ## Browser-side performance telemetry
 
 The counters above say what the kernel spent. What the browser spent on the

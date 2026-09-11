@@ -99,7 +99,7 @@ test("userMd() renders through the breaks:true instance and the SAME sanitizer a
 
 test("the user bubble renders the user's OWN words with userMd, harness notes and everything else with md", () => {
   // the landed bubble: kind "user" → userMd; the harness-injected note sharing the branch → md
-  assert.match(RENDER, /bubble\.innerHTML = kind === "user" \? userMd\(ev\.md\) : md\(ev\.md\);\n\s*linkifyFileUris\(bubble, imgPaths, ev\.spacePaths, ev\.pathLinks, ev\.pathPins\);/);
+  assert.match(RENDER, /bubble\.innerHTML = kind === "user" \? userMd\(ev\.md\) : md\(ev\.md\);\n\s*linkifyFileUris\(bubble, imgPaths, ev\.spacePaths, ev\.pathLinks, ev\.pathPins, ev\.pathPreview\);/);
   assert.doesNotMatch(RENDER, /bubble\.innerHTML = md\(ev\.md\);/, "no user bubble left on the soft-wrap grammar");
   // the queued / optimistic bubble is the same message a beat earlier — same renderer, so the swap to the
   // landed bubble changes nothing on screen

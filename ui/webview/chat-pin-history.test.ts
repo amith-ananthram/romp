@@ -16,9 +16,9 @@ const PREVIEW = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview
 const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");
 
 test("pathPins ride the chat events as a sibling map and thread into every linkify pass", () => {
-  assert.match(RENDER, /pathLinks\?: Record<string, string>; pathPins\?: Record<string, string> \}\n  \| \{ kind: "assistant";/);
-  assert.match(RENDER, /pathLinks\?: Record<string, string>, pathPins\?: Record<string, string>\): void/);
-  const uses = RENDER.match(/linkifyFileUris\((?:body|bubble|full), [^)]*ev\.pathPins\)/g) || [];
+  assert.match(RENDER, /pathLinks\?: Record<string, string>; pathPins\?: Record<string, string>; pathPreview\?: Record<string, string> \}\n  \| \{ kind: "assistant";/);
+  assert.match(RENDER, /pathLinks\?: Record<string, string>, pathPins\?: Record<string, string>, pathPreview\?: Record<string, string>\): void/);
+  const uses = RENDER.match(/linkifyFileUris\((?:body|bubble|full), [^)]*ev\.pathPins, ev\.pathPreview\)/g) || [];
   assert.equal(uses.length, 3, "all three chat bodies thread the pins");
 });
 

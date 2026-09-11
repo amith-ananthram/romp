@@ -120,6 +120,7 @@ CENSUS = {
     "_patch_rows": ("pure", "over a structured patch"),
     "_path_links": ("sig", "pathlink", "a resolved token latches for the message's life; an unresolved one is retried, and the retry is the pathlink dep"),
     "_path_pins": ("sig", "pathlink", "the pins latched beside the links"),
+    "_path_previews": ("sig", "pathlink", "the preview popover's verdict per verified link (T351): a stat of each target beside the links, and it warms the cache; it moves only when the links move or a file appears, the pathlink dep"),
     "_postal_card_deps": ("sig", "postal"),
     "_postal_index": ("sig", "postal", "memoized on the log's identity"),
     "_queue_recallable": ("sig", "backend"),
