@@ -9802,7 +9802,9 @@ function renderCommentPopover(): void {
       // T356 (the user 2026-09-11): a thread's mail is off, both directions, until it is broken out; the popover
       // is the thread's whole surface, so it says so here
       const mail = el("div", "cmt-note cmt-mail");
-      mail.textContent = "Mail off: this thread neither sends nor receives peer mail until you break it out.";
+      const held = th.heldMail || 0;
+      mail.textContent = "Mail off: this thread neither sends nor receives peer mail until you break it out."
+        + (held ? " " + held + (held === 1 ? " message waits" : " messages wait") + " in its box and land when you do." : "");
       mail.title = "Peers cannot see or mail this thread, and its own mail is refused. Break out turns mail on.";
       pop.appendChild(mail);
     }
@@ -9873,9 +9875,13 @@ function renderCommentPopover(): void {
     const note = el("div", "cmt-note");
     note.textContent = "The discussion continues there.";
     pop.appendChild(note);
-    // the break-out flipped its mail on (T356): said once, here, where the user looks after breaking it out
+    // the break-out flipped its mail on (T356): said once, here, where the user looks after breaking it out — from the
+    // EFFECTIVE state the frame carries, so a mailbox the user toggled off since reads as off (the review's low)
     const mailOn = el("div", "cmt-note cmt-mail");
-    mailOn.textContent = "Its mail is on now: peers can reach it and it can send.";
+    const held = th.heldMail || 0;
+    mailOn.textContent = th.mailOff
+      ? "Its mailbox is off: the lane's mailbox toggle turns peer mail back on."
+      : "Its mail is on now: peers can reach it and it can send." + (held ? " " + held + (held === 1 ? " held message lands" : " held messages land") + " in a moment." : "");
     pop.appendChild(mailOn);
     const row = el("div", "cmt-actions");
     const open = el("button", "cmt-act") as HTMLButtonElement;

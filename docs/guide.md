@@ -404,10 +404,14 @@ agent works in the new folder and reads its `CLAUDE.md`.
 
 A comment thread's mail is off, both directions, until you break it out: peers
 cannot see or mail the thread, and its own mail is refused with a line saying
-so. The popover says "mail off" while it lasts, and the moment you break the
+so. The popover says "mail off" while it lasts (and how many messages wait in
+its box; they land within seconds of a break-out), and the moment you break the
 thread out it is a session like any other, mail on unless you toggle its
 mailbox off (the user 2026-09-11, after a thread received a manager's mail and
-acted as the manager).
+acted as the manager). Only peer mail is gated: what you type into the thread's
+box yourself, and plain text the kernel's own send route carries, is yours and
+still goes through; that is the human channel, by design, not a hole in the
+gate.
 
 A session started from another one joins its tags. Forking a session, breaking
 a comment thread out into its own session, and running `romp new` inside a
