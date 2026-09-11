@@ -62,6 +62,7 @@ class BootSettled(unittest.TestCase):
         km._mark_boot("firstServe")
         self.assertEqual(len(self._rows()), 1, "one mark alone appends nothing")
         km._mark_boot("reconcileDone")
+        km._mark_boot("attachDone")            # the row waits for the boot attaches too (2026-09-11)
         rows = self._rows()
         self.assertEqual(len(rows), 2)
         b = rows[-1]
@@ -73,6 +74,7 @@ class BootSettled(unittest.TestCase):
 
     def test_marks_land_in_either_order(self):
         km._mark_boot("reconcileDone")               # the backend builds lazily — order is not fixed
+        km._mark_boot("attachDone")            # the row waits for the boot attaches too (2026-09-11)
         self.assertEqual(self._rows(), [])
         km._mark_boot("firstServe")
         self.assertEqual(len(self._rows()), 1)
@@ -80,6 +82,7 @@ class BootSettled(unittest.TestCase):
     def test_a_fresh_install_row_carries_no_outage(self):
         km._mark_boot("firstServe")
         km._mark_boot("reconcileDone")
+        km._mark_boot("attachDone")            # the row waits for the boot attaches too (2026-09-11)
         b = self._rows()[-1]
         self.assertNotIn("outageS", b, "no previous cut row → no delta to claim")
 
@@ -87,6 +90,7 @@ class BootSettled(unittest.TestCase):
         km._mark_boot("firstServe")
         km._mark_boot("firstServe")
         km._mark_boot("reconcileDone")
+        km._mark_boot("attachDone")            # the row waits for the boot attaches too (2026-09-11)
         km._mark_boot("reconcileDone")
         self.assertEqual(len(self._rows()), 1, "one row per boot, however often the marks re-fire")
 

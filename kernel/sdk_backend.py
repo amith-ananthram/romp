@@ -9973,12 +9973,12 @@ class SdkBackend:
             # Compact each paid in full the reload the gate existed to avoid, leaving Skip as the only
             # option that did what the card said. Context is managed by hand for now. Every cut/queued
             # session resumes here, exactly as it did before the gate.
-            attach_first = [s for s in to_start if s in self._boot_attach_sids] + [s for s in to_start if s not in self._boot_attach_sids]
+            to_start = [s for s in to_start if s in self._boot_attach_sids] + [s for s in to_start if s not in self._boot_attach_sids]
             with self._boot_attach_lock:
                 self._boot_attach_pending = sum(1 for s in to_start if s in self._boot_attach_sids)
             if not self._boot_attach_pending:
                 self._boot_milestone("attachDone")       # nothing to attach: the phase is over before it began
-            for sid in attach_first:
+            for sid in to_start:                         # re-attaches first, then the cold launches
                 attach = sid in self._boot_attach_sids
                 # a RE-ATTACH (a live host holds the CLI) is a socket connect, first and on its own wider bound; a
                 # cold launch keeps the spawn stagger (the CPU burst the stagger exists for)

@@ -21876,7 +21876,7 @@ _BOOT_ATTACHED = threading.Event()                 # set at attachDone: every bo
 #                                                    judges' pass waits on this (bounded) so the census and the
 #                                                    attaches are not slowed by cold refolds in the same interpreter
 BOOT_JUDGE_HOLD_S = float(os.environ.get("ROMP_BOOT_JUDGE_HOLD_S", "8"))   # the bound on that wait
-BOOT_ROW_BACKSTOP_S = 30.0                         # the boot row is written without attachDone after this long
+BOOT_ROW_BACKSTOP_S = 30.0                         # the boot row is written without attachDone after this long (the pusher's tick)
 
 
 def _wait_boot_attached(timeout=None):
@@ -21938,8 +21938,6 @@ def _mark_boot(kind):
             write = _boot_row_due_locked()
         if kind == "attachDone":
             _BOOT_ATTACHED.set()
-        if kind == "reconcileDone":
-            _t = threading.Timer(BOOT_ROW_BACKSTOP_S, _boot_row_backstop); _t.daemon = True; _t.start()
         if write:
             _append_boot_settled(_BOOT_MARKS["firstServe"], _BOOT_MARKS["reconcileDone"])
     except Exception:
@@ -21956,16 +21954,21 @@ def _boot_row_due_locked():
     return False
 
 
-def _boot_row_backstop():
-    """BOOT_ROW_BACKSTOP_S after reconcileDone: write the row without attachDone if it never came."""
+def _boot_row_backstop(now=None):
+    """The pusher's tick (no thread of its own): BOOT_ROW_BACKSTOP_S after reconcileDone with attachDone still missing,
+    write the row without it (the row then says attachTimedOut). Idempotent; a no-op once the row is written."""
     try:
+        now = time.time() if now is None else now
         with _BOOT_MARKS_LOCK:
             if _BOOT_MARKS.get("_row") or "firstServe" not in _BOOT_MARKS or "reconcileDone" not in _BOOT_MARKS:
-                return
+                return False
+            if now - _BOOT_MARKS["reconcileDone"] < BOOT_ROW_BACKSTOP_S:
+                return False
             _BOOT_MARKS["_row"] = True
         _append_boot_settled(_BOOT_MARKS["firstServe"], _BOOT_MARKS["reconcileDone"])
+        return True
     except Exception:
-        pass
+        return False
 
 
 # ── going down (`romp down`) ─────────────────────────────────────────────────────
@@ -45396,6 +45399,10 @@ def _pusher_cycle_jobs(now, live_map, any_client):
         _persist_checkpoints(now)         # move (T323 stage 3): the next kernel folds the tails, not the files
     except Exception:
         sys.stderr.write("checkpoints: %s\n" % traceback.format_exc())
+    try:                                  # the boot row's backstop: written without attachDone once the bound has passed
+        _boot_row_backstop(now)
+    except Exception:
+        pass
     try:                                  # hitting a usage limit auto-engages the retry-pause (before the resume check)
         _auto_pause_on_limit()
     except Exception:

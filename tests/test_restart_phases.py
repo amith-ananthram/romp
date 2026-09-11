@@ -27,10 +27,9 @@ class BootMarks(unittest.TestCase):
         km._BOOT_ATTACHED.clear()
         self.rows = []
         self._p = mock.patch.object(km, "_append_restart_cut", lambda row: self.rows.append(row)); self._p.start()
-        self._t = mock.patch.object(km.threading, "Timer", lambda *a, **k: mock.Mock(start=lambda: None)); self._t.start()
 
     def tearDown(self):
-        self._p.stop(); self._t.stop()
+        self._p.stop()
         km._BOOT_MARKS.clear(); km._BOOT_ATTACHED.clear()
 
     def test_the_boot_row_waits_for_attach_done_and_carries_the_phases(self):
@@ -50,23 +49,26 @@ class BootMarks(unittest.TestCase):
         km._mark_boot("attachDone"); km._mark_boot("firstServe")
         self.assertEqual(len(self.rows), 1, "idempotent: one row per boot")
 
-    def test_the_backstop_writes_the_row_without_attach_done_and_says_so(self):
+    def test_the_backstop_tick_writes_the_row_without_attach_done_after_the_bound_and_says_so(self):
         km._mark_boot("firstServe"); km._mark_boot("reconcileDone"); km._mark_boot("censusDone")
         self.assertEqual(self.rows, [])
-        km._boot_row_backstop()
+        t0 = km._BOOT_MARKS["reconcileDone"]
+        self.assertFalse(km._boot_row_backstop(t0 + km.BOOT_ROW_BACKSTOP_S / 2), "inside the bound: the tick waits")
+        self.assertEqual(self.rows, [])
+        self.assertTrue(km._boot_row_backstop(t0 + km.BOOT_ROW_BACKSTOP_S + 1))
         self.assertEqual(len(self.rows), 1)
         self.assertTrue(self.rows[0].get("attachTimedOut"))
         self.assertIn("censusS", self.rows[0]); self.assertNotIn("attachS", self.rows[0])
         km._mark_boot("attachDone")
         self.assertEqual(len(self.rows), 1, "a late attachDone writes no second row")
-        km._boot_row_backstop()
+        self.assertFalse(km._boot_row_backstop(t0 + 10 * km.BOOT_ROW_BACKSTOP_S))
         self.assertEqual(len(self.rows), 1)
 
-    def test_the_backstop_is_armed_at_reconcile_done(self):
-        armed = []
-        with mock.patch.object(km.threading, "Timer", lambda s, fn: armed.append((s, fn)) or mock.Mock(start=lambda: None)):
-            km._mark_boot("reconcileDone")
-        self.assertEqual([(s, fn.__name__) for s, fn in armed], [(km.BOOT_ROW_BACKSTOP_S, "_boot_row_backstop")])
+    def test_the_backstop_rides_the_pusher_tick_not_a_thread(self):
+        src = open(os.path.join(BIN, "romp-kernel")).read()
+        self.assertIn("        _boot_row_backstop(now)\n", src, "the pusher's tick jobs call it")
+        self.assertNotIn("threading.Timer(BOOT_ROW_BACKSTOP_S", src, "no timer thread: nothing outlives a boot (T282)")
+        self.assertEqual(len(threading.enumerate()), len([t for t in threading.enumerate() if not t.name.startswith("boot-row")]))
 
 
 class ProducerGate(unittest.TestCase):
