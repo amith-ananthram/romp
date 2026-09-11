@@ -149,6 +149,7 @@ CENSUS = {
     "_session_cwd": ("sig", "cwd", "the names entry's cwd, else the transcript's stamp"),
     "_session_flag": ("sig", "flags"),
     "_postal_isolated": ("sig", "flags", "the effective mail state: the mailbox flag with its legacy twin (flags), and a comment thread's default read from its reg's threadOf through _thread_reg (reg) (T356)"),
+    "_mail_off_why_k": ("sig", "flags", "the reason behind _postal_isolated: the record's readability and threadOf (reg), then the mailbox flag with its legacy twin (flags) (T356)"),
     "_session_meta": ("pure", "over the transcript's records, memoized by record identity (transcript)"),
     "_session_retry_suppressed": ("sig", "retry"),
     "_session_working": ("sig", "downtime", "over the turns, and the host suspensions recorded since boot"),

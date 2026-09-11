@@ -1274,6 +1274,11 @@ def _postal_off(sid):
     can't send, and can't receive."""
     return bool(_mail_off_why(sid))
 
+ISOLATION_SENDER = ("isolation: YOUR OWN mailbox is OFF. This session is in postal isolation (its mailbox icon is toggled off "
+                    "on its timeline lane), so it can't send OR receive any mail. This is NOT the recipient's mailbox — the "
+                    "recipient is fine; nothing was sent. To fix, ask the USER to toggle THIS session's mailbox back on in "
+                    "the timeline, then retry. When you relay this, say it's YOUR mailbox that's off, not theirs.")
+
 UNREADABLE_REG_SENDER = ("isolation: YOUR OWN mail is held because this session's record (its entry under the kernel's sdk/ "
                          "directory) cannot be read, so the bus cannot tell what kind of session this is. Mail to and from it is "
                          "held until the record is repaired. Nothing was sent, and this is final: do not route around it. Tell "
@@ -2478,12 +2483,7 @@ class Handler(BaseHTTPRequestHandler):
             if why_off == "unreadable":            # its own words: never the thread diagnosis for a corrupt record
                 return self._send({"error": UNREADABLE_REG_SENDER}, 403)
             if why_off:                            # the sender is in isolation → sending is disabled
-                return self._send({"error": "isolation: YOUR OWN mailbox is OFF. This session is in postal "
-                                   "isolation (its mailbox icon is toggled off on its timeline lane), so it "
-                                   "can't send OR receive any mail. This is NOT the recipient's mailbox — the "
-                                   "recipient is fine; nothing was sent. To fix, ask the USER to toggle THIS "
-                                   "session's mailbox back on in the timeline, then retry. When you relay this, "
-                                   "say it's YOUR mailbox that's off, not theirs."}, 403)
+                return self._send({"error": ISOLATION_SENDER}, 403)
             # ONE resolution step for every case (self, ambiguous, isolated, relayed, unknown) —
             # see resolve_recipient. A name that answers to more than one live session is refused
             # here, not tiebroken.
@@ -5108,10 +5108,11 @@ def cli_send(argv):
         sys.stderr.write("[romp mail] %s\n" % _unreachable_hint()); return 1
     mid, me = _self_identity()
     own = _mail_off_why(mid) if mid else ""
-    if own in ("thread", "unreadable"):
-        # the CALLER's own identity is judged before any --from label substitutes a synthetic one (the review's low
-        # on this change: --from was a door around the thread's own-send refusal, the incident's shape)
-        sys.stderr.write("[romp mail] %s\n" % (THREAD_MAIL_OFF_SENDER if own == "thread" else UNREADABLE_REG_SENDER))
+    if own:
+        # the CALLER's own identity is judged before any --from label substitutes a synthetic one, for every closed
+        # door (the review: --from was a door around the thread's own-send refusal, the incident's shape; then around
+        # a mailbox the user toggled off too)
+        sys.stderr.write("[romp mail] %s\n" % {"thread": THREAD_MAIL_OFF_SENDER, "unreadable": UNREADABLE_REG_SENDER}.get(own, ISOLATION_SENDER))
         return 1
     if frm_label:
         me, mid = frm_label, "ext:" + frm_label

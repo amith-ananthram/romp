@@ -30,16 +30,21 @@ test("the popover says the thread's mail is off, and the promoted view says it i
 });
 
 test("the tab hover and the Sessions pane show a session's mail state", () => {
-  assert.match(RENDER, /rows\.push\(\["Mail", s\.postalServiceOff \? "off: this session neither sends nor receives peer mail" : "on"\]\);/);
+  assert.match(RENDER, /rows\.push\(\["Mail", !s\.postalServiceOff \? "on"\s*\n\s*: s\.mailOffWhy === "unreadable" \? "held: this session's record cannot be read, so mail waits until it is repaired"\s*\n\s*: s\.mailOffWhy === "thread" \? "off until the thread is broken out"\s*\n\s*: "off: this session neither sends nor receives peer mail"\]\);/,
+               "the tab hover says which door is closed");
+  assert.match(RENDER, /mailOffWhy: \("mailOffWhy" in msg\) \? String\(msg\.mailOffWhy \|\| ""\) : \(prev \? prev\.mailOffWhy : undefined\),/, "the reason rides the session frame");
+  assert.match(FLEET, /mo\.textContent = s\.mailOffWhy === "unreadable" \? "mail held" : "mail off";/, "the Sessions pane tag says held for an unreadable record");
   assert.match(FLEET, /postalServiceOff\?: boolean;/, "the Sessions pane row type carries it");
-  assert.match(FLEET, /if \(s\.postalServiceOff\) \{[\s\S]*?const mo = el\("span", "fl-mail-off"\);\s*\n\s*mo\.textContent = "mail off";/);
+  assert.match(FLEET, /if \(s\.postalServiceOff\) \{[\s\S]*?const mo = el\("span", "fl-mail-off"\);\s*\n\s*mo\.textContent = s\.mailOffWhy === "unreadable" \? "mail held" : "mail off";/);
   assert.match(CSS, /\.fl-mail-off \{/);
 });
 
 test("the kernel and the bus derive the same default from the thread's reg and the fresh key", () => {
   assert.match(KERNEL, /def _thread_mail_off\(sid\):[\s\S]*?if not sid or not _thread_reg\(sid\)\.get\("threadOf"\):\s*\n\s*return False\s*\n\s*f = _session_flags\(\)\.get\(sid\)\s*\n\s*return not \(isinstance\(f, dict\) and f\.get\("threadMail"\) is True\)/,
                "literal True only (the flip-a-default rule)");
-  assert.match(KERNEL, /def _postal_isolated\(sid\):[\s\S]*?return _thread_mail_off\(sid\) or bool\(_session_flag\(sid, "postalServiceOff"\) or _session_flag\(sid, "postalOff"\)\)/);
+  assert.match(KERNEL, /def _mail_off_why_k\(sid\):[\s\S]*?if _reg_unreadable\(sid\):\s*\n\s*return "unreadable"\s*\n\s*if _thread_mail_off\(sid\):\s*\n\s*return "thread"\s*\n\s*return "isolation" if \(_session_flag\(sid, "postalServiceOff"\) or _session_flag\(sid, "postalOff"\)\) else ""/,
+               "the kernel's reasons: unreadable first (the bus holds everything for it), then the thread default, then the mailbox flag");
+  assert.match(KERNEL, /def _postal_isolated\(sid\):[\s\S]*?return bool\(_mail_off_why_k\(sid\)\)/);
   assert.match(KERNEL, /"mailOff": bool\(_postal_isolated\(tsid\)\),/, "the comments frame carries it");
   assert.match(KERNEL, /"postalServiceOff": _postal_isolated\(m\["id"\]\),/, "the Sessions pane rows carry it");
   assert.match(POSTAL, /t = _thread_of\(sid\)\s*\n\s*if t == THREAD_REG_UNREADABLE:\s*\n\s*return "unreadable"[^\n]*\n\s*if t and not \(isinstance\(f, dict\) and f\.get\("threadMail"\) is True\):\s*\n\s*return "thread"/,
