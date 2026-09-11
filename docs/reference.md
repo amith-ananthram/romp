@@ -2472,12 +2472,15 @@ before this rule wrote none) records nothing for that first result, since its
 total is the lifetime's and the turn's share is unknowable; the kernel log says
 so, and the watermark is written from there. The replay of a dead host's
 journal tail seeds the same way for the dead CLI before it drains. A result the
-attach's replay hands over again folds nothing, decided from the journal
-position the transport tracks (a record before the offset the host's hello
-named as its next is a replay, and a replay at or below the offset acknowledged
-at the attach, or at or below the watermark, is one the ledger already holds;
-its turn row says `redelivered`); a live total below the watermark is a counter
-reset the kernel did not see and folds whole, as before. The attach flag lives
+attach's replay hands over again folds nothing, whatever its total, decided
+from the record's own journal position: the transport tags each result record
+with its offset as it reads it, the fold pops the tags in order (the SDK's
+buffered reader runs a record ahead, so the transport's current offset is
+never the handled record's), and a record before the offset the host's hello
+named as its next is a replay; its turn row says `redelivered` and carries
+`journalOffset`. A live total below the watermark is a counter reset the kernel
+did not see and folds whole, as before. An orphan journal's replay keeps the
+dead CLI's watermark as its line: at or below it was folded, above it was not. The attach flag lives
 one connect, so a rollback to hosts off records a fresh child's first turn in
 full, and a `/clear` as the first turn after an attach retires the pending seed
 so the zeroed counter stands. Each `turns.jsonl` row carries

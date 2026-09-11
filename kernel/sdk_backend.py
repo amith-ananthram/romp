@@ -6763,6 +6763,9 @@ class SdkSession:
             row["cumulativeUsd"] = round(float(cum), 6)
         if getattr(self, "_turn_redelivered", False):
             row["redelivered"] = True                      # a replayed result the ledger already held: folded nothing (T354)
+        jo = getattr(self, "_turn_journal_offset", None)
+        if isinstance(jo, int) and jo >= 0:
+            row["journalOffset"] = jo                      # the host journal record this result came from
         bl = getattr(self, "_turn_baseline", None)        # a first result's baseline: fresh, seeded, attach-unknown (T354)
         if isinstance(bl, str) and bl:
             row["spendBaseline"] = bl
@@ -6878,6 +6881,7 @@ class SdkSession:
         self._last_usage_totals = {}  # and its cumulative token counters
         self._spend_first_result = True
         self._spend_baseline = "fresh"
+        self._replay_cli = ""         # a dead CLI's replay is over once a connect seeds
         if getattr(self, "_host_is_attach", False) and getattr(self, "_host", None) is not None:
             # a host ATTACH (T315), and only with the host transport in hand (the flag alone is not trusted, M1 of
             # 1450's review): the CLI process SURVIVED the kernel, so its counters continued and its first
@@ -6908,7 +6912,8 @@ class SdkSession:
         c = (hello or {}).get("cli") if isinstance(hello, dict) else None
         if isinstance(c, dict) and c.get("pid"):
             return "%s:%s" % (c.get("pid"), c.get("start"))
-        return ""
+        return str(getattr(self, "_replay_cli", "") or "")   # an orphan replay: the dead CLI the seed named, so the
+        #                                                       watermark it persists stays under that identity
 
     def _seed_for_dead_cli(self, cli: str) -> None:
         """Before a dead host's journal tail is replayed (T354 review, M7): its result rows carry that CLI's cumulative
@@ -6920,6 +6925,7 @@ class SdkSession:
         self._last_usage_totals = {}
         self._spend_first_result = True
         self._spend_baseline = "attach-pending"
+        self._replay_cli = str(cli or "")
         self._seed_from_reg_cost_state(cli=cli, dead=True)
 
     def _seed_from_reg_cost_state(self, cli=None, dead: bool = False) -> bool:
@@ -6950,33 +6956,38 @@ class SdkSession:
                           problem=False)
         return False
 
-    def _spend_redelivered(self, total) -> bool:
-        """Is this result one an earlier kernel already folded? Decided from the host transport's journal position
-        (T354, the round-two review of the kernel fix): the record being handled sits at the transport's ack offset
-        (the transport advances it as it hands each record over), the host's hello names the journal's next offset at
-        the attach (records before it are the replay), and an orphan journal's reader replays only. A replay at or
-        below the offset acknowledged when the transport was made was handed to an earlier kernel; a replay at or
-        below the watermark was folded by the kernel that persisted it (hostAck lags the watermark by up to a second).
-        A live record is never a redelivery, whatever its total."""
+    def _spend_result_tag(self):
+        """The journal tag the host transport queued for the result being handled (T354, round four of the fix's
+        review): {"offset", "replay"}, popped in order, one per result. None for a plain kernel child, or a hosted
+        session whose transport queued none (a result the transport never saw). The consumer reads the transport
+        through the SDK's buffered stream a record ahead, so the transport's CURRENT offset is never the handled
+        record's own; the tag is."""
         t = getattr(self, "_host", None)
-        if t is None:
-            return False
+        tags = getattr(t, "result_tags", None) if t is not None else None
+        if not tags:
+            return None
         try:
-            pos = int(getattr(t, "ack_offset", -1))
-        except (TypeError, ValueError):
+            return tags.popleft()
+        except (IndexError, AttributeError):
+            return None
+
+    def _spend_redelivered(self, tag, total) -> bool:
+        """Is this result one an earlier kernel already folded? From the record's own journal position (round four of
+        1450's review): a replayed record (its offset before the journal's next at the attach) folds nothing, moves no
+        watermark and marks its row, WHATEVER its total, since the kernel that died folded what it saw and the ack it
+        left lags by at most a second; a live record is never a redelivery, and a live total below the watermark folds
+        whole as a counter reset. An orphan journal's replay (the dead-CLI seed in hand, no kernel ever saw the tail
+        past the ack) keeps the watermark comparison: at or below the dead CLI's watermark was folded, above it was
+        not."""
+        if tag is None:
             return False
-        hello = getattr(t, "hello", None)
-        j = hello.get("journal") if isinstance(hello, dict) and isinstance(hello.get("journal"), dict) else None
-        nxt = j.get("next") if j else None
-        replay_only = getattr(t, "journal_dir", None) is not None and hello is None
-        in_window = replay_only or (isinstance(nxt, (int, float)) and pos < nxt)
-        if not in_window:
+        if not tag.get("replay"):
             return False
-        try:
-            attach_ack = int(getattr(t, "attach_ack", -1))
-        except (TypeError, ValueError):
-            attach_ack = -1
-        return pos <= attach_ack or float(total) <= float(self._last_cost_total)
+        t = getattr(self, "_host", None)
+        orphan = getattr(t, "journal_dir", None) is not None and getattr(t, "hello", None) is None
+        if orphan:
+            return float(total) <= float(self._last_cost_total)
+        return True
 
     def _persist_cost_state(self, total) -> None:
         """The watermark on the registry, every result (T354): the CLI's cumulative total, the token watermarks and
@@ -6984,7 +6995,8 @@ class SdkSession:
         kernel's own file (hostAck lives there too); a failed write costs the seed, never the fold."""
         try:
             self.backend._update_reg(self.sid, costState={"total": float(total), "tokens": dict(self._last_usage_totals),
-                                                           "cli": self._cli_ident(), "t": int(time.time())})
+                                                           "cli": self._cli_ident(), "t": int(time.time()),
+                                                           "session": str(getattr(self, "_spend_session_id", "") or "")})
         except Exception as e:
             self.backend._log("spend (%s): costState write failed: %s" % (self.name, e), problem=False)
 
@@ -7498,7 +7510,9 @@ class SdkSession:
                     # is one the ledger already holds. A LIVE total below the watermark is a counter reset (a /clear
                     # the kernel did not see, a resumed cost-state seed against a print-mode CLI) and folds whole, as
                     # it always did; read from the total alone, a reset latched the session at $0 for the process's life
-                    duplicate = self._spend_redelivered(total)
+                    self._spend_session_id = str(getattr(msg, "session_id", "") or "")   # the CLI's session epoch (a /clear moves it), kept beside the watermark
+                    tag = self._spend_result_tag()
+                    duplicate = self._spend_redelivered(tag, total)
                     if unknown or duplicate:
                         delta = 0.0       # unknown: the lifetime's total, this turn's share unknowable; duplicate: already folded
                     else:
@@ -7520,6 +7534,7 @@ class SdkSession:
                     self._turn_cumulative = float(total)          # the turn row carries the CLI's own cumulative (T354)
                     self._turn_baseline = baseline if first else None
                     self._turn_redelivered = duplicate            # the turn row says so (a flag the repair can trust)
+                    self._turn_journal_offset = tag.get("offset") if tag else None
                     self._turn_spend = (delta, turn_u)   # for the turn ledger row the finally writes (T304)
                     self._persist_cost_state(self._last_cost_total)   # the watermark the next kernel's attach seeds from (T354)
                     self.backend._record_spend(delta, turn_u, keyed=self.api_key_auth,
@@ -7568,6 +7583,7 @@ class SdkSession:
                 self._turn_cumulative = None
                 self._turn_baseline = None
                 self._turn_redelivered = False
+                self._turn_journal_offset = None
                 self._fed_t = None               # the turn's feed stamps are spent (see _turn_ledger_row)
                 self._first_out_t = None
                 # THE SETTLE — everything that makes the turn over for the kernel — runs whatever the
