@@ -127,8 +127,11 @@ class WarmTheCards(P.Harness):
                                                                         {"id": "d", "kind": "handoff", "status": "open", "anchorUuid": deep}]}]}
         self.assertEqual(km._card_anchors(feed), [(SID, tail_anchor)], "a completed card's rows, a done row and a handoff row do not count")
         self.assertEqual(km._warm_history_pages(feed, NOW, {}), 0, "a tail anchor is resident already")
+        self.assertEqual(km._WARM_MEMO["anchors"], tuple(km._card_anchors(feed)), "a resolved board with every anchor in the tail SETTLES (an empty set)")
+        self.assertEqual(km._warm_history_pages(feed, NOW, {}), 0)
+        self.assertEqual(km._PAGE_STATS["warmCycles"], 2, "…and the next cycle is the probe alone")
         self.assertEqual(km._warm_history_pages({"type": "feed", "asks": []}, NOW, {}), 0, "no anchors: no cycle")
-        self.assertEqual(km._PAGE_STATS["warmCycles"], 1)
+        self.assertEqual(km._PAGE_STATS["warmCycles"], 2)
 
     def test_a_slow_pusher_stands_down_and_the_next_cycle_in_budget_warms(self):
         whole, m = self._restored()
@@ -241,6 +244,27 @@ class WarmTheCards(P.Harness):
         src = open(os.path.join(P.BIN, "romp-kernel")).read()
         fn = src[src.index("def _warm_history_pages("):src.index("def _turn_of_uuid(")]
         self.assertLess(fn.index("WARM_SKIP_MS:"), fn.index('_WARM_MEMO["anchors"]:'), "the stand-down precedes the probe")
+
+    def test_a_page_two_windows_share_is_counted_once_in_the_sets_bytes(self):
+        """The follow-up's low: the page bound treated a shared page as free while the byte count added it twice, closing the set early."""
+        whole, m = self._restored(turns=600, compact_every=150)
+        floor = m["floor"]
+        turns = km._parse(self.leaf, SID, NOW)["turns"]
+        first = lambda j: next(a["uuid"] for a in turns[j]["atoms"] if a.get("uuid"))
+        page = km._chat_history_page(SID, floor - km.PAGE_TURNS, floor, NOW)
+        with km._page_lock:
+            page_bytes = max(b for _, b in km._PAGE_CACHE.values())
+        saved = km._PAGE_CACHE_BYTES
+        km._PAGE_CACHE_BYTES = page_bytes * 5                        # half the bound: two and a half pages
+        try:
+            # two anchors in one window (the same two pages) and a third in another: with the shared pages counted once the
+            # set holds two pages after the first two anchors, so the third window is admitted; counted twice it was closed
+            feed = self._feed(self._card([first(8), first(9), first(40)]))
+            n = km._warm_history_pages(feed, NOW, {})
+            self.assertEqual(n, 4, "both windows rendered: four pages")
+            self.assertEqual(km._PAGE_STATS["warmPending"], 0)
+        finally:
+            km._PAGE_CACHE_BYTES = saved
 
     def test_the_window_is_two_aligned_pages_around_the_anchor(self):
         w = km._window_turns

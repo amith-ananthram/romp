@@ -17154,8 +17154,20 @@ def _rename_session(sid, name):
 
 
 def _num(x):
+    """A backend row's `since` as an epoch int, else None. A float string parses too, truncated
+    (2026-09-11): the Codex backend stamps since = time.time() and ships it raw (the SDK backend ships
+    str(int(...))), and the SDK backend's dormant read serves the state log's LAST record, whose
+    machineCut and resume-fork lines carry a float t. The digits-only test read every such since as
+    None, so _idle_faded never fired: a Codex session idle past FADED_S stayed a solid "ready" in the
+    chat tab and the timeline lane while every idle SDK tab and lane dimmed. Non-numbers, nan and inf
+    stay None."""
     x = (x or "").strip()
-    return int(x) if x.lstrip("-").isdigit() else None
+    if x.lstrip("-").isdigit():
+        return int(x)
+    try:
+        return int(float(x))
+    except (ValueError, OverflowError):
+        return None
 
 
 # One liveness snapshot per PUSHER CYCLE (the 2026-08-10 CPU fix). Every Sessions.live() read sweeps the
@@ -27501,7 +27513,9 @@ def _ledger_memo_report():
 # only draws a window) and streams OLDER history in on scroll-back, WIRE_CHUNK events per `loadOlder` request.
 # The build itself is unchanged (every session still builds its full events + ledger — so the Fleet ledger
 # that rides the chat builds is intact); only what crosses the wire is trimmed.
-WIRE_TAIL = 250                                  # events shipped on a full chat send; older streams in on scroll-back
+WIRE_TAIL = 250                                 # events shipped on a full chat send; older streams in on scroll-back
+REATTACH_KEYS = 512                              # the newest resident keys a proto-2 client sends with its re-attach ask
+REATTACH_KEYS_CLIENTS = 16                       # sessions whose posted keys one client may hold at once (the oldest dropped)
 WIRE_CHUNK = 250                                 # events per loadOlder (chatHead) response
 
 
@@ -36528,6 +36542,399 @@ def _series_index(hour_key, h0):
         return None
 
 
+# ── the SPEND GUARD (T350, the user 2026-09-11, after a team's review panels cost thousands of dollars in an hour) ──
+# A session-wide watch over each session's INSTANTANEOUS spend. Every pusher cycle reads each live session's rate over
+# the last SPEND_GUARD_WINDOW_S seconds, scaled to an hour, from data the kernel already holds: the record cache the
+# pusher serves the leaf transcript from (em._read_jsonl_incremental), plus the agent transcripts beside the leaf
+# (`<leaf stem>/subagents/*.jsonl`, the subagents and workflow agents the session fanned out; only the files that
+# changed inside the window are read), each assistant record priced by the same table the cost view uses (tokens by
+# _price_for; a response logged more than once, one per content block, counts once, at its largest usage row).
+# Over the ceiling, once per crossing: the session is INTERRUPTED (the Stop button's road, so the fan-out ends now,
+# not after the model reads a message), handed ONE message in the user's voice (no romp vocabulary; the voice test
+# renders it), every connected dashboard gets a warn toast naming the session, the rate and the moment, and one
+# session-events row (kind spend.ceiling) is filed through problem_row, so the kernel log and the error center carry it
+# and restart-metrics counts it. The crossing is the EVENT (CLAUDE.md: cards move on new information, never on a
+# per-build flap): the latch holds until the rate falls under SPEND_GUARD_REARM of the ceiling, then a cleared row
+# (spend.ceiling.cleared) and toast say so and the guard re-arms. The ceiling is a bare-value file under the state
+# directory (`spend-ceiling-usd-per-hour`, like session-hosts), read at each check: 1000 with no file, 0 disables.
+SPEND_CEILING_SETTING = "spend-ceiling-usd-per-hour"
+SPEND_CEILING_DEFAULT = 1000.0
+SPEND_GUARD_WINDOW_S = 600          # the sliding window the rate is read over
+SPEND_GUARD_REARM = 0.5             # the latch re-arms once the rate is under this share of the ceiling
+SPEND_GUARD_MEMO_SLACK_S = 60       # a file's window rows are scanned this much further back than the window, so the
+#                                     memo serves the next cycles' (later) windows without a re-scan
+SPEND_GUARD_LATCH_MAX = 1000        # latch entries kept for sessions no longer live (the oldest go first)
+_SPEND_GUARD = {}                   # sid -> {"over": bool, "t": the crossing (or clearing) epoch, "rate": $/h then}
+_SPEND_GUARD_SEEDED = [False]       # the latch was read back from the ledger once this kernel life
+_SPEND_ROWS_CACHE = {}              # file -> ((mtime, size, base), floor, [(t, usd), ...], last use): the window rows, memoized on the stamp
+SPEND_GUARD_ROWS_CACHE_MAX = 4000   # window-row memo entries kept; over it the least recently used go (a kernel life sees
+#                                     thousands of finished agent files, each a window row list nobody asks for again)
+SPEND_GUARD_TREE_RESCAN_S = 30      # a COLD agent file (idle since before the window's floor) is statted again this often,
+#                                     not every cycle; a hot one every cycle
+_SPEND_TREE_CACHE = {}              # leaf -> {"dirs": {dir: mtime}, "files": {path: mtime}, "full": epoch of the last full
+#                                     stat pass, "seen": epoch}: the session's subagents tree, watched by directory mtimes
+
+
+def _spend_ceiling():
+    """The ceiling in dollars an hour: the setting file's number; SPEND_CEILING_DEFAULT with no file, an empty one, a
+    value that is not a number, or one that is not a finite non-negative number (nan, inf, a negative); exactly 0
+    disables the guard."""
+    raw = jd._state_str(SPEND_CEILING_SETTING, "")
+    if not raw:
+        return SPEND_CEILING_DEFAULT
+    try:
+        v = float(raw)
+    except ValueError:
+        return SPEND_CEILING_DEFAULT
+    if not math.isfinite(v) or v < 0:
+        return SPEND_CEILING_DEFAULT
+    return v
+
+
+def _spend_tree_list_dir(d, m, known):
+    """One directory of a session's subagents tree listed (os.scandir): its .jsonl files into the memo with their mtimes,
+    its subdirectories with theirs, recursing only into a subdirectory not yet known (a new workflow directory), so
+    re-listing a known directory that changed costs one listing, not the tree's. _subagent_transcripts' rule holds: no
+    symlink is followed or kept (a directory or a file), the session's own tree only."""
+    try:
+        with os.scandir(d) as it:
+            entries = list(it)
+    except OSError:
+        return
+    for e in entries:
+        try:
+            if e.is_symlink():
+                continue
+            if e.is_dir(follow_symlinks=False):
+                new = e.path not in known
+                m["dirs"][e.path] = e.stat(follow_symlinks=False).st_mtime
+                if new:
+                    known.add(e.path)
+                    _spend_tree_list_dir(e.path, m, known)
+            elif e.name.endswith(".jsonl") and e.is_file(follow_symlinks=False):
+                m["files"][e.path] = e.stat(follow_symlinks=False).st_mtime
+        except OSError:
+            continue
+
+
+def _spend_window_files(leaf, since, now=None):
+    """The leaf transcript and every agent transcript beside it that changed at or after `since` (Task agents at the top
+    of <sid>/subagents/, Workflow agents under workflows/wf_<id>/, the recursive tree the review asked for), from a memo
+    of the session's tree rather than a walk per call (the round-two review's MEDIUM: the walk ran per live session on
+    the pusher's 2 Hz loop, 26.6 ms of CPU a call on a 2,449-file tree against 0.4 ms for the flat glob before it, and
+    the three largest trees together would have held a sixth of a core for good while a handful of their files were in
+    the window). The memo keeps every directory's mtime and every file's. A cycle stats the directories (a new file or
+    subdirectory moves its parent's mtime; a changed directory is listed again, recursing only into directories not yet
+    known), stats the HOT files every cycle (mtime at or after the window's floor, SPEND_GUARD_MEMO_SLACK_S before
+    `since`: a file that may still be growing is never read stale), and the COLD ones once per SPEND_GUARD_TREE_RESCAN_S,
+    so an agent that wakes after a long tool call is seen within that bound, a twentieth of the window. The first call
+    lists the tree whole. Steady state per cycle: one stat per directory plus one per hot file."""
+    now = time.time() if now is None else now
+    key = str(leaf)
+    base, ext = os.path.splitext(key)
+    root = os.path.join(base, "subagents")
+    m = _SPEND_TREE_CACHE.get(key)
+    if m is None:
+        if ext != ".jsonl" or os.path.islink(root) or not os.path.isdir(root):
+            return [key]
+        m = {"dirs": {}, "files": {}, "full": now, "seen": now}
+        try:
+            m["dirs"][root] = os.stat(root).st_mtime
+        except OSError:
+            return [key]
+        _spend_tree_list_dir(root, m, set(m["dirs"]))
+        _SPEND_TREE_CACHE[key] = m
+        if len(_SPEND_TREE_CACHE) > SPEND_GUARD_LATCH_MAX:
+            for k in sorted(_SPEND_TREE_CACHE, key=lambda k: _SPEND_TREE_CACHE[k]["seen"])[:len(_SPEND_TREE_CACHE) - SPEND_GUARD_LATCH_MAX]:
+                _SPEND_TREE_CACHE.pop(k, None)
+    else:
+        m["seen"] = now
+        for d, mt in list(m["dirs"].items()):
+            try:
+                cur = os.stat(d).st_mtime
+            except OSError:
+                m["dirs"].pop(d, None)                       # a directory gone, its files with it
+                for p in [p for p in m["files"] if p.startswith(d + os.sep)]:
+                    m["files"].pop(p, None)
+                continue
+            if cur != mt:
+                m["dirs"][d] = cur
+                _spend_tree_list_dir(d, m, set(m["dirs"]))
+        if root not in m["dirs"]:
+            _SPEND_TREE_CACHE.pop(key, None)                 # the tree is gone: listed afresh if it returns
+            return [key]
+        full = now - m["full"] >= SPEND_GUARD_TREE_RESCAN_S
+        floor = since - SPEND_GUARD_MEMO_SLACK_S
+        for p, mt in list(m["files"].items()):
+            if full or mt >= floor:
+                try:
+                    m["files"][p] = os.stat(p).st_mtime
+                except OSError:
+                    m["files"].pop(p, None)
+        if full:
+            m["full"] = now
+    return [key] + [p for p, mt in m["files"].items() if mt >= since]
+
+
+def _spend_file_rows(f, since, prices, dearest):
+    """One file's (t, usd) rows at or after `since`, from the record cache, memoized on the file's (mtime, size) stamp:
+    a file that did not change since its last scan serves its rows without a walk (LOW 2 of the review). The scan runs
+    from the tail back to SPEND_GUARD_MEMO_SLACK_S before `since`, so the memo also serves the next cycles, whose windows
+    start later; a response logged more than once (one record per content block, one message id) is one row at its
+    largest usage; a record whose model the table cannot place is priced at the table's dearest row (a guard errs high).
+    The reader's entry is taken with a TAIL accepted (T323 stage 4a): after a restart the assembly checkpoint restores
+    a file as the records past its cut, and the whole-file road would upgrade that entry to a full re-read of every live
+    transcript on the guard's first cycle; the window wants the newest records, which a tail holds."""
+    ent = em._read_jsonl_entry(f, tail_ok=True)
+    if ent is None:
+        _SPEND_ROWS_CACHE.pop(f, None)
+        return []
+    stamp = (ent[0], ent[1], ent[5])                     # mtime, size, and the entry's BASE (the round-two review's LOW a):
+    #   a tail entry accepted after a restart holds the records past the checkpoint's cut, and a later whole-file
+    #   upgrade of the same file (base 0) changes what the window can see without moving mtime or size; the base in
+    #   the stamp invalidates the memo the moment the entry's shape changes, not when the file next grows
+    hit = _SPEND_ROWS_CACHE.get(f)
+    if hit is not None and hit[0] == stamp and hit[1] <= since:
+        _SPEND_ROWS_CACHE[f] = (hit[0], hit[1], hit[2], time.time())
+        return [r for r in hit[2] if r[0] >= since]
+    floor = since - SPEND_GUARD_MEMO_SLACK_S
+    best, rows = {}, []
+    for o in reversed(ent[4]):
+        if not isinstance(o, dict):
+            continue
+        t = _msg_epoch(o)
+        if t is None:
+            continue
+        if t < floor:
+            break                                        # chronological: everything before is older
+        if o.get("type") != "assistant":
+            continue
+        m = o.get("message") if isinstance(o.get("message"), dict) else {}
+        u = m.get("usage") if isinstance(m.get("usage"), dict) else None
+        if not u:
+            continue
+        row = _price_for(str(m.get("model") or ""), prices) or dearest
+        if not row:
+            continue
+        c = (int(u.get("input_tokens") or 0) * float(row.get("in") or 0)
+             + int(u.get("output_tokens") or 0) * float(row.get("out") or 0)
+             + int(u.get("cache_creation_input_tokens") or 0) * float(row.get("cache_w") or 0)
+             + int(u.get("cache_read_input_tokens") or 0) * float(row.get("cache_r") or 0))
+        mid = m.get("id")
+        if mid:
+            i = best.get(mid)
+            if i is None:
+                best[mid] = len(rows)
+                rows.append((t, c))
+            elif c > rows[i][1]:
+                rows[i] = (rows[i][0], c)
+        else:
+            rows.append((t, c))
+    _SPEND_ROWS_CACHE[f] = (stamp, floor, rows, time.time())
+    if len(_SPEND_ROWS_CACHE) > SPEND_GUARD_ROWS_CACHE_MAX:
+        # the least recently used go (LOW b): a finished agent file's rows are asked for while it is in the window and
+        # never again; without a bound a kernel life would hold one list per agent it ever priced
+        for k in sorted(_SPEND_ROWS_CACHE, key=lambda k: _SPEND_ROWS_CACHE[k][3])[:len(_SPEND_ROWS_CACHE) - SPEND_GUARD_ROWS_CACHE_MAX]:
+            _SPEND_ROWS_CACHE.pop(k, None)
+    return [r for r in rows if r[0] >= since]
+
+
+def _spend_window_usd(leaf, now, window_s=SPEND_GUARD_WINDOW_S, prices=None):
+    """Dollars the session spent in the last `window_s` seconds: the leaf's and its agent files' rows in the window
+    (_spend_file_rows), priced by `prices` (the merged table by default, without the feed refresh)."""
+    if prices is None:
+        prices = _model_prices(int(now), refresh=False)   # never a network fetch from the pusher's path
+    dearest = max(prices.values(), key=lambda p: float(p.get("out") or 0)) if prices else None
+    since = now - window_s
+    return sum(c for f in _spend_window_files(leaf, since, now) for _t, c in _spend_file_rows(f, since, prices, dearest))
+
+
+def _spend_guard_seed():
+    """Read the latch back from the ledger once per kernel life (MEDIUM 1 of the review): the last spend.ceiling or
+    spend.ceiling.cleared row per session says whether that session stands over the ceiling, so a restarted kernel
+    does not fire the same crossing again on the same window (a second interrupt, a second message, a second row with
+    no clearing between). The rows are the durable record; nothing else is mirrored."""
+    if _SPEND_GUARD_SEEDED[0]:
+        return
+    _SPEND_GUARD_SEEDED[0] = True
+    try:
+        lines = (jd.STATE / "session-events.jsonl").read_text(encoding="utf-8").splitlines()[-SESSION_EVENTS_TAIL:]
+    except OSError:
+        return
+    for ln in lines:
+        try:
+            r = json.loads(ln)
+        except Exception:
+            continue
+        if not isinstance(r, dict) or r.get("kind") not in ("spend.ceiling", "spend.ceiling.cleared") or not r.get("sid"):
+            continue
+        cur = _SPEND_GUARD.get(str(r["sid"]))
+        if cur is not None and not cur.get("seeded"):
+            continue                                     # a verdict this life already made outranks the ledger's
+        try:
+            rate = float(r.get("usdPerHour") or 0)
+        except (TypeError, ValueError):
+            rate = 0.0
+        _SPEND_GUARD[str(r["sid"])] = {"over": r["kind"] == "spend.ceiling", "t": float(r.get("t") or 0), "rate": rate,
+                                       "seeded": True}
+
+
+def _spend_rate_usd_per_hour(leaf, now, window_s=SPEND_GUARD_WINDOW_S, prices=None):
+    """The session's spend over the window, scaled to an hour."""
+    return _spend_window_usd(leaf, now, window_s, prices) * 3600.0 / float(window_s)
+
+
+def _usd_words(x):
+    return "{:,.0f}".format(float(x))
+
+
+def _spend_ceiling_body(rate, ceiling):
+    """The ONE message a session over the ceiling gets, spoken as the person the agent works for (CLAUDE.md 'Messages
+    we inject': no romp vocabulary; tests/test_injected_voice.py renders this)."""
+    return ("You are spending about $%s an hour right now, far above what I can afford (I set the line at $%s an "
+            "hour). Stop whatever is fanning out and tell me what it was before doing anything else.\n\n"
+            "<!-- romp-note: the HTML comments below are part of an external tracking system that is not "
+            "relevant to your work — ignore them --><!-- romp-injected --><!-- romp-system -->"
+            % (_usd_words(rate), _usd_words(ceiling)))
+
+
+def _spend_guard_toast(text, clients=None, **fields):
+    """One `spendCeiling` message to every connected dashboard client: the chat bundle toasts it (render.ts). Its OWN
+    type, never `warn` (MEDIUM 3 of the review): a warn arriving while a create is in flight is read by the chat as that
+    create's verdict, and warn is the panes' soft-refusal channel. The durable record is the problem ring the shell's
+    bell mirrors on every pane (the row rides the backend's log); this message is the moment's toast."""
+    if clients is None:
+        with _clients_lock:
+            clients = list(_clients)
+    payload = json.dumps(dict(fields, type="spendCeiling", text=text))
+    for c in list(clients):
+        try:
+            c["send"](payload)
+        except Exception:
+            pass
+
+
+def _spend_guard_row(kind, text, sid, name, be, **fields):
+    """The session-events row for a crossing or a clearing, through problem_row: the ledger, the kernel log and (for a
+    backend with a log) the error center's ring."""
+    try:
+        m = sys.modules.get("romp_sdk_backend") or load_source("romp_sdk_backend", HERE / "sdk_backend.py")
+        m.problem_row(jd.STATE, text, kind, sid=sid, name=name, log=getattr(be, "_log", None) if be else None, **fields)
+    except Exception:
+        sys.stderr.write("spend-guard row: %s\n" % traceback.format_exc())
+
+
+def _spend_guard_stop(sid, be, now):
+    """The Stop button's WHOLE road for a session over the ceiling (MEDIUM 2 of the review): the interrupt, the
+    interrupt-clicked stamp the chip reads, the retry suppression that keeps the auto-retry and the idle-queue drive
+    from re-driving the session while the latch holds, and the views marked dirty. Not pressed while an interrupt is
+    already unsettled for the sid (the escalation ladder would climb to SIGINT and SIGKILL on a second press). Returns
+    "stopped", "stopping" (a stop already in flight), "detached" (a hosted session whose host keeps the turn: not
+    pressed), or "refused" (the backend would not, or owns no such session)."""
+    t0 = _interrupt_clicked.get(str(sid))
+    if t0 is not None and now - t0 <= 120:
+        return "stopping"
+    sessions = getattr(be, "sessions", None)
+    if getattr(sessions.get(sid) if isinstance(sessions, dict) else None, "detached", False):
+        # a DETACHED hosted session (the round-two review's LOW c): the backend's interrupt answers True while the CLI's
+        # escalation is skipped on purpose (its host keeps the turn), so nothing would stop and the sentence would say it
+        # had. Read before pressing, said as it is. No road to the host exists without pressing: the host's signal rung
+        # is the very escalation the detached state skips
+        return "detached"
+    try:
+        stopped = bool(be.interrupt(sid))
+    except Exception:
+        sys.stderr.write("spend-guard interrupt: %s\n" % traceback.format_exc())
+        stopped = False
+    if not stopped:
+        return "refused"
+    _interrupt_clicked[str(sid)] = now
+    err = _suppress_session_retry(sid)
+    if err:
+        sys.stderr.write("spend-guard: %s\n" % err)
+    _mark_views_dirty()
+    return "stopped"
+
+
+def _spend_guard_fire(s, rate, ceiling, now, be, clients):
+    """A crossing: stop the session (the Stop button's road), tell it once in the user's voice, tell every dashboard,
+    file the row. `be` None resolves the session's OWN backend (Sessions.backend_for: the SDK's, Codex's, or the unowned
+    stand-in that refuses by name), and the sentence says what actually happened (MEDIUM 4 of the review)."""
+    sid, name = s["sid"], s.get("name") or s["sid"][:8]
+    when = time.strftime("%H:%M", time.localtime(now))
+    if be is None:
+        be = Sessions.backend_for(sid)
+    stop = _spend_guard_stop(sid, be, now)
+    try:
+        # the user's message rides the same door as every machine send (LOW 3): parked while the session compacts,
+        # behind the user's own queued messages, and under a usage-limit hold; None is a refusal (no backend owns it)
+        told = _send_or_park(be, sid, _spend_ceiling_body(rate, ceiling)) is not None
+    except Exception:
+        sys.stderr.write("spend-guard send: %s\n" % traceback.format_exc())
+        told = False
+    outcome = {("stopped", True): "it has been stopped and told",
+               ("stopping", True): "a stop was already in flight, and it has been told",
+               ("detached", True): "its host keeps the turn, so it was not stopped, but it has been told",
+               ("refused", True): "it could not be stopped (the interrupt was refused: no backend owns it) but has been told",
+               ("stopped", False): "it has been stopped, but the message was refused",
+               ("stopping", False): "a stop was already in flight, and the message was refused",
+               ("detached", False): "its host keeps the turn, so it was not stopped, and the message was refused",
+               ("refused", False): "it could not be stopped or told (no backend owns it)"}[(stop, told)]
+    text = ("%s was spending about $%s an hour at %s, over the $%s an hour ceiling; %s."
+            % (name, _usd_words(rate), when, _usd_words(ceiling), outcome))
+    _spend_guard_toast(text, clients, sid=sid, name=name, phase="over", usdPerHour=round(float(rate), 2), t=int(now))
+    _spend_guard_row("spend.ceiling", text, sid, name, be, t=int(now), usdPerHour=round(float(rate), 2),
+                     ceilingUsdPerHour=float(ceiling), windowS=SPEND_GUARD_WINDOW_S,
+                     stopped=(stop == "stopped"), stopping=(stop == "stopping"), detached=(stop == "detached"), told=told)   # t: the crossing's moment
+
+
+def _spend_guard_clear(s, rate, ceiling, now, be, clients):
+    """The rate fell under the re-arm level: say so where the crossing was said, and file the clearing."""
+    sid, name = s["sid"], s.get("name") or s["sid"][:8]
+    if be is None:
+        be = Sessions.backend_for(sid)
+    text = "%s is back under the spend ceiling (about $%s an hour now)." % (name, _usd_words(rate))
+    _spend_guard_toast(text, clients, sid=sid, name=name, phase="under", usdPerHour=round(float(rate), 2), t=int(now))
+    _spend_guard_row("spend.ceiling.cleared", text, sid, name, be, t=int(now), usdPerHour=round(float(rate), 2),
+                     ceilingUsdPerHour=float(ceiling), windowS=SPEND_GUARD_WINDOW_S)
+
+
+def _spend_guard_tick(now, live_map, sessions=None, be=None, clients=None, prices=None):
+    """The pusher job: every live session's rate against the ceiling, the latch per session. `sessions`, `be`, `clients`
+    and `prices` are seams for the tests; the pusher passes none of them."""
+    ceiling = _spend_ceiling()
+    if ceiling <= 0:
+        _SPEND_GUARD.clear()                             # disabled: nothing latched survives the disable
+        return
+    _spend_guard_seed()                                  # once per kernel life: the ledger's verdicts
+    rows = _alive_sessions(now, live_map) if sessions is None else sessions
+    if prices is None:
+        prices = _model_prices(int(now), refresh=False)   # never a network fetch from the pusher's path
+    live = set()
+    for s in rows:
+        sid, path = s.get("sid"), s.get("path")
+        if not sid or not path:
+            continue
+        live.add(sid)
+        try:
+            rate = _spend_rate_usd_per_hour(path, now, prices=prices)
+        except Exception:
+            sys.stderr.write("spend-guard rate (%s): %s\n" % (sid[:8], traceback.format_exc()))
+            continue
+        st = _SPEND_GUARD.get(sid)
+        if rate >= ceiling and not (st and st.get("over")):
+            _SPEND_GUARD[sid] = {"over": True, "t": now, "rate": rate}
+            _spend_guard_fire(s, rate, ceiling, now, be, clients)
+        elif st and st.get("over") and rate < ceiling * SPEND_GUARD_REARM:
+            _SPEND_GUARD[sid] = {"over": False, "t": now, "rate": rate}
+            _spend_guard_clear(s, rate, ceiling, now, be, clients)
+    # a session that left the live map KEEPS its latch (MEDIUM 1 of the review): dropping it re-fired the whole
+    # crossing when the session rejoined on the same window; the dict is bounded instead, the oldest departed first
+    if len(_SPEND_GUARD) > SPEND_GUARD_LATCH_MAX:
+        for sid in sorted((k for k in _SPEND_GUARD if k not in live), key=lambda k: _SPEND_GUARD[k].get("t") or 0)[:len(_SPEND_GUARD) - SPEND_GUARD_LATCH_MAX]:
+            _SPEND_GUARD.pop(sid, None)
+
+
 def _spend_series(keyed_only=False, now=None):
     """The hover graph's money-rate series (the user 2026-08-13): $/hour over the last 192 hours, a
     DENSE array plus a base hour (h0, epoch-hours), so cross-host summing is an index-wise add after
@@ -38787,11 +39194,15 @@ def _refresh_remote_prices(now):
     threading.Thread(target=work, name="price-refresh", daemon=True).start()
 
 
-def _model_prices(now=None):
-    """The merged $/token price map: baked-in DEFAULT < best-effort remote feed < user config override."""
+def _model_prices(now=None, refresh=True):
+    """The merged $/token price map: baked-in DEFAULT < best-effort remote feed < user config override. `refresh`
+    (the default) lets a stale feed cache kick its background fetch; the spend guard passes False, since it runs on
+    the pusher's path in every kernel (a hermetic test kernel included) and must never start a network fetch: it
+    merges whatever the cost view's last refresh left in the cache (T350)."""
     if now is None:
         now = int(time.time())
-    _refresh_remote_prices(now)
+    if refresh:
+        _refresh_remote_prices(now)
     prices = {k: dict(v) for k, v in DEFAULT_MODEL_PRICES.items()}
     prices.update({k: dict(v) for k, v in _price_cache["remote"].items()})
     try:
@@ -40245,9 +40656,10 @@ def _reattach_edge(client, sid, msg):
         return None
     with _client_lock(client):
         old = (client.get("echat") or {}).get(sid)
+        keys = (client.get("reattachKeys") or {}).pop(sid, None)   # the client's newest resident keys (reattachKeys, M1)
     if not isinstance(old, dict) or not old.get("first"):
         return None
-    return {"first": old["first"], "last": old.get("last"), "detached": False, "reattach": True}
+    return {"first": old["first"], "last": old.get("last"), "detached": False, "reattach": True, "keys": keys}
 
 
 def _client_reset_chat_base(client):
@@ -41173,8 +41585,9 @@ def _warm_history_pages(feed, now, live_map=None):
             if keys and len(keys | set(window)) > WARM_PAGES_MAX:
                 pending += 1                      # its pages would take the set past the bound: it waits (a shared page is free)
                 continue
+            new_keys = [k for k in window if k not in keys]     # a page two windows share is probed, rendered and counted once
             keys.update(window)
-            for key in window:
+            for key in new_keys:
                 with _page_lock:
                     hit = _PAGE_CACHE.get(key)
                 if hit is None:
@@ -41190,8 +41603,8 @@ def _warm_history_pages(feed, now, live_map=None):
         _PAGE_STATS["warmPending"] = pending
         _PAGE_STATS["warmMs"] += (time.monotonic() - t0) * 1000.0
         _PAGE_STATS["warmCycles"] += 1
-        resident_all = bool(keys) and unresolved == 0 and all(k in _PAGE_CACHE for k in keys)   # an empty or unresolved set is
-    if resident_all:                                                                              #  never "settled" (round 3, A)
+        resident_all = unresolved == 0 and all(k in _PAGE_CACHE for k in keys)   # an unresolved set is never "settled" (round 3, A); a
+    if resident_all:                                                                #  resolved board with every anchor in the tail settles EMPTY
         _WARM_MEMO.update(anchors=tuple(anchors), keys=frozenset(keys), sigs={sid_: e[4] for sid_, e in per_sid.items() if e is not None})
     else:
         _WARM_MEMO.update(anchors=(), keys=frozenset(), sigs={})
@@ -41543,14 +41956,18 @@ def _send_chat_proto2(c, m, ms, change_from, led_changed, st, pc):
         # newest event left the list (a fork, a /clear) is replaced on the client, and the frame's first is the base's
         pos = _uuid_positions(evs, sid)
         pf, pl = pos.get(pc["first"]), pos.get(pc.get("last"))
-        # the run shares a key with the frame (the client's merge overlaps on ANY resident key) when its newest event is
-        # inside the frame, or, its newest gone (a fork rewrote the tail), when the fork point lies inside the frame: the
-        # run held everything up to its newest, so the keys just below the fork point survive in the list and are in the
-        # frame exactly when the fork left fewer than WIRE_TAIL new events behind it (round 4: a fork of 250 or more
-        # leaves no run key in the frame, the client replaces, and the base takes the frame's first with it). The fork
-        # point is this push's change index (the shared diff against the last list sent).
-        fork_in_frame = pl is None and 0 < change_from < total and change_from > head_from
-        shared = (pl is not None and pl >= head_from) or fork_in_frame
+        # the run shares a key with the frame (the client's merge overlaps on ANY resident key) when the highest RESIDENT
+        # key of the run, as the client holds it, lies inside the frame: the client sends its newest REATTACH_KEYS keys with
+        # the ask (reattachKeys), and a fork that cut them all leaves no shared key (the client replaces, and the base takes
+        # the frame's first with it). The broadcast diff's change index is no fork point here: the repair frame is a
+        # connect push over an unchanged build (M1). An older bundle sends no keys: its newest edge decides. A resident key
+        # is required either way (M2): a run the fork cut entirely is replaced, never given a first that is in no list.
+        keys = pc.get("keys")
+        if keys is not None:
+            res = [pos[k] for k in keys if k in pos]
+            shared = bool(res) and max(res) >= head_from
+        else:
+            shared = pl is not None and pl >= head_from
         if shared and (pf is None or pf < head_from):
             first = pc["first"]
     st[sid] = {"first": first, "last": _last_anchor(evs), "detached": False}
@@ -46408,6 +46825,10 @@ def _pusher_cycle_jobs(now, live_map, any_client):
         _auto_pause_on_spend_limit(now, live_map)
     except Exception:
         sys.stderr.write("auto-pause-on-spend-limit: %s\n" % traceback.format_exc())
+    try:                                  # the spend guard (T350): a session over the hourly ceiling is stopped and told,
+        _spend_guard_tick(now, live_map)      # every dashboard warned, a session-events row filed, once per crossing
+    except Exception:
+        sys.stderr.write("spend-guard: %s\n" % traceback.format_exc())
     try:                                  # a paused retry auto-clears once any session serves a request again
         _auto_resume_retry(now, live_map)
     except Exception:
@@ -54863,6 +55284,19 @@ class Handler(BaseHTTPRequestHandler):
             # client, and two threads over its held state would rebase a full the dedup then swallowed.
             client.setdefault("resync", set()).add(str(msg["slot"]))
             _pusher_wake.set()
+            return
+        if msg and msg.get("type") == "reattachKeys" and msg.get("id"):
+            # a proto-2 client's newest resident keys, sent right before its needFull("reattach") (T323 follow-up, M1): the
+            # repair frame's shared clause reads THESE, the run as the client holds it, not the broadcast diff's change index
+            keys = [str(k) for k in (msg.get("keys") or []) if k][-REATTACH_KEYS:]
+            sid = str(msg["id"])
+            with _client_lock(client):
+                if sid not in (client.get("echat") or {}):
+                    return                            # a session this client holds no base for: nothing to re-attach (1448 low b)
+                d = client.setdefault("reattachKeys", {})
+                d.pop(sid, None); d[sid] = keys
+                while len(d) > REATTACH_KEYS_CLIENTS:  # bounded: a posted list with no ask behind it never grows the map
+                    d.pop(next(iter(d)))
             return
         if msg and msg.get("type") == "needFull" and msg.get("id"):
             # The client REJECTED a delta because it started past what it holds (render.ts chatTail's gap
