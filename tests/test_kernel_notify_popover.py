@@ -558,14 +558,14 @@ class TurnFinishedPush(unittest.TestCase):
                 f.unlink()
         self.path = _transcript(SID_WEB, "Done: the login flow now redirects to the notes list.\n\nDetails below.")
         self.alive = [{"sid": SID_WEB, "name": "web", "path": self.path}]
-        self.tmux = {SID_WEB: {"state": "waiting"}}
+        self.live = {SID_WEB: {"state": "waiting"}}
 
     def _tick(self):
         pushed, fwd = [], []
         with mock.patch.object(km, "_alive_sessions", return_value=self.alive), \
              mock.patch.object(km, "_push_notify", side_effect=lambda *a, **k: pushed.append((a, k))), \
              mock.patch.object(km, "_push_forward", side_effect=lambda evs: fwd.append(evs)):
-            fired = km._turn_notify_tick(time.time(), self.tmux)
+            fired = km._turn_notify_tick(time.time(), self.live)
         return fired, pushed, fwd
 
     def test_first_sight_is_a_silent_baseline_then_a_new_end_fires(self):
@@ -603,10 +603,10 @@ class TurnFinishedPush(unittest.TestCase):
         _stamp_stop(SID_WEB, 1010)
         self.assertEqual(len(self._tick()[0]), 1, "…and with both on the next end fires")
 
-    def test_a_tmux_interrupt_settle_is_not_a_finished_turn(self):
+    def test_an_interrupt_settle_is_not_a_finished_turn(self):
         # a Stop press writes an idle row (romp's _record_idle, tagged by:interrupt) — the user's own
-        # act, not a turn the session finished, so the fallback key must skip it (#937 fold). A tmux
-        # session has no lastStopAt, so the fallback is what decides.
+        # act, not a turn the session finished, so the fallback key must skip it (#937 fold). A session
+        # with no lastStopAt in its ledger leaves the fallback to decide.
         km._set_notify_all(True)
         km._set_notify_turns(True)
         _append_state(SID_WEB, "working", 1000)
@@ -667,7 +667,7 @@ class TurnFinishedPush(unittest.TestCase):
         self.assertEqual(self._tick()[0][0]["body"], "finished a turn")
 
     def test_the_fallback_key_counts_only_stopped_transitions(self):
-        # a tmux session: no Stop-hook ledger; states/ is the record — and a turn STARTING (working)
+        # a session without a Stop-hook ledger: states/ is the record — and a turn STARTING (working)
         # must never read as an end
         km._set_notify_all(True)
         km._set_notify_turns(True)
@@ -683,8 +683,8 @@ class TurnFinishedPush(unittest.TestCase):
     def test_wired_into_the_pusher_cycle_after_the_feed_build(self):
         import inspect
         src = inspect.getsource(km._pusher_cycle_jobs)
-        self.assertIn("_turn_notify_tick(now, tmux)", src)
-        self.assertLess(src.index("_push_all(tmux=tmux)"), src.index("_turn_notify_tick(now, tmux)"),
+        self.assertIn("_turn_notify_tick(now, live_map)", src)
+        self.assertLess(src.index("_push_all(live_map=live_map)"), src.index("_turn_notify_tick(now, live_map)"),
                         "the feed builds first, so a same-settle bell event files its buzz first")
 
 
@@ -695,7 +695,7 @@ class TurnOpenerGate(unittest.TestCase):
     coordinating session, none about anything the user had asked at that moment. The Stop hook now stamps
     WHO opened the turn beside the settle (lastTurnOpener, sdk_backend) and the tick skips an end whose
     opener is not the human — without spending the buzz claim, so a bell event that turn raises keeps its
-    buzz. A registry without the field (an older ledger, a tmux session) reads as the human's: a missing
+    buzz. A registry without the field (an older ledger) reads as the human's: a missing
     fact never drops the user's buzz."""
 
     def setUp(self):

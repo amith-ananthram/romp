@@ -24,7 +24,7 @@ test("the kernel's feed payload carries the chat tab strip's sessions, tab_meta-
   // …plus the session's GitHub repo (owner/repo or null), for the card text's PR links (pr-links.ts, 2026-09-06),
   // derived from the SAME cwd the chat frame uses (_session_cwd: the registry's, else the transcript's stamp)
   assert.ok(KERNEL.includes('"githubRepo": _github_repo_of(_session_cwd(s["sid"], s.get("path")))}'));
-  assert.ok(KERNEL.includes("for s in _chat_tab_sessions(now, tmux)]"), "the SAME list the tabs render, in ITS order");
+  assert.ok(KERNEL.includes("for s in _chat_tab_sessions(now, live_map)]"), "the SAME list the tabs render, in ITS order");
 });
 
 test("federation prefixes each sessions[] entry's sid AND name, and the merge concatenates local-first", () => {

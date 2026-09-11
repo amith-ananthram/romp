@@ -226,7 +226,7 @@ class HydrateRecipient(unittest.TestCase):
             return real(events, index, sid, captions=captions)
         km._hydrate_postal = spy
         self.addCleanup(setattr, km, "_hydrate_postal", real)
-        saved = (km._sessions, km._tmux_sessions, km._msg_summaries)
+        saved = (km._sessions, km._live_map, km._msg_summaries)
         td = tempfile.TemporaryDirectory()
         self.addCleanup(td.cleanup)
         tx = os.path.join(td.name, ME + ".jsonl")
@@ -234,12 +234,12 @@ class HydrateRecipient(unittest.TestCase):
             f.write(json.dumps({"type": "user", "uuid": "u1", "timestamp": "2026-09-01T10:00:00.000Z",
                                 "message": {"role": "user", "content": "hello"}}) + "\n")
         km._sessions = lambda now, **kw: [{"sid": ME, "name": "web", "anchor": ME, "path": tx, "mtime": 1}]
-        km._tmux_sessions = lambda: {}
+        km._live_map = lambda: {}
         km._msg_summaries = lambda: {}
         try:
             km.build_session(ME, 1700000000, {})
         finally:
-            km._sessions, km._tmux_sessions, km._msg_summaries = saved
+            km._sessions, km._live_map, km._msg_summaries = saved
         self.assertTrue(seen, "build_session hydrated at least once")
         self.assertEqual(set(seen), {ME}, "every hydration carried the session's own sid")
 

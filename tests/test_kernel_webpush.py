@@ -1277,20 +1277,20 @@ class RevealAiming(unittest.TestCase):
 
     def test_connected_pane_gets_it_now_dead_session_gets_revive(self):
         c, got = self._register("chat", "W1")
-        with mock.patch.object(km, "_tmux_sessions", return_value={"SID-live": {}}):
+        with mock.patch.object(km, "_live_map", return_value={"SID-live": {}}):
             self.assertTrue(km._reveal_request("SID-live", "W1"))
         self.assertEqual(got, [{"type": "focus", "id": "SID-live", "live": True}])
         self.assertIsNone(km._PENDING_REVEAL[0], "delivered → nothing parked")
         # a DEAD session never silently reveals — the revive prompt instead (_reveal_or_confirm's split)
         got.clear()
-        with mock.patch.object(km, "_tmux_sessions", return_value={}), \
+        with mock.patch.object(km, "_live_map", return_value={}), \
              mock.patch.object(km, "_name_of", return_value="web"):
             km._reveal_request("SID-gone", "W1")
         self.assertEqual(got[0]["type"], "confirmRevive")
 
     def test_boot_race_parks_then_ready_consumes_aimed_by_wid(self):
         # the norm: the shell's fetch beats its chat iframe's WS, so nothing is connected yet
-        with mock.patch.object(km, "_tmux_sessions", return_value={"SID-live": {}}):
+        with mock.patch.object(km, "_live_map", return_value={"SID-live": {}}):
             self.assertFalse(km._reveal_request("SID-live", "W-phone"))
             self.assertEqual(km._PENDING_REVEAL[0], {"sid": "SID-live", "wid": "W-phone"})
             # another dashboard's pane saying ready must NOT steal it (the 2026-07-29 rule)
@@ -1317,7 +1317,7 @@ class RevealAiming(unittest.TestCase):
         AND kept parked (the same-wid socket may be the previous page's, dead), retired by the pane's answer
         or consumed by a new pane's ready. Before the fix a boot reveal was parked alone."""
         mine, mine_got = self._register("chat", "W-phone")   # ready already, no ping outstanding
-        with mock.patch.object(km, "_tmux_sessions", return_value={"SID-live": {}}):
+        with mock.patch.object(km, "_live_map", return_value={"SID-live": {}}):
             self.assertTrue(km._reveal_request("SID-live", "W-phone", boot=True, via="link"), "delivered to the ready pane")
         self.assertEqual(mine_got, [{"type": "focus", "id": "SID-live", "live": True}])
         parked = km._PENDING_REVEAL[0]
@@ -1338,7 +1338,7 @@ class RevealAiming(unittest.TestCase):
         dropped = []
         booting["ready"] = False          # registered at its handshake; the bundle is still loading
         booting["send"] = lambda s: (heard if booting.get("ready") else dropped).append(json.loads(s))   # a frame before ready vanishes
-        with mock.patch.object(km, "_tmux_sessions", return_value={"SID-live": {}}):
+        with mock.patch.object(km, "_live_map", return_value={"SID-live": {}}):
             self.assertFalse(km._reveal_request("SID-live", "W-boot", boot=True, via="link"), "parked: nothing can hear it yet")
             self.assertEqual(dropped, [], "nothing is sent to a pane that cannot listen")
             self.assertEqual(km._PENDING_REVEAL[0], {"sid": "SID-live", "wid": "W-boot"})
@@ -1352,7 +1352,7 @@ class RevealAiming(unittest.TestCase):
         self.assertIsNone(km._PENDING_REVEAL[0])
         # a live (non-boot) tap to that same not-yet-ready socket parks too: the sw / ack / vanish roads had the
         # same hole once the shell saw the socket up but before the bundle listened
-        with mock.patch.object(km, "_tmux_sessions", return_value={"SID-live": {}}):
+        with mock.patch.object(km, "_live_map", return_value={"SID-live": {}}):
             booting["ready"] = False
             self.assertFalse(km._reveal_request("SID-live", "W-boot", via="sw"))
             self.assertEqual(dropped, [])
@@ -1361,7 +1361,7 @@ class RevealAiming(unittest.TestCase):
 
     def test_a_widless_park_matches_the_first_chat_pane(self):
         # sessionStorage blocked → the shell has no wid; better the first chat pane than a dropped tap
-        with mock.patch.object(km, "_tmux_sessions", return_value={"S": {}}):
+        with mock.patch.object(km, "_live_map", return_value={"S": {}}):
             km._reveal_request("S", "")
             c, got = _fake_ws_client("chat", "W-any")
             km._consume_pending_reveal(c)
@@ -1377,7 +1377,7 @@ class RevealAiming(unittest.TestCase):
         # the same-wid socket like an unproven live tap AND a copy stays parked: a dead twin swallows its
         # frame and the fresh pane's ready consumes the copy; a live pane lands it and its answer retires it.
         twin, twin_got = self._register("chat", "W-phone")
-        with mock.patch.object(km, "_tmux_sessions", return_value={"S": {}}):
+        with mock.patch.object(km, "_live_map", return_value={"S": {}}):
             self.assertTrue(km._reveal_request("S", "W-phone", boot=True))
             self.assertEqual(twin_got, [{"type": "focus", "id": "S", "live": True}], "the same-wid socket is told: it may be the page's own pane")
             parked = km._PENDING_REVEAL[0]
@@ -1396,7 +1396,7 @@ class RevealAiming(unittest.TestCase):
         # (_resolve_reconnect stamps the client, its strip sender consumes; the redial posts no ready).
         c, got = self._register("chat", "W1")
         c["pingAt"] = 100.0
-        with mock.patch.object(km, "_tmux_sessions", return_value={"S": {}}):
+        with mock.patch.object(km, "_live_map", return_value={"S": {}}):
             self.assertTrue(km._reveal_request("S", "W1"))
         self.assertEqual(got, [{"type": "focus", "id": "S", "live": True}], "still delivered at once")
         self.assertEqual((km._PENDING_REVEAL[0] or {}).get("sid"), "S", "…and kept until the socket proves itself")
@@ -1409,12 +1409,12 @@ class RevealAiming(unittest.TestCase):
         km._note_ws_inbound(c, now=101.0)
         self.assertIsNone(km._PENDING_REVEAL[0])
         c["pingAt"] = None
-        with mock.patch.object(km, "_tmux_sessions", return_value={"S": {}}):
+        with mock.patch.object(km, "_live_map", return_value={"S": {}}):
             self.assertTrue(km._reveal_request("S", "W1"))
         self.assertIsNone(km._PENDING_REVEAL[0], "a socket with no ping outstanding is proven — nothing parked")
         # the dead case: never pongs; the redial's first strip takes the copy (its sender's consume, called here)
         c["pingAt"] = 100.0
-        with mock.patch.object(km, "_tmux_sessions", return_value={"S": {}}):
+        with mock.patch.object(km, "_live_map", return_value={"S": {}}):
             km._reveal_request("S", "W1")
             fresh, fresh_got = _fake_ws_client("chat", "W1")
             km._consume_pending_reveal(fresh)
@@ -1428,7 +1428,7 @@ class RevealAiming(unittest.TestCase):
         a phone suspend or a dropped link parked for good, until the page reloaded. The redial's first tab
         strip is the event that stands in for the ready: _resolve_reconnect stamps the client when it pops
         the flag and says so, and the strip sender consumes the park right behind the strip it just sent."""
-        with mock.patch.object(km, "_tmux_sessions", return_value={"S": {}}):
+        with mock.patch.object(km, "_live_map", return_value={"S": {}}):
             self.assertFalse(km._reveal_request("S", "W1", via="vanish"), "the socket died: the tap parks")
             self.assertEqual(km._PENDING_REVEAL[0], {"sid": "S", "wid": "W1"})
             c, got = self._register("chat", "W1")
@@ -1507,7 +1507,7 @@ class RevealRoute(unittest.TestCase):
         with km._clients_lock:
             km._clients.append(twin)
         try:
-            with mock.patch.object(km, "_tmux_sessions", return_value={"SID-x": {}}):
+            with mock.patch.object(km, "_live_map", return_value={"SID-x": {}}):
                 code, body = self._post("/reveal", {"sid": "SID-x", "wid": "W-x", "boot": True})
         finally:
             with km._clients_lock:

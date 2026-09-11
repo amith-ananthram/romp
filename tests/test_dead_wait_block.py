@@ -44,19 +44,47 @@ SID = ""
 GID = ""
 
 
-def _register_name(sid):
-    """A names-registry entry — the launch record BOTH backends write at creation. It is what marks
-    a reg-less sid as one tmux could have run; a sid with no reg and no names entry exists only as
-    a transcript (the file fallback's world), and no liveness owner here can answer for it."""
+class _FakeCodex:
+    """The Codex backend as the corroborator reads it: a registry of sids, each still owned (alive) or
+    marked dead, or a registry the backend could not read."""
+    def __init__(self, rows=None, unreadable=False):
+        self.rows = dict(rows or {})            # sid → alive
+        self._registry_unreadable = unreadable
+
+    def _session(self, sid):
+        return self.rows.get(sid) if sid in self.rows else None   # a row (truthy or not) vs no row
+
+    def owns(self, sid):
+        return bool(self.rows.get(sid))
+
+
+OTHER_SID = "11111111-2222-3333-4444-777777777777"   # a bystander SDK session: the registry is never empty
+
+
+def _register_name(sid, ended=True):
+    """A names-registry entry — the launch record BOTH backends write at creation — plus the SDK reg an
+    ENDED session keeps (the backend never unlinks a reg; the kill flips alive to False): the shape of a
+    dead SDK sender. A names entry with NO reg is dead history only when nothing shows recent life while
+    the registry holds no regs at all; with fresh states rows beside an empty registry it reads as a
+    registry moved aside, on which the corroborator stands down (tests/test_sdk_registry_blind.py). A sid
+    with no reg and no names entry exists only as a transcript, and no liveness owner here can answer
+    for it. Tests that need another reg shape write it after this call. ended=False models a sid the SDK
+    registry never held (a Codex session, or plain history) on a machine that still runs OTHER SDK
+    sessions: no reg for the sid, a bystander's alive reg beside it, so the registry is not empty."""
     jd.NAMES.mkdir(parents=True, exist_ok=True)
     (jd.NAMES / sid).write_text("web\t~/notes-api\t#3355aa\t#ffffff\n")
+    jd.SDKDIR.mkdir(parents=True, exist_ok=True)
+    if ended:
+        (jd.SDKDIR / (sid + ".json")).write_text(json.dumps({"sid": sid, "alive": False}))
+    else:
+        (jd.SDKDIR / (OTHER_SID + ".json")).write_text(json.dumps({"sid": OTHER_SID, "alive": True}))
 
 
-def _seed_store(awaiting=True, named=True):
-    # named=True: the fixture models a romp-LAUNCHED session (the usual world), so the owner scan
+def _seed_store(awaiting=True, named=True, ended=True):
+    # named=True: the fixture models a romp-LAUNCHED session (the usual world), so the corroborator
     # is entitled to settle it; named=False models a transcript-derived one (no launch record).
     if named:
-        _register_name(SID)
+        _register_name(SID, ended=ended)
     store = jd.load_goals(SID)
     nd = {"id": GID, "text": "delegate the batch and report", "parentId": None,
           "nodeComplete": False, "blocked": False, "cleared": False, "t": STAMP_T - 100,
@@ -87,15 +115,16 @@ class _HermeticDeadWait(unittest.TestCase):
         GID = SID + ":g1"
         km._PREV_ALIVE = None
         self.nudged = {}
-        # hermetic liveness: never read whether THIS box has tmux (the corroboration the sweep now
-        # does before converting would otherwise shell out); an authoritative empty owner scan is
-        # the corroborated-dead world these tests were written in
-        km._TMUX.available = lambda: True
-        km._TMUX.alive_sids = lambda t=3: set()
+        # hermetic liveness: the corroboration the sweep does before converting reads the Codex
+        # backend's records; a readable registry that knows none of these sids is the
+        # corroborated-dead world these tests were written in (a named sid with no record anywhere
+        # is dead history). Never the real module, which would bind to this box's Codex state.
+        self.codex = _FakeCodex()
+        self._saved_codex = km._codex
+        km._codex = lambda: self.codex
 
     def tearDown(self):
-        for nm in ("available", "alive_sids"):
-            km._TMUX.__dict__.pop(nm, None)   # instance attrs shadow the class methods; drop them
+        km._codex = self._saved_codex
         for d in (jd.GOALDIR, jd.STATE / "states", jd.SDKDIR, jd.STATE / "gone", jd.NAMES):
             if d.is_dir():
                 for f in d.glob("*"):
@@ -236,36 +265,46 @@ class DeadWaitBlock(_HermeticDeadWait):
 
 class DeadWaitCorroboration(_HermeticDeadWait):
     """The sweep's trigger — absence from a RAW liveness listing — inherits every collapse that
-    listing has (tmux list error/timeout empties the map for a cycle; a swallowed SDK live-merge
+    listing has (a backend's read that failed and is stood down on; a swallowed SDK live-merge
     exception does the same to the merged half), and the block it files is irreversible bookkeeping
     on the user's board with nothing to lift it when the listing returns. So absence alone NEVER
     files: the death is corroborated with the liveness OWNER first (the SDK reg's alive bit / a
-    standing death record / the owner scan), and an unconfirmable candidate stands down for the
-    cycle with its transition kept armed — the doctrine _death_sweep_tick and _death_boot_pass follow."""
+    standing death record / the Codex registry's dead mark / a names entry no record answers for),
+    and an unconfirmable candidate stands down for the cycle with its transition kept armed — the
+    doctrine _death_sweep_tick and _death_boot_pass follow."""
 
     def _blocked(self):
         return bool(jd.load_goals(SID)["nodes"][GID].get("blocked"))
 
     def test_a_raw_listing_collapse_alone_never_files(self):
-        _seed_store()
+        _seed_store(ended=False)
         _write_state("idle", STAMP_T + 50)
-        km._TMUX.alive_sids = lambda t=3: {SID}   # the OWNER answers alive — the raw listing blinked
+        self.codex.rows[SID] = True               # the OWNER answers alive — the raw listing blinked
         km._PREV_ALIVE = {SID}
         km._dead_wait_sweep(set(), self.nudged, STAMP_T + 900)   # empty alive set: the collapse shape
         self.assertFalse(self._blocked(), "an owner-corroborated ALIVE session must never convert")
         self.assertIn(SID, km._PREV_ALIVE, "the death transition stays armed for a genuine later death")
 
-    def test_probe_failure_stands_down_and_the_next_tick_retries(self):
-        _seed_store()
+    def test_a_blind_codex_registry_stands_down_and_the_next_tick_retries(self):
+        _seed_store(ended=False)
         _write_state("idle", STAMP_T + 50)
-        km._TMUX.alive_sids = lambda t=3: None    # a REAL probe failure — cannot confirm either way
+        self.codex._registry_unreadable = True    # the Codex records cannot be read — a Codex sid and dead history look alike
         km._PREV_ALIVE = {SID}
         km._dead_wait_sweep(set(), self.nudged, STAMP_T + 900)
         self.assertFalse(self._blocked(), "unconfirmed is never dead — nothing files")
         self.assertIn(SID, km._PREV_ALIVE, "the candidate is kept, not spent")
-        km._TMUX.alive_sids = lambda t=3: set()   # the probe recovers and corroborates the death…
+        self.codex._registry_unreadable = False   # the registry reads again and marks the sid dead: the owner's answer…
+        self.codex.rows[SID] = False
         km._dead_wait_sweep(set(), self.nudged, STAMP_T + 950)
         self.assertTrue(self._blocked(), "…and the retried tick converts")
+
+    def test_the_codex_registrys_dead_mark_is_the_answer_for_a_codex_sid(self):
+        _seed_store(ended=False)
+        _write_state("idle", STAMP_T + 50)
+        self.codex.rows[SID] = True               # a row the backend still owns
+        self.assertIs(km._dead_wait_corroborated(SID), False, "owned: alive, never converts")
+        self.codex.rows[SID] = False              # the registry's dead mark
+        self.assertIs(km._dead_wait_corroborated(SID), True, "the owner's durable dead mark corroborates")
 
     def test_sdk_reg_alive_bit_outranks_the_merged_maps_absence(self):
         _seed_store()
@@ -286,18 +325,16 @@ class DeadWaitCorroboration(_HermeticDeadWait):
         gone = jd.STATE / "gone"
         gone.mkdir(parents=True, exist_ok=True)
         (gone / (SID + ".json")).write_text(json.dumps({"t": STAMP_T + 60, "by": "gone"}))
-        km._TMUX.alive_sids = lambda t=3: None    # even with the probe down…
+        self.codex._registry_unreadable = True    # even with the Codex records unreadable…
         km._PREV_ALIVE = {SID}
         km._dead_wait_sweep(set(), self.nudged, STAMP_T + 900)
         self.assertTrue(self._blocked(), "…a death a corroborated writer already stamped answers")
 
-    def test_wake_goal_headless_branch_stands_down_for_file_derived_sessions(self):
-        # a no-tmux box's _alive_sessions falls back to FILE-derived sessions, which reach
-        # _wake_goal absent from the merged map while genuinely ALIVE — no owner here can answer
-        # for a reg-less one, so nothing may file
+    def test_wake_goal_dormant_branch_stands_down_for_transcript_derived_sessions(self):
+        # a transcript-derived session (no reg, no names entry: launched by neither backend) reaches
+        # _wake_goal absent from the merged map — no owner here can answer for it, so nothing may file
         _seed_store(named=False)                  # transcript-derived: no launch record
         _write_state("idle", STAMP_T + 50)
-        km._TMUX.available = lambda: False
         store = jd.load_goals(SID)
         fired = km._wake_goal(SID, GID, (STAMP_T, "w"), self.nudged, [], store,
                               STAMP_T + 900, {}, {})
@@ -311,24 +348,20 @@ class DeadWaitCorroboration(_HermeticDeadWait):
         self.assertTrue(fired)
         self.assertTrue(self._blocked())
 
-    def test_tmux_appearing_mid_flight_cannot_settle_a_sid_it_never_owned(self):
-        # AUTHORITY FOLLOWS OWNERSHIP: a headless box's file fallback lists a LIVE
-        # transcript-derived session (no reg, no names entry — launched by neither backend); it
-        # drops out of the file-derived alive set, arming its death transition… and THEN tmux is
-        # installed. The availability probe is live (shutil.which), so keying the stand-down on
-        # the BOX's tmux availability would let the fresh, EMPTY server — which never ran this
-        # sid — answer as its liveness owner: a false conversion of a live session's card. An
-        # owner scan settles only sids the owner could have run; this one stands down REGARDLESS
-        # of tmux availability.
+    def test_clean_backend_records_cannot_settle_a_sid_no_backend_launched(self):
+        # AUTHORITY FOLLOWS OWNERSHIP: a transcript-derived session (no reg, no names entry —
+        # launched by neither backend) drops out of the alive set, arming its death transition.
+        # Every backend's records read clean and know nothing of it — and that silence is not an
+        # answer: a readable, EMPTY Codex registry never ran this sid, so letting it answer as the
+        # liveness owner would be a false conversion of a live session's card. The records settle
+        # only sids a backend could have run; this one stands down.
         _seed_store(named=False)                  # transcript-derived: no launch record
         _write_state("idle", STAMP_T + 50)
-        km._TMUX.available = lambda: True         # tmux just appeared mid-flight…
-        km._TMUX.alive_sids = lambda t=3: set()   # …and its fresh server owns nothing
         self.assertIsNone(km._dead_wait_corroborated(SID),
-                          "an owner scan settles only sids the owner could have run")
+                          "the records settle only sids a backend could have run")
         km._PREV_ALIVE = {SID}
         km._dead_wait_sweep(set(), self.nudged, STAMP_T + 900)
-        self.assertFalse(self._blocked(), "a sid tmux never ran must not convert on tmux's word")
+        self.assertFalse(self._blocked(), "a sid no backend ran must not convert on a clean registry's word")
         self.assertIn(SID, km._PREV_ALIVE, "stood down and kept armed, never spent")
         # …while the SAME sid WITH a launch record is the owner's to settle: it converts
         _register_name(SID)
@@ -346,19 +379,29 @@ class DeadWaitStandDownLogging(_HermeticDeadWait):
     def _blocked(self):
         return bool(jd.load_goals(SID)["nodes"][GID].get("blocked"))
 
-    def test_probe_failure_logs_one_line_per_pass_not_per_candidate(self):
+    def test_a_blind_codex_registry_logs_one_line_per_pass_not_per_candidate(self):
         sid2 = _fresh_sid()
-        _register_name(SID)
-        _register_name(sid2)
-        km._TMUX.alive_sids = lambda t=3: None    # a REAL probe failure, shared by the whole pass
+        _register_name(SID, ended=False)
+        _register_name(sid2, ended=False)
+        self.codex._registry_unreadable = True    # the Codex records cannot be read, shared by the whole pass
         km._PREV_ALIVE = {SID, sid2}
         buf = io.StringIO()
         with redirect_stderr(buf):
             km._dead_wait_sweep(set(), {}, STAMP_T + 900)
-        lines = [ln for ln in buf.getvalue().splitlines() if "dead-wait" in ln and "probe" in ln]
+        lines = [ln for ln in buf.getvalue().splitlines() if "dead-wait" in ln and "Codex" in ln]
         self.assertEqual(len(lines), 1, "one line per pass, not per candidate: %r" % lines)
         self.assertIn("2 candidate(s) stood down this pass", lines[0])
         self.assertEqual({SID, sid2} & km._PREV_ALIVE, {SID, sid2}, "both kept armed")
+
+    def test_a_single_probe_codex_blind_stand_down_names_the_sid(self):
+        _register_name(SID, ended=False)
+        self.codex._registry_unreadable = True
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            self.assertIsNone(km._dead_wait_corroborated(SID))
+        out = buf.getvalue()
+        self.assertIn(SID, out, "the single-probe stand-down names the sid (fail-loudly rule)")
+        self.assertIn("Codex registry", out)
 
     def test_unreadable_reg_stand_down_is_loud_and_per_pass_deduped(self):
         sid2 = _fresh_sid()
@@ -408,7 +451,7 @@ class DeadWaitOneObserver(_HermeticDeadWait):
         saved = {nm: getattr(km, nm) for nm in
                  ("_alive_sessions", "_wait_for_graph", "_debt_backstop_tick",
                   "_awaiting_wake_outcomes")}
-        km._alive_sessions = lambda now, tmux: []
+        km._alive_sessions = lambda now, live_map: []
         km._wait_for_graph = lambda now, alive_sids: {}
         km._debt_backstop_tick = lambda now: None
         km._awaiting_wake_outcomes = lambda now: False
@@ -443,13 +486,13 @@ class DeadWaitOneObserver(_HermeticDeadWait):
         real = km._dead_wait_corroborated
         seen = {}
 
-        def hooked(sid, scan=None, stats=None):
+        def hooked(sid, stats=None, now=None):
             if "ran" not in seen:
                 seen["ran"] = True
                 before = set(km._PREV_ALIVE)
                 km._auto_nudge_tick(STAMP_T + 901, {}, run_dead_wait=False)   # WS fires mid-pass: returns at the lock
                 seen["moved"] = set(km._PREV_ALIVE) != before
-            return real(sid, scan=scan, stats=stats)
+            return real(sid, stats=stats, now=now)
 
         km._dead_wait_corroborated = hooked
         try:
@@ -476,7 +519,7 @@ class DeadWaitOneObserver(_HermeticDeadWait):
         self.assertIn("_ws_act_now_tick()", arm_c, "setCompactSuggest's arm re-ticks, through the wrap")
         self.assertNotIn("_auto_nudge_tick(", src, "no WS call site ticks around the wrap")
         wrap = inspect.getsource(km._ws_act_now_tick)
-        self.assertIn("_auto_nudge_tick(int(time.time()), _tmux_sessions(), run_dead_wait=False)", wrap,
+        self.assertIn("_auto_nudge_tick(int(time.time()), _live_map(), run_dead_wait=False)", wrap,
                       "the WS-shaped tick skips the one-observer sweep")
         self.assertIn("except Exception", wrap, "…and a failure in it is logged, not a socket failure")
 

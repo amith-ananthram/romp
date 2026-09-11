@@ -23,7 +23,7 @@ setup() {
     # ROMP_MANAGER_PORT, which the unit now bakes — so a default-vs-override test would be
     # reading the developer's machine instead of the code. Clear the whole instance set; the
     # tests that want them set them explicitly.
-    unset ROMP_SERVE_PORT ROMP_KERNEL_PORT ROMP_POSTAL_PORT ROMP_MANAGER_PORT ROMP_STATE_DIR CLAUDE_CONFIG_DIR ROMP_TMUX_SOCKET
+    unset ROMP_SERVE_PORT ROMP_KERNEL_PORT ROMP_POSTAL_PORT ROMP_MANAGER_PORT ROMP_STATE_DIR CLAUDE_CONFIG_DIR
     # The env-file path is baked (and, when non-default, exported) into the unit too; a developer shell
     # that carries either variable must not leak it into the default-install assertions below.
     unset ROMP_SERVICE_ENV_FILE XDG_CONFIG_HOME
@@ -253,16 +253,15 @@ EOF2
     grep -q "<key>ROMP_KERNEL_PORT</key><string>29856</string>" "$ROMP_LAUNCHD_DIR/com.romp.manager.plist"
 }
 
-@test "install bakes the rest of the profile: state root, Claude config dir, tmux socket" {
+@test "install bakes the rest of the profile: state root, Claude config dir" {
     # The same set romp-manager's specEnv hands an aux kernel — a profile that is only half
     # carried is the silent-divergence bug, not a smaller version of it.
-    export ROMP_STATE_DIR="$TEST_DIR/alt-state" CLAUDE_CONFIG_DIR="$TEST_DIR/alt-claude" ROMP_TMUX_SOCKET=romp-alt
+    export ROMP_STATE_DIR="$TEST_DIR/alt-state" CLAUDE_CONFIG_DIR="$TEST_DIR/alt-claude"
     ROMP_OS_OVERRIDE=Linux run "$SVC" install
     [ "$status" -eq 0 ]
     local unit="$ROMP_SYSTEMD_DIR/romp-manager.service"
     grep -q "^Environment=ROMP_STATE_DIR=$TEST_DIR/alt-state$"      "$unit"
     grep -q "^Environment=CLAUDE_CONFIG_DIR=$TEST_DIR/alt-claude$"  "$unit"
-    grep -q "^Environment=ROMP_TMUX_SOCKET=romp-alt$"               "$unit"
 }
 
 @test "a default install writes NO instance env — unchanged for everyone not doing this" {
@@ -270,7 +269,7 @@ EOF2
     ROMP_OS_OVERRIDE=Linux run "$SVC" install
     [ "$status" -eq 0 ]
     local unit="$ROMP_SYSTEMD_DIR/romp-manager.service"
-    run grep -q "ROMP_SERVE_PORT\|ROMP_KERNEL_PORT\|ROMP_POSTAL_PORT\|ROMP_MANAGER_PORT\|ROMP_STATE_DIR\|CLAUDE_CONFIG_DIR\|ROMP_TMUX_SOCKET" "$unit"
+    run grep -q "ROMP_SERVE_PORT\|ROMP_KERNEL_PORT\|ROMP_POSTAL_PORT\|ROMP_MANAGER_PORT\|ROMP_STATE_DIR\|CLAUDE_CONFIG_DIR" "$unit"
     [ "$status" -ne 0 ]
     # ...and the file is still well-formed around the seam: the always-present
     # (optional, dash-prefixed) EnvironmentFile line, a blank line, then [Install].
@@ -280,7 +279,7 @@ EOF2
     [ -z "$(sed -n '/^EnvironmentFile=-/{n;p;}' "$unit")" ]
     ROMP_OS_OVERRIDE=Darwin run "$SVC" install
     [ "$status" -eq 0 ]
-    run grep -q "ROMP_SERVE_PORT\|ROMP_STATE_DIR\|ROMP_TMUX_SOCKET" "$ROMP_LAUNCHD_DIR/com.romp.manager.plist"
+    run grep -q "ROMP_SERVE_PORT\|ROMP_STATE_DIR\|CLAUDE_CONFIG_DIR" "$ROMP_LAUNCHD_DIR/com.romp.manager.plist"
     [ "$status" -ne 0 ]        # (a bare `! cmd` that is not the test's last statement can never fail it)
 }
 

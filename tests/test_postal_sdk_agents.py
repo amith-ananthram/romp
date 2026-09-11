@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""SDK-backed (non-tmux) sessions must be VISIBLE + reachable to the Romp Postal Service (the user via ui,
-2026-06-26). local_agents() now reads the kernel's UNIFIED GET /sessions (tmux + SDK) — the kernel merges
-both backends — so an SDK session the kernel reports is a live postal agent here too: a send to it DELIVERS
-instead of resolving DEAD and PARKING. The bus no longer reads the SDK registry directly or shells tmux;
-the kernel is the single source. Synthetic only — placeholder UUIDs, hostname-free.
+"""SDK-backed sessions must be VISIBLE + reachable to the Romp Postal Service (the user via ui,
+2026-06-26). local_agents() reads the kernel's UNIFIED GET /sessions — the kernel merges every backend
+(Claude Code and Codex) — so a session the kernel reports is a live postal agent here: a send to it
+DELIVERS instead of resolving DEAD and PARKING. The bus never reads the SDK registry directly for
+addressing; the kernel is the single source. Synthetic only — placeholder UUIDs, hostname-free.
 """
 import os
 import tempfile
@@ -49,7 +49,7 @@ class SdkAgentsVisibleToPostal(unittest.TestCase):
 
     def test_unreachable_kernel_yields_no_local_agents(self):
         # _kernel_sessions returns [] on any failure (the real impl swallows the urlopen error); the bus then
-        # shows no local agents rather than shelling tmux behind the abstraction.
+        # shows no local agents rather than reaching past the abstraction.
         pm._kernel_sessions = lambda threads=False: []
         self.assertEqual(pm.local_agents(), [])
 

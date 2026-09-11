@@ -146,7 +146,8 @@ PY
     start_fake_kernel '{"ok": false, "error": "id or name required"}'
     run "$ROMP_SCRIPT" interrupt ghost
     [ "$status" -eq 1 ]
-    [[ "$output" == *"kernel refused"* ]]
+    [[ "$output" == *"refused"* ]]
+    [[ "$output" == *"id or name required"* ]]   # the kernel's own words, not the raw body
 }
 
 @test "an unreachable kernel is loud, not a silent curl swallow" {

@@ -28,10 +28,12 @@ km = load_source("romp_kernel_modelq", os.path.join(BIN, "romp-kernel"))
 # limit. Pinning it off keeps them hermetic.
 km._limit_hold = lambda sid: None
 
-# The tmux PROMPT HOLD (_hold_drain: a tmux-shaped delivery holds the sid for a moment, tested in
-# tests/test_kernel_parked_ops_liveness.py) is a separate axis: off here, so back-to-back
-# _apply_pending_ops calls stand for successive cycles.
-km._TMUX_PROMPT_HOLD_S = 0.0
+# The PROMPT HOLD (_hold_drain: a turn-opening delivery whose backend did not read busy() True inside
+# send() holds the sid until the flip is observed or _PROMPT_HOLD_S runs out — built for the tmux backend,
+# removed 2026-09-11, and kept as a defensive arm for any backend without a synchronous busy gate; tested
+# in tests/test_kernel_parked_ops_liveness.py) is a separate axis: off here, so
+# back-to-back _apply_pending_ops calls stand for successive cycles.
+km._PROMPT_HOLD_S = 0.0
 
 SID = "11111111-2222-3333-4444-555555555555"
 
@@ -116,16 +118,16 @@ class CompactingNowGate(unittest.TestCase):
     """_compacting_now composes the REAL _compacting corroboration from cheap parts (cached parse only)."""
 
     def setUp(self):
-        self._saved = (km._tmux_sessions, km._path_of, km._parse_cached)
+        self._saved = (km._live_map, km._path_of, km._parse_cached)
         km._path_of = lambda sid: "/tmp/x.jsonl"
         km._compact_clicked.clear()
 
     def tearDown(self):
-        (km._tmux_sessions, km._path_of, km._parse_cached) = self._saved
+        (km._live_map, km._path_of, km._parse_cached) = self._saved
         km._compact_clicked.clear()
 
     def test_optimistic_click_reads_compacting_until_the_boundary_lands(self):
-        km._tmux_sessions = lambda: {SID: {"state": "waiting", "since": None}}
+        km._live_map = lambda: {SID: {"state": "waiting", "since": None}}
         km._parse_cached = lambda p: {"turns": []}
         km._compact_clicked[SID] = time.time()          # the kernel itself just sent /compact
         self.assertTrue(km._compacting_now(SID), "the optimistic click reads compacting at once")
@@ -135,7 +137,7 @@ class CompactingNowGate(unittest.TestCase):
         self.assertFalse(km._compacting_now(SID), "the compact_boundary event ends it — the parked switch can fire")
 
     def test_no_signal_reads_not_compacting(self):
-        km._tmux_sessions = lambda: {SID: {"state": "waiting", "since": None}}
+        km._live_map = lambda: {SID: {"state": "waiting", "since": None}}
         km._parse_cached = lambda p: {"turns": []}
         self.assertFalse(km._compacting_now(SID))
 

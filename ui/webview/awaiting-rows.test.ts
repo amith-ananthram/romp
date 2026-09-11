@@ -192,8 +192,8 @@ test("the box re-renders on a rows change like any other awaiting field, and eve
   assert.ok(key.includes("st.awaitingItems"), "awaitingItems is in the await key");
   // pins changed 2026-09-06: the session-scoped surfaces ship the rows in BOTH turn states (the wait's own rows
   // idle-awaiting, everything in flight otherwise — _awaiting_items_payload), not gated on awaiting_why
-  assert.match(KERNEL, /_aw_items = _awaiting_items_payload\(_aw, sid, sess\["path"\], tmux\)[\s\S]*?"awaitingItems": _aw_items,/, "chat status");
-  assert.match(KERNEL, /"awaitingItems": \(_awaiting_items_payload\(_aw_bg, sid, s\["path"\], tmux\) if live else \[\]\),/, "timeline lane");
+  assert.match(KERNEL, /_aw_items = _awaiting_items_payload\(_aw, sid, sess\["path"\], live_map\)[\s\S]*?"awaitingItems": _aw_items,/, "chat status");
+  assert.match(KERNEL, /"awaitingItems": \(_awaiting_items_payload\(_aw_bg, sid, s\["path"\], live_map\) if live else \[\]\),/, "timeline lane");
   assert.match(KERNEL, /"items": await_items,/, "the goal card");
   assert.match(KERNEL, /"items": list\(items or \[\]\),/, "the placeholder card");
 });

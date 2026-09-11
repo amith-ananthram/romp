@@ -1129,7 +1129,7 @@ test("startPageServer hands the Handler an isolated environment: a minted token,
     const dist = fakeDist(tmp);
     const envOut = path.join(tmp, "env.txt");
     // The variables the Handler must never inherit, named here so a shrinking export cannot shrink the check:
-    // the manager's, the live kernel's ports and state root, the perf switch and tmux's.
+    // the manager's, the live kernel's ports and state root, the perf switch and a terminal's TMUX.
     const NEVER = ["ROMP_MANAGER_PORT", "ROMP_MANAGER_PID", "ROMP_SUPERVISED", "ROMP_STATE_DIR", "ROMP_SERVE_PORT", "ROMP_KERNEL_PORT", "ROMP_PERF", "TMUX"];
     assert.deepEqual([...STRIPPED_ENV].sort(), [...NEVER].sort(), "the tool's list is exactly this one");
     // Every key-source and credential name tests/conftest.py pops before any test (its KEY_SOURCE_ENV_NAMES and
@@ -1167,7 +1167,6 @@ test("startPageServer hands the Handler an isolated environment: a minted token,
       if (process.platform !== "win32") { assert.equal(mode(srv.root), 0o700); assert.equal(mode(srv.tmp), 0o700); }
       assert.equal(env.ROMP_DIST_DIR, dist);
       assert.ok(env.XDG_STATE_HOME.startsWith(srv.tmp + path.sep), "a private state root");
-      assert.ok(env.TMUX_TMPDIR.startsWith(srv.tmp + path.sep));
       assert.ok(fs.readFileSync(envOut, "utf8").includes(`\nTMPARG ${srv.tmp}\n`), "the subprocess is told its directory so it can remove it");
       for (const k of Object.keys(env)) assert.ok(!k.startsWith("ANTHROPIC_") && !k.startsWith("OP_SESSION_"), `${k} must not reach the Handler`);
       for (const k of NEVER) if (k !== "ROMP_MANAGER_PORT") assert.equal(env[k], undefined, `${k} was planted and must not reach the Handler`);

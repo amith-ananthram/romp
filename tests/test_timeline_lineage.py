@@ -19,7 +19,6 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
-os.environ["ROMP_TMUX_AVAILABLE"] = "1"
 os.environ["ROMP_SERVE_TOKEN"] = "testtok"
 em = load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
 jd = load_source("romp_judge", os.path.join(BIN, "romp-judge"))
@@ -103,7 +102,7 @@ class TimelineLineageBase(unittest.TestCase):
 
 class BranchOnTheTimeline(TimelineLineageBase):
     def test_the_forked_lane_carries_its_branch_and_clips_the_copied_history(self):
-        tl = km.build_timeline(self.now, tmux={})
+        tl = km.build_timeline(self.now, live_map={})
         lane = self._lane(tl, CHILD)
         self.assertEqual(lane["branch"], {"fromId": PARENT, "t": self.fork_t, "cut": "a1"})
         starts = [b["start"] for b in tl["turns"][CHILD]]
@@ -116,19 +115,19 @@ class BranchOnTheTimeline(TimelineLineageBase):
     def test_a_gone_parent_returns_the_whole_story_to_the_child(self):
         (jd.NAMES / PARENT).unlink()                 # the parent session is gone from the timeline
         jd._discover_cache.clear()
-        tl = km.build_timeline(self.now, tmux={})
+        tl = km.build_timeline(self.now, live_map={})
         self.assertIsNone(self._lane(tl, CHILD)["branch"],
                           "no parent lane, no connector endpoint")
         self.assertTrue(any(b["start"] < self.fork_t for b in tl["turns"][CHILD]),
                         "with the parent gone the child reads as one session all along")
 
     def test_the_skeleton_carries_lineage_without_parsing(self):
-        tl = km.build_timeline(self.now, tmux={}, with_bars=False)
+        tl = km.build_timeline(self.now, live_map={}, with_bars=False)
         self.assertEqual(self._lane(tl, CHILD)["branch"]["fromId"], PARENT)
         self.assertEqual(tl["turns"], {}, "the skeleton still parses nothing")
 
     def test_an_unforked_lane_carries_no_branch(self):
-        tl = km.build_timeline(self.now, tmux={})
+        tl = km.build_timeline(self.now, live_map={})
         self.assertIsNone(self._lane(tl, PARENT)["branch"])
 
 
@@ -144,7 +143,7 @@ class CommentSquares(TimelineLineageBase):
             {"tid": "t3", "sid": "t3", "anchorUuid": "a1", "cutUuid": "a1",
              "exact": "x", "status": "promoted", "promotedName": "sidework",
              "createdT": self.now - 50, "lastSeenT": self.now}]})
-        tl = km.build_timeline(self.now, tmux={})
+        tl = km.build_timeline(self.now, live_map={})
         marks = self._lane(tl, PARENT)["comments"]
         self.assertEqual([m["tid"] for m in marks], [THREAD, "t2"],
                          "open + resolved ride the lane; a promoted thread IS a session")
@@ -153,7 +152,7 @@ class CommentSquares(TimelineLineageBase):
         self.assertEqual(marks[0]["uuid"], "a1")
 
     def test_a_lane_with_no_threads_pays_one_stat_and_carries_none(self):
-        tl = km.build_timeline(self.now, tmux={})
+        tl = km.build_timeline(self.now, live_map={})
         self.assertEqual(self._lane(tl, CHILD)["comments"], [])
 
 

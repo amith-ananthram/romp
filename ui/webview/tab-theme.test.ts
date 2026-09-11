@@ -60,7 +60,7 @@ test("Classic: NO identity tint — every tint rule lives under the theme class"
 test("Classic: faded labels brighten 10% — one tunable knob, Yatharth keeps his full fade (T118)", () => {
   assert.match(RENDER, /const CLASSIC_FADE_SCALE = 0\.9;/);
   assert.match(RENDER, /const scale = settings\.chatTabTheme === "yatharth" \? 1 : CLASSIC_FADE_SCALE;/);
-  assert.match(RENDER, /const t = Math\.min\(0\.85, \(Lc - Lt\) \/ \(Lc - Lb\)\) \* scale;/);
+  assert.match(RENDER, /const t = Math\.min\(0\.85, \(Lc - Lt\) \/ \(Lc - Lb\)\) \* scale \* amount;/);   // × the caller's strength since T341 (1 for the strip)
 });
 
 test("Classic: ONE dark background — no band, no explicit body fill, baseline transparency (T141)", () => {

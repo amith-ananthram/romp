@@ -38,10 +38,11 @@ km = load_source("romp_kernel_headless", os.path.join(BIN, "romp-kernel"))
 # limit. Pinning it off keeps them hermetic.
 km._limit_hold = lambda sid: None
 
-# The tmux PROMPT HOLD (_hold_drain: a tmux-shaped delivery holds the sid for a moment, tested in
-# tests/test_kernel_parked_ops_liveness.py) is a separate axis: off here, so back-to-back
+# The PROMPT HOLD (_hold_drain: a turn-opening delivery whose backend did not read busy() True inside
+# send() holds the sid for a moment; built for the tmux backend, removed 2026-09-11, and kept as a defensive
+# arm; tested in tests/test_kernel_parked_ops_liveness.py) is a separate axis: off here, so back-to-back
 # _apply_pending_ops calls stand for successive cycles.
-km._TMUX_PROMPT_HOLD_S = 0.0
+km._PROMPT_HOLD_S = 0.0
 
 
 class PendingOpsPersistence(unittest.TestCase):

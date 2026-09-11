@@ -10,9 +10,10 @@ removed the first by body while the client had dropped its own entry by id (the 
 for a cancelled send).
 
 Exercised through the real kernel functions (_send_or_park, _deliver_send_batch, _apply_pending_ops, _cancel_parked,
-_cancel_backend_queued and the ws handler _drive) against in-memory backend stand-ins, and against the real
-TmuxBackend for the route whose send takes no id. The SdkBackend half (send(qid=), unqueue(qid=), the shape check
-against a live queue) is in tests/test_queued_copy_identity.py.
+_cancel_backend_queued and the ws handler _drive) against in-memory backend stand-ins: one that identifies its
+copies (the SdkBackend shape) and one whose send takes the text alone and cannot forward mid-turn (the ABC's
+default shape; Codex's send takes no id either, though it forwards). The SdkBackend half (send(qid=), unqueue(qid=),
+the shape check against a live queue) is in tests/test_queued_copy_identity.py.
 SYNTHETIC fixtures only: a private synthetic sid, invented text, no hostnames."""
 import json
 import os
@@ -31,10 +32,10 @@ os.environ.pop("ROMP_STATE_DIR", None)
 os.environ["ROMP_MANAGER_PORT"] = "1"
 km = load_source("romp_kernel_pressid", os.path.join(BIN, "romp-kernel"))
 
-# the account gate and the tmux prompt hold are separate axes (tests/test_kernel_limit_queue.py,
+# the account gate and the prompt hold are separate axes (tests/test_kernel_limit_queue.py,
 # tests/test_kernel_parked_ops_liveness.py): off here, so a park is a park for the reason under test
 km._limit_hold = lambda sid: None
-km._TMUX_PROMPT_HOLD_S = 0.0
+km._PROMPT_HOLD_S = 0.0
 
 SID = "7e8f9a0b-1c2d-4e3f-8a9b-0c1d2e3f4a5b"   # private synthetic sid
 A = "echo:" + "a" * 32                        # ids in the kernel's own echo form, as the client mints them
@@ -82,8 +83,9 @@ class _IdBackend:
 
 
 class _PlainBackend:
-    """A backend whose copies carry no id, in the tmux shape: it lists its queue's copies with their stamps and no id
-    (pending_queued_meta, which the chat reads for the stamps) and its send takes the text alone."""
+    """A backend whose copies carry no id and which cannot forward a send mid-turn (no forwards_sends: the ABC's
+    default): it lists its queue's copies with their stamps and no id (pending_queued_meta, which the chat reads
+    for the stamps) and its send takes the text alone."""
 
     def __init__(self):
         self.calls = []
@@ -104,12 +106,10 @@ class _PlainBackend:
 
 class _ParkFixture(unittest.TestCase):
     def setUp(self):
-        self.echoes = []
         self._saved = (km._compacting_now, km._working_now, km.Sessions.backend_for, km._push_all,
-                       km._optimistic_echo, km._mark_views_dirty)
+                       km._mark_views_dirty)
         km._push_all = lambda: None
         km._mark_views_dirty = lambda: None
-        km._optimistic_echo = lambda sid, text, author="human": self.echoes.append((text, author))
         km._working_now = lambda sid: False
         km._compacting_now = lambda sid: False
         km._pending_ops.pop(SID, None)
@@ -117,7 +117,7 @@ class _ParkFixture(unittest.TestCase):
 
     def tearDown(self):
         (km._compacting_now, km._working_now, km.Sessions.backend_for, km._push_all,
-         km._optimistic_echo, km._mark_views_dirty) = self._saved
+         km._mark_views_dirty) = self._saved
         km._pending_ops.pop(SID, None)
         km._inflight_ops.pop(SID, None)
         km._save_pending_ops()
@@ -136,7 +136,6 @@ class ParkedSendCarriesItsPressId(_ParkFixture):
                           ("send", "no id rode this one", "human"), ("command", "/compact", "human", C)],
                          "the id is the op's 4th slot, present only when the press minted one")
         self.assertEqual(be.calls, [], "parked, not handed over")
-        self.assertEqual(self.echoes, [], "a parked send stamps no echo until it fires")
 
     def test_the_slot_survives_the_disk_mirror(self):
         km._compacting_now = lambda sid: True
@@ -151,7 +150,6 @@ class ParkedSendCarriesItsPressId(_ParkFixture):
         plain = _PlainBackend()
         self.assertFalse(km._send_or_park(plain, SID, "go", echo="human", qid=A))
         self.assertEqual(plain.calls, ["go"], "a route whose copies carry no id takes the text alone")
-        self.assertEqual(self.echoes, [("go", "human"), ("go", "human")])
 
     def test_the_drain_hands_each_parked_send_its_own_id(self):
         be = _IdBackend()
@@ -168,7 +166,6 @@ class ParkedSendCarriesItsPressId(_ParkFixture):
         km._save_pending_ops()
         km._apply_pending_ops()
         self.assertEqual(be.calls, [("/compact", C)], "the command's echo will wear the id the press minted")
-        self.assertEqual(self.echoes, [("/compact", "human")])
 
     def test_a_parked_command_fires_as_the_text_on_a_backend_whose_send_takes_no_id(self):
         plain = _PlainBackend()
@@ -179,76 +176,71 @@ class ParkedSendCarriesItsPressId(_ParkFixture):
         self.assertEqual(plain.calls, ["/compact"], "the command fired; the id, which this send cannot take, was left off")
         self.assertEqual(km._pending_ops.get(SID), [("send", "after it", "human", A)],
                          "the op behind it waits for the command's turn to end: the queue was delivered, not dropped")
-        self.assertEqual(self.echoes, [("/compact", "human")])
 
 
-class _TmuxFixture(_ParkFixture):
-    """The real TmuxBackend (km._TMUX) with the pane typing stubbed: _tmux_send records what reaches the pane, the
-    transcript path resolves to none (no queue records, no parse) and the sid has a name. The ws handler's stubs
-    are the ones TheWireCarriesTheId uses."""
+class _PlainRouteFixture(_ParkFixture):
+    """The ws handler over a backend whose send takes the text alone and cannot forward mid-turn (_PlainBackend):
+    the transcript path resolves to none (no queue records, no parse) and the sid has a name. The ws handler's
+    stubs are the ones TheWireCarriesTheId uses."""
 
     def setUp(self):
         super().setUp()
-        self.typed = []
-        self._tmux_saved = (km._tmux_send, km._path_of, km._name_of, km._sdk, km._push_soon,
-                            km.jd.optimistic_followup, km._predict_working)
-        km._tmux_send = lambda name, text, **kw: self.typed.append((name, text))
+        self.plain = _PlainBackend()
+        self._route_saved = (km._path_of, km._name_of, km._sdk, km._push_soon,
+                             km.jd.optimistic_followup, km._predict_working)
         km._path_of = lambda sid, now=None: None
         km._name_of = lambda sid: "web" if sid == SID else None
         km._sdk = lambda: None
         km._push_soon = lambda: None
         km.jd.optimistic_followup = lambda *a, **k: False
         km._predict_working = lambda *a, **k: None
-        km.Sessions.backend_for = staticmethod(lambda sid: km._TMUX)
+        km.Sessions.backend_for = staticmethod(lambda sid: self.plain)
 
     def tearDown(self):
-        (km._tmux_send, km._path_of, km._name_of, km._sdk, km._push_soon,
-         km.jd.optimistic_followup, km._predict_working) = self._tmux_saved
+        (km._path_of, km._name_of, km._sdk, km._push_soon,
+         km.jd.optimistic_followup, km._predict_working) = self._route_saved
         super().tearDown()
 
 
-class TheTmuxRouteTakesTheTextAlone(_TmuxFixture):
-    """TmuxBackend lists its queue's copies (pending_queued_meta, for the chat's stamps) and its send takes no id: a
-    send that rode in with one reaches the pane as the text, handed over now or fired from the parked queue, and
-    the client's id still names the copy while it is parked."""
+class TheNoIdRouteTakesTheTextAlone(_PlainRouteFixture):
+    """A backend that lists its queue's copies (pending_queued_meta, for the chat's stamps) and whose send takes no
+    id: a send that rode in with one reaches the backend as the text, handed over now or fired from the parked
+    queue, and the client's id still names the copy while it is parked."""
 
-    def test_a_composer_send_carrying_an_id_reaches_the_pane(self):
+    def test_a_composer_send_carrying_an_id_reaches_the_backend(self):
         sent = []
         client = {"send": lambda s: sent.append(json.loads(s))}
         self.assertTrue(km._drive({"type": "sendMessage", "id": SID, "text": "hello there", "qid": A}, client))
-        self.assertEqual(self.typed, [("web", "hello there")], "the text reached the pane; the id stayed with the kernel")
-        self.assertEqual(self.echoes, [("hello there", "human")], "the kernel's own echo, as for every tmux send")
+        self.assertEqual(self.plain.calls, ["hello there"], "the text reached the backend; the id stayed with the kernel")
         self.assertNotIn(SID, km._pending_ops, "handed over, not parked")
         self.assertEqual(sent, [], "nothing refused")
 
-    def test_a_follow_up_carrying_an_id_reaches_the_pane(self):
+    def test_a_follow_up_carrying_an_id_reaches_the_backend(self):
         client = {"send": lambda s: None}
         self.assertTrue(km._drive({"type": "askFollowUp", "itemId": SID + ":g4", "text": "and the fix?", "qid": A}, client))
-        self.assertEqual(len(self.typed), 1)
-        self.assertEqual(self.typed[0][0], "web")
-        self.assertIn("and the fix?", self.typed[0][1])
+        self.assertEqual(len(self.plain.calls), 1)
+        self.assertIn("and the fix?", self.plain.calls[0])
 
     def test_a_parked_command_fires_as_the_text_and_the_queue_behind_it_stays(self):
         km._pending_ops[SID] = [("command", "/compact", "human", C), ("send", "after it", "human", A)]
         km._save_pending_ops()
         km._apply_pending_ops()
-        self.assertEqual(self.typed, [("web", "/compact")], "the command reached the pane as the text")
+        self.assertEqual(self.plain.calls, ["/compact"], "the command reached the backend as the text")
         self.assertEqual(km._pending_ops.get(SID), [("send", "after it", "human", A)],
                          "the send behind it waits for the command's turn to end: nothing was dropped")
-        self.assertEqual(self.echoes, [("/compact", "human")])
 
     def test_a_parked_send_keeps_the_id_for_its_chip_and_its_cancel_until_the_drain_hands_the_text_over(self):
-        km._working_now = lambda sid: True                 # a turn is open: tmux holds the send
+        km._working_now = lambda sid: True                 # a turn is open: a backend that cannot forward holds the send
         client = {"send": lambda s: None}
         km._drive({"type": "sendMessage", "id": SID, "text": WORDS, "qid": A}, client)
         km._drive({"type": "sendMessage", "id": SID, "text": WORDS, "qid": B}, client)
         # the composer's send is the user's: the fifth slot says so (T315), behind the id in the fourth
         self.assertEqual(km._pending_ops[SID], [("send", WORDS, "human", A, True), ("send", WORDS, "human", B, True)])
-        self.assertIsNone(km._cancel_parked(SID, 0, WORDS, qid=B), "the ✕ by id is exact on a parked tmux send too")
+        self.assertIsNone(km._cancel_parked(SID, 0, WORDS, qid=B), "the ✕ by id is exact on a held send too")
         self.assertEqual(km._pending_ops[SID], [("send", WORDS, "human", A, True)])
         km._working_now = lambda sid: False
         km._apply_pending_ops()
-        self.assertEqual(self.typed, [("web", WORDS)], "the drain hands the pane the text")
+        self.assertEqual(self.plain.calls, [WORDS], "the drain hands the backend the text")
         self.assertNotIn(SID, km._pending_ops)
 
 
@@ -345,7 +337,7 @@ class TheWireCarriesTheId(unittest.TestCase):
         self.client = {"send": lambda s: self.sent.append(json.loads(s))}
         self.be = _IdBackend()
         self._saved = (km._name_of, km._sdk, km.Sessions.backend_for, km._compacting_now, km._working_now,
-                       km._push_soon, km._push_all, km._mark_views_dirty, km._optimistic_echo,
+                       km._push_soon, km._push_all, km._mark_views_dirty,
                        km.jd.optimistic_followup, km._predict_working)
         km.jd.optimistic_followup = lambda *a, **k: False   # the card reopen is the goal store's, not this test's
         km._predict_working = lambda *a, **k: None
@@ -357,13 +349,12 @@ class TheWireCarriesTheId(unittest.TestCase):
         km._push_soon = lambda: None
         km._push_all = lambda: None
         km._mark_views_dirty = lambda: None
-        km._optimistic_echo = lambda sid, text, author="human": None
         km._pending_ops.pop(SID, None)
         km._inflight_ops.pop(SID, None)
 
     def tearDown(self):
         (km._name_of, km._sdk, km.Sessions.backend_for, km._compacting_now, km._working_now,
-         km._push_soon, km._push_all, km._mark_views_dirty, km._optimistic_echo,
+         km._push_soon, km._push_all, km._mark_views_dirty,
          km.jd.optimistic_followup, km._predict_working) = self._saved
         km._pending_ops.pop(SID, None)
         km._inflight_ops.pop(SID, None)

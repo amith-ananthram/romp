@@ -104,7 +104,7 @@ class AnsweredWakeFilesWhenItsCallerHoldsTheSharedView(unittest.TestCase):
         jd.parsed_session = lambda sid, paths, now: {"turns": self.turns}
         self.fb = _FakeBackend()
         km.Sessions.backend_for = lambda sid: self.fb
-        self.tmux = {SID: {"state": ""}}
+        self.live = {SID: {"state": ""}}
         (jd.GOALDIR / (SID + ".json")).write_text(json.dumps({
             "rompUuid": SID, "seq": 1, "placements": {}, "status": {GID: "working"},
             "nodes": {GID: _stamped_node()}}))
@@ -163,7 +163,7 @@ class AnsweredWakeFilesWhenItsCallerHoldsTheSharedView(unittest.TestCase):
         nudged = dict(km._auto_nudge_data().get("nudged", {}))
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            out = km._auto_nudge_session({"sid": SID, "path": "/nonexistent.jsonl"}, NOW, self.tmux, nudged, {})
+            out = km._auto_nudge_session({"sid": SID, "path": "/nonexistent.jsonl"}, NOW, self.live, nudged, {})
         self.assertNotIsInstance(out, str, "a session gate held the walk before the goal loop: %r" % (out,))
         self.assertGreaterEqual(self._delta("miss") + self._delta("hit"), 1,
                                 "fixture: the walk's store read went through the shared loader")
@@ -179,7 +179,7 @@ class AnsweredWakeFilesWhenItsCallerHoldsTheSharedView(unittest.TestCase):
         nudged = dict(km._auto_nudge_data().get("nudged", {}))
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
-            fired = km._wake_goal(SID, GID, stamp, nudged, self.turns, store, NOW, self.turns[-1], self.tmux)
+            fired = km._wake_goal(SID, GID, stamp, nudged, self.turns, store, NOW, self.turns[-1], self.live)
         self.assertFalse(fired, "an answered wake never escalates")
         self._assert_answer_filed_cleanly(err.getvalue())
         self.assertEqual(len(store["nodes"][GID]["log"]), 1, "the view object itself is untouched")
@@ -195,7 +195,7 @@ class AnsweredWakeFilesWhenItsCallerHoldsTheSharedView(unittest.TestCase):
             nudged = dict(km._auto_nudge_data().get("nudged", {}))
             before = jd.shared_store_stats()
             with contextlib.redirect_stderr(io.StringIO()):
-                km._auto_nudge_session({"sid": SID, "path": "/nonexistent.jsonl"}, NOW, self.tmux, nudged, {})
+                km._auto_nudge_session({"sid": SID, "path": "/nonexistent.jsonl"}, NOW, self.live, nudged, {})
             after = jd.shared_store_stats()
             self.assertGreaterEqual((after["miss"] + after["hit"]) - (before["miss"] + before["hit"]), 1,
                                     "fixture: walk %d read the store through the shared loader" % n)

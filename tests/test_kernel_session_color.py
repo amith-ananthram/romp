@@ -47,7 +47,7 @@ class SessionColor(unittest.TestCase):
         km._pal_cache.update({"name": km.pal.DEFAULT, "mt": None})
 
     def test_active_palette_shape_and_the_rose_slot(self):
-        # the SAME set the tmux launcher / SDK backend assign from — romp_palette is the single
+        # the SAME set the SDK backend (and, until 2026-09-11, the tmux launcher) assigns from — romp_palette is the single
         # source. The romp set grows APPEND-ONLY (slot 9 = rose #E0629C, the user 2026-08-28), so
         # the pin is shape + the stable prefix, never a fixed nine.
         bgs, fgs = km.pal.colors(km._palette_name()), km.pal.fgs(km._palette_name())

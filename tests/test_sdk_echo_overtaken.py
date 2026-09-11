@@ -10,9 +10,9 @@ send, its own text landed nowhere and owed by no queue. The composer's messages 
 order, so the later one going through means the CLI took it while still holding this one.
 
 Three surfaces, each pinned here:
-  1. live — sdk_backend.settle_echoes marks the overtaken echo dropped at the build (the SDK twin of the
-     kernel's _tmux_echo_settle): whole seconds, never pruning, standing down for a text the backend's own
-     queue or the CLI's queue ledger still lists, self-correcting on a landing;
+  1. live — sdk_backend.settle_echoes marks the overtaken echo dropped at the build: whole seconds, never
+     pruning, standing down for a text the backend's own queue or the CLI's queue ledger still lists,
+     self-correcting on a landing;
   2. the kernel's _merge_live_atoms hands the settle the CLI's UNFILTERED ledger (_pending_ledger), and
      only when an unflagged, unlanded echo is actually overtaken;
   3. boot — _mark_dropped_echoes flags instead of re-feeding when a later human input landed after the
@@ -337,13 +337,12 @@ class TheKernelHandsTheSettleTheLedger(unittest.TestCase):
                 f.write(json.dumps({"type": "queue-operation", "timestamp": _iso(T + 5), "operation": op, "content": content}) + "\n")
 
     def test_an_overtaken_echo_brings_one_settle_call_with_the_unfiltered_ledger(self):
-        mail = "<!-- romp-msg-id: m1 -->hello from web"          # a delivery the display fold drops as not the user's
+        mail = "<!-- romp-msg-id: m1 -->hello from web"          # agent mail, not the user's typed input: owed all the same
         self._ledger([("enqueue", "still waiting"), ("enqueue", mail), ("enqueue", "taken"), ("remove", "taken")])
         self.live = [_echo_atom()]
         km._merge_live_atoms(self._session(T + 60), SID)
         self.assertEqual(self.prunes, [T + 60], "the prune runs first, with the same floor")
         self.assertEqual(self.calls, [(SID, T + 60, ["still waiting", mail])])
-        self.assertEqual(km._pending_queued(self.path), ["still waiting"], "the display fold keeps only the user's queued input")
         self.assertEqual(km._pending_ledger(self.path), ["still waiting", mail], "the settle's owed read keeps every pending text")
 
     def test_no_settle_without_something_to_rule_on(self):
@@ -363,10 +362,10 @@ class TheKernelHandsTheSettleTheLedger(unittest.TestCase):
         self.live = [_echo_atom()]
         km._merge_live_atoms(self._session(T + 60), SID)
         self.assertEqual(self.calls, [(SID, T + 60, [])], "no transcript path: nothing owed by a ledger")
-        Tmuxish = type("Tmuxish", (), {"live_atoms": self.Fake.live_atoms, "prune_live": self.Fake.prune_live})
-        km.Sessions.backend_for = staticmethod(lambda sid: Tmuxish())
+        NoSettle = type("NoSettle", (), {"live_atoms": self.Fake.live_atoms, "prune_live": self.Fake.prune_live})
+        km.Sessions.backend_for = staticmethod(lambda sid: NoSettle())
         self.calls.clear()
-        km._merge_live_atoms(self._session(T + 60), SID)        # the tmux backend settles inside its own prune_live
+        km._merge_live_atoms(self._session(T + 60), SID)        # no settle_echoes on this backend (the unowned route): nothing to call
         self.assertEqual(self.calls, [])
 
 

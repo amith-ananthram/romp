@@ -143,11 +143,6 @@ produced confusing failures:
 
 - The bats suite takes about a minute on Linux and about fifteen on macOS. That
   is expected, not a hang.
-- Some tests behave differently depending on whether a `tmux` binary exists on
-  the machine, because romp treats "no tmux at all" as headless and falls back
-  to file-derived sessions. Tests that care now pin this explicitly; if you add
-  one that calls into session liveness, pin it too rather than inheriting the
-  machine's state.
 - On macOS, run the bats suite with a modern bash (`brew install bash`; bats
   picks it up via `env bash` when `/opt/homebrew/bin` precedes `/bin` on PATH).
   The stock `/bin/bash` 3.2 does not fail a test on a mid-test `[[ ]]`

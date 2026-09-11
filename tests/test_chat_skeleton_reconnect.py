@@ -99,20 +99,20 @@ class SkeletonReconnect(unittest.TestCase):
         self.paths[S4] = os.path.join(self.tmp, S4 + ".jsonl")   # never written: the transcript-less session
         self.SESS = {S1: _sess(S1, 5, "working"), S2: _sess(S2, 7, "working"),
                      S3: _sess(S3, 3, "waiting"), S4: _sess(S4, 0, "waiting")}
-        self._saved = (km._chat_tab_sessions, km._tmux_sessions, km._cached_feed, km.build_session,
+        self._saved = (km._chat_tab_sessions, km._live_map, km._cached_feed, km.build_session,
                        km._comments_frame, km._push_subagents, km.NAMES, km.jd.STATE, list(km._clients))
-        km._chat_tab_sessions = lambda now, tmux: [
+        km._chat_tab_sessions = lambda now, live_map: [
             {"sid": sid, "name": NAMES[sid], "path": self.paths[sid], "anchor": sid} for sid in TAB_ORDER]
-        km._tmux_sessions = lambda: {}
+        km._live_map = lambda: {}
         km._cached_feed = lambda *a, **k: None          # no feed build — the chat frames are what is pinned
         self.built = []
 
-        def build(sid, now, tmux=None, **kw):
+        def build(sid, now, live_map=None, **kw):
             self.built.append(sid)
             return json.loads(json.dumps(self.SESS[sid]))   # a fresh copy per build, as the real builder returns
         km.build_session = build
-        km._comments_frame = lambda sid, tmux: None
-        km._push_subagents = lambda clients, now, tmux: None
+        km._comments_frame = lambda sid, live_map: None
+        km._push_subagents = lambda clients, now, live_map: None
         km.NAMES = Path(self.tmp) / "names"
         km.NAMES.mkdir()
         km.jd.STATE = Path(self.tmp) / "state"
@@ -124,7 +124,7 @@ class SkeletonReconnect(unittest.TestCase):
         km._pusher_wake.clear()
 
     def tearDown(self):
-        (km._chat_tab_sessions, km._tmux_sessions, km._cached_feed, km.build_session,
+        (km._chat_tab_sessions, km._live_map, km._cached_feed, km.build_session,
          km._comments_frame, km._push_subagents, km.NAMES, km.jd.STATE, clients) = self._saved
         del km._clients[:]
         km._clients.extend(clients)
@@ -173,7 +173,7 @@ class SkeletonReconnect(unittest.TestCase):
         km._push([c])
         self.assertEqual(c["skeleton"], {S2, S3})
         orig = km._chat_tab_sessions
-        km._chat_tab_sessions = lambda now, tmux: [s for s in orig(now, tmux) if s["sid"] != S3]   # S3 ended
+        km._chat_tab_sessions = lambda now, live_map: [s for s in orig(now, live_map) if s["sid"] != S3]   # S3 ended
         try:
             km._push([c])
         finally:
@@ -387,11 +387,11 @@ class SkeletonReconnect(unittest.TestCase):
         for fn in (km._push, km._push_session_now, km._confirm_close_now):
             s = inspect.getsource(fn)
             self.assertIn("_resolve_reconnect(c, chat_list)", s, fn.__name__)
-            self.assertIn("_send_tab_order(c, tab_order, tab_meta, tmux)", s, fn.__name__)
-            self.assertLess(s.index("_resolve_reconnect(c, chat_list)"), s.index("_send_tab_order(c, tab_order, tab_meta, tmux)"),
+            self.assertIn("_send_tab_order(c, tab_order, tab_meta, live_map)", s, fn.__name__)
+            self.assertLess(s.index("_resolve_reconnect(c, chat_list)"), s.index("_send_tab_order(c, tab_order, tab_meta, live_map)"),
                             fn.__name__ + ": resolve BEFORE the strip")
             self.assertIn("_consume_pending_reveal(c", s, fn.__name__ + ": a redial's first strip consumes a parked reveal")
-            self.assertLess(s.index("_send_tab_order(c, tab_order, tab_meta, tmux)"), s.index("_consume_pending_reveal(c"),
+            self.assertLess(s.index("_send_tab_order(c, tab_order, tab_meta, live_map)"), s.index("_consume_pending_reveal(c"),
                             fn.__name__ + ": the strip BEFORE the focus it names a tab of")
         i = src.find('msg.get("type") == "ready"')
         body = src[i:i + 2600]
@@ -497,7 +497,7 @@ class SkeletonReconnect(unittest.TestCase):
         # pusher's first strip for the redial is the event that stands in: it stamps the client, sends the strip,
         # then delivers the parked focus, so the focus names a tab the strip has already listed.
         km._PENDING_REVEAL[0] = None
-        km._tmux_sessions = lambda: {S1: {}}       # the tapped session is live, so the reveal is a focus, not a revive
+        km._live_map = lambda: {S1: {}}       # the tapped session is live, so the reveal is a focus, not a revive
         try:
             trail = io.StringIO()
             with contextlib.redirect_stderr(trail):
@@ -536,7 +536,7 @@ class SkeletonReconnect(unittest.TestCase):
         """A tap parked while the window had no socket, then the page's redial registered at its handshake:
         the client is in _clients with the flag and no stamp, exactly as _ws leaves it before any strip."""
         km._PENDING_REVEAL[0] = None
-        km._tmux_sessions = lambda: {S1: {}}       # the tapped session is live, so the reveal is a focus, not a revive
+        km._live_map = lambda: {S1: {}}       # the tapped session is live, so the reveal is a focus, not a revive
         trail = io.StringIO()
         with contextlib.redirect_stderr(trail):
             self.assertFalse(km._reveal_request(S1, "W1", via=via), "no socket for the window: parked")

@@ -20,7 +20,10 @@ set -uo pipefail
 
 [[ -n "${ROMP_SUMMARIZING:-}" ]] && exit 0
 [[ -f "$HOME/.claude/romp-postal-off" ]] && exit 0
-[[ -z "${TMUX:-}" ]] && exit 0
+# romp sessions only: a romp session is exactly one launched with ROMP_SID in its
+# environment (the kernel sets it on the CLI it spawns); a plain Claude Code session
+# has no peers and no mail.
+[[ -n "${ROMP_SID:-}" ]] || exit 0
 
 input="$(cat)"
 [[ "$input" =~ \"session_id\":\"([^\"]+)\" ]] || exit 0
@@ -31,14 +34,9 @@ sid="${BASH_REMATCH[1]}"
 case "$source_kind" in resume|startup) ;; *) exit 0 ;; esac
 
 # Fast path: nothing pending for this session -> nothing to do. The marker is
-# on-disk so this needs no tmux vars and no bus round-trip.
+# on-disk so this needs no kernel query and no bus round-trip.
 pending="${ROMP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/romp}/postal/mail-pending/$sid"
 [[ -f "$pending" ]] || exit 0
-
-# romp sessions only — identified by the @romp flag, not the name.
-sess="$(tmux display-message -p '#S' 2>/dev/null || true)"
-[[ -n "$sess" ]] || exit 0
-[[ -n "$(tmux show -t "$sess" -v @romp 2>/dev/null || true)" ]] || exit 0
 
 # Locate romp-postal-service via this hook's REAL (symlink-followed) path: the hook lives
 # at dotfiles/claude/hooks/ and romp-postal-service at dotfiles/scripts/.

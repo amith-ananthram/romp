@@ -49,18 +49,18 @@ class ColorRoute(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.names = Path(self.tmp) / "names"
         self.names.mkdir()
-        self._saved = (km.NAMES, km.jd.STATE, km._tmux_sessions, km._live_names,
+        self._saved = (km.NAMES, km.jd.STATE, km._live_map, km._live_names,
                        km._mark_views_dirty)
         km.NAMES = self.names
         km.jd.STATE = Path(self.tmp) / "state"
         km._pal_cache.update({"name": km.pal.DEFAULT, "mt": None})   # drop the mtime cache between sandboxes
-        km._tmux_sessions = lambda: {}
+        km._live_map = lambda: {}
         km._live_names = lambda tm: {"web": SID}
         self.dirty = []                                       # the route must poke the views push
         km._mark_views_dirty = lambda: self.dirty.append(1)
 
     def tearDown(self):
-        (km.NAMES, km.jd.STATE, km._tmux_sessions, km._live_names,
+        (km.NAMES, km.jd.STATE, km._live_map, km._live_names,
          km._mark_views_dirty) = self._saved
         km._pal_cache.update({"name": km.pal.DEFAULT, "mt": None})
 

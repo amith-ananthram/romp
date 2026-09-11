@@ -80,7 +80,7 @@ class RetryPauseAutoResume(unittest.TestCase):
         km._set_retry_paused(True)
         floor = km._retry_pause_ts()
         path = self._transcript("healthy.jsonl", floor + 5)   # wrote output AFTER the pause
-        km._alive_sessions = lambda now, tmux: [{"sid": "s1", "path": path}]
+        km._alive_sessions = lambda now, live: [{"sid": "s1", "path": path}]
         km._api_error = lambda p: None                        # not blocked on an API error
         km._auto_resume_retry(int(time.time()), {})
         self.assertFalse(km._retry_paused_on(), "a served request after the pause proves recovery → resume")
@@ -90,7 +90,7 @@ class RetryPauseAutoResume(unittest.TestCase):
         km._set_retry_paused(True)
         floor = km._retry_pause_ts()
         path = self._transcript("errored.jsonl", floor + 5)   # fresh mtime, but the last record is an API error
-        km._alive_sessions = lambda now, tmux: [{"sid": "s1", "path": path}]
+        km._alive_sessions = lambda now, live: [{"sid": "s1", "path": path}]
         km._api_error = lambda p: {"text": "overloaded", "status": 529}
         km._auto_resume_retry(int(time.time()), {})
         self.assertTrue(km._retry_paused_on(), "a session still blocked on an API error must not clear the pause")
@@ -100,7 +100,7 @@ class RetryPauseAutoResume(unittest.TestCase):
         km._set_retry_paused(True)
         floor = km._retry_pause_ts()
         path = self._transcript("stale.jsonl", floor - 60)    # last wrote BEFORE the pause
-        km._alive_sessions = lambda now, tmux: [{"sid": "s1", "path": path}]
+        km._alive_sessions = lambda now, live: [{"sid": "s1", "path": path}]
         km._api_error = lambda p: None
         km._auto_resume_retry(int(time.time()), {})
         self.assertTrue(km._retry_paused_on(), "no fresh output since the pause → no evidence the API recovered")
@@ -109,7 +109,7 @@ class RetryPauseAutoResume(unittest.TestCase):
     def test_noop_when_not_paused(self):
         km._set_retry_paused(False)
         called = []
-        km._alive_sessions = lambda now, tmux: called.append(1) or []
+        km._alive_sessions = lambda now, live: called.append(1) or []
         km._auto_resume_retry(int(time.time()), {})
         self.assertEqual(called, [], "not paused → the resume check does no work")
 
@@ -119,7 +119,7 @@ class RetryPauseAutoResume(unittest.TestCase):
         km._pusher_wake.clear()                          # the pre-pause's own wake, not the clear's
         floor = km._retry_pause_ts()
         path = self._transcript("healthy.jsonl", floor + 5)
-        km._alive_sessions = lambda now, tmux: [{"sid": "s1", "path": path}]
+        km._alive_sessions = lambda now, live: [{"sid": "s1", "path": path}]
         km._api_error = lambda p: None
 
     def test_the_clear_wakes_the_pusher_and_marks_the_views_dirty(self):
@@ -156,7 +156,7 @@ class RetryPauseAutoResume(unittest.TestCase):
         km._pusher_wake.clear()
         pfloor = km._retry_pause_ts()
         path = self._transcript("stale.jsonl", pfloor - 60)
-        km._alive_sessions = lambda now, tmux: [{"sid": "s1", "path": path}]
+        km._alive_sessions = lambda now, live: [{"sid": "s1", "path": path}]
         km._api_error = lambda p: None
         floor = km._views_dirty[0]
         km._auto_resume_retry(int(time.time()), {})
@@ -171,7 +171,7 @@ class RetryPauseAutoResume(unittest.TestCase):
                 sess[1]["path"]: {"spendLimit": False, "t": 1005},       # not a cap
                 sess[2]["path"]: {"spendLimit": True, "t": 0},           # no readable time: not proof of staleness
                 sess[3]["path"]: {"spendLimit": True, "t": 1001}}        # the evidence's own second: new
-        km._alive_sessions = lambda now, tmux: sess
+        km._alive_sessions = lambda now, live: sess
         km._api_error = lambda p: errs.get(p)
         self.assertEqual(km._spend_capped_session(0, {})["sid"], "s0", "no lift on record: the first capped session")
         # `after` is the lifting output's own stamp, whole seconds like the record's
@@ -191,7 +191,7 @@ class RetryPauseAutoResume(unittest.TestCase):
         with open(path, "w") as f:
             f.write(_out_line(floor + 5))                      # a login-billed session's answer after the pause
         live = {"s1": {"state": "idle", "auth": "login", "backend": "sdk"}}
-        km._alive_sessions = lambda now, tmux: [{"sid": "s1", "name": "web", "path": path}]
+        km._alive_sessions = lambda now, live: [{"sid": "s1", "name": "web", "path": path}]
         km._api_error = lambda p: None
         saved_backend, saved_usage = km.Sessions.__dict__["backend_for"], km._usage
         km.Sessions.backend_for = staticmethod(lambda sid: object())
@@ -284,7 +284,7 @@ class _PauseFixture(unittest.TestCase):
         self._was_set = km._pusher_wake.is_set()
         km._pusher_wake.clear()
         self.roster = []
-        km._alive_sessions = lambda now, tmux: list(self.roster)
+        km._alive_sessions = lambda now, live: list(self.roster)
 
     def tearDown(self):
         (km.jd.STATE, km._alive_sessions, km._push_all, km.jd.rearm_failed_summaries, km._usage,

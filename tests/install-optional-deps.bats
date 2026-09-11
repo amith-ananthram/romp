@@ -1,15 +1,13 @@
 #!/usr/bin/env bats
 
-# A first install on a machine that has neither a VS Code-family editor, nor tmux, nor a pip-capable
-# python must still produce a WORKING romp — and must SAY what it turned off. Regression cover for a
-# fresh Linux install (the user 2026-07-27) where all three were absent and each failure was swallowed
-# by a `|| echo`, leaving a dashboard that served 404s for every bundle and no way to start a session.
+# A first install on a machine that has neither a VS Code-family editor nor a pip-capable python must
+# still produce a WORKING romp — and must SAY what it turned off. Regression cover for a fresh Linux
+# install (the user 2026-07-27) where both were absent and each failure was swallowed by a `|| echo`,
+# leaving a dashboard that served 404s for every bundle and no way to start a session.
 #
 # Hermetic: HOME is a temp dir, and each test puts stubs ahead of the real tools on PATH.
 
 ROMP_DIR="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
-
-load tmux-private
 
 setup() {
     TEST_DIR="$(mktemp -d)"
@@ -24,28 +22,23 @@ setup() {
     unset ROMP_PYTHON
     # The state root is this test's own (the setup scripts read ROMP_STATE_DIR first, and a kernel
     # exports it to its sessions), and no port here may reach a live kernel or manager: the manager
-    # port and the kernel port's two spellings are poisoned to a dead value (`romp new -t` asks the
-    # kernel where its tmux socket lives before it launches, and nothing may answer from a live one).
+    # port and the kernel port's two spellings are poisoned to a dead value, so nothing a script
+    # under test asks can be answered by a live one.
     export ROMP_STATE_DIR="$TEST_DIR/state"
     export ROMP_MANAGER_PORT=1 ROMP_KERNEL_PORT=1 ROMP_SERVE_PORT=1
-    # tmux's socket directory is this test's own too (the shell twin would otherwise make
-    # $XDG_RUNTIME_DIR/romp in the REAL runtime dir), and a shell inside a running romp carries the
-    # session's manager pid and mark, which the twin reads: neither may reach the launches here
-    tmux_private_socket_dir "$TEST_DIR"
-    unset ROMP_MANAGER_PID ROMP_TMUX_TMPDIR_RULE
     export ROMP_GITHOOK_DIR="$TEST_DIR/githooks"
     # Keep vscode-extension/install.sh's app-bundle probe inside the sandbox: on a
     # dev mac, /Applications really contains editors, and finding one would send
     # the "no editor" tests down the package-and-install path.
     export ROMP_EDITOR_APPS="$TEST_DIR/no-apps"
 
-    # An ALLOWLIST bin instead of the machine's /usr/bin — "tmux absent" must mean
-    # the same thing on every machine, and with a real /usr/bin it doesn't: CI's
-    # apt puts tmux there, Debian puts node there, and a mac keeps both in
-    # /opt/homebrew. So a PATH of "$STUB:/usr/bin:/bin" is bare on one box and
-    # fully equipped on the next (exactly how these tests passed on the box that
-    # wrote them and failed on the runner). Symlink only the tools the scripts
-    # under test legitimately need; everything else is absent, everywhere.
+    # An ALLOWLIST bin instead of the machine's /usr/bin — "absent" must mean the
+    # same thing on every machine, and with a real /usr/bin it doesn't: Debian puts
+    # node there, a mac keeps it in /opt/homebrew, and CI's apt fills /usr/bin with
+    # whatever a workflow installed. So a PATH of "$STUB:/usr/bin:/bin" is bare on
+    # one box and fully equipped on the next (exactly how these tests passed on the
+    # box that wrote them and failed on the runner). Symlink only the tools the
+    # scripts under test legitimately need; everything else is absent, everywhere.
     BAREBIN="$TEST_DIR/barebin"; mkdir -p "$BAREBIN"
     local t p
     for t in bash sh env dirname basename realpath readlink mktemp mkdir ln cp mv rm \
@@ -56,13 +49,10 @@ setup() {
     done
 }
 
-teardown() { tmux_private_kill && rm -rf "$TEST_DIR"; }
+teardown() { rm -rf "$TEST_DIR"; }
 
-# Stubs first, then the allowlist — nothing from the host machine leaks in (CI's
-# apt tmux and Debian's node live in /usr/bin, so a PATH keeping /usr/bin is never
-# bare). Belt and braces for tmux: the tests below ALSO state their tmux
-# assumption explicitly via ROMP_TMUX_AVAILABLE (the seam install.sh, bin/romp
-# and TmuxBackend all honour), so the assertion doesn't ride on PATH mechanics.
+# Stubs first, then the allowlist — nothing from the host machine leaks in (Debian's
+# node lives in /usr/bin, so a PATH keeping /usr/bin is never bare).
 bare_path() { echo "$STUB:$BAREBIN"; }
 
 # ── the bug that blanked the dashboard ────────────────────────────────────────
@@ -124,70 +114,6 @@ EOF
     build_line="$(grep -n 'node esbuild.js' "$CALL_LOG" | head -1 | cut -d: -f1)"
     [ -n "$npm_line" ] && [ -n "$build_line" ]
     [ "$npm_line" -lt "$build_line" ]
-}
-
-# ── tmux is optional, and its absence is advisory (never fatal) ───────────────
-
-@test "install.sh: succeeds with no tmux, and names it as a disabled optional piece" {
-    # node exists (preflight needs it) — ONLY tmux is missing, which is the point.
-    printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB/node"; chmod +x "$STUB/node"
-    PATH="$(bare_path)" ROMP_TMUX_AVAILABLE=0 run "$ROMP_DIR/install.sh"
-    [ "$status" -eq 0 ]                       # NOT a preflight failure
-    [[ "$output" == *"tmux isn't installed"* ]]
-    [[ "$output" == *"romp new"* ]]           # points at the backend that still works
-    [[ "$output" == *"install tmux"* ]]       # and the exact remedy
-}
-
-@test "install.sh: says nothing about tmux when tmux is present" {
-    printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB/node"; chmod +x "$STUB/node"
-    cat > "$STUB/tmux" <<'EOF'
-#!/usr/bin/env bash
-exit 0
-EOF
-    chmod +x "$STUB/tmux"
-    PATH="$(bare_path)" ROMP_TMUX_AVAILABLE=1 run "$ROMP_DIR/install.sh"
-    [ "$status" -eq 0 ]
-    [[ "$output" != *"tmux isn't installed"* ]]
-}
-
-@test "romp new -t: without tmux, fails naming the remedy and the SDK alternative" {
-    PATH="$(bare_path)" ROMP_TMUX_AVAILABLE=0 run "$ROMP_DIR/bin/romp" new -t notes-api
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"tmux isn't installed"* ]]
-    [[ "$output" == *"install tmux"* ]]
-    # It must offer the path that still works, with the session name carried through.
-    [[ "$output" == *"romp new notes-api"* ]]
-    # And never leak the raw shell error the launcher would otherwise produce.
-    [[ "$output" != *"command not found"* ]]
-}
-
-# ── uuidgen is not universal ─────────────────────────────────────────────────
-# Debian/Ubuntu ship it in uuid-runtime, which a minimal install omits. It used to fail to an
-# EMPTY --session-id rather than to an error, so the session broke with nothing naming the cause.
-
-@test "romp new -t: generates a session id without uuidgen installed" {
-    cat > "$STUB/tmux" <<'EOF'
-#!/usr/bin/env bash
-echo "tmux $*" >> "$CALL_LOG"
-case "$1" in
-  has-session) exit 1 ;;
-  show|show-hooks|list-keys|list-sessions) exit 0 ;;
-esac
-exit 0
-EOF
-    cat > "$STUB/claude" <<'EOF'
-#!/usr/bin/env bash
-exit 0
-EOF
-    chmod +x "$STUB/tmux" "$STUB/claude"
-    # No uuidgen on this PATH — python3 (a hard romp dependency) must cover for it.
-    [ ! -x "$STUB/uuidgen" ]
-
-    PATH="$(bare_path)" ROMP_TMUX_AVAILABLE=1 run "$ROMP_DIR/bin/romp" new -t notes-api --detach
-
-    # A real lowercase v4 uuid reached the launch line, not an empty string.
-    grep -qE 'session-id [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' "$CALL_LOG"
-    ! grep -qE 'session-id *$' "$CALL_LOG"
 }
 
 # ── a python that cannot bootstrap pip (Debian without python3-venv) ─────────
@@ -568,7 +494,7 @@ EOF
     # node is absent from the allowlist bin by design; preflight needs one.
     printf '#!/usr/bin/env bash\nexit 0\n' > "$STUB/node"; chmod +x "$STUB/node"
 
-    PATH="$(bare_path)" ROMP_TMUX_AVAILABLE=1 run "$ROMP_DIR/install.sh"
+    PATH="$(bare_path)" run "$ROMP_DIR/install.sh"
     [ "$status" -eq 0 ]
     [[ "$output" == *"Open a new terminal and type:  romp"* ]]
     # The URL must survive as the fallback — this terminal's PATH is stale, and a headless
@@ -654,7 +580,7 @@ exit 0
 EOF
     chmod +x "$STUB/oldpython"
 
-    PATH="$(bare_path)" ROMP_TMUX_AVAILABLE=1 ROMP_NO_SDK= ROMP_PYTHON="$STUB/oldpython" \
+    PATH="$(bare_path)" ROMP_NO_SDK= ROMP_PYTHON="$STUB/oldpython" \
       run "$ROMP_DIR/install.sh"
 
     [ "$status" -eq 0 ]

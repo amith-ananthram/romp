@@ -74,7 +74,7 @@ def _inline_threading():
 
 
 class _Base(unittest.TestCase):
-    """Fresh STATE per test; the WS handlers' side effects stubbed (nudge tick, tmux, threads,
+    """Fresh STATE per test; the WS handlers' side effects stubbed (nudge tick, liveness, threads,
     the propagation fan-out recorded)."""
 
     def setUp(self):
@@ -86,11 +86,11 @@ class _Base(unittest.TestCase):
         vars(km).get("_ledger_write_failed", {}).clear()   # the writer's per-episode registry: no episode leaks in
         km._stale_seen.refused = None                      # a direct setter call's verdict never rides a later dispatch
         self._saved = {n: getattr(km, n) for n in
-                       ("_propagate_judge_settings", "_auto_nudge_tick", "_tmux_sessions", "threading")}
+                       ("_propagate_judge_settings", "_auto_nudge_tick", "_live_map", "threading")}
         self.propagated = []
         km._propagate_judge_settings = self.propagated.append
         km._auto_nudge_tick = lambda *a, **k: None
-        km._tmux_sessions = lambda: {}
+        km._live_map = lambda: {}
         km.threading = _inline_threading()
 
     def tearDown(self):
@@ -795,7 +795,7 @@ class VersionReportsEveryStoredStamp(_Base):
     def test_a_fresh_install_reports_every_store_at_zero(self):
         gts = km._version_info()["settingsGt"]
         self.assertEqual(set(gts), set(km._GT_STORES), "one key per gt-gated store, no more, no less")
-        self.assertEqual(len(km._GT_STORES), 19, "five toggles/modes + fourteen kernel-side stores (judge-concurrency since T277, tmux-backend since T288, judge-fast with the judges' fast mode, distill-fast and index-fast with T300's box per tier)")
+        self.assertEqual(len(km._GT_STORES), 18, "five toggles/modes + thirteen kernel-side stores (judge-concurrency since T277, judge-fast with the judges' fast mode, distill-fast and index-fast with T300's box per tier; the terminal-backend store went with that backend, T332)")
         self.assertEqual(set(gts.values()), {0}, "nothing applied yet reads 0 — nothing to outrank")
         self.assertEqual(json.loads(json.dumps(gts)), gts, "plain JSON — ints, no paths, nothing to redact")
 
@@ -840,7 +840,7 @@ class VersionReportsEveryStoredStamp(_Base):
                  {"type": "setDistillModel", "model": "haiku"},
                  {"type": "setDistillEffort", "effort": "high"}, {"type": "setCommentModel", "model": "haiku"},
                  {"type": "setCommentEffort", "effort": "high"}, {"type": "setCommentFast", "fast": "on"},
-                 {"type": "setTmuxBackend", "enabled": True}, {"type": "setJudgeFast", "enabled": True},
+                 {"type": "setJudgeFast", "enabled": True},
                  {"type": "setDistillFast", "enabled": True}, {"type": "setIndexFast", "enabled": True}]
         older = [{"type": "setAutoNudge", "enabled": True}, {"type": "setCompactSuggest", "enabled": False},
                  {"type": "setFileEditing", "enabled": False}, {"type": "setUpdateMode", "mode": "off"},
@@ -850,7 +850,7 @@ class VersionReportsEveryStoredStamp(_Base):
                  {"type": "setDistillModel", "model": "triage"},
                  {"type": "setDistillEffort", "effort": "low"}, {"type": "setCommentModel", "model": "session"},
                  {"type": "setCommentEffort", "effort": "session"}, {"type": "setCommentFast", "fast": "session"},
-                 {"type": "setTmuxBackend", "enabled": False}, {"type": "setJudgeFast", "enabled": False},
+                 {"type": "setJudgeFast", "enabled": False},
                  {"type": "setDistillFast", "enabled": False}, {"type": "setIndexFast", "enabled": False}]
         with contextlib.redirect_stderr(io.StringIO()):
             for n, o in zip(newer, older):
@@ -858,7 +858,7 @@ class VersionReportsEveryStoredStamp(_Base):
                 km.Handler._dispatch_ws(types.SimpleNamespace(), dict(o, gt=T_OLD), client)
         named = {m["setting"] for m in sent if m.get("type") == "settingStale"}
         self.assertEqual(named, set(km._version_info()["settingsGt"]), "frames and the report share one vocabulary")
-        self.assertEqual(len(named), 19)   # fourteen kernel-side stores since T300's box per judge tier
+        self.assertEqual(len(named), 18)   # thirteen kernel-side stores: T300's box per judge tier, minus the terminal-backend store (T332)
 
 
 class ASkewedClockCannotLockTheStore(_Base):
@@ -977,10 +977,10 @@ class AutoNudgeTurnOnActsNow(_Base):
     def test_a_real_turn_on_ticks_once_without_the_dead_wait_sweep(self):
         self.dispatch({"type": "setAutoNudge", "enabled": True, "gt": T_NEW})
         self.assertEqual(len(self.ticks), 1, "a real apply acts now")
-        (now, tmux), kw = self.ticks[0]
+        (now, live_map), kw = self.ticks[0]
         self.assertIsInstance(now, int)
         self.assertEqual(kw, {"run_dead_wait": False}, "the WS tick never runs the one-observer sweep")
-        self.assertEqual(tmux, {}, "the tick takes the listing the handler fetched (_tmux_sessions)")
+        self.assertEqual(live_map, {}, "the tick takes the listing the handler fetched (_live_map)")
 
     def test_a_stale_stamp_and_an_echo_fire_no_tick(self):
         self.dispatch({"type": "setAutoNudge", "enabled": True, "gt": T_NEW})
@@ -1074,7 +1074,7 @@ class AutoNudgeTickIsSingleFlight(_Base):
                        "_debt_backstop_tick", "_dead_wait_sweep", "_awaiting_wake_outcomes", "_push_soon")}
         self.sends = []                                            # the `now` of every pass that reached the send
         self.entered, self.release = _real_threading.Event(), _real_threading.Event()
-        km._alive_sessions = lambda now, tmux: [{"sid": SF_SID, "path": "/nonexistent.jsonl"}]
+        km._alive_sessions = lambda now, live_map: [{"sid": SF_SID, "path": "/nonexistent.jsonl"}]
         km._wait_for_graph = lambda now, alive_ids: {}
         km._auto_nudge_session = self._walk
         km._compact_suggest_tick = lambda sid, tm, now: False
@@ -1089,7 +1089,7 @@ class AutoNudgeTickIsSingleFlight(_Base):
             setattr(km, n, v)
         super().tearDown()
 
-    def _walk(self, s, now, tmux, nudged, waitfor, alive_ids=None, wake_only=False, cleared=None):   # #936 adds the kwarg (toggle off → wake-only walk); T267d hands the pass's clear set
+    def _walk(self, s, now, live_map, nudged, waitfor, alive_ids=None, wake_only=False, cleared=None):   # #936 adds the kwarg (toggle off → wake-only walk); T267d hands the pass's clear set
         """The per-session walk standing in for the SEND: the first pass to reach it holds here,
         mid-send, until the test releases it; every later pass records and returns at once."""
         self.sends.append(now)
@@ -1122,10 +1122,10 @@ class AutoNudgeTickIsSingleFlight(_Base):
 
     def test_a_pass_that_raises_releases_the_guard(self):
         self.release.set()                                                      # nothing holds in this test
-        km._alive_sessions = lambda now, tmux: 1 / 0
+        km._alive_sessions = lambda now, live_map: 1 / 0
         with self.assertRaises(ZeroDivisionError):                              # propagates as before (the
             km._auto_nudge_tick(1000, {})                                       # pusher loop catches it)
-        km._alive_sessions = lambda now, tmux: [{"sid": SF_SID, "path": "/nonexistent.jsonl"}]
+        km._alive_sessions = lambda now, live_map: [{"sid": SF_SID, "path": "/nonexistent.jsonl"}]
         km._auto_nudge_tick(1001, {})
         self.assertEqual(self.sends, [1001], "the guard is released on every exit, a raise included")
 

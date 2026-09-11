@@ -1,5 +1,9 @@
 # The SDK (non-tmux) session backend
 
+*History (2026-09-11): the terminal (tmux) backend this plan was written to coexist with was removed
+from romp on that date (issue #1398; the migration note is in `docs/reference.md`). The tmux
+passages below describe the state at the time of writing and are kept as history.*
+
 Resolves the open question in `event-model.md` ("Agent SDK vs hand-rolled
 stream-json client for the future headless-with-parity substrate") and the
 backlog item "Headless-with-parity substrate". **Decision: the Python Agent

@@ -410,17 +410,14 @@ did, so searching for the work finds the session that did it, months later.
 
 ### Session backends
 
-Sessions run on one of these backends, chosen per session:
+Sessions run on one of two backends, chosen per session:
 
-- **Claude Code (the default, strongly recommended).** The kernel runs the
-  Claude Code session itself, through the Claude Agent SDK.
+- **Claude Code (the default).** The kernel runs the Claude Code session
+  itself, through the Claude Agent SDK.
 - **Codex.** An OpenAI Codex agent; see [docs/codex.md](codex.md).
 
-The terminal backend (a Claude Code session in a tmux pane that Romp followed by
-reading the terminal) is being removed: the new-session picker and the gear's
-Default backend list no longer offer it, and a saved default of it reads as
-Claude Code. The backends interleave freely, so Claude Code and Codex sessions
-sit side by side in the interface and message each other like any other pair.
+The backends interleave freely, so Codex sessions and Claude Code sessions sit
+side by side in the interface and message each other like any other pair.
 
 ## The Romp kernel (the back end)
 

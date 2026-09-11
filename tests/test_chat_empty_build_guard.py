@@ -28,7 +28,7 @@ NOW = 1781300000
 
 def _tm():
     return {"state": "waiting", "color": "#888888", "since": NOW - 60, "model": "", "effort": "",
-            "context": None, "backend": "tmux"}
+            "context": None, "backend": "sdk"}
 
 
 def _ev(i):
@@ -49,7 +49,7 @@ class _Pusher(unittest.TestCase):
         with open(self.path, "w") as f:
             f.write("{}\n")                                # stat-able: the build cache keys on it
         self.sess = {"sid": SID, "name": "web", "anchor": None, "path": self.path, "mtime": NOW}
-        self.tmux = {SID: _tm()}
+        self.live = {SID: _tm()}
         self.sent = []
         self.builds = []
         self.client = {"app": "chat", "alive": True, "sent": {}, "send": lambda s: None}
@@ -73,12 +73,12 @@ class _Pusher(unittest.TestCase):
         with mock.patch.object(km, "_alive_sessions", lambda now, tm: [dict(self.sess)]), \
                 mock.patch.object(km, "_chat_tab_sessions", lambda now, tm: [dict(self.sess)]), \
                 mock.patch.object(km, "_warm_fleet_bg", lambda now: None), \
-                mock.patch.object(km, "_tmux_sessions", lambda: dict(self.tmux)), \
-                mock.patch.object(km, "build_session", lambda sid, now, tmux=None, **kw: dict(frame)), \
+                mock.patch.object(km, "_live_map", lambda: dict(self.live)), \
+                mock.patch.object(km, "build_session", lambda sid, now, live_map=None, **kw: dict(frame)), \
                 mock.patch.object(km, "_cached_feed", lambda *a, **k: {"working": [], "awaiting": [], "asks": []}), \
                 mock.patch.object(km, "_send_client", lambda c, key, msg, pre=None, sig=None, kind="full": self.sent.append((key, msg))), \
                 mock.patch.object(sys, "stderr", stderr if stderr is not None else io.StringIO()):
-            km._push([self.client], tmux=self.tmux)
+            km._push([self.client], live_map=self.live)
         return [m for k, m in self.sent if k == ("chat", SID)]
 
     def test_an_empty_build_after_content_sends_nothing_and_the_next_content_is_a_tail(self):
@@ -115,9 +115,9 @@ class _Pusher(unittest.TestCase):
         self._cycle([_ev(1), _ev(2)])
         self.sent.clear()
         with mock.patch.object(km, "_clients", [self.client]), \
-                mock.patch.object(km, "_tmux_sessions", lambda: dict(self.tmux)), \
+                mock.patch.object(km, "_live_map", lambda: dict(self.live)), \
                 mock.patch.object(km, "_chat_tab_sessions", lambda now, tm: [dict(self.sess)]), \
-                mock.patch.object(km, "build_session", lambda sid, now, tmux=None, **kw: _frame([])), \
+                mock.patch.object(km, "build_session", lambda sid, now, live_map=None, **kw: _frame([])), \
                 mock.patch.object(km, "_send_client", lambda c, key, msg, pre=None, sig=None, kind="full": self.sent.append((key, msg))), \
                 mock.patch.object(sys, "stderr", io.StringIO()):
             km._push_session_now(SID)

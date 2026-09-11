@@ -157,7 +157,7 @@ class World(unittest.TestCase):
         # an SDK snapshot as the status build reads it (model/effort/context keys), for the Liveness tests
         self.live = {"state": "waiting", "since": T0, "model": "", "effort": "", "context": None,
                      "compactPct": None, "color": None, "backend": "sdk"}
-        km._tmux_sessions = lambda: self.tm
+        km._live_map = lambda: self.tm
         for cache in (km._chat_fold, km._parse_cache, km._SUBAGENT_META_CACHE, km._AGENT_GIST_CACHE,
                       km._AGENT_LAUNCH_CACHE, km._SUBAGENT_FRAMES, km._bgtasks_cache, km._bgall_cache):
             cache.clear()

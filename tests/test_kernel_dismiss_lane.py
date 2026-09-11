@@ -33,9 +33,9 @@ class DismissLane(unittest.TestCase):
 
     def test_build_timeline_filters_dead_dismissed_lanes_only(self):
         src = inspect.getsource(km.build_timeline)
-        # the filter drops a sid ONLY when it's both dismissed AND currently dead (tmux has no live session),
+        # the filter drops a sid ONLY when it's both dismissed AND currently dead (no live row for it),
         # so a revived sid comes back on its own
-        self.assertIn('s["sid"] in _dismissed_lanes and tmux.get(s["sid"]) is None', src)
+        self.assertIn('s["sid"] in _dismissed_lanes and live_map.get(s["sid"]) is None', src)
 
     def test_build_timeline_sheds_records_on_revive(self):
         # the revive is the un-dismiss EVENT: a dismissed sid seen alive drops its durable record there,

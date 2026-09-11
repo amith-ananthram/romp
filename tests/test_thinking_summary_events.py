@@ -81,9 +81,9 @@ class ThinkingBlockOpacity(unittest.TestCase):
         shutil.rmtree(self._td, ignore_errors=True)
 
     def _thinking_events(self):
-        # path_override is the read-only render of exactly this transcript; the tmux stub makes the
-        # sid resolvable without a registry (the same synthesized entry a brand-new pane gets)
-        m = km.build_session(SID, NOW, tmux={SID: {}}, path_override=str(self.path))
+        # path_override is the read-only render of exactly this transcript; the live_map stub makes the
+        # sid resolvable without a registry (the same synthesized entry a brand-new session gets)
+        m = km.build_session(SID, NOW, live_map={SID: {}}, path_override=str(self.path))
         self.assertIsNotNone(m)
         return [e for e in m["events"] if e.get("kind") == "thinking"]
 

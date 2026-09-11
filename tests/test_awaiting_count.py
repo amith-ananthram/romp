@@ -28,10 +28,10 @@ class AwaitingCount(unittest.TestCase):
 
     def setUp(self):
         self._saved = {n: getattr(km, n) for n in
-                       ("_tmux_sessions", "_bg_live_norm", "_bg_pending", "_states_awaiting_overlay",
+                       ("_live_map", "_bg_live_norm", "_bg_pending", "_states_awaiting_overlay",
                         "_owned_yield_why", "_session_stamp_full", "_session_delegated_why",
                         "_session_delegated_identities", "_watch_awaiting", "_peer_identity")}
-        km._tmux_sessions = lambda: {SID: {}}
+        km._live_map = lambda: {SID: {}}
         km._bg_live_norm = lambda sid, path: []
         km._bg_pending = lambda sid, path, tasks: []
         km._states_awaiting_overlay = lambda sid: None
@@ -46,13 +46,13 @@ class AwaitingCount(unittest.TestCase):
             setattr(km, n, f)
 
     def test_one_live_agent_counts_one(self):
-        km._tmux_sessions = lambda: {SID: {"subagents": [{"type": "a", "since": 500}]}}
+        km._live_map = lambda: {SID: {"subagents": [{"type": "a", "since": 500}]}}
         aw = km._session_awaiting(SID, "/tmp/x", True)
         self.assertEqual((aw["kind"], aw["count"]), ("agents", 1))
         self.assertEqual(aw["why"], "1 background agent still working", "the why already agrees in number")
 
     def test_several_live_agents_count_them_all(self):
-        km._tmux_sessions = lambda: {SID: {"subagents": [{"type": "a", "since": 1}, {"type": "b", "since": 2},
+        km._live_map = lambda: {SID: {"subagents": [{"type": "a", "since": 1}, {"type": "b", "since": 2},
                                                          {"type": "c", "since": 3}]}}
         aw = km._session_awaiting(SID, "/tmp/x", True)
         self.assertEqual(aw["count"], 3)
@@ -62,7 +62,7 @@ class AwaitingCount(unittest.TestCase):
         # 2026-09-06: two agents + one shell command read "Awaiting 5 · 4 agents · 1 command" because the
         # hook row and the stream row for the same agent were never joined — the count is per awaited THING
         a1, a2 = "a1111111111111111", "a2222222222222222"
-        km._tmux_sessions = lambda: {SID: {"subagents": [{"type": "general-purpose", "since": 100, "agentId": a1},
+        km._live_map = lambda: {SID: {"subagents": [{"type": "general-purpose", "since": 100, "agentId": a1},
                                                          {"type": "general-purpose", "since": 105, "agentId": a2}]}}
         km._bg_live_norm = lambda sid, path: [
             {"tid": "toolu_01", "desc": "check the exporter", "t": 98, "type": "local_agent", "agentId": a1},
@@ -152,9 +152,9 @@ class AwaitingCount(unittest.TestCase):
         # gating them on awaiting_why made the chat box swap presentations at every turn boundary. The
         # goal card and the placeholder keep theirs inside the card's awaiting object (a wait only).
         src = inspect.getsource(km)
-        self.assertIn('_aw_items = _awaiting_items_payload(_aw, sid, sess["path"], tmux)', src, "the chat status payload (under the build's own snapshot)")
+        self.assertIn('_aw_items = _awaiting_items_payload(_aw, sid, sess["path"], live_map)', src, "the chat status payload (under the build's own snapshot)")
         self.assertIn('"awaitingItems": _aw_items,', src, "the chat status payload")
-        self.assertIn('"awaitingItems": (_awaiting_items_payload(_aw_bg, sid, s["path"], tmux) if live else []),', src, "the timeline lane payload")
+        self.assertIn('"awaitingItems": (_awaiting_items_payload(_aw_bg, sid, s["path"], live_map) if live else []),', src, "the timeline lane payload")
         self.assertIn('"items": await_items,', src, "the goal card's awaiting object")
         self.assertIn('"items": list(items or []),', src, "the placeholder card's awaiting object")
         self.assertIn('count=sess_awaiting_count, items=sess_awaiting_items))', src, "…threaded from the session read")
@@ -165,7 +165,7 @@ class AwaitingCount(unittest.TestCase):
         # box that lists them no longer swaps presentations when a turn opens. The one-number contract holds
         # in the idle state exactly as before; mid-turn there is no number, only the rows.
         a1, a2 = "a1111111111111111", "a2222222222222222"
-        km._tmux_sessions = lambda: {SID: {"subagents": [{"type": "general-purpose", "since": 100, "agentId": a1},
+        km._live_map = lambda: {SID: {"subagents": [{"type": "general-purpose", "since": 100, "agentId": a1},
                                                          {"type": "general-purpose", "since": 105, "agentId": a2}]}}
         km._bg_live_norm = lambda sid, path: [
             {"tid": "toolu_01", "desc": "check the exporter", "t": 98, "type": "local_agent", "agentId": a1},

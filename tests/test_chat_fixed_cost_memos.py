@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 from datetime import datetime, timezone
 from romp_load import load_source
 from pathlib import Path
@@ -46,7 +47,7 @@ MID = "1788400000.100_1.TESTHOST"
 def _clear_memos():
     """Every chat-build memo this module fills, emptied; a name absent on a tree without the memos is skipped."""
     for name in ("_chat_fold", "_ledger_memo", "_task_fold_memo", "_node_anchor_last", "_node_anchor_rev",
-                 "_merge_sets_memo", "_tmux_echo"):
+                 "_merge_sets_memo"):
         d = getattr(km, name, None)
         if isinstance(d, dict):
             d.clear()
@@ -65,12 +66,12 @@ class SigLabels(unittest.TestCase):
         self.tx = Path(self.tmp) / (SID_A + ".jsonl")
         self.tx.write_text('{"type": "user"}\n')
         self.sess = {"sid": SID_A, "path": str(self.tx), "anchor": SID_A}
-        self.saved = (km._sdk, km._tmux_sessions)
+        self.saved = (km._sdk, km._live_map)
         km._sdk = lambda: None
-        km._tmux_sessions = lambda: {}
+        km._live_map = lambda: {}
 
     def tearDown(self):
-        km._sdk, km._tmux_sessions = self.saved
+        km._sdk, km._live_map = self.saved
 
     def test_a_real_signature_has_one_label_per_position_and_a_row_slot_either_way(self):
         sig = km._chat_build_sig(self.sess)
@@ -181,7 +182,7 @@ class TwoTabAttribution(unittest.TestCase):
     rebuild names the component that moved. The sweep at the end of the chat block drops the memos of
     tabs no longer shown (keeping this cycle's comment threads, like the fold prefixes)."""
 
-    STUBS = ("NAMES", "_tmux_sessions", "_live_names", "_chat_tab_sessions", "build_session",
+    STUBS = ("NAMES", "_live_map", "_live_names", "_chat_tab_sessions", "build_session",
              "_cached_feed", "_cached_timeline", "build_timeline", "_fleet_view_sig", "_comments_frame",
              "_retry_parked_creates")
 
@@ -204,17 +205,17 @@ class TwoTabAttribution(unittest.TestCase):
         for d in (jd.STATESDIR, jd.GOALDIR):
             d.mkdir(parents=True, exist_ok=True)
         km.NAMES = names
-        self.tmux = {}
-        km._tmux_sessions = lambda: dict(self.tmux)
+        self.live = {}
+        km._live_map = lambda: dict(self.live)
         km._live_names = lambda tm: {"web": SID_A, "api": SID_B}
-        km._chat_tab_sessions = lambda now, tmux: [{"sid": s, "name": n, "path": str(self.tx[s]), "anchor": s}
+        km._chat_tab_sessions = lambda now, live_map: [{"sid": s, "name": n, "path": str(self.tx[s]), "anchor": s}
                                                   for s, n in ((SID_A, "web"), (SID_B, "api"))]
         km.build_session = self._build_session
-        km._cached_feed = lambda now, tmux, sig, connect=False: {"working": [], "awaiting": [], "now": now}
-        km._cached_timeline = lambda now, tmux, sig, connect=False: {"turns": {}, "judging": [], "messages": [], "now": now}
-        km.build_timeline = lambda now, tmux, **kw: {"lanes": [], "now": now}
-        km._fleet_view_sig = lambda now, tmux: {"probe": 1}
-        km._comments_frame = lambda sid, tmux: None
+        km._cached_feed = lambda now, live_map, sig, connect=False: {"working": [], "awaiting": [], "now": now}
+        km._cached_timeline = lambda now, live_map, sig, connect=False: {"turns": {}, "judging": [], "messages": [], "now": now}
+        km.build_timeline = lambda now, live_map, **kw: {"lanes": [], "now": now}
+        km._fleet_view_sig = lambda now, live_map: {"probe": 1}
+        km._comments_frame = lambda sid, live_map: None
         km._retry_parked_creates = lambda: None
         km._built_chat.clear(); km._prev_chat_events.clear(); km._prev_chat_ledger.clear()
         self.built = []
@@ -233,7 +234,7 @@ class TwoTabAttribution(unittest.TestCase):
         km._judge_gen[0] = jg
         km._thread_fold_keep[0], km._thread_fold_keep[1] = keep
 
-    def _build_session(self, sid, now, tmux):
+    def _build_session(self, sid, now, live_map):
         self.built.append(sid)
         return {"type": "session", "id": sid, "name": "x", "events": [{"uuid": "e1", "type": "user"}],
                 "ledger": None, "status": {"state": "waiting"}, "color": None}
@@ -297,7 +298,7 @@ class TwoTabAttribution(unittest.TestCase):
     def test_the_sweep_drops_the_merge_sets_of_a_sid_neither_shown_nor_alive(self):
         stray = "66666666-7777-8888-9999-aaaaaaaaaaa9"
         alive = "66666666-7777-8888-9999-aaaaaaaaaaa8"
-        self.tmux = {alive: {"state": "idle"}}
+        self.live = {alive: {"state": "idle"}}
         for sid in (stray, alive, SID_B):
             km._merge_sets_memo[sid] = ({"turns": []}, ())
         try:
@@ -600,10 +601,10 @@ class CycleCaptionSlot(unittest.TestCase):
     push) reads the map directly."""
 
     def setUp(self):
-        self.saved = (km._tmux_sessions, km._pusher_cycle_jobs, km._msg_summaries, jd.STATE,
+        self.saved = (km._live_map, km._pusher_cycle_jobs, km._msg_summaries, jd.STATE,
                       dict(km._postal_log_cache))
         self.fetched = []
-        km._tmux_sessions = lambda: {}
+        km._live_map = lambda: {}
         km._msg_summaries = lambda: (self.fetched.append(1) or {MID: "cap"})
         td = tempfile.TemporaryDirectory()
         self.addCleanup(td.cleanup)
@@ -611,7 +612,7 @@ class CycleCaptionSlot(unittest.TestCase):
         km._postal_log_cache.clear()
 
     def tearDown(self):
-        km._tmux_sessions, km._pusher_cycle_jobs, km._msg_summaries, state, log = self.saved
+        km._live_map, km._pusher_cycle_jobs, km._msg_summaries, state, log = self.saved
         jd._rebind_state(state)
         km._postal_log_cache.clear(); km._postal_log_cache.update(log)
         km._live_scope.msgsum = None
@@ -622,7 +623,7 @@ class CycleCaptionSlot(unittest.TestCase):
     def test_reads_within_one_cycle_fetch_once_and_the_slot_closes_with_the_cycle(self):
         seen = []
 
-        def jobs(now, tmux, any_client):
+        def jobs(now, live_map, any_client):
             seen.append(getattr(km._live_scope, "msgsum", None))
             first = km._msg_summaries_scoped()
             for _ in range(4):
@@ -640,7 +641,7 @@ class CycleCaptionSlot(unittest.TestCase):
     def test_the_slot_closes_when_the_jobs_raise(self):
         seen = []
 
-        def jobs(now, tmux, any_client):
+        def jobs(now, live_map, any_client):
             seen.append(getattr(km._live_scope, "msgsum", None))
             raise RuntimeError("a job failed")
         km._pusher_cycle_jobs = jobs
@@ -658,7 +659,7 @@ class CycleCaptionSlot(unittest.TestCase):
                                            "t": now - 60}) + "\n")
         rows = []
 
-        def jobs(now_, tmux, any_client):
+        def jobs(now_, live_map, any_client):
             km._msg_summaries_scoped()                          # a chat build fetched the cycle's map
             rows.append(self._connectors(now))                  # the timeline build's connectors, twice
             rows.append(self._connectors(now))
@@ -697,7 +698,7 @@ def _trline(t, tool_use_id, uuid, parent, content="ok\n"):
 class World:
     """A synthetic session build_session can build: names/ + projects/<cdir>/<sid>.jsonl under a state root
     the kernel's judge module is rebound to (tests/test_chat_fold.py's Sess, reduced), plus a goal-store
-    writer and a postal log. The tmux path: the live tail is the kernel's own echo store."""
+    writer and a postal log. The live tail is the owning backend's (nobody's here: an unowned sid has none)."""
 
     def __init__(self, sid):
         self.sid = sid
@@ -711,7 +712,7 @@ class World:
         self.tpath = pdir / (sid + ".jsonl")
         self.tpath.write_text("")
         self.saved_state = jd.STATE
-        self.saved = (jd.PROJECTS, km.NAMES, km._tmux_sessions, km._GLOBAL_CLAUDE_MD, km._msg_summaries, km._sdk,
+        self.saved = (jd.PROJECTS, km.NAMES, km._live_map, km._GLOBAL_CLAUDE_MD, km._msg_summaries, km._sdk,
                       os.environ.get("CLAUDE_CONFIG_DIR"))
         jd._rebind_state(td)                              # names, goals, captions, archive, states, messages: all under td
         jd.PROJECTS = proj
@@ -723,7 +724,7 @@ class World:
         self.t = self.now - 3 * 86400
         self.tm = {sid: {"state": "working", "since": self.now - 100, "model": "", "effort": "",
                          "context": None, "compactPct": None, "color": None}}
-        km._tmux_sessions = lambda: self.tm
+        km._live_map = lambda: self.tm
         km._msg_summaries = lambda: {}
         km._sdk = lambda: None
         os.environ["CLAUDE_CONFIG_DIR"] = str(td / "claude")   # no real task store is read
@@ -737,7 +738,7 @@ class World:
 
     def close(self):
         km._rewind_hold_clear(self.sid)
-        (jd.PROJECTS, km.NAMES, km._tmux_sessions, km._GLOBAL_CLAUDE_MD, km._msg_summaries, km._sdk, cfg) = self.saved
+        (jd.PROJECTS, km.NAMES, km._live_map, km._GLOBAL_CLAUDE_MD, km._msg_summaries, km._sdk, cfg) = self.saved
         if cfg is None:
             os.environ.pop("CLAUDE_CONFIG_DIR", None)
         else:
@@ -1062,9 +1063,19 @@ class LedgerMemo(unittest.TestCase):
         s = self._stats()
         w.build()
         self.assertEqual(self._delta(s), {"hit": 1}, "the hold gone, the earlier entry serves")
-        km._tmux_echo_add(SID_A, "one more thing")           # a live atom merged into the last turn
-        s = self._stats()
-        w.build()
+        # a live atom merged into the last turn: the owning backend's live tail (the SDK backend's input echo
+        # shape); the kernel keeps no echo store of its own since the tmux backend's removal (2026-09-11)
+        class _LiveTail(km._UnownedBackend):
+            def live_atoms(self, sid):
+                return [{"type": "user", "uuid": "echo-11111111-2222-3333-4444-555555555555", "session_id": sid,
+                         "t": w.now, "parentUuid": None, "author": "human", "_echo_text": "one more thing",
+                         "message": {"role": "user", "content": [{"type": "text", "text": "one more thing"}]}}]
+
+            def prune_live(self, sid, tx_uuids, tx_text_t, human_floor):
+                pass
+        with mock.patch.object(km.Sessions, "backend_for", staticmethod(lambda sid: _LiveTail())):
+            s = self._stats()
+            w.build()
         self.assertEqual(self._delta(s), {"bypass_live": 1})
 
     def test_a_warm_anchor_learned_for_this_sessions_node_misses_once_and_another_sessions_does_not(self):

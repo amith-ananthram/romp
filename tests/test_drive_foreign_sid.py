@@ -2,11 +2,18 @@
 """A drive op naming a session this kernel doesn't have must FAIL LOUDLY, never degrade into a no-op.
 
 The user 2026-07-29: on a board merging two kernels, a reply addressed to the wrong one reached a kernel
-that owns no such session. Sessions.backend_for() falls through to tmux for any unrecognized sid, and
-TmuxBackend.send then types at a pane named after the sid — with no such pane, the keystrokes evaporate
-with nothing raised and nothing logged, so typed messages simply ceased to exist. Per the repo's
-fail-loudly rule, an op we cannot deliver has to say so: a modal in the pane that fired it, the text kept
-verbatim on disk so nothing typed is lost, and a line in the kernel log.
+that owns no such session. Sessions.backend_for() then fell through to the tmux backend for any
+unrecognized sid, and that backend's send typed at a terminal pane named after the sid — with no such pane,
+the keystrokes evaporated with nothing raised and nothing logged, so typed messages simply ceased to exist.
+Per the repo's fail-loudly rule, an op we cannot deliver has to say so: a modal in the dashboard pane that
+fired it, the text kept verbatim on disk so nothing typed is lost, and a line in the kernel log.
+
+The fall-through itself is gone with that backend (removed 2026-09-11): a sid neither the Claude Code
+("sdk") nor the Codex backend owns now routes to _UNOWNED (kernel/kernel.py, _UnownedBackend), whose every
+op is an explicit refusal — send() returns False and says why on stderr, nothing is typed anywhere. The
+check pinned here still matters on its own: _drive asks _kernel_knows before the op is routed to a backend
+(Sessions.backend_for), and that is what produces the modal, the on-disk copy and the log line rather than
+a bare refusal.
 """
 import json
 import os

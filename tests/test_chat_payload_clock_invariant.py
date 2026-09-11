@@ -73,7 +73,7 @@ class ChatPayloadIsClockInvariant(unittest.TestCase):
         (names / SID).write_text("web\t%s\t#abcdef\n" % str(cdir))
 
         self.saved = (jd.NAMES, jd.PROJECTS, jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR, jd.STATE,
-                      km.NAMES, km._tmux_sessions, km._GLOBAL_CLAUDE_MD)
+                      km.NAMES, km._live_map, km._GLOBAL_CLAUDE_MD)
         jd.NAMES, jd.PROJECTS = names, proj
         jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR = td / "captions", td / "archive", td / "goals"
         jd.STATE = td
@@ -82,13 +82,13 @@ class ChatPayloadIsClockInvariant(unittest.TestCase):
         km._GLOBAL_CLAUDE_MD = td / "no-global-claude.md"
         # Alive + idle, and FIXED: a `since` derived from the real clock would itself vary between the
         # two builds and mask the very thing under test.
-        km._tmux_sessions = lambda: {SID: {"state": "idle", "since": NOW - 100, "model": "",
+        km._live_map = lambda: {SID: {"state": "idle", "since": NOW - 100, "model": "",
                                            "effort": "", "context": None, "compactPct": None,
                                            "color": None}}
 
     def tearDown(self):
         (jd.NAMES, jd.PROJECTS, jd.CAPDIR, jd.ARCHDIR, jd.GOALDIR, jd.STATE,
-         km.NAMES, km._tmux_sessions, km._GLOBAL_CLAUDE_MD) = self.saved
+         km.NAMES, km._live_map, km._GLOBAL_CLAUDE_MD) = self.saved
         self.td.cleanup()
 
     def _write_turns(self):

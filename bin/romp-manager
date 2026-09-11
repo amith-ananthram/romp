@@ -26,7 +26,7 @@
 // (`restart [kernel]` (single) also exists for front ends: no romp verb.)
 
 const http = require('http');
-const { spawn, execFileSync } = require('child_process');
+const { spawn } = require('child_process');
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
@@ -56,12 +56,11 @@ function clearDownMarker(file = DOWN_MARKER) {
   try { fs.unlinkSync(file); return true; } catch (e) { return false; }   // absent = nothing to clear
 }
 
-// $TMUX scrub (2026-07-20): a manager launched by hand from INSIDE a tmux session leaks $TMUX to
-// its kernels and their SDK-session children — whose tmux-status hooks then resolve `#S` to
-// whatever session is ATTACHED and hijack ITS @romp-session-id anchor (a live session flapping
-// "dead" → bogus revive prompts). launchd spawns us clean; this makes the manual path just as
-// clean at the source. Mirrors kernel/judge.py's scrub for judge subprocesses. The hook's own
-// CLAUDE_CODE_ENTRYPOINT guard stays as defense-in-depth for managers older than this line.
+// Environment scrub: a manager started by hand from inside a terminal multiplexer pane inherits that
+// pane's variables (TMUX, TMUX_PANE). Every kernel is spawned with a copy of this process's
+// environment (specEnv), and each session's CLI inherits its kernel's, so the leak would tell every
+// CLI it sits in a pane of that multiplexer. launchd and systemd start the manager clean; this makes
+// the manual path as clean, at the source. Mirrors kernel/judge.py's scrub for judge subprocesses.
 delete process.env.TMUX;
 delete process.env.TMUX_PANE;
 
@@ -90,7 +89,7 @@ function rompServeBin() {
 // demand via /ensure ('k<port>').
 
 // kernels.json (plans/multi-kernel.md phase 3): the durable aux-kernel profiles —
-//   { "kernels": [ { "id", "port", "postalPort"?, "stateDir"?, "claudeConfigDir"?, "tmuxSocket"? } ] }
+//   { "kernels": [ { "id", "port", "postalPort"?, "stateDir"?, "claudeConfigDir"? } ] }
 // Parsed FRESH at every consult (never cached at manager start): the --refresh stale-manager
 // incident (the user 2026-07-24) was the manager baking config once at start and then respawning
 // kernels with values the disk had long since moved past. A `main` entry may override the primary's
@@ -126,7 +125,7 @@ function loadSpecs(file, mainPort, controlPort) {
       if (!Number.isInteger(pp) || pp < 1024 || pp > 65535 || ports.has(pp)) { bad('postalPort must be a free integer in [1024,65535]'); continue; }
       spec.postalPort = pp; ports.add(pp);
     }
-    for (const [field, pat] of [['stateDir', /^[/~]/], ['claudeConfigDir', /^[/~]/], ['tmuxSocket', /^[A-Za-z0-9_-]{1,64}$/]]) {
+    for (const [field, pat] of [['stateDir', /^[/~]/], ['claudeConfigDir', /^[/~]/]]) {
       if (k[field] != null) {
         const v = String(k[field]);
         if (!pat.test(v)) { spec._bad = field; break; }
@@ -140,8 +139,8 @@ function loadSpecs(file, mainPort, controlPort) {
 }
 
 // The per-spec child env (pure, exported for tests): the profile's whole isolation story rides these
-// five variables — the kernel and everything it spawns (SDK sessions, its tmux server, its postal
-// bus) inherit them, so one env set at spawn scopes state, sessions, and mail per kernel.
+// four variables — the kernel and everything it spawns (SDK sessions, its postal bus) inherit them,
+// so one env set at spawn scopes state, sessions, and mail per kernel.
 function specEnv(spec, base, ids) {
   const env = Object.assign({}, base, {
     // BOTH spellings of the listen port, always overwritten together: `base` is the manager's own
@@ -155,13 +154,8 @@ function specEnv(spec, base, ids) {
   if (spec.postalPort) env.ROMP_POSTAL_PORT = String(spec.postalPort);
   if (spec.stateDir) env.ROMP_STATE_DIR = spec.stateDir;
   if (spec.claudeConfigDir) env.CLAUDE_CONFIG_DIR = spec.claudeConfigDir;
-  if (spec.tmuxSocket) env.ROMP_TMUX_SOCKET = spec.tmuxSocket;
-  // the manager's own rule for the tmux socket directory rides beside the value (T325): a kernel reports it on
-  // /version, and bin/romp tells a manager from before the rule (no word) from a current one on tmux's default
-  if (tmuxSocketRule) env.ROMP_TMUX_TMPDIR_RULE = tmuxSocketRule;
   return env;
 }
-let tmuxSocketRule = '';   // set by startManager once it resolved; '' until then (a kernel spawned before that reads no word)
 
 const kernels = new Map();
 
@@ -321,7 +315,7 @@ function spawnKernel(spec) {
   // ROMP_MANAGER_PID lets the kernel run a parent-death watchdog (_parent_watch in bin/romp-kernel):
   // if we die uncleanly (SIGKILL / crash / closed terminal) and never SIGTERM it, it sees us vanish and
   // exits itself instead of orphaning. ROMP_SERVE_PORT is the kernel's listen port; the rest of the
-  // profile env (state root, Claude config dir, postal port, tmux socket) is the kernel's whole
+  // profile env (state root, Claude config dir, postal port) is the kernel's whole
   // isolation story (specEnv).
   const env = specEnv(spec, process.env, { managerPid: process.pid, controlPort: CONTROL_PORT });
   // stdio inherited → the kernel's own logs surface in this foreground terminal (visible owner).
@@ -730,16 +724,16 @@ function runManager() {
   });
 }
 
-// romp holds no API key and runs no secret-manager CLI (the user 2026-09-08): the tmux server the manager
-// starts inherits the manager's environment unchanged, so nothing is scrubbed here. A retired provider
-// variable in that environment is refused BEFORE the server starts (retiredCredentialNames, below): every
-// pane the server ever creates inherits the SERVER's globals, and a `romp new -t` terminal session's `exec
-// claude` would read a leftover ANTHROPIC_API_KEY from there even though the kernel refuses to boot on the
-// same variable (kernel/credentials.py check_boot_environment). The manager is what receives service.env
-// (systemd's EnvironmentFile=, bin/romp-node-launch), so this is the check that covers the tmux path.
-// The retired provider variables, then the 1Password CLI's own names (the retired reference kind read
-// them; romp no longer runs op, and a token left here would ride into every pane): kernel/credentials.py
-// RETIRED_VARS, OP_ENV_NAMES and OP_ENV_PREFIX, mirrored.
+// romp holds no API key and runs no secret-manager CLI (the user 2026-09-08): every kernel the manager
+// spawns inherits the manager's environment as it stands (specEnv copies it), and nothing is scrubbed
+// here. A retired provider variable in that environment is refused BEFORE a kernel starts
+// (retiredCredentialNames, below). The kernel refuses to boot on the same variable
+// (kernel/credentials.py check_boot_environment), but the manager is what receives service.env (systemd's
+// EnvironmentFile=, bin/romp-node-launch), so the check sits at the door the file comes in through: the
+// variable never reaches a kernel or a session it starts, and the manager's own log names the line to
+// remove. The retired provider variables, then the 1Password CLI's own names (the retired reference kind
+// read them; romp no longer runs op, and a token left here would ride into every kernel and session):
+// kernel/credentials.py RETIRED_VARS, OP_ENV_NAMES and OP_ENV_PREFIX, mirrored.
 const RETIRED_CREDENTIAL_NAMES = ['ROMP_API_KEY_CMD', 'ROMP_API_KEY_REF', 'ANTHROPIC_API_KEY'];
 const OP_ENV_NAMES = ['OP_SERVICE_ACCOUNT_TOKEN', 'OP_CONNECT_HOST', 'OP_CONNECT_TOKEN', 'OP_ACCOUNT'];
 const OP_ENV_PREFIX = 'OP_SESSION_';
@@ -756,75 +750,11 @@ function retiredCredentialMessage(names) {
     '(a key romp holds is a key a session can print). Remove the line from service.env (and any exported variable), ' +
     'configure apiKeyHelper in Claude Code\'s settings, declare the billing with ROMP_EXPECTED_AUTH=key, then start again.' + op;
 }
-function withoutOpCredentials(env) {
-  return Object.assign({}, env);
-}
-//
-// Under the Linux service the server goes into a transient systemd scope of its own (2026-09-05). The
-// manager runs as a systemd user service that relies on systemd's default KillMode=control-group (the
-// unit sets no KillMode line), so a server started here lands in the service's cgroup and `systemctl
-// --user restart romp-manager` kills it, with every session's tmux jobs inside — a service restart that
-// day killed two sessions' tmux servers and setsid jobs along with the kernel. `systemd-run --scope`
-// starts the daemon outside the service cgroup; a session's later `tmux new-session` joins that server
-// and survives a service restart. The tmux CLIENT still exits at once (it only starts the daemon), so
-// execFileSync's semantics are unchanged, and when a server already runs the call is the same no-op and
-// the scope collects itself. Any failure of the scoped path falls back to the bare call, and the line after
-// it READS where the server actually sits (its cgroup) rather than assuming the bare call placed it: a
-// timed-out scoped call kills only tmux's client, the daemon it forked stays inside the scope. The macOS
-// path is as it was: launchd owns the lineage there and the TCC rationale above still applies.
-const TMUX_START_ARGV = ['tmux', 'start-server', ';', 'set', '-g', 'exit-empty', 'off'];
-
-// Where the tmux server keeps its socket (T325, 2026-09-11; the node twin of kernel/tmux_socket.py and
-// bin/romp-tmux-env, one rule in three languages): a TMUX_TMPDIR the operator set wins as it stands; else
-// XDG_RUNTIME_DIR naming an existing, writable directory gives <XDG_RUNTIME_DIR>/romp, created 0700 when missing
-// (tmux 3.4 falls back to /tmp silently when TMUX_TMPDIR names a missing directory, so it is made, never assumed);
-// else null, tmux's own default. /run/user/<uid> is a per-user tmpfs that no /tmp housekeeping, tmpfiles age
-// sweep or /tmp mount-over can touch: on 2026-09-11 a tmpfs mounted over a populated /tmp hid /tmp/tmux-<uid>
-// and every tmux-backed session's terminal was unreachable for an hour. startManager resolves it once, before
-// it starts the server, into process.env, so the server, every kernel (specEnv copies the env) and every
-// session the kernels create dial the same socket. `fsi` is the fs to consult (tests hand a fake).
-// The rules, named as the Python twin names them (kernel/tmux_socket.py), so the log says which one fired.
-const TMUX_DIR_RULES = { operator: 'operator', runtime: 'runtime-dir', noRuntime: 'no XDG_RUNTIME_DIR',
-                         runtimeUnusable: 'XDG_RUNTIME_DIR is not a writable directory',
-                         subdirUnusable: 'XDG_RUNTIME_DIR/romp could not be made, or is not a writable directory' };
-function resolveTmuxTmpdir({ env = process.env, fsi = fs } = {}) {
-  const op = env.TMUX_TMPDIR || '';                 // as it stands: no trimming, the twins agree byte for byte
-  if (op) {
-    // the shell twin's word for what IT resolved (bin/romp-tmux-env exports the mark beside the value before `romp
-    // up` starts a manager), honoured only for the value it describes: a mark that leaked into a descendant shell
-    // must not relabel an operator's own TMUX_TMPDIR as the runtime directory
-    const mark = env.ROMP_TMUX_TMPDIR_RULE || '';
-    const run = env.XDG_RUNTIME_DIR || '';
-    const canon = (p) => { try { return fsi.realpathSync(p); } catch { return p.replace(/\/+$/, '') || p; } };
-    if (mark === TMUX_DIR_RULES.runtime && run && canon(op) === path.join(canon(run), 'romp')) return { dir: op, rule: TMUX_DIR_RULES.runtime };
-    return { dir: op, rule: TMUX_DIR_RULES.operator };
-  }
-  const run0 = env.XDG_RUNTIME_DIR || '';
-  if (!run0) return { dir: null, rule: TMUX_DIR_RULES.noRuntime };
-  const usable = (p) => {
-    try { if (!fsi.statSync(p).isDirectory()) return false; fsi.accessSync(p, fs.constants.W_OK | fs.constants.X_OK); return true; } catch { return false; }
-  };
-  let run = run0;                                   // the CANONICAL runtime path: a trailing slash or a symlink must not read as another directory
-  try { run = fsi.realpathSync(run0); } catch { run = run0.replace(/\/+$/, '') || run0; }
-  if (!usable(run)) return { dir: null, rule: TMUX_DIR_RULES.runtimeUnusable };
-  const d = path.join(run, 'romp');
-  if (!usable(d)) {
-    try { fsi.mkdirSync(d, { mode: 0o700 }); } catch { /* refused, or made by a sibling this instant: judged below */ }
-    if (!usable(d)) return { dir: null, rule: TMUX_DIR_RULES.subdirUnusable };
-  }
-  return { dir: d, rule: TMUX_DIR_RULES.runtime };
-}
-function tmuxTmpdir(opts) { return resolveTmuxTmpdir(opts).dir; }
-function describeTmuxTmpdir({ dir, rule }) {
-  if (rule === TMUX_DIR_RULES.operator) return `${dir} (TMUX_TMPDIR set by the operator)`;
-  if (rule === TMUX_DIR_RULES.runtime) return `${dir} (the user's runtime directory, out of /tmp's reach)`;
-  return `tmux default (${rule})`;
-}
 
 // A manager whose binary changed since it started must not bring a kernel up under itself (the stale-manager
 // shape restartAllOrSelf handles for `romp refresh`): the same for a single kernel's /restart and for the crash
-// respawn (T325 review: a new-code kernel under an old manager inherits its stale environment, the tmux socket
-// directory included, for as long as the checkout sits ahead of the running manager). Supervised → exit so the
+// respawn (T325 review: a new-code kernel under an old manager inherits its stale environment, ports and profile
+// env alike, for as long as the checkout sits ahead of the running manager). Supervised → exit so the
 // supervisor respawns the new manager, which brings every kernel back on the new defaults; foreground → warn and
 // let the kernel come up anyway. Returns true when the manager is exiting instead.
 function staleManagerYields(why) {
@@ -838,171 +768,6 @@ function staleManagerYields(why) {
   return false;
 }
 
-// Is `name` an executable on the env's PATH? (Node has no `which`.)
-function commandOnPath(name, env = process.env) {
-  for (const dir of (env.PATH || '').split(path.delimiter)) {
-    if (!dir) continue;
-    try { fs.accessSync(path.join(dir, name), fs.constants.X_OK); return true; } catch { /* next dir */ }
-  }
-  return false;
-}
-
-// The PURE choice of how to start the server — exported for unit tests. null when tmux is not on PATH:
-// nothing to start and nothing to say (the behaviour before the scopes; a tmux-less box must not log a
-// scope failure at every start). Scoped exactly when the kernel scopes session CLIs (cli_scope_supported
-// in kernel/sdk_backend.py, the same switch): ROMP_CLI_SCOPE=1, or under the supervised service
-// (ROMP_SUPERVISED, what bin/romp-service's unit sets) unless ROMP_CLI_SCOPE=0 — so a terminal-run
-// manager scopes nothing unless asked — and then only on Linux with systemd-run on PATH. The unit name
-// carries a timestamp: systemd refuses a duplicate name ("already loaded") and the last scope may
-// still be alive with the server in it.
-function tmuxStartArgv({ platform = process.platform, env = process.env, onPath = commandOnPath, now = Date.now } = {}) {
-  if (!onPath('tmux', env)) return null;
-  const want = env.ROMP_CLI_SCOPE;
-  const wanted = want === '1' || (Boolean(env.ROMP_SUPERVISED) && want !== '0');
-  if (platform !== 'linux' || !wanted || !onPath('systemd-run', env)) {
-    return { argv: TMUX_START_ARGV.slice(), scoped: false };
-  }
-  return { argv: ['systemd-run', '--user', '--scope', '--quiet', '--collect', `--unit=romp-tmux-${now()}`,
-                  '--', ...TMUX_START_ARGV], scoped: true };
-}
-
-const TMUX_START_TIMEOUT_MS = 5000;
-const FAILURE_LINE_MAX = 200;
-
-// What a failed scoped start says in the log, from execFileSync's error: the tool that failed, and its
-// first stderr line, bounded. systemd-run in --scope mode execs the command in place, so a non-zero exit
-// is either systemd-run's own — no user bus, a refused unit name; its logger prefixes every line
-// "Failed to …" — or tmux's, failing inside a scope that did start ("error connecting to …"). The line
-// names whichever wrote the message. With nothing on stderr it names systemd-run, the command that ran,
-// and says how it ended. Exported for the node suite.
-function scopedStartFailure(e) {
-  const first = String((e && e.stderr) || '').split('\n').map((s) => s.trim()).find(Boolean) || '';
-  const tool = first && !/^Failed to /.test(first) ? 'tmux' : 'systemd-run';
-  let detail = first;
-  if (!detail) {
-    if (e && e.code === 'ETIMEDOUT') detail = `timed out after ${TMUX_START_TIMEOUT_MS / 1000} s`;
-    else if (e && e.signal) detail = `killed by ${e.signal}`;
-    else if (e && typeof e.status === 'number') detail = `exit ${e.status}, nothing on stderr`;
-    else detail = String(e && e.message || e).split('\n')[0];   // a spawn error: "spawnSync systemd-run ENOENT"
-  }
-  if (detail.length > FAILURE_LINE_MAX) detail = detail.slice(0, FAILURE_LINE_MAX - 1) + '…';
-  return { tool, detail };
-}
-
-// After a failed scoped start the bare call runs, and where the server then sits is READ, not predicted
-// (the #953 review): the old fixed line said the server was unscoped and a service restart would take it
-// down, which is wrong in two cases. A scoped call that times out — execFileSync SIGTERMs the tmux CLIENT
-// (systemd-run exec'd it in place) while the server daemon that client forked stays alive inside the
-// romp-tmux scope, so the bare retry is a no-op onto a scoped server. And after a service restart the
-// previous manager's server is still up in its old scope, so if systemd-run fails on THIS start (bus not
-// up yet, a refused unit) the bare call no-ops onto a scoped server again. `#{pid}` is the server's pid;
-// display-message does not start a server (exit 1, "no server running on …", when there is none — tmux 3.4).
-const TMUX_SERVER_PID_ARGV = ['tmux', 'display-message', '-p', '#{pid}'];
-
-// PURE: the path of the hierarchy systemd manages, from a /proc/<pid>/cgroup text — the `0::<path>` line on
-// cgroup v2; on v1 (one `<id>:<controllers>:<path>` line per controller) the `name=systemd` controller's,
-// else the first path present. '' when the text carries none.
-function systemdCgroupPath(text) {
-  const rows = String(text || '').split('\n').map((l) => l.trim()).filter(Boolean).map((l) => {
-    const parts = l.split(':');
-    return parts.length >= 3 ? { id: parts[0], controllers: parts[1], path: parts.slice(2).join(':') } : null;
-  }).filter(Boolean);
-  const v2 = rows.find((r) => r.id === '0' && r.controllers === '');
-  const v1 = rows.find((r) => r.controllers.split(',').includes('name=systemd'));
-  return ((v2 || v1 || rows[0]) || { path: '' }).path;
-}
-
-// PURE: where a /proc/<pid>/cgroup text places the server, against the manager's own (/proc/self/cgroup).
-// Every line is tried for a romp-tmux-* scope (cgroup v1 has one per controller, each ending in the unit);
-// only the manager's own scopes count — a romp-session-* scope is a session CLI's, not this feature's claim.
-// Otherwise the server's cgroup is COMPARED with the manager's, not classified from the shape of its path
-// (the #967 review): the same cgroup, or one under it, is the service's own, which KillMode=control-group
-// takes down with the service — 'unscoped', the line as it always was. Any other cgroup is outside the
-// service's reach — a server the user started from a terminal sits in the login session's scope — and a
-// service restart leaves it alive, so 'outside' names the cgroup instead of predicting a loss.
-function placementFromCgroup(text, own) {
-  const lines = String(text || '').split('\n');
-  for (const line of lines) {
-    const m = /\/(romp-tmux-\d+\.scope)\s*$/.exec(line);
-    if (m) return { placement: 'scoped', unit: m[1] };
-  }
-  const server = systemdCgroupPath(text);
-  if (!server) return { placement: 'unknown', why: lines.some((l) => l.trim()) ? 'no cgroup path in the file' : 'empty cgroup file' };
-  const mine = systemdCgroupPath(own);
-  if (!mine) return { placement: 'unknown', why: "the manager's own cgroup file is empty" };
-  if (server === mine || server.startsWith(mine.replace(/\/$/, '') + '/')) return { placement: 'unscoped' };
-  return { placement: 'outside', cgroup: server };
-}
-
-function defaultServerPid() {
-  return execFileSync(TMUX_SERVER_PID_ARGV[0], TMUX_SERVER_PID_ARGV.slice(1),
-                      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: TMUX_START_TIMEOUT_MS,
-                        env: withoutOpCredentials(process.env) });
-}
-function defaultReadCgroup(pid) { return fs.readFileSync('/proc/' + pid + '/cgroup', 'utf8'); }
-
-// Never throws — a throw here would abort startManager before the control port binds — so every failure
-// of the probe is an 'unknown' placement carrying the failure's first line, bounded like the failure
-// line's detail. `serverPid` and `readCgroup` are injectable for the node suite; the defaults ask tmux
-// (bounded by the same timeout as the start) and read /proc — the server's file, then the manager's own
-// (`self`), which the placement compares it with.
-function tmuxServerPlacement({ serverPid = defaultServerPid, readCgroup = defaultReadCgroup } = {}) {
-  const why = (e) => {
-    const first = String((e && e.stderr) || '').split('\n').map((s) => s.trim()).find(Boolean)
-      || String(e && e.message || e).split('\n')[0];
-    return first.length > FAILURE_LINE_MAX ? first.slice(0, FAILURE_LINE_MAX - 1) + '…' : first;
-  };
-  let pid;
-  try { pid = String(serverPid()).trim(); } catch (e) { return { placement: 'unknown', why: why(e) }; }
-  if (!/^\d+$/.test(pid)) return { placement: 'unknown', why: 'tmux reported no server pid' };
-  let text, own;
-  try { text = readCgroup(pid); own = readCgroup('self'); } catch (e) { return { placement: 'unknown', why: why(e) }; }
-  return placementFromCgroup(text, own);
-}
-
-// PURE: the line the bare call's success logs, worded from where the server sits. The unscoped wording is
-// the line as it always was (its pins stay); the other three predict no loss.
-function bareEnsuredLine({ placement, unit, cgroup, why }) {
-  if (placement === 'scoped') {
-    return `tmux server ensured — already running inside ${unit} (the scoped start had begun it, or an earlier one still holds it); a service restart leaves it and its sessions' jobs alive`;
-  }
-  if (placement === 'unscoped') {
-    return 'tmux server ensured without a scope — under the service, a service restart will take it down';
-  }
-  if (placement === 'outside') {
-    return `tmux server ensured — already running outside the service's cgroup, in ${cgroup} (a server begun from a terminal sits in the login session's scope); a service restart leaves it and its sessions' jobs alive`;
-  }
-  return `tmux server ensured — whether it sits in a scope could not be read (${why}); under the service, a restart takes it down only if it is not in one`;
-}
-
-function startTmuxServer() {
-  const pick = tmuxStartArgv();
-  if (!pick) return;   // no tmux on PATH: nothing to start, and nothing to log (as before the scopes)
-  // stderr is piped on the scoped call, for the failure line below: with stdio 'ignore' the error carried
-  // "Command failed: <argv>" and nothing about why. The pipe closes when tmux's client exits — its server
-  // daemonizes onto /dev/null — so it holds nothing open. The bare call keeps 'ignore': nothing reads it.
-  const stdio = pick.scoped ? ['ignore', 'ignore', 'pipe'] : 'ignore';
-  try {
-    execFileSync(pick.argv[0], pick.argv.slice(1), { stdio, timeout: TMUX_START_TIMEOUT_MS, env: withoutOpCredentials(process.env) });
-    log(pick.scoped
-      ? 'tmux server ensured in its own transient scope (romp-tmux-*) — a service restart leaves it and its sessions\' jobs alive'
-      : 'tmux server ensured (launchd-rooted) — new sessions won\'t inherit a terminal\'s TCC identity');
-    return;
-  } catch (e) {
-    if (!pick.scoped) return;   // a server is already up, or tmux itself failed — nothing more to do
-    // Say what failed; where the server sits is read from its cgroup after the bare call (bareEnsuredLine),
-    // not predicted here.
-    const { tool, detail } = scopedStartFailure(e);
-    log(tool === 'tmux'
-      ? `tmux failed inside the scope systemd-run started for it (${detail}) — starting it the plain way instead`
-      : `systemd-run could not start the tmux server in a scope (${detail}) — starting it the plain way instead`);
-  }
-  try {
-    execFileSync(TMUX_START_ARGV[0], TMUX_START_ARGV.slice(1), { stdio: 'ignore', timeout: TMUX_START_TIMEOUT_MS, env: withoutOpCredentials(process.env) });
-    log(bareEnsuredLine(tmuxServerPlacement()));
-  } catch (e) { /* a server is already up, or tmux itself failed — nothing to do */ }
-}
-
 // startManager's first statement clears the `romp down` marker: a deliberate start brings the kernels
 // back, and a start the credential check below refuses still records that it was asked for, so
 // `romp status` does not call the kernel stopped on purpose.
@@ -1013,13 +778,6 @@ function startManager() {
     log(retiredCredentialMessage(retired));   // the supervisor restarts the manager on its backoff, so the line
     process.exit(1);                          // repeats in its log until the file is repaired (the kernel's own shape)
   }
-  // the socket directory first: the server started next, every kernel (specEnv copies process.env) and every
-  // session they create must agree on it (T325)
-  const tmuxPick = resolveTmuxTmpdir();
-  if (tmuxPick.rule === TMUX_DIR_RULES.runtime) process.env.TMUX_TMPDIR = tmuxPick.dir;   // the operator's stands as it is; the default is the variable's absence
-  tmuxSocketRule = tmuxPick.rule;
-  log(`tmux socket dir: ${describeTmuxTmpdir(tmuxPick)}`);
-  startTmuxServer();
   const server = http.createServer((req, res) => {
     const url = new URL(req.url || '/', 'http://x');
     const kid = url.searchParams.get('kernel') || 'main';
@@ -1141,9 +899,8 @@ function ensureUp() {
 // file is executed directly, so require()-ing it from a test has no side effects.
 module.exports = { restartGate, quietGate, quietTick, loadSpecs, specEnv, fileStamp,
                    kernelToken, fetchBusy, resetDrainNotices, queueQuietRestart, clearPendingQuiet,
-                   tmuxStartArgv, scopedStartFailure, commandOnPath, TMUX_START_ARGV, tmuxTmpdir, resolveTmuxTmpdir, describeTmuxTmpdir, TMUX_DIR_RULES, staleManagerYields, startManager,
-                   placementFromCgroup, tmuxServerPlacement, bareEnsuredLine, TMUX_SERVER_PID_ARGV,
-                   withoutOpCredentials, retiredCredentialNames, retiredCredentialMessage, exitLine, auditSigterm,
+                   staleManagerYields, startManager,
+                   retiredCredentialNames, retiredCredentialMessage, exitLine, auditSigterm,
                    ensureDecision, downMarkerHeld, clearDownMarker, DOWN_MARKER,
                    quietWindowRow, auditQuietWindow,
                    // the SIGTERM wiring, for tests that seed `kernels` with a stand-in child or point

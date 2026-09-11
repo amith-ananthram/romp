@@ -64,7 +64,7 @@ class _FakeBackend:
     alive reg and a comment thread are both taken, as SdkBackend._ensure does; `refuse` forces a
     refusal for a live one; `marker_raises` makes the record reader itself fail. Nothing here
     consults a live set: that is the point. What this fake cannot stage is the real routing —
-    ownership by owns(), the fall-through to tmux — which RealRouting covers with real backends."""
+    ownership by owns(), the fall-through to the unowned route — which RealRouting covers with real backends."""
 
     def __init__(self, regs=None, refuse=False, marker_raises=False, names=None):
         self.regs, self.refuse, self.marker_raises, self.sent = dict(regs or {}), refuse, marker_raises, []
@@ -97,7 +97,7 @@ class _FakeBackend:
 
 
 class _NoRecordBackend(_FakeBackend):
-    """A backend with no record reader at all (tmux-like), whose send still refuses."""
+    """A backend with no record reader at all (no registry to read), whose send still refuses."""
     end_marker = None
     sid_for_name = None
 
@@ -573,16 +573,16 @@ THREAD = "33333333-2222-3333-4444-555555555555"
 
 
 def _live_raises():
-    raise RuntimeError("tmux list-sessions timed out")
+    raise RuntimeError("the liveness read timed out")
 
 
 class DeliveryTargets(unittest.TestCase):
     """The decision procedure against an SDK-shaped fake whose record the test writes. Before the
     first fix, _pr_watch_deliver returned True whenever the send did not raise, and no backend raises
-    for a dead session (SDK/Codex send return False, tmux's send reports a missing session only on
-    stderr; _send_or_park dropped be.send's return), so an ended registrant's landing mail was
-    dropped silently. The first fix pre-classified from Sessions.live() — which reads EMPTY on a slow
-    `tmux list-sessions` or a swallowed live_sessions error, and never lists a comment thread — so a
+    for a dead session (SDK/Codex send return False; _send_or_park dropped be.send's return), so an
+    ended registrant's landing mail was dropped silently. The first fix pre-classified from
+    Sessions.live() — which reads EMPTY on a slow liveness read or a swallowed live_sessions error,
+    and never lists a comment thread — so a
     blip diverted a running registrant's mail with a false "has ended". Now the durable records
     decide (an explicit end marker before any send; a uuid nobody holds is never sent; a record that
     says alive sends first), refusals are classified from the same records, a uuid with no record has
@@ -591,13 +591,13 @@ class DeliveryTargets(unittest.TestCase):
     the REAL _pr_watch_deliver →
     _send_or_park → backend path, with the record readers and Sessions.backend_for routed to the fake
     and Sessions.live() EMPTY throughout (or raising). What the fake cannot stage — ownership by
-    owns() falling through to tmux — RealRouting covers with real backends."""
+    owns() falling through to the unowned route — RealRouting covers with real backends."""
 
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
         self._saved = {n: getattr(km, n) for n in
                        ("PR_WATCH_FILE", "_pr_watch_read", "_compacting_now", "_working_now", "_limit_hold",
-                        "_optimistic_echo", "_sid_of", "_name_of", "_watch_escalate_default",
+                        "_sid_of", "_name_of", "_watch_escalate_default",
                         "_pr_watch_record_backends")}
         self._saved_rows = list(km._pr_watches)
         self._saved_live, self._saved_be = km.Sessions.live, km.Sessions.backend_for
@@ -610,7 +610,6 @@ class DeliveryTargets(unittest.TestCase):
         km._compacting_now = lambda sid, *a, **k: False
         km._working_now = lambda sid, *a, **k: False
         km._limit_hold = lambda sid, *a, **k: False
-        km._optimistic_echo = lambda *a, **k: None
         km._sid_of = lambda who: MGR if who == "mgr" else who
         km._name_of = lambda sid: "mgr" if sid == MGR else None
         km._watch_escalate_default = lambda: ""
@@ -819,7 +818,7 @@ class DeliveryTargets(unittest.TestCase):
     # the contact's name: durable resolution, and an unresolved name only waits
     def test_an_unresolved_contact_name_waits_uncounted_and_is_never_sent_bare(self):
         # _sid_of reads the live set — the probe — and hands an unresolvable NAME back unchanged; a
-        # send to it would fall to tmux, whose send never refuses. A name the live set failed to
+        # send to it would reach the unowned route, which refuses. A name the live set failed to
         # list is not a session that ended: the row waits, said once, and is never dropped for it
         km.add_pr_watch(7, "TESTORG/testrepo", SID, now=0, escalate="mgr")
         km._sid_of = lambda who: who
@@ -841,7 +840,7 @@ class DeliveryTargets(unittest.TestCase):
     def test_an_unresolved_contact_name_is_waited_on_to_the_bound_then_dropped_loudly(self):
         # the wait above is BOUNDED (review find, 2026-09-08): a name that never resolves (mistyped, or
         # a box default naming a session nobody starts again) otherwise kept the row armed forever, one
-        # tmux fork per tick with the once-said Log row its only trace. At PR_WATCH_ESCALATE_S from the
+        # liveness read per tick with the once-said Log row its only trace. At PR_WATCH_ESCALATE_S from the
         # first unresolved tick, the bound this module already keeps for waiting on the named contact,
         # the row retires the loud way: one stderr line and one bell row under the refused kind
         km.add_pr_watch(7, "TESTORG/testrepo", SID, now=0, escalate="mgr")
@@ -869,26 +868,28 @@ class DeliveryTargets(unittest.TestCase):
         km._pr_watch_tick(100.0)
         self.assertEqual(([s for s, _ in self.be.sent], km._pr_watches), ([MGR], []))
 
-    def test_send_or_park_tells_a_refused_handover_apart_and_echoes_nothing_for_it(self):
-        echoed = []
-        km._optimistic_echo = lambda sid, text, author="human": echoed.append(text)
+    def test_send_or_park_tells_a_refused_handover_apart_and_hands_nothing_over_for_it(self):
+        # the backend echoes for itself inside send() (no kernel-side echo exists), so what a refusal
+        # must leave behind is nothing: the session never got the text
         self.assertIsNone(km._send_or_park(self.be, SID, "hello", echo="human"), "refused: neither parked nor handed")
-        self.assertEqual(echoed, [], "no echo for a message the session never got")
+        self.assertEqual(self.be.sent, [], "nothing reached the session")
         self.be.regs = {SID: True}
         self.assertIs(km._send_or_park(self.be, SID, "hello", echo="human"), False, "handed over now")
-        self.assertEqual(echoed, ["hello"])
+        self.assertEqual(self.be.sent, [(SID, "hello")])
 
 
 class RealRouting(unittest.TestCase):
     """Through the REAL Sessions.backend_for and REAL backends: a fresh SdkBackend over a temp state
-    dir, a fresh CodexBackend, and tmux's send replaced by a recorder. The routing fact this class
-    pins: Sessions.backend_for picks by owns(), and owns() is False for exactly the records that
-    decide a landing mail — an SDK reg that is absent or unreadable, a Codex session marked dead — so
-    those sids fall to _TMUX, whose send returns True unconditionally; before this change their
-    notices "were accepted" by a shell that never existed and the rows retired with no Log row. The
-    decision now reads the records first, independent of ownership, and a uuid nobody holds is never
-    sent. Only the gates the module already patches are patched; sends never reach a live SDK reg (a
-    real send there would spawn a CLI)."""
+    dir, a fresh CodexBackend, and the unowned route's send wrapped by a recorder. The routing fact
+    this class pins: Sessions.backend_for picks by owns(), and owns() is False for exactly the records
+    that decide a landing mail — an SDK reg that is absent or unreadable, a Codex session marked dead —
+    so those sids fall to _UNOWNED, whose send REFUSES by name (the tmux backend that once stood there
+    accepted anything, so their notices "were accepted" by a shell that never existed and the rows
+    retired with no Log row). The decision reads the records first, independent of ownership, a uuid
+    nobody holds is never sent, and a refusal is classified from the same records. The live set is
+    held EMPTY (the probe this module distrusts; a contact resolves through the SDK regs). Only the
+    gates the module already patches are patched; sends never reach a live SDK reg (a real send there
+    would spawn a CLI)."""
 
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
@@ -897,11 +898,15 @@ class RealRouting(unittest.TestCase):
         self.sb, self.cb = sb, cb
         self.sdk = sb.SdkBackend(state, "claude", lambda *a, **k: None)             # reconcile=False: no boot sweep
         self.cx = cb.CodexBackend(state, notify=lambda *a, **k: None, log=lambda m: None)
-        self.tmux = []
+        self.unowned = []                                     # every (sid, text) the unowned route refused
         self._saved = {n: getattr(km, n) for n in
                        ("PR_WATCH_FILE", "NAMES", "_pr_watch_read", "_compacting_now", "_working_now", "_limit_hold",
-                        "_optimistic_echo", "_tmux_send", "_sdk", "_codex", "_watch_escalate_default")}
+                        "_sdk", "_codex", "_watch_escalate_default")}
         self._saved_rows = list(km._pr_watches)
+        self._saved_live = km.Sessions.live
+        km.Sessions.live = staticmethod(lambda: {})           # the probe lists nobody; the records decide
+        refuse = km._UnownedBackend.send
+        km._UNOWNED.send = lambda sid, text: (self.unowned.append((sid, text)), refuse(km._UNOWNED, sid, text))[1]
         km.PR_WATCH_FILE = state / "pr-watches.json"
         km.NAMES = state / "names"
         km.NAMES.mkdir()
@@ -913,15 +918,15 @@ class RealRouting(unittest.TestCase):
         km._compacting_now = lambda sid, *a, **k: False
         km._working_now = lambda sid, *a, **k: False
         km._limit_hold = lambda sid, *a, **k: False
-        km._optimistic_echo = lambda *a, **k: None
         km._watch_escalate_default = lambda: ""
-        km._tmux_send = lambda name, text, **kw: self.tmux.append((name, text))
         km._sdk = lambda: self.sdk
         km._codex = lambda: self.cx
 
     def tearDown(self):
         for n, v in self._saved.items():
             setattr(km, n, v)
+        km._UNOWNED.__dict__.pop("send", None)               # back to the class's refusal
+        km.Sessions.live = staticmethod(self._saved_live)
         km._pr_watches[:] = self._saved_rows
         km._pr_watch_save_faults.clear()
         km._SYNC_NOTICES.clear()
@@ -939,25 +944,28 @@ class RealRouting(unittest.TestCase):
         s.dead = True
         self.cx._put_session(s)
 
-    def _tmux_contact(self, name):
-        (km.NAMES / name).write_text("%s\t/tmp\n" % name)    # a tmux session: its sid IS its name
+    def _sdk_contact(self, name, sid):
+        """An SDK session the contact name resolves to through its reg (the live set lists nobody):
+        the reg carries the name, and the session runs in this process so its backend owns it."""
+        self.sb.write_reg(Path(self.td.name), sid, {"sid": sid, "name": name, "alive": True})
+        self._running(sid)
 
-    def test_a_dead_codex_registrant_never_reaches_tmux_and_retires_loudly(self):
+    def test_a_dead_codex_registrant_is_never_sent_and_retires_loudly(self):
         self._dead_codex(SID)
         km.add_pr_watch(7, "TESTORG/testrepo", SID, now=0)
-        self.assertIs(km.Sessions.backend_for(SID), km._TMUX, "the routing fact: a dead Codex sid falls to tmux")
+        self.assertIs(km.Sessions.backend_for(SID), km._UNOWNED, "the routing fact: a dead Codex sid falls to the unowned route")
         self.assertIs(km._pr_watch_end_marker(SID), True, "…while its record says it ended")
         with redirect_stderr(io.StringIO()):
             km._pr_watch_tick(100.0)
-        self.assertEqual((self.tmux, km._pr_watches), ([], []), "never sent to a shell that never existed; retired")
+        self.assertEqual((self.unowned, km._pr_watches), ([], []), "the record decided before any send; retired")
         log = self._log()
         self.assertEqual([ok for ok, _ in log], [False])
         self.assertIn("has ended (its record says it ended) and no escalation contact is named", log[0][1])
 
-    def test_a_uuid_whose_record_reader_raises_waits_and_never_reaches_tmux(self):
+    def test_a_uuid_whose_record_reader_raises_waits_and_its_send_is_refused_by_the_unowned_route(self):
         # the SDK reader raising leaves the marker UNREAD, so the send still goes to the router —
-        # which disowns the sid (owns() stats the reg) and picks tmux. The deliver guard refuses a
-        # uuid there, the refusal classifies as "could not be read", and the row waits, uncounted
+        # which disowns the sid (owns() stats the reg) and picks the unowned route, whose send refuses
+        # by name; the refusal classifies as "could not be read", and the row waits, uncounted
         km.add_pr_watch(7, "TESTORG/testrepo", SID, now=0)
 
         def boom(sid):
@@ -966,7 +974,7 @@ class RealRouting(unittest.TestCase):
         with redirect_stderr(io.StringIO()):
             km._pr_watch_tick(100.0)
         del self.sdk.end_marker                          # the class's real reader is back
-        self.assertEqual(self.tmux, [], "a uuid is never handed to tmux, however it reached the router")
+        self.assertEqual([s for s, _ in self.unowned], [SID], "the unowned route refused it: nothing accepted it")
         self.assertEqual(len(km._pr_watches), 1, "the row waits")
         self.assertIsNone(km._pr_watches[0].get("_norec", {}).get(SID), "a reader's fault is not counted")
         log = self._log()
@@ -976,34 +984,34 @@ class RealRouting(unittest.TestCase):
         self.sb.write_reg(Path(self.td.name), SID, {"sid": SID, "alive": False, "name": "web"})
         with redirect_stderr(io.StringIO()):
             km._pr_watch_tick(200.0)
-        self.assertEqual((self.tmux, km._pr_watches), ([], []))
+        self.assertEqual((len(self.unowned), km._pr_watches), (1, []), "the end marker decided: no second send")
         self.assertIn("has ended (its record says it ended)", self._log()[-1][1])
 
-    def test_a_dead_codex_registrant_with_a_tmux_contact_hands_off(self):
+    def test_a_dead_codex_registrant_with_an_sdk_contact_hands_off(self):
         self._dead_codex(SID)
-        self._tmux_contact("mgr")
+        self._sdk_contact("mgr", MGR)
         km.add_pr_watch(7, "TESTORG/testrepo", SID, now=0, escalate="mgr")
         km._pr_watch_tick(100.0)
-        self.assertEqual([n for n, _ in self.tmux], ["mgr"], "the contact — a tmux session by name — got it")
-        self.assertIn("romp was watching for session 11111111 has MERGED", self.tmux[0][1])
-        self.assertEqual(km._pr_watches, [])
+        self.assertEqual([s for s, _ in self.sdk_sent], [MGR], "the contact — resolved through its reg's name — got it")
+        self.assertIn("romp was watching for session 11111111 has MERGED", self.sdk_sent[0][1])
+        self.assertEqual((km._pr_watches, self.unowned), ([], []))
         self.assertIn("went to mgr", self._log()[0][1])
 
     def test_an_sdk_reg_with_alive_false_hands_off_to_the_contact(self):
         self.sb.write_reg(Path(self.td.name), SID, {"sid": SID, "name": "web", "alive": False})
-        self._tmux_contact("mgr")
+        self._sdk_contact("mgr", MGR)
         km.add_pr_watch(7, "TESTORG/testrepo", SID, now=0, escalate="mgr")
         self.assertIs(km.Sessions.backend_for(SID), self.sdk, "owned (the reg exists) — the one case the old order reached")
         km._pr_watch_tick(100.0)
-        self.assertEqual(([n for n, _ in self.tmux], km._pr_watches), (["mgr"], []))
+        self.assertEqual(([s for s, _ in self.sdk_sent], km._pr_watches), ([MGR], []))
 
-    def test_an_absent_sdk_reg_for_a_uuid_sid_never_reaches_tmux_and_ends_on_the_first_check(self):
+    def test_an_absent_sdk_reg_for_a_uuid_sid_is_never_sent_and_ends_on_the_first_check(self):
         km.add_pr_watch(7, "TESTORG/testrepo", SID, now=0)
-        self.assertIs(km.Sessions.backend_for(SID), km._TMUX, "the routing fact: an absent reg falls to tmux")
+        self.assertIs(km.Sessions.backend_for(SID), km._UNOWNED, "the routing fact: an absent reg falls to the unowned route")
         self.assertIsNone(km._pr_watch_end_marker(SID), "no reg file: no record, a durable fact")
         with redirect_stderr(io.StringIO()):
             km._pr_watch_tick(100.0)
-        self.assertEqual((self.tmux, km._pr_watches), ([], []), "ended on the first read; never sent")
+        self.assertEqual((self.unowned, km._pr_watches), ([], []), "ended on the first read; never sent")
         self.assertIn("has ended (no record of the session) and no escalation contact is named", self._log()[-1][1])
 
     def _reg_path(self):
@@ -1041,7 +1049,7 @@ class RealRouting(unittest.TestCase):
         km._pr_watch_tick(100.0)
         self.assertEqual([s for s, _ in self.sdk_sent], [SID], "the mail went to the registrant, first tick")
         self.assertIn("has MERGED", self.sdk_sent[0][1])
-        self.assertEqual((self.tmux, km._pr_watches, self._log()), ([], [], []), "retired; nothing false on the Log")
+        self.assertEqual((self.unowned, km._pr_watches, self._log()), ([], [], []), "retired; nothing false on the Log")
 
     def test_a_reg_that_would_not_read_with_no_running_session_waits_uncounted_and_recovers(self):
         self.sb.write_reg(Path(self.td.name), SID, {"sid": SID, "alive": True, "name": "web"})
@@ -1054,7 +1062,8 @@ class RealRouting(unittest.TestCase):
         with redirect_stderr(io.StringIO()):
             km._pr_watch_tick(100.0)
             km._pr_watch_tick(100.0 + km.PR_WATCH_EVERY)
-        self.assertEqual((self.tmux, len(km._pr_watches)), ([], 1), "waits; never handed to tmux")
+        self.assertEqual(([s for s, _ in self.unowned], len(km._pr_watches)), ([SID, SID], 1),
+                         "each tick's send reached the unowned route and was refused by name; the row waits")
         self.assertNotIn("_norec", km._pr_watches[0], "uncounted")
         log = self._log()
         self.assertEqual([ok for ok, _ in log], [False], "said once")
@@ -1064,21 +1073,21 @@ class RealRouting(unittest.TestCase):
         self.sb.write_reg(Path(self.td.name), SID, {"sid": SID, "alive": False, "name": "web"})
         with redirect_stderr(io.StringIO()):
             km._pr_watch_tick(100.0 + 2 * km.PR_WATCH_EVERY)
-        self.assertEqual((self.tmux, km._pr_watches), ([], []))
+        self.assertEqual((len(self.unowned), km._pr_watches), (2, []), "the healed record decided: no third send")
         self.assertIn("has ended (its record says it ended)", self._log()[-1][1])
 
-    def test_a_corrupt_sdk_reg_is_a_readers_fault_that_waits_never_a_tmux_session_nor_an_ending(self):
+    def test_a_corrupt_sdk_reg_is_a_readers_fault_that_waits_never_an_ending(self):
         # torn JSON reads like a read error: the file is there, so it is not "no record"
         p = self._reg_path()
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("{not json")
         km.add_pr_watch(7, "TESTORG/testrepo", SID, now=0)
         self.assertFalse(self.sdk.owns(SID), "the routing fact: an unreadable reg is not owned")
-        self.assertIs(km.Sessions.backend_for(SID), km._TMUX)
+        self.assertIs(km.Sessions.backend_for(SID), km._UNOWNED)
         self.assertEqual(km._pr_watch_end_marker(SID), km._PR_WATCH_UNREAD)
         with redirect_stderr(io.StringIO()):
             km._pr_watch_tick(100.0)
-        self.assertEqual((self.tmux, len(km._pr_watches)), ([], 1))
+        self.assertEqual(([s for s, _ in self.unowned], len(km._pr_watches)), ([SID], 1), "refused by name; waits")
         self.assertIn("(its record could not be read)", self._log()[0][1])
         self.assertNotIn("no record", self._log()[0][1])
 
@@ -1098,17 +1107,24 @@ class RealRouting(unittest.TestCase):
         km.add_pr_watch(7, "TESTORG/testrepo", SID, now=0)
         with redirect_stderr(io.StringIO()):
             km._pr_watch_tick(100.0)
-        self.assertEqual((self.tmux, len(km._pr_watches)), ([], 1), "waits, uncounted; never tmux, never ended")
+        self.assertEqual(([s for s, _ in self.unowned], len(km._pr_watches)), ([SID], 1),
+                         "waits, uncounted; refused by the unowned route, never ended")
         self.assertIn("its record could not be read", self._log()[0][1])
         self._dead_codex(SID)                                 # a session it DOES hold still answers from its mark
         self.assertIs(self.cx.end_marker(SID), True)
 
-    def test_a_name_shaped_registrant_goes_to_tmux_the_standing_gap(self):
+    def test_a_name_shaped_registrant_nobody_owns_is_refused_and_retires_loudly(self):
+        # the gap that stood while the tmux backend existed (a name-shaped sid with no record went to a shell
+        # whose send never refused, so a dead registrant's notice read as accepted) closed with it: nobody
+        # owns the name, the unowned route refuses by name, and the refusal is classified from the records
         km.add_pr_watch(7, "TESTORG/testrepo", "web", now=0)
-        km._pr_watch_tick(100.0)
-        self.assertEqual([n for n, _ in self.tmux], ["web"], "a tmux registrant is sent as ever")
-        self.assertEqual((km._pr_watches, self._log()), ([], []),
-                         "tmux's send never refuses: accepted, retired, nothing to log — the documented gap")
+        with redirect_stderr(io.StringIO()):
+            km._pr_watch_tick(100.0)
+        self.assertEqual([s for s, _ in self.unowned], ["web"], "the send reached the unowned route and was refused")
+        self.assertEqual(km._pr_watches, [], "no record → ended → retired, never a silent acceptance")
+        log = self._log()
+        self.assertEqual([ok for ok, _ in log], [False], "loudly: one Log row")
+        self.assertIn("has ended (no record of the session) and no escalation contact is named", log[0][1])
 
     def test_a_contact_name_resolves_through_the_sdk_regs_when_the_live_set_lists_nobody(self):
         self._dead_codex(SID)
@@ -1123,8 +1139,8 @@ class RealRouting(unittest.TestCase):
             km._pr_watch_tick(100.0)
         finally:
             km.Sessions.live, km._pr_watch_deliver = staticmethod(saved_live), saved_deliver
-        self.assertEqual((got, km._pr_watches, self.tmux), ([MGR], [], []),
-                         "resolved from the reg's name, not the live set; nothing fell to tmux")
+        self.assertEqual((got, km._pr_watches, self.unowned), ([MGR], [], []),
+                         "resolved from the reg's name, not the live set; nothing fell to the unowned route")
 
 
 class EndMarkerReaders(unittest.TestCase):

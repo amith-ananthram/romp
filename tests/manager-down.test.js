@@ -60,12 +60,12 @@ test('stopTrigger reads the marker at stop time: cli-down while it is on disk, s
   assert.equal(stopTrigger(), 'stop', 'nothing cached: the marker is read at every stop');
 });
 
-test('startManager clears the marker before the tmux server starts (source pin: a deliberate start brings the kernels back)', () => {
+test('startManager clears the marker before it brings the kernels back (source pin: a deliberate start brings the kernels back)', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'bin', 'romp-manager'), 'utf8');
   const body = src.slice(src.indexOf('function startManager() {'));
   const clear = body.indexOf('clearDownMarker()');
-  const tmux = body.indexOf('startTmuxServer();');
-  assert.ok(clear > 0 && tmux > 0 && clear < tmux, 'the clear runs before startTmuxServer()');
+  const boot = body.indexOf('for (const spec of boot.specs) spawnKernel(spec);');
+  assert.ok(clear > 0 && boot > 0 && clear < boot, 'the clear runs before the boot specs are spawned');
 });
 
 // Two free loopback ports, fresh per case, never a literal: a literal pair once collided with another
@@ -79,22 +79,18 @@ function freePorts(n) {
 }
 
 // The escalation cases below run a REAL manager with a stand-in kernel that swallows SIGTERM;
-// ROMP_SHUTDOWN_GRACE_MS shortens the 5s grace so each stays bounded. PATH holds only a no-op tmux,
-// so startTmuxServer() never reaches the machine's server (tests/tmux-private.bash has the incident),
-// and the socket directory is private too. The stand-in writes its pid to the ready file once its
-// handler is installed (a SIGTERM before that would simply kill it), so a respawn is told apart from
-// the kernel it replaced. Every wait below is for an EVENT (the manager's exit, a kernel's death, a
-// fresh kernel reporting ready), bounded only by the test's own timeout.
+// ROMP_SHUTDOWN_GRACE_MS shortens the 5s grace so each stays bounded. The stand-in writes its pid to
+// the ready file once its handler is installed (a SIGTERM before that would simply kill it), so a
+// respawn is told apart from the kernel it replaced. Every wait below is for an EVENT (the manager's
+// exit, a kernel's death, a fresh kernel reporting ready), bounded only by the test's own timeout.
 function stubbornManager(managerPort, servePort) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'romp-stubborn-'));
-  const bin = path.join(dir, 'bin');
-  for (const d of [bin, path.join(dir, 'tmux'), path.join(dir, 'state')]) fs.mkdirSync(d);
-  fs.writeFileSync(path.join(bin, 'tmux'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  fs.mkdirSync(path.join(dir, 'state'));
   const ready = path.join(dir, 'kernel-ready');
   const serve = path.join(dir, 'fake-serve');
   fs.writeFileSync(serve, `#!/bin/sh\nexec "${process.execPath}" -e "process.on('SIGTERM', () => {}); require('fs').writeFileSync(process.env.ROMP_TEST_READY, String(process.pid)); setInterval(() => {}, 1000)"\n`, { mode: 0o755 });
   const env = Object.assign({}, process.env, {
-    PATH: bin, TMUX_TMPDIR: path.join(dir, 'tmux'), ROMP_CLI_SCOPE: '0',
+    ROMP_CLI_SCOPE: '0',
     ROMP_STATE_DIR: path.join(dir, 'state'), ROMP_MANAGER_PORT: String(managerPort), ROMP_SERVE_PORT: String(servePort),
     ROMP_SERVE_BIN: serve, ROMP_SHUTDOWN_GRACE_MS: '1000', ROMP_TEST_READY: ready,
   });

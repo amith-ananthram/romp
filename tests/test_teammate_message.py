@@ -145,19 +145,19 @@ class BuildSessionEmitsTeammateCard(unittest.TestCase):
         names = td / "names"; names.mkdir()
         (names / SID).write_text("testsess\t%s\t#abcdef\n" % str(cdir))
         self.saved = (jd.NAMES, jd.PROJECTS, jd.GOALDIR, jd.STATE, km.NAMES,
-                      km._tmux_sessions, km._read_task_store, km._GLOBAL_CLAUDE_MD)
+                      km._live_map, km._read_task_store, km._GLOBAL_CLAUDE_MD)
         jd.NAMES, jd.PROJECTS, jd.GOALDIR, jd.STATE = names, proj, td / "goals", td
         km.NAMES = names
         km._GLOBAL_CLAUDE_MD = td / "no-global.md"           # keep a real ~/.claude/CLAUDE.md out of the fixture
         km._read_task_store = lambda fsid, fold=None: []                # no to-do card in the way
-        km._tmux_sessions = lambda: {SID: {"state": "idle", "since": NOW - 100, "model": "",
+        km._live_map = lambda: {SID: {"state": "idle", "since": NOW - 100, "model": "",
                                            "effort": "", "context": None, "compactPct": None, "color": None}}
         jd.GOALDIR.mkdir(parents=True)
         km._parse_cache.clear()
 
     def tearDown(self):
         (jd.NAMES, jd.PROJECTS, jd.GOALDIR, jd.STATE, km.NAMES,
-         km._tmux_sessions, km._read_task_store, km._GLOBAL_CLAUDE_MD) = self.saved
+         km._live_map, km._read_task_store, km._GLOBAL_CLAUDE_MD) = self.saved
         km._parse_cache.clear()
         self.td.cleanup()
 

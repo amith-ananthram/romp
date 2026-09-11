@@ -55,8 +55,10 @@ try:
     s = json.load(open(sys.argv[1]))
 except (IOError, OSError, ValueError):
     print(0); raise SystemExit
-OURS = ("tmux-status.sh", "romp-summarize.sh", "romp-postal-drain.sh", "romp-postal-ensure.sh",
-        "romp-postal-revive.sh", "romp-postal-context.sh", "romp-wake.sh")
+# mirrors bin/romp-uninstall's OURS: the two retired names (romp-summarize.sh and tmux-status.sh,
+# both gone 2026-09-11 with the tmux backend) stay for one release alongside the hooks the repo ships
+OURS = ("tmux-status.sh", "romp-summarize.sh", "romp-postal-drain.sh",
+        "romp-postal-ensure.sh", "romp-postal-revive.sh", "romp-postal-context.sh", "romp-wake.sh")
 n = sum(1 for rules in (s.get("hooks") or {}).values() for r in rules for h in r.get("hooks", [])
         if h.get("command", "").rsplit("/", 1)[-1] in OURS)
 print(n)
@@ -66,13 +68,14 @@ PY
 @test "romp-uninstall: removes the hook symlinks, skills and MCP config that install.sh created" {
     run "$ROMP_DIR/install.sh"
     [ "$status" -eq 0 ]
-    [ -L "$HOME/.claude/hooks/tmux-status.sh" ]
+    [ -L "$HOME/.claude/hooks/romp-wake.sh" ]
     [ -L "$HOME/.claude/romp-postal.mcp.json" ]
     [ "$(hook_count)" -gt 0 ]
 
     run "$CLONE/bin/romp-uninstall" --yes
     [ "$status" -eq 0 ]
 
+    [ ! -e "$HOME/.claude/hooks/romp-wake.sh" ]
     [ ! -e "$HOME/.claude/hooks/tmux-status.sh" ]
     [ ! -e "$HOME/.claude/hooks/romp-summarize.sh" ]
     [ ! -e "$HOME/.claude/hooks/romp-postal-drain.sh" ]

@@ -36,9 +36,7 @@ test("OPENING covers exactly each backend's spawn window — a dormant created s
   assert.ok(SDK.includes('"spawning": not self.client'), "the snapshot carries the in-flight window");
   assert.ok(KERNEL.includes('"connected": bool(st.get("connected"))'), "the live merge threads connected through");
   assert.ok(KERNEL.includes('"spawning": bool(st.get("spawning"))'), "the live merge threads spawning through");
-  assert.ok(KERNEL.includes('spawn_inflight = bool(tm.get("spawning")) or \\'), "SDK: the live spawn window");
-  assert.ok(KERNEL.includes('(tm.get("backend") == "tmux" and not (tm.get("state") or "").strip())'),
-    "tmux: no @claude-state published yet");
+  assert.ok(KERNEL.includes('spawn_inflight = bool(tm.get("spawning"))'), "the live spawn window is the backend's own report");
 });
 
 // A per-session chip event must not ride the periodic full push cycle, which runs SECONDS on a busy

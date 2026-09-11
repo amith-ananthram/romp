@@ -593,7 +593,7 @@ class FrameUnchanged(unittest.TestCase):
         self.td = tempfile.TemporaryDirectory()
         self._state, self._alive, self._send, self._sdk = km.jd.STATE, km._alive_sessions, km._send_to_app, km._sdk
         km.jd.STATE = Path(self.td.name)
-        km._alive_sessions = lambda now, tmux: []
+        km._alive_sessions = lambda now, live_map: []
         self.sent = []
         km._send_to_app = lambda app, m: self.sent.append((app, m))
         self.be = _Backend()
@@ -610,7 +610,7 @@ class FrameUnchanged(unittest.TestCase):
         km._api_health_push(f1)
         self.assertEqual(len(self.sent), 1)
         self.assertEqual(set(f1), {"type", "state", "cls", "reason", "text", "waiting", "retrying", "blocked",
-                                   "since", "tmux", "sessions", "seq", "hosts", "quiet", "errs", "host"}, "the documented keys, nothing added")
+                                   "since", "sessions", "seq", "hosts", "quiet", "errs", "host"}, "the documented keys, nothing added")
         for k in ("windows", "transitions", "buckets", "history", "overall", "bootAt"):
             self.assertNotIn(k, f1)
         # a hover reads the route in between (the read files a transition: the storm classifies)
@@ -752,7 +752,7 @@ class Script(unittest.TestCase):
                          "requests excludes 'none', so requests plus noStatus counts every attempt once")
         self.assertIn("rows.forEach(function(r){h+=rowHTML(r,full);});h+='</div>';}\nh+=histHTML();\nif(full)h+=", JS,
                       "the section sits after the sessions waiting and before the footer, in hover and detail alike")
-        self.assertNotIn("tmux session", JS, "T331: the terminal-coverage line is gone (the frame's count stays until the kernel side goes)")
+        self.assertNotIn("tmux session", JS, "T331: the terminal-coverage line is gone (the frame carries no count for it either)")
 
     def test_the_card_names_every_machine_with_its_counts_in_their_colours_and_the_window_once(self):
         # T316: no head sentence; one line per machine (the dot in its state, the kernel's own name, the counts as coloured

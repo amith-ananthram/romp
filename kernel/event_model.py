@@ -2971,8 +2971,10 @@ class FileAdapter:
             # away_summary) are harness bookkeeping, not conversational messages -> skipped.
 
 
-# A session is NOT working once it has STOPPED: the tmux hook writes state:"waiting" on the Stop event (the
-# agent handed the floor back) and state:"idle" on the idle-prompt later. Both terminate the turn — keying
+# A session is NOT working once it has STOPPED: the states/ log records state:"waiting" when a turn's result
+# lands (the agent handed the floor back — the SDK backend writes it on the ResultMessage; the tmux backend's
+# Stop hook did until its removal, 2026-09-11) and state:"idle" for a stop without one (an interrupt now; the
+# idle-prompt, then). Both terminate the turn — keying
 # only on "idle" left a finished session whose last assistant message wasn't a clean end_turn (e.g. it ended
 # on a tool_use) stuck reading "working" from Stop until the idle-prompt eventually landed (the user 2026-06-25,
 # "reverting working when stuff isn't working"). Event-based, not a grace timer.

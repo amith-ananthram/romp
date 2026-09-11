@@ -48,8 +48,8 @@ class ForkRoute(unittest.TestCase):
     def setUp(self):
         self.calls = []
         self.names = {"exp-web": PARENT_SID}      # the live-name store the route consults
-        self._saved = (km._tmux_sessions, km._live_names, km._fork_session)
-        km._tmux_sessions = lambda: {}
+        self._saved = (km._live_map, km._live_names, km._fork_session)
+        km._live_map = lambda: {}
         km._live_names = lambda tm: dict(self.names)
 
         def fake_fork(psid, at, nm, now=None, client=None):
@@ -59,7 +59,7 @@ class ForkRoute(unittest.TestCase):
         km._fork_session = fake_fork
 
     def tearDown(self):
-        km._tmux_sessions, km._live_names, km._fork_session = self._saved
+        km._live_map, km._live_names, km._fork_session = self._saved
 
     def _post(self, body):
         req = urllib.request.Request(

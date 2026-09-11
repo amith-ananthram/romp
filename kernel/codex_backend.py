@@ -47,8 +47,8 @@ _runtime = load_source("romp_codex_runtime", HERE / "codex_runtime.py")
 # The by-text KEY RULE (session_backend.echo_text_key): the one normalization under which an input echo's
 # text is compared with a transcript record's, shared with the kernel's _atom_user_texts and
 # SdkBackend.prune_live, so an echo whose text carries a trailing newline still lands. The kernel's own
-# copy of that module when it is loaded (kernel.py loads it as romp_session_backend, and TmuxBackend
-# subclasses that copy's ABC); otherwise the file is loaded under its OWN module name, as sdk_backend
+# copy of that module when it is loaded (kernel.py loads it as romp_session_backend, and its
+# _UnownedBackend subclasses that copy's ABC); otherwise the file is loaded under its OWN module name, as sdk_backend
 # does, so re-executing the source never rebinds the ABC out from under a subclass.
 echo_text_key = (sys.modules.get("romp_session_backend")
                  or load_source("romp_session_backend_keys", HERE / "session_backend.py")).echo_text_key
@@ -837,7 +837,7 @@ class CodexBackend:
         with s.lock:
             if s.dead:
                 return False
-            # WHOLE seconds, as the SDK and tmux echoes stamp theirs: record times are parse_z's int
+            # WHOLE seconds, as the SDK echoes stamp theirs: record times are parse_z's int
             # seconds and prune_live lands an echo by text only through a record at or after its send,
             # so a float stamp would keep an echo whose record was written later in the same second. The
             # text is stored under the shared key rule (echo_text_key), the key prune_live and _append
@@ -1560,7 +1560,7 @@ class CodexBackend:
         without that floor a repeated text ("ok" twice) would retire the second echo the moment it was
         sent (the SDK's T237b case); a plain set (an older caller) keeps the unfloored match. Texts are
         compared under echo_text_key on BOTH sides. Record times are parse_z's whole seconds, so send()
-        stamps the echo with int(time.time()) as the SDK and tmux echoes do: a float stamp would keep an
+        stamps the echo with int(time.time()) as the SDK echoes do: a float stamp would keep an
         echo whose record was written later in the same second. The backend's own _append retire is the
         other exit; it sees only the records it just wrote and takes one echo per landed text block, the
         oldest carrying the text (a turn started from several queued sends lands as one record with a

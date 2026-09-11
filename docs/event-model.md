@@ -75,10 +75,10 @@ future stream substrate is a near passthrough.
   `parentUuid` in practice; that's the deferred session→files concern below.)
 - **Idle comes from the state log.** Period clipping keys on the real idle
   transition in `states/<sid>.jsonl`, not a silence-duration heuristic.
-- **Resolved: the Agent SDK backend is the per-turn headless backend**, and the
-  default for new sessions — see `plans/sdk-backend.md` for the design and the
-  guide for the tmux/SDK choice. Still deferred: whether summaries operate at
-  turn grain or segment grain (the timeline uses segments).
+- **Resolved: the Agent SDK backend is the per-turn headless backend**, the one
+  every Claude Code session runs on — see `plans/sdk-backend.md` for the design.
+  Still deferred: whether summaries operate at turn grain or segment grain (the
+  timeline uses segments).
 
 ## Hierarchy
 
