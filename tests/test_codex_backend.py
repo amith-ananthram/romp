@@ -738,6 +738,56 @@ class Lifecycle(unittest.TestCase):
         self.assertTrue(until(lambda: not be.busy(sid) and not be.pending_queued(sid)))
         self.assertEqual(len(replacement.called("turn_start")), 1)
 
+    def test_replacement_server_resumes_a_thread_the_dead_server_had_loaded(self):
+        # `loaded` meant "thread/resume done in this process", but the process that has to know the
+        # thread is the app-server, and the backend replaces that one on the fly when the pump sees
+        # it die. The thread stayed "loaded" on a server that had never seen it, turn/start went out
+        # with no thread/resume before it, and the app-server refuses that with "thread not found":
+        # a permanent rejection, so every resend met the same refusal until a kernel restart. The fake
+        # answers the way the pinned app-server does, so the turn completing proves the resume came
+        # first; the old server started the thread itself and must not be resumed on the way there.
+        class InvalidRequestError(RuntimeError):
+            code = -32600
+
+        class ThreadAwareClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.known = set()
+
+            def thread_start(self, params=None):
+                resp = super().thread_start(params)
+                self.known.add(resp.thread.id)
+                return resp
+
+            def thread_resume(self, tid, params=None):
+                self.known.add(tid)
+                return super().thread_resume(tid, params)
+
+            def turn_start(self, tid, input_items, params=None):
+                if tid not in self.known:
+                    raise InvalidRequestError("thread not found: %s" % tid)
+                return super().turn_start(tid, input_items, params)
+
+        old, replacement = ThreadAwareClient(), ThreadAwareClient()
+        clients = [old, replacement]
+        be, _, _ = build(factory=lambda: clients.pop(0))
+        sid = be.spawn("web", "/TESTDIR")
+        self.assertTrue(be.send(sid, "first"))
+        self.assertTrue(until(lambda: not be.busy(sid) and not be.pending_queued(sid)))
+        self.assertEqual(len(old.called("turn_start")), 1)
+        with be._client_lock:                  # the old app-server died: the pump's invalidation
+            be._record_client_failure_locked(RuntimeError("server died"), old)
+            be._client_retry_at = 0.0
+        self.assertTrue(be.send(sid, "second"))
+        self.assertTrue(until(lambda: not be.busy(sid) and not be.pending_queued(sid)),
+                        "the second turn never ran on the replacement server")
+        resumes = replacement.called("thread_resume")
+        self.assertEqual([r[1] for r in resumes], [be._session(sid).tid])
+        self.assertEqual(len(replacement.called("turn_start")), 1)
+        self.assertLess(replacement.calls.index(resumes[0]),
+                        replacement.calls.index(replacement.called("turn_start")[0]))
+        self.assertEqual(old.called("thread_resume"), [])
+
     def test_client_factory_failure_backs_off_then_recovers_queued_session(self):
         fake = FakeClient()
         attempts = []
@@ -780,6 +830,16 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(len(fake.called("thread_start")), 1,
                          "the pending placeholder must become a real Codex thread")
         self.assertFalse(be.pending_queued(sid))
+        # A thread the server itself just created is loaded on that server: the next turn goes
+        # straight to turn/start, with no thread/resume ahead of it. `loaded` counts only while its
+        # recorded app-server generation matches the current one, so the create path has to record
+        # the generation it created on; left unrecorded (None), every later turn would re-resume
+        # the same live server first, an extra RPC per turn that one turn never shows.
+        self.assertTrue(be.send(sid, "and again"))
+        self.assertTrue(until(lambda: not be.busy(sid) and not be.pending_queued(sid), timeout=20))
+        self.assertEqual(fake.called("thread_resume"), [],
+                         "a thread the server itself created is never resumed on that server")
+        self.assertEqual(len(fake.called("turn_start")), 2)
 
     def test_turn_end_pokes_after_busy_clears(self):
         # the kernel's parked-op drain wakes on the poke (2026-09-03): every in-loop poke fires while the
