@@ -548,7 +548,7 @@ def _bg_finish(state, want_all=False):
     return keep[:60]
 
 
-def scan_bg_tasks_cached(path, cache, want_all=False):
+def scan_bg_tasks_cached(path, cache, want_all=False, ckpt=None):
     """_scan_bg_tasks folded append-incrementally through `cache` (fold_records): a changed transcript
     steps only its appended records instead of re-pairing the whole file — the kernel's chat box, awaiting
     source and awaiting-stamp lift, and the judge's settled gate, all asked per push per session, and
@@ -556,7 +556,7 @@ def scan_bg_tasks_cached(path, cache, want_all=False):
     2026-09-02: four such readers over one 180 MB transcript held the push loop at a full core). `cache`
     is the caller's dict (the kernel keeps a running-only and an every-task cache; the judge its own), so
     the two views never invalidate each other and a test's `.clear()` still forces a re-fold."""
-    state = fold_records(cache, path, lambda: _bg_fresh(want_all), _bg_step)
+    state = fold_records(cache, path, lambda: _bg_fresh(want_all), _bg_step, ckpt=ckpt)
     if state["all"] != bool(want_all):                    # the view is baked into the state at init: a cache handed to
         raise ValueError("bg fold cache for %s is shaped for want_all=%r, asked for %r"   # both views would answer
                          % (path, state["all"], bool(want_all)))                          # one of them wrong
@@ -593,7 +593,12 @@ def _read_jsonl(path):
 # (FileAdapter builds fresh atom dicts; nothing writes into a record), matching the kernel's existing
 # whole-parse cache contract. The cached list itself is never extended in place — a grown file stores a
 # NEW list — so a concurrent reader holding the old list is never surprised mid-iteration.
-_JSONL_CACHE = {}                 # path -> (mtime, size, offset, tail_bytes, records); dict order = LRU, hits reinsert
+_JSONL_CACHE = {}                 # path -> (mtime, size, offset, tail_bytes, records, base, gen); dict order = LRU, hits reinsert
+#                                   base: how many records of the file precede records[0] (0 = the whole file is held; > 0 = a
+#                                   TAIL entry restored from a checkpoint, T323 stage 3); gen: a process-wide counter's value,
+#                                   fresh for every from-zero read and every restored entry (a mismatch, an eviction, a first
+#                                   read), kept across an upgrade from a tail entry to a whole one and across appends, so a
+#                                   fold cursor keyed on it survives those and nothing else
 _JSONL_CACHE_MAX = 1024           # bounds MEMORY only (384 → 1024 on 2026-09-03: the per-session states,
                                   # captions and the postal/nudge logs became tenants — a few KB each — and
                                   # must never evict a live transcript's slot) — past the cap, evict the least-recently-USED entry, one per
@@ -613,6 +618,378 @@ _JSONL_CACHE_LOCK = threading.Lock()   # the cache has cross-thread callers (the
                                        # lock covers only the cheap dict ops — the parse runs outside it —
                                        # and pops stay guarded so a lost race degrades to a re-parse, never
                                        # a raise
+
+
+_READ_BYTES = {}                  # path -> bytes this process read from it through the reader (the exit-then-boot witness; /perf)
+_READ_BYTES_LOCK = threading.Lock()
+
+
+def _count_read(path, n):
+    with _READ_BYTES_LOCK:
+        _READ_BYTES[path] = _READ_BYTES.get(path, 0) + int(n)
+
+
+def read_bytes_report():
+    """{path: bytes read since this process began} plus "total": what the reader itself pulled off disk, file by
+    file, so a test or /perf can say how much of a boot was tails and how much whole files."""
+    with _READ_BYTES_LOCK:
+        out = dict(_READ_BYTES)
+    out["total"] = sum(out.values())
+    return out
+
+
+# ───────────────────────── fold checkpoints (T323 stage 3, 2026-09-11) ─────────────────────────
+# A checkpoint is one small JSON file per folded JSONL file, under the state root's checkpoints/ directory, named by
+# the sha1 of the file's realpath. It records the reader's PREFIX WITNESS (the byte offset past the last complete
+# line, the up-to-64 bytes before it, the record count before it) and, for every fold_records fold whose cursor stood
+# at that count, the fold's state (through _ckpt_encode: sets and tuples survive the JSON). A fresh process that folds
+# the file restores the witness, verifies the guard bytes on disk and reads only offset..EOF; the folds resume from
+# their recorded states over the tail. Anything that does not verify (version, path, a shrunk file, a rewrite under the
+# guard, a same-size-new-mtime, a corrupt document) falls back to a whole read from zero, is counted per reason and
+# says so on stderr. The directory is asked of a provider the kernel/judge install (it follows _rebind_state); with no
+# provider, checkpoints are off and every fold behaves as before. Writes are event-keyed by the kernel (a session's
+# settle, its states log moving, exit), never by a timer.
+_CKPT_V = 1
+_CKPT_DIR_FN = None               # () -> Path of the checkpoint directory; None = checkpoints off
+_CKPT_STATS = {"restored": 0, "writes": 0, "swept": 0, "skippedFolds": 0, "fallbacks": {}, "restoredFolds": {}, "droppedRestores": 0,
+               "oversizeFolds": {}}
+_CKPT_FOLD_CAP = 64 * 1024        # bytes of encoded state a fold may put in a checkpoint. A state that grows with its file (the postal
+#                                   log fold's map of every sent row, the state intervals' list of every transition, the every-task
+#                                   background view on a long transcript) would make the document a second copy of the file: reading
+#                                   it at boot costs what the checkpoint exists to save (measured 2026-09-11: 11 MB of documents in a
+#                                   44 MB world). Such a fold is left out, counted per name, and cold-folds at first touch; the folds
+#                                   whose state is bounded (the gist's capped steps, the running tasks, the newest rows) are the ones
+#                                   the checkpoint pays for. A bounded projection for the growing ones is a later stage's item.
+_CKPT_LOCK = threading.Lock()
+_CKPT_PENDING = {}                # path -> {"count": N, "gen": g, "folds": {name: {"count", "state"}}} restores not yet taken
+_CKPT_SEQ = {}                    # path -> the seq of the last checkpoint read or written for it
+_FOLD_DIRTY = set()               # paths whose fold cursors moved since their checkpoint was last written
+_FOLD_REG = {}                    # checkpoint name -> the fold's cursor dict (fold_records registers at first call)
+_GEN = [0]                        # the reader's generation counter: every from-zero read and every restored entry takes the
+#                                   next value, process-wide, so no two entries of a path ever share one (a cursor left by an
+#                                   entry the cache evicted or a stat failure popped must never match a later read's, since
+#                                   the later read may be of a rewritten file with as many records; review find, 2026-09-11)
+
+
+def _next_gen():
+    with _JSONL_CACHE_LOCK:
+        _GEN[0] += 1
+        return _GEN[0]
+_FOLD_NAME_OF = {}                # id(cursor dict) -> checkpoint name, for callers that name their cache once (name_fold_cache)
+
+
+def name_fold_cache(cache, name):
+    """Give a fold's cursor dict its checkpoint name once, so every fold_records call over it is resumable without
+    a `ckpt` argument at the call (a caller whose call shape other code stubs, such as the judge's background-task
+    scan, keeps its signature)."""
+    _FOLD_NAME_OF[id(cache)] = name
+    _FOLD_REG[name] = cache
+
+
+def set_checkpoint_dir(fn):
+    """Kernel/judge wiring: `fn()` names the checkpoint directory (a Path) at CALL time, so a rebound state root
+    moves it. None turns checkpoints off."""
+    global _CKPT_DIR_FN
+    _CKPT_DIR_FN = fn
+    with _CKPT_LOCK:
+        _CKPT_PENDING.clear(); _CKPT_SEQ.clear(); _FOLD_DIRTY.clear()
+
+
+def _ckpt_dir():
+    fn = _CKPT_DIR_FN
+    return None if fn is None else fn()
+
+
+def _ckpt_file(path):
+    d = _ckpt_dir()
+    if d is None:
+        return None
+    return Path(d) / (hashlib.sha1(os.path.realpath(str(path)).encode("utf-8")).hexdigest()[:20] + ".json")
+
+
+def _ckpt_fallback(path, reason, detail=""):
+    """A checkpoint that did not verify: counted per reason, said once on stderr, and its file removed so the next
+    write starts clean. The caller reads the whole file from zero."""
+    with _CKPT_LOCK:
+        _CKPT_STATS["fallbacks"][reason] = _CKPT_STATS["fallbacks"].get(reason, 0) + 1
+        _CKPT_PENDING.pop(str(path), None)
+    try:
+        sys.stderr.write("checkpoint fallback (%s) for %s%s\n" % (reason, path, (": " + detail) if detail else ""))
+    except Exception:
+        pass
+    cp = _ckpt_file(path)
+    if cp is not None:
+        try:
+            cp.unlink()
+        except OSError:
+            pass
+
+
+def _ckpt_encode(o):
+    """The fold states are plain data (dict, list, set, tuple, str, int, float, bool, None); JSON keeps dicts with
+    string keys and lists, so sets, tuples and non-string-keyed dicts are tagged. Raises TypeError on anything else,
+    which the writer treats as a fold that cannot be checkpointed (counted, never a torn state)."""
+    if o is None or isinstance(o, (bool, int, float, str)):
+        return o
+    if isinstance(o, list):
+        return [_ckpt_encode(x) for x in o]
+    if isinstance(o, tuple):
+        return {"~tuple": [_ckpt_encode(x) for x in o]}
+    if isinstance(o, (set, frozenset)):
+        return {"~set": sorted((_ckpt_encode(x) for x in o), key=lambda x: json.dumps(x, sort_keys=True))}
+    if isinstance(o, dict):
+        if all(isinstance(k, str) and not k.startswith("~") for k in o):
+            return {k: _ckpt_encode(v) for k, v in o.items()}
+        return {"~dict": [[_ckpt_encode(k), _ckpt_encode(v)] for k, v in o.items()]}
+    raise TypeError("not checkpointable: %s" % type(o).__name__)
+
+
+def _ckpt_decode(o):
+    if isinstance(o, list):
+        return [_ckpt_decode(x) for x in o]
+    if isinstance(o, dict):
+        if len(o) == 1:
+            (k, v), = o.items()
+            if k == "~tuple":
+                return tuple(_ckpt_decode(x) for x in v)
+            if k == "~set":
+                return set(_ckpt_decode(x) for x in v)
+            if k == "~dict":
+                return {_ckpt_decode(a): _ckpt_decode(b) for a, b in v}
+        return {k: _ckpt_decode(v) for k, v in o.items()}
+    return o
+
+
+def _ckpt_load(path):
+    """The verified-by-shape checkpoint document for `path`, or None (absent, or a fallback was counted)."""
+    cp = _ckpt_file(path)
+    if cp is None or not cp.exists():
+        return None
+    try:
+        text = cp.read_bytes()
+        _count_read(str(cp), len(text))                   # the document is a read of the boot too (/perf, the bench)
+        doc = json.loads(text.decode("utf-8"))
+    except (OSError, ValueError) as e:
+        _ckpt_fallback(path, "corrupt", str(e)[:80]); return None
+    if not isinstance(doc, dict) or doc.get("v") != _CKPT_V:
+        _ckpt_fallback(path, "version", repr(doc.get("v")) if isinstance(doc, dict) else "not a document"); return None
+    if doc.get("path") != os.path.realpath(str(path)):
+        _ckpt_fallback(path, "path", str(doc.get("path"))[:80]); return None
+    try:
+        offset, count, size = int(doc["offset"]), int(doc["count"]), int(doc["size"])
+        guard = bytes.fromhex(doc.get("guard") or "")
+        folds = doc.get("folds") or {}
+        if offset < 0 or count < 0 or len(guard) > _JSONL_TAIL_GUARD or not isinstance(folds, dict):
+            raise ValueError("shape")
+    except (KeyError, TypeError, ValueError) as e:
+        _ckpt_fallback(path, "corrupt", "shape: %s" % e); return None
+    return doc
+
+
+def _ckpt_verdict(doc, st_size, st_mtime):
+    """What the file's stat says about a checkpoint document before its guard is read: "shrunk" (the file ends before
+    the recorded offset), "rewrite" (the same size under another mtime, or shorter than recorded while past the offset:
+    a rewrite the guard could miss), or None (grown, or the very file the document describes: the guard decides). Both
+    restore paths (the tail read and the whole-reader-first fold) ask this, so one rewrite gets one verdict and one
+    fallback reason whichever reader came first."""
+    offset, size, mtime = int(doc["offset"]), int(doc["size"]), float(doc.get("mtime") or 0)
+    if st_size < offset:
+        return "shrunk"
+    if st_size < size or (st_size == size and st_mtime != mtime):
+        return "rewrite"
+    return None
+
+
+def _checkpoint_entry(path, st):
+    """A TAIL reader entry restored from `path`'s checkpoint, (mtime, size, offset, guard, [], count, 0), or None. The
+    guard bytes are verified by the reader against the file; here the document and the size are: a file shorter than
+    the recorded offset is a shrink."""
+    doc = _ckpt_load(path)
+    if doc is None:
+        return None
+    offset, count = int(doc["offset"]), int(doc["count"])
+    verdict = _ckpt_verdict(doc, st.st_size, st.st_mtime)
+    if verdict is not None:
+        _ckpt_fallback(path, verdict, "size %d, recorded %d at offset %d" % (st.st_size, int(doc["size"]), offset)); return None
+    gen = _next_gen()
+    with _CKPT_LOCK:
+        _CKPT_PENDING[str(path)] = {"count": count, "gen": gen, "folds": dict(doc.get("folds") or {})}
+        _CKPT_SEQ[str(path)] = int(doc.get("seq") or 0)
+    return (float(doc.get("mtime") or 0), int(doc["size"]), offset, bytes.fromhex(doc.get("guard") or ""), [], count, gen)
+
+
+def _ckpt_pending(path, ent):
+    """The restores waiting for `path`'s folds, given the reader's current entry: the ones a tail restore left, or,
+    when a whole reader read the file first (the entry holds every record and no restore happened), the checkpoint's
+    fold states after its guard is verified on disk by one 64-byte read. None when there is nothing to resume."""
+    key = str(path)
+    with _CKPT_LOCK:
+        pend = _CKPT_PENDING.get(key)
+    if pend is not None or ent is None or ent[5] != 0 or _CKPT_DIR_FN is None:
+        return pend
+    with _CKPT_LOCK:
+        if key in _CKPT_SEQ:                          # already consulted (or written) in this process: nothing new
+            return None
+    doc = _ckpt_load(path)
+    if doc is None:
+        with _CKPT_LOCK:
+            _CKPT_SEQ.setdefault(key, 0)
+        return None
+    offset, count, guard = int(doc["offset"]), int(doc["count"]), bytes.fromhex(doc.get("guard") or "")
+    verdict = _ckpt_verdict(doc, ent[1], ent[0])          # the same facts the tail path checks: size, mtime, then the guard
+    if verdict is not None:
+        _ckpt_fallback(path, verdict, "whole reader first"); return None
+    ok = False
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(max(0, offset - len(guard)))
+            ok = fh.read(len(guard)) == guard
+        _count_read(key, len(guard))
+    except OSError:
+        ok = False
+    if not ok or count > ent[5] + len(ent[4]):
+        _ckpt_fallback(path, "guard", "whole reader first"); return None
+    pend = {"count": count, "gen": ent[6], "folds": dict(doc.get("folds") or {})}
+    with _CKPT_LOCK:
+        _CKPT_PENDING[key] = pend
+        _CKPT_SEQ[key] = int(doc.get("seq") or 0)
+        _CKPT_STATS["restored"] += 1
+    return pend
+
+
+def _restored_cursor(key, name, ent):
+    """The fold cursor (count, gen, state) a checkpoint carries for fold `name` of `key`, when it stands at a count
+    the current entry can resume from; None otherwise. Each fold's restore is taken once."""
+    pend = _ckpt_pending(key, ent)
+    if pend is None:
+        return None
+    f = pend["folds"].pop(name, None)
+    if not isinstance(f, dict):
+        return None
+    base = ent[5]
+    try:
+        count = int(f["count"])
+        if pend["gen"] != ent[6]:                          # the entry is not the one the restore was taken for: another
+            with _CKPT_LOCK:                              # read replaced it (the stripe lock makes this a residual)
+                _CKPT_STATS["droppedRestores"] += 1
+            try:
+                sys.stderr.write("checkpoint restore dropped for fold %s of %s: the reader's entry moved under it\n" % (name, key))
+            except Exception:
+                pass
+            return None
+        if count != pend["count"] or count < base or count > base + len(ent[4]):
+            return None
+        state = _ckpt_decode(f["state"])
+        with _CKPT_LOCK:
+            _CKPT_STATS["restoredFolds"][name] = _CKPT_STATS["restoredFolds"].get(name, 0) + 1
+        return (count, ent[6], state)
+    except (KeyError, TypeError, ValueError) as e:
+        _ckpt_fallback(key, "corrupt", "fold %s: %s" % (name, e)); return None
+
+
+def checkpoint_write(path, force=False):
+    """Write `path`'s checkpoint from the reader's entry and every registered fold whose cursor stands at the entry's
+    record count. False when there is nothing to write (no entry, or no fold at the witness and not `force`)."""
+    key = str(path)
+    cp = _ckpt_file(key)
+    if cp is None:
+        return False
+    with _JSONL_CACHE_LOCK:
+        ent = _JSONL_CACHE.get(key)
+    if ent is None:
+        return False
+    mtime, size, offset, tail, records, base, gen = ent
+    count = base + len(records)
+    folds = {}
+    for name, cache in list(_FOLD_REG.items()):
+        cur = cache.get(key)
+        if cur is None or cur[0] != count or cur[1] != gen:
+            continue
+        try:
+            enc = _ckpt_encode(cur[2])
+            if len(json.dumps(enc, separators=(",", ":"))) > _CKPT_FOLD_CAP:
+                with _CKPT_LOCK:                          # a state the size of its file: the document must not become the file
+                    _CKPT_STATS["oversizeFolds"][name] = _CKPT_STATS["oversizeFolds"].get(name, 0) + 1
+                continue
+            folds[name] = {"count": count, "state": enc}
+        except TypeError:
+            with _CKPT_LOCK:
+                _CKPT_STATS["skippedFolds"] += 1
+    if not folds and not force:
+        return False
+    last = records[-1] if records else None
+    with _CKPT_LOCK:
+        seq = _CKPT_SEQ.get(key, 0) + 1
+    doc = {"v": _CKPT_V, "path": os.path.realpath(key), "size": int(size), "mtime": float(mtime), "offset": int(offset),
+           "guard": tail.hex(), "count": int(count), "lastUuid": (last.get("uuid") if isinstance(last, dict) else None),
+           "seq": seq, "t": time.time(), "folds": folds}
+    try:
+        cp.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cp.with_name("%s.%d.%x.tmp" % (cp.name, os.getpid(), threading.get_ident()))
+        tmp.write_text(json.dumps(doc, separators=(",", ":")))
+        os.replace(tmp, cp)
+    except OSError:
+        return False
+    with _CKPT_LOCK:
+        _CKPT_SEQ[key] = seq
+        _CKPT_STATS["writes"] += 1
+        _FOLD_DIRTY.discard(key)
+    return True
+
+
+def checkpoint_dirty():
+    """The paths whose fold cursors moved since their checkpoint was last written."""
+    with _CKPT_LOCK:
+        return sorted(_FOLD_DIRTY)
+
+
+def checkpoint_write_dirty(paths=None):
+    """Write the checkpoints of `paths` (default: every dirty path); returns how many were written."""
+    n = 0
+    for p in (checkpoint_dirty() if paths is None else [str(p) for p in paths]):
+        if checkpoint_write(p):
+            n += 1
+    return n
+
+
+def checkpoint_sweep():
+    """One pass over the checkpoint directory at boot: a document whose recorded file no longer exists, or that does
+    not parse, is removed (counted as swept), so cleared and removed sessions do not grow the directory forever."""
+    d = _ckpt_dir()
+    if d is None or not Path(d).is_dir():
+        return 0
+    gone = 0
+    for cp in Path(d).glob("*.json"):
+        keep = False
+        try:
+            text = cp.read_bytes()
+            _count_read(str(cp), len(text))
+            doc = json.loads(text.decode("utf-8"))
+            keep = isinstance(doc, dict) and isinstance(doc.get("path"), str) and os.path.exists(doc["path"])
+        except (OSError, ValueError):
+            keep = False
+        if not keep:
+            try:
+                cp.unlink(); gone += 1
+            except OSError:
+                pass
+    with _CKPT_LOCK:
+        _CKPT_STATS["swept"] += gone
+    return gone
+
+
+def checkpoint_stats():
+    with _CKPT_LOCK:
+        out = dict(_CKPT_STATS); out["fallbacks"] = dict(_CKPT_STATS["fallbacks"]); out["restoredFolds"] = dict(_CKPT_STATS["restoredFolds"])
+        out["oversizeFolds"] = dict(_CKPT_STATS["oversizeFolds"])
+    d = _ckpt_dir()
+    with _READ_BYTES_LOCK:
+        out["documentBytes"] = sum(n for p_, n in _READ_BYTES.items() if d is not None and p_.startswith(str(d) + os.sep))
+        out["dirty"] = len(_FOLD_DIRTY)
+    rb = read_bytes_report()
+    out["readBytes"] = rb.pop("total")
+    out["readByPath"] = rb                            # per file, so a boot can be read as tails versus whole files
+    return out
 
 
 def _scan_jsonl_bytes(data, base_offset):
@@ -639,7 +1016,34 @@ def _read_jsonl_incremental(path, on_fail=None):
     when given, is called with the exception for a stat, open or read that raised on a file that EXISTS (any
     OSError but FileNotFoundError): an absent file is a state and answers [] quietly, an unreadable one is a
     failure the caller may count and log (fold_records passes it through as on("fail")). The answer is []
-    either way."""
+    either way. This is the WHOLE-file read: a tail entry a checkpoint restored is upgraded to the whole file
+    first (T323 stage 3); fold_records reads the entry itself through _read_jsonl_entry with tail_ok."""
+    ent = _read_jsonl_entry(path, on_fail=on_fail, tail_ok=bool(getattr(_TAIL_OK, "flag", False)))
+    _LAST_ENTRY.ent = ent
+    return ent[4] if ent is not None else []
+
+
+_TAIL_OK = threading.local()      # .flag: the calling fold accepts a tail entry (set by fold_records around its read)
+_READER_TRACE = bool(os.environ.get("ROMP_READER_TRACE"))   # one stderr line per read that pulled bytes (a diagnosis aid)
+_LAST_ENTRY = threading.local()   # .ent: the entry the last _read_jsonl_incremental on this thread served
+
+
+_READ_STRIPES = [threading.RLock() for _ in range(64)]   # per-path serialization of the reads that pull bytes: two threads
+#                                                            meeting a file's first read at once (the judges' parse and the pusher's
+#                                                            folds at boot) used to read it twice and, with a checkpoint in play, the
+#                                                            later store's generation orphaned the earlier restore's pending fold
+#                                                            states (review find, 2026-09-11); the second thread now waits and hits.
+#                                                            Striped by path hash, so at most one in 64 unrelated files waits behind another.
+
+
+def _read_stripe(path):
+    return _READ_STRIPES[hash(path) % len(_READ_STRIPES)]
+
+
+def _read_jsonl_entry(path, on_fail=None, tail_ok=False):
+    """The reader's cache entry for `path`, current as of this call (the contract at _read_jsonl_entry_unlocked). A hit
+    is served under the cache lock alone; a read that would pull bytes runs under the path's stripe lock and re-checks
+    the cache first, so concurrent first reads of one file cost one read and one generation."""
     path = str(path)
     try:
         st = os.stat(path)
@@ -648,100 +1052,204 @@ def _read_jsonl_incremental(path, on_fail=None):
             _JSONL_CACHE.pop(path, None)
         if on_fail is not None and not isinstance(e, FileNotFoundError):
             on_fail(e)
-        return []
+        return None
     with _JSONL_CACHE_LOCK:
         hit = _JSONL_CACHE.get(path)
-        if hit is not None and hit[0] == st.st_mtime and hit[1] == st.st_size:
+        if hit is not None and hit[0] == st.st_mtime and hit[1] == st.st_size and (tail_ok or hit[5] == 0):
             _JSONL_CACHE.pop(path, None)  # reinsert at the LRU tail: a served entry is a USED entry
             _JSONL_CACHE[path] = hit
-            return hit[4]
+            return hit
+    with _read_stripe(path):
+        return _read_jsonl_entry_unlocked(path, on_fail=on_fail, tail_ok=tail_ok)
+
+
+def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False):
+    """The reader's cache entry for `path`, (mtime, size, offset, tail, records, base, gen), current as of this call,
+    or None when the file is absent or unreadable (`on_fail` as in _read_jsonl_incremental). With `tail_ok` a caller
+    accepts a TAIL entry (base > 0: records[0] is the file's record number base), and a first touch with no entry
+    consults the file's checkpoint (T323 stage 3): the recorded offset's guard bytes are verified on disk and only
+    offset..EOF is read. Without it a tail entry is upgraded to the whole file from zero (same gen: the prefix stood).
+    A mismatch anywhere (the guard, a shrink, a same-size-new-mtime) reads from zero and bumps gen; when the entry
+    came from a checkpoint that is a counted fallback."""
+    path = str(path)
     try:
-        with open(path, "rb") as fh:
-            if hit is not None and st.st_size > hit[1]:
-                _, _, offset, tail, records = hit
-                fh.seek(max(0, offset - len(tail)))
-                if fh.read(len(tail)) == tail:            # the file really is our cached prefix + more
-                    new, offset = _scan_jsonl_bytes(fh.read(), offset)
-                    records = records + new               # a NEW list — never extend the served one in place
-                else:
-                    fh.seek(0)                            # prefix changed → a rewrite → full re-read
-                    records, offset = _scan_jsonl_bytes(fh.read(), 0)
-            else:
-                records, offset = _scan_jsonl_bytes(fh.read(), 0)
-            tail_from = max(0, offset - _JSONL_TAIL_GUARD)
-            fh.seek(tail_from)
-            tail = fh.read(offset - tail_from)
+        st = os.stat(path)
     except OSError as e:
         with _JSONL_CACHE_LOCK:
             _JSONL_CACHE.pop(path, None)
         if on_fail is not None and not isinstance(e, FileNotFoundError):
             on_fail(e)
-        return []
+        return None
+    with _JSONL_CACHE_LOCK:
+        hit = _JSONL_CACHE.get(path)
+        if hit is not None and hit[0] == st.st_mtime and hit[1] == st.st_size and (tail_ok or hit[5] == 0):
+            _JSONL_CACHE.pop(path, None)  # reinsert at the LRU tail: a served entry is a USED entry
+            _JSONL_CACHE[path] = hit
+            return hit
+    restored = None
+    if hit is None and tail_ok and _CKPT_DIR_FN is not None:
+        hit = restored = _checkpoint_entry(path, st)
+    try:
+        with open(path, "rb") as fh:
+            base, gen, done, kind = 0, None, False, "zero"
+            grown = hit is not None and (st.st_size > hit[1] or (restored is not None and st.st_size == hit[1]
+                                                                    and st.st_mtime == hit[0]))
+            unchanged_tail = (hit is not None and not tail_ok and hit[5] > 0 and st.st_size == hit[1]
+                              and st.st_mtime == hit[0])            # a whole reader meets an unchanged tail entry
+            if grown or unchanged_tail:
+                _, _, offset, tail, records, base0, gen0 = hit
+                fh.seek(max(0, offset - len(tail)))
+                _count_read(path, len(tail))
+                if fh.read(len(tail)) == tail:            # the file really is our cached prefix + more
+                    if tail_ok or base0 == 0:
+                        data = fh.read()
+                        _count_read(path, len(data))
+                        new, offset = _scan_jsonl_bytes(data, offset)
+                        records = (records + new) if records else new   # a NEW list — never extend the served one in place
+                        base, gen, done = base0, gen0, True
+                        kind = "restore" if restored is not None else "grown"
+                        if restored is not None:
+                            with _CKPT_LOCK:
+                                _CKPT_STATS["restored"] += 1
+                    else:                                 # a whole reader over a tail entry: the whole file, same gen
+                        fh.seek(0)
+                        data = fh.read()
+                        _count_read(path, len(data))
+                        records, offset = _scan_jsonl_bytes(data, 0)
+                        base, gen, done, kind = 0, gen0, True, "upgrade"
+                else:
+                    kind = "guard"                        # prefix changed → a rewrite → full re-read, a fresh generation
+                    if restored is not None:
+                        _ckpt_fallback(path, "guard")
+            elif hit is not None:
+                kind = "shrunk" if st.st_size < hit[2] else "rewrite"   # shrank, or same size under a new mtime: a rewrite
+                if restored is not None:
+                    _ckpt_fallback(path, kind)
+            if not done:
+                fh.seek(0)
+                data = fh.read()
+                _count_read(path, len(data))
+                records, offset = _scan_jsonl_bytes(data, 0)
+                base, gen = 0, _next_gen()                # a from-zero read: a generation no cursor of this path can hold
+            tail_from = max(0, offset - _JSONL_TAIL_GUARD)
+            fh.seek(tail_from)
+            tail = fh.read(offset - tail_from)
+            _count_read(path, len(tail))                  # the guard capture is a read too (/perf's count is what was pulled)
+            if _READER_TRACE:
+                sys.stderr.write("reader: %s %s base=%d gen=%d size=%d\n" % (kind, path, base, gen, st.st_size))
+    except OSError as e:
+        with _JSONL_CACHE_LOCK:
+            _JSONL_CACHE.pop(path, None)
+        if on_fail is not None and not isinstance(e, FileNotFoundError):
+            on_fail(e)
+        return None
+    ent = (st.st_mtime, st.st_size, offset, tail, records, base, gen)
     with _JSONL_CACHE_LOCK:
         _JSONL_CACHE.pop(path, None)
         while len(_JSONL_CACHE) >= _JSONL_CACHE_MAX:
             _JSONL_CACHE.pop(next(iter(_JSONL_CACHE)))   # oldest-used first; hot entries survive any cold flood
-        _JSONL_CACHE[path] = (st.st_mtime, st.st_size, offset, tail, records)
-    return records
+        _JSONL_CACHE[path] = ent
+    return ent
 
 
-def fold_records(cache, path, init, step, on=None):
+def fold_records(cache, path, init, step, on=None, ckpt=None):
     """Fold a JSONL file's records into a carried state, APPEND-INCREMENTALLY (issue 903, 2026-09-03):
     the states/transcript readers re-read their whole file behind an (mtime,size) key that every append
-    invalidates — O(file) per push for every working session. _read_jsonl_incremental already serves the
-    parsed records of a growing file incrementally (the parse reads the same list, so this adds no I/O),
-    and its contract — a grown file returns a NEW list whose prefix objects are the SAME — is the
-    identity gate here: when the cached prefix is intact, only the appended records run through `step`;
-    a rewrite (prefix identity lost, a shrink, a same-size-new-mtime) re-folds from record 0. `init()`
-    makes a fresh state; `step(state, record)` returns the next state (mutate-and-return is fine: the
-    cached state is deep-copied before folding onto it, so a state a caller was handed never changes
-    under it). Returns the state; [] records (a missing or unreadable file) fold to init().
+    invalidates — O(file) per push for every working session. The reader serves the parsed records of a
+    growing file incrementally (the parse reads the same list, so this adds no I/O), and only the appended
+    records run through `step`; a rewrite (a shrink, a same-size-new-mtime, a changed prefix under the
+    reader's guard) re-folds from record 0. `init()` makes a fresh state; `step(state, record)` returns the
+    next state (mutate-and-return is fine: the cached state is deep-copied before folding onto it, so a
+    state a caller was handed never changes under it). Returns the state; [] records (a missing or
+    unreadable file) fold to init().
+
+    The cursor in `cache` is (count, gen, state): the record count folded and the reader entry's generation
+    (T323 stage 3, 2026-09-11; it was (count, last record object, state) gated on the identity of the
+    records list's objects, which no checkpoint can carry; the count stays first, as every reader of the
+    cursor knew it). A same-gen entry whose count grew is an append; any other gen (a rewrite, a shrink, an
+    entry the cache evicted or a failure popped and a later read replaced: every from-zero read takes a
+    fresh process-wide generation) refolds. `ckpt`, a name, makes the fold RESUMABLE across processes: its
+    cursor is written into the file's checkpoint (checkpoint_write, when it stands at the reader's witness)
+    and restored from it at the first fold of the file in a new process, over a TAIL entry that read only the
+    bytes past the checkpoint's offset; the fold then steps the tail alone. A refold over a tail entry reads
+    the whole file first. Folds without `ckpt` behave as before, over whatever entry the reader holds.
 
     `on`, when given, is called once per call with the path the fold took: "hit" (the records are the
     cached ones; nothing stepped), "append" (only the records past the cached prefix stepped), "refold"
-    (every record stepped: a rewrite, a shrink, or the first fold of this file) or "fail" (the file exists
-    and its stat, open or read raised: the answer is init(), the cache entry for the path is dropped and
-    nothing is memoized, so the next call reads again; an ABSENT file is not a failure and folds to init()
-    through the normal path). A caller's counters ride it (the kernel's `_states_awaiting_overlay`); the
-    fold itself keeps no counters, since one cache dict serves many readers and a caller's counters are
-    locked per reader.
+    (every record stepped: a rewrite, a shrink, or the first fold of this file), "restore" (the cursor came
+    from the checkpoint and only the tail past it was stepped) or "fail" (the file exists and its stat, open
+    or read raised: the answer is init(), the cache entry for the path is dropped and nothing is memoized, so
+    the next call reads again; an ABSENT file is not a failure and folds to init() through the normal path).
+    A caller's counters ride it (the kernel's `_states_awaiting_overlay`); the fold itself keeps no counters,
+    since one cache dict serves many readers and a caller's counters are locked per reader.
 
     Lives here (moved from the kernel, 2026-09-03) so the judge's readers can fold too — the
     background-task pairing below is shared by both."""
     key = str(path)
+    if ckpt is None:
+        ckpt = _FOLD_NAME_OF.get(id(cache))               # a cache named once (name_fold_cache)
+    if ckpt is not None:
+        _FOLD_REG[ckpt] = cache                           # the newest caller's cursor dict (a test process loads the kernel
+        #                                                   several times over one event model; production loads it once)
     failed = []                                           # the reader's failures: a stat, open or read that raised on a
-    recs = _read_jsonl_incremental(path, on_fail=failed.append)   # file that exists (an absent file is [] and no failure)
+    recs = _tail_read(path, failed)                       # file that exists (an absent file is [] and no failure)
     ent = _pinned_entry(key, recs)                        # the reader's entry for THIS read, pinned by identity: another
     if ent is _UNPINNED:                                  # thread (the judge pool, a handler) may advance the shared entry
         del failed[:]                                     # past our records before we look at its tail, and a newer tail
-        recs = _read_jsonl_incremental(path, on_fail=failed.append)   # folded onto an older prefix would skip the
-        ent = _pinned_entry(key, recs)                    # records between. A lost pin re-reads once: the newer entry
-        if ent is _UNPINNED:                              # pins cleanly, so the answer is current, not a poll behind;
-            ent = None                                    # lost twice, the fold answers without the tail, never with
-    if failed:                                            # the wrong one. The re-read's verdict is the one that counts.
+        recs = _tail_read(path, failed)                   # folded onto an older prefix would skip the records between. A
+        ent = _pinned_entry(key, recs)                    # lost pin re-reads once: the newer entry pins cleanly, so the
+        if ent is _UNPINNED:                              # answer is current, not a poll behind; lost twice, the fold
+            ent = None                                    # answers its own records without a tail, never with the wrong
+    if failed:                                            # one. The re-read's verdict is the one that counts.
         cache.pop(key, None)                              # A failed read is never memoized: the next call reads again
         if on is not None:
             on("fail")
         return init()
+    base = ent[5] if ent is not None else 0               # no entry (lost twice): the records in hand, whole, no tail
+
+    gen = ent[6] if ent is not None else 0
+    total = base + len(recs)
     hit = cache.get(key)
+    kind = None
+    if hit is None and ckpt is not None and ent is not None:
+        hit = _restored_cursor(key, ckpt, ent)
+        if hit is not None:
+            kind = "restore"
     if hit is not None:
-        n0, last0, state0 = hit
-        if n0 == len(recs) and (n0 == 0 or recs[-1] is last0):
+        n0, g0, state0 = hit
+        if g0 == gen and n0 == total:
             if on is not None:
-                on("hit")
+                on("hit" if kind is None else kind)
+            if kind is not None:
+                cache[key] = hit                          # a restore at the witness: the cursor stands, nothing stepped
             return _fold_eof_fragment(key, ent, state0, step)   # unchanged records; a newline-less tail may still sit past them
-        if 0 < n0 < len(recs) and recs[n0 - 1] is last0:
-            state, start, kind = copy.deepcopy(state0), n0, "append"
+        if g0 == gen and base <= n0 < total:
+            state, start = copy.deepcopy(state0), n0 - base
+            kind = kind or "append"
         else:
-            state, start, kind = init(), 0, "refold"
-    else:
+            kind = None
+    if kind is None:
+        if base > 0:                                      # a refold needs every record: the entry is a tail, so read whole
+            del failed[:]
+            ent = _read_jsonl_entry(path, on_fail=failed.append, tail_ok=False)
+            if failed:
+                cache.pop(key, None)
+                if on is not None:
+                    on("fail")
+                return init()
+            recs = ent[4] if ent is not None else []
+            gen = ent[6] if ent is not None else 0
+            total = len(recs)
         state, start, kind = init(), 0, "refold"
     for r in recs[start:]:
         if isinstance(r, dict):
             state = step(state, r)
     if len(cache) > 256:                                  # bounded by the session count; never unbounded
         cache.clear()
-    cache[key] = (len(recs), recs[-1] if recs else None, state)
+    cache[key] = (total, gen, state)
+    if ckpt is not None:
+        with _CKPT_LOCK:
+            _FOLD_DIRTY.add(key)
     if on is not None:
         on(kind)
     return _fold_eof_fragment(key, ent, state, step)
@@ -750,10 +1258,25 @@ def fold_records(cache, path, init, step, on=None):
 _UNPINNED = object()
 
 
+def _tail_read(path, failed):
+    """fold_records' read: the whole-list reader (the seam every fold shares, so a test's stub or counter on
+    _read_jsonl_incremental still sees every fold read) with the tail flag raised, so a checkpoint-restored tail
+    entry is served instead of upgraded to the whole file."""
+    _TAIL_OK.flag = True
+    try:
+        return _read_jsonl_incremental(path, on_fail=failed.append)
+    finally:
+        _TAIL_OK.flag = False
+
+
 def _pinned_entry(key, recs):
     """The shared reader's cache entry for `key` if it still describes the read that returned `recs` (its
     records list IS `recs`), None when the reader holds nothing for the path, _UNPINNED when another thread
-    has advanced the entry past that read."""
+    has advanced the entry past that read. The entry the reader served on this thread is checked first
+    (T323 stage 3: an entry evicted from the cache between the read and the pin still describes the read)."""
+    last = getattr(_LAST_ENTRY, "ent", None)
+    if last is not None and last[4] is recs:
+        return last
     with _JSONL_CACHE_LOCK:
         ent = _JSONL_CACHE.get(key)
     if ent is not None and ent[4] is recs:
@@ -796,6 +1319,7 @@ def _trailing_record(path, ent):
         with open(path, "rb") as fh:
             fh.seek(ent[2])
             frag = fh.read(ent[1] - ent[2]).strip()
+        _count_read(path, ent[1] - ent[2])
         if frag and b"\n" not in frag:
             o = json.loads(frag.decode("utf-8", "replace"))
     except (OSError, ValueError):

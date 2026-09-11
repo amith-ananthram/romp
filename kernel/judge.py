@@ -67,6 +67,8 @@ _ls_mod = importlib.util.module_from_spec(_ls_spec)
 _ls_spec.loader.exec_module(_ls_mod)
 load_source = _ls_mod.load_source   # file-path imports with load_module()'s sys.modules semantics (kernel/loadsource.py)
 em = load_source("romp_event_model", HERE / "event_model.py")
+em.set_checkpoint_dir(lambda: STATE / "checkpoints")   # T323 stage 3: the fold checkpoints live under the state root, read at
+#                                                        call time so _rebind_state moves them with everything else
 _cred = sys.modules.get("romp_credentials") or load_source("romp_credentials", HERE / "credentials.py")
 
 HOME     = Path.home()
@@ -8460,6 +8462,16 @@ def _discover_impl(now, window=None, forks=True):
         # ever-growing work bar (the user 2026-07-10).
         last = _sdk_last_sid(sid)
         fork = next(((p, m) for st, p, m in listing if st == last), None) if last else None
+        if fork is None and last:
+            # The /clear race window: the registry's lastSid already names the new transcript but the CLI has not
+            # written its first record, so the file is not on disk yet. Handing out the ANCHOR here (the shape until
+            # 2026-09-11) made every build landing in the window parse the pre-clear anchor cold from the second clear
+            # on (its tree was released at the first clear) and flipped the noted leaf twice. The session's current
+            # transcript is the leaf discover handed out last, so that is what it hands out, when it still exists;
+            # only a fresh process, which noted nothing yet, falls to the anchor (review find carried from stage 2).
+            with _LEAF_LOCK:
+                prev = _LEAF_SEEN.get(sid)
+            fork = next(((p, m) for st, p, m in listing if p == prev), None) if prev else None
         if fork is not None:
             path_str, mt = fork
             _note_leaf(sid, path_str)                    # the leaf flipped here: the previous leaf's trees go
@@ -8652,6 +8664,15 @@ def _session_closed(session):
 _BG_SCAN_CACHE = {}                       # path -> em.fold_records entry (running tasks) — mirrors the kernel's _bg_scan_cached
 
 
+def _bg_scan(path):
+    """The judge's background-task pairing over `path`, resumable from the file's checkpoint (T323 stage 3). The name
+    rides the cursor dict and is registered at every call (em.name_fold_cache is idempotent): a test process
+    re-executes the event model under each kernel load, which resets its registry, and the scan's own call shape
+    stays the two arguments a test may stub."""
+    em.name_fold_cache(_BG_SCAN_CACHE, "bgJudge")
+    return em.scan_bg_tasks_cached(path, _BG_SCAN_CACHE)
+
+
 def _bg_unresolved(path, now=None):
     """The transcript's still-RUNNING background launches (em._scan_bg_tasks pairing), folded append-incrementally.
     The DURABLE awaited-work source: the pairing lives in the transcript, so unlike any live backend
@@ -8660,7 +8681,7 @@ def _bg_unresolved(path, now=None):
     planner key's expiry term and the gate's not-before, so none of them can disagree at the crossing);
     the wall clock otherwise."""
     # folds append-incrementally since 2026-09-03: a changed transcript steps only its appended records
-    tasks = em.scan_bg_tasks_cached(path, _BG_SCAN_CACHE)
+    tasks = _bg_scan(path)
     # expiry is applied OUTSIDE the cache with a fresh now: a monitor whose CLI died mid-watch has no
     # terminal record, and an idle transcript never busts the mtime key — a cached verdict would say
     # "running" forever (see em._bg_expired)
@@ -8683,7 +8704,7 @@ def _bg_expiry_key(path, now):
     computed is planned every pass; the settle's own call then raises as it does today."""
     try:
         return tuple(sorted((str(t.get("id") or ""), bool(em._bg_expired(t, now)))
-                            for t in em.scan_bg_tasks_cached(path, _BG_SCAN_CACHE)))
+                            for t in _bg_scan(path)))
     except Exception:
         return object()
 
@@ -8702,7 +8723,7 @@ def _settle_not_before(fsid, path, now):
     launch the judged world held (the transcript is append-only; a launch that landed after the pass's
     pin moves the parse pair anyway). Never recomputed on a skip: with an unchanged signature the task
     set is unchanged, so the stored instant is exact."""
-    tasks = em.scan_bg_tasks_cached(path, _BG_SCAN_CACHE)
+    tasks = _bg_scan(path)
     sp = _cli_epoch(fsid)
     nb = None
     for t in tasks:

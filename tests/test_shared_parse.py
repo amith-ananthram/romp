@@ -288,6 +288,57 @@ class OneParseForBoth(unittest.TestCase):
                 os.environ["CLAUDE_CONFIG_DIR"] = saved[3]
             jd._rebind_state(saved[0])
 
+    def test_the_clear_race_window_hands_out_the_previous_leaf_not_the_anchor(self):
+        """Carried from the stage 2 review (2026-09-11): between the registry's lastSid rewrite and the new transcript's
+        first record, discover handed out the ANCHOR, so from the second clear on a build landing in the window parsed
+        the pre-clear anchor cold (its tree released at the first clear) and the noted leaf flipped twice. discover
+        hands out the leaf it handed out last until the named file exists."""
+        import re
+        C = "33333333-2222-4333-8444-000000000304"
+        L1, L2 = "44444444-2222-4333-8444-000000000451", "44444444-2222-4333-8444-000000000452"
+        saved = (jd.STATE, jd.NAMES, jd.PROJECTS, os.environ.get("CLAUDE_CONFIG_DIR"))
+        td = Path(tempfile.mkdtemp())
+        try:
+            jd._rebind_state(td / "state")
+            cfg = td / "claude"; os.environ["CLAUDE_CONFIG_DIR"] = str(cfg)
+            cdir = td / "launchdir"; cdir.mkdir()
+            proj_dir = cfg / "projects" / re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(str(cdir)))
+            proj_dir.mkdir(parents=True)
+            names = td / "names"; names.mkdir()
+            (names / C).write_text("worker\t%s\t#abcdef\n" % cdir)
+            jd.NAMES, jd.PROJECTS = names, cfg / "projects"
+            jd.SDKDIR.mkdir(parents=True, exist_ok=True)
+            reg = jd.SDKDIR / (C + ".json")
+            anchor_path = _transcript(str(proj_dir), C, n=2)
+            leaf1 = _transcript(str(proj_dir), L1, n=1)
+            reg.write_text(json.dumps({"sid": C, "name": "worker", "cwd": str(cdir), "lastSid": L1}))
+            now = time.time()
+
+            def current_leaf():
+                rows = [r for r in jd.discover(now) if r[0] == C]
+                self.assertEqual(len(rows), 1, rows)
+                return str(rows[0][1])
+
+            self.assertEqual(current_leaf(), leaf1)                       # after the first clear
+            km._parse(leaf1, C, now)
+            reg.write_text(json.dumps({"sid": C, "name": "worker", "cwd": str(cdir), "lastSid": L2}))
+            os.utime(reg, (now + 1, now + 1))                             # the second clear's registry write lands first
+            m0 = self._misses()
+            self.assertEqual(current_leaf(), leaf1, "the window: lastSid names a file not on disk, the previous leaf stands")
+            self.assertEqual(self._misses() - m0, 0)
+            self.assertFalse(jd._leaf_retired(C, leaf1), "no flip was noted in the window")
+            self.assertEqual([k for k in jd._PARSE_CACHE if k[0] == C], [(C, jd._pending_cut(C), leaf1)], "the anchor was never parsed")
+            leaf2 = _transcript(str(proj_dir), L2, n=1)                  # the CLI writes the new transcript's first record
+            self.assertEqual(current_leaf(), leaf2, "the file exists: discover hands out the new leaf")
+            self.assertTrue(jd._leaf_retired(C, leaf1)); self.assertFalse(jd._leaf_retired(C, anchor_path))
+        finally:
+            jd.NAMES, jd.PROJECTS = saved[1], saved[2]
+            if saved[3] is None:
+                os.environ.pop("CLAUDE_CONFIG_DIR", None)
+            else:
+                os.environ["CLAUDE_CONFIG_DIR"] = saved[3]
+            jd._rebind_state(saved[0])
+
     def test_a_fork_childs_flip_leaves_the_parents_slot(self):
         """Review find (2026-09-11): a fork child's SDK registry is born with lastSid = the PARENT's fsid until its
         own init flips it, so discover hands the child the parent's transcript first; the child's flip to its own

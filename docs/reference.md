@@ -978,7 +978,32 @@ leaf's, so the two never evict each other. When a `/clear` or a resume fork
 moves a session to a new transcript, the previous leaf's tree is dropped the
 moment discovery first hands out the new one, so it holds across clears too.
 The store evicts the least recently used entry past 256 instead of clearing
-wholesale. The gain is one tree per session, about
+wholesale.
+
+The folds' checkpoints survive a restart. Every append-incremental fold over a
+JSONL file (the states overlay and the last-state readers, the background-task
+pairing, the agent gists and launches, the postal log, the queue ledger, the
+wake tail, the machine cut, the states notes, the state intervals, the session
+meta) used to re-read its whole file from record zero after a kernel restart:
+its cursor lived in the process. Since 2026-09-11 one small JSON file per
+folded file under the state root's `checkpoints/` directory records the
+reader's prefix witness (the byte offset past the last complete line, the up
+to 64 bytes before it, the record count) and the state of every fold whose
+cursor stood at that count. A fresh kernel verifies the guard bytes on disk,
+reads only the bytes past the offset and resumes each fold from its recorded
+state; a checkpoint that does not verify (its version, its path, a file that
+shrank, a rewrite under the guard, a corrupt document) falls back to a whole
+read, is counted per reason in `/perf` and said once on stderr. A fold whose
+encoded state would exceed 64 KB is left out of the document and counted (a
+state that grows with its file, such as the postal log fold's map of every
+sent row, would make the document a second copy of the file); it cold-folds
+at first touch, while the bounded folds beside it restore. Checkpoints
+are written when a session's turn settles or its states log moves, and all of
+them at exit; checkpoints of files that no longer exist are swept at boot. A
+compaction appends records and changes nothing here. The parse trees and the
+record cache the parse reads through are unchanged by this: a restart still
+parses a session's leaf transcript whole (the checkpoint work that follows
+addresses the parse itself). The gain is one tree per session, about
 a quarter of the record cost the T311 report measured (0.25 GB of 6.6); the
 record cache itself, the bulk, is the checkpoint work's target.
 
@@ -1365,6 +1390,18 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   longer wait between cycles would have skipped; a conservative undercount,
   since a wake set by another thread or a periodic repost of an unchanged
   frame marks a cycle busy).
+- `checkpoints`: the folds' checkpoints since boot: `restored` (files whose
+  folds resumed from one), `restoredFolds` (restores per fold name), `writes`,
+  `swept` (checkpoints of vanished files removed at boot), `skippedFolds`
+  (fold states the codec could not encode), `oversizeFolds` (per fold name,
+  states over the 64 KB cap left out of a document), `droppedRestores` (a
+  restore lost to a read that replaced the entry under it; the reader
+  serializes reads per path, so this should stay at zero), `documentBytes`
+  (what reading the checkpoint documents themselves cost since boot),
+  `fallbacks` per reason (`version`, `path`, `shrunk`, `guard`, `rewrite`,
+  `corrupt`), `dirty` (files whose folds moved since their last write),
+  `readBytes` and `readByPath` (what the JSONL reader pulled off disk since
+  boot, in total and per file).
 - `parses`: the cold event-model parses through the one parse store the
   kernel and the judges share: `total` (every miss, whoever asked), `kernel`
   (the display's asks among them, with `bytes`, the parsed files' sizes, and
