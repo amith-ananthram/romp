@@ -1039,12 +1039,18 @@ _load_downtime()
 _SHA = None                                  # lazily-resolved git short-sha of the code this kernel runs
 
 
+_SHA_MISS_T = [0.0]         # when git last failed to answer _kernel_sha
+_SHA_REASK_S = 30           # and how long that failure stands before git is asked again (the round-two review's low)
+
+
 def _kernel_sha():
     """git short-sha of HEAD, plus '-dirty' if the working tree has uncommitted edits — the kernel
     loads bin/*.py straight from the worktree, so a dirty tree means it's running code that isn't at
     any commit. Resolved once (a restart re-reads it). None outside a git checkout."""
     global _SHA
     if _SHA is None:
+        if time.time() - _SHA_MISS_T[0] < _SHA_REASK_S:
+            return None             # asked and unanswered within the bound: /version and /sw.js call this per request
         try:
             r = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"],
                                capture_output=True, text=True, timeout=2)
@@ -1054,9 +1060,11 @@ def _kernel_sha():
                                    capture_output=True, text=True, timeout=2)
                 if d.returncode == 0 and d.stdout.strip():
                     sha += "-dirty"
-            _SHA = sha
-        except Exception:
-            _SHA = ""
+            _SHA = sha or None      # an EMPTY answer is not remembered for the process's life (T352 review): a 2 s git
+        except Exception:           # timeout at a busy boot used to pin '' and the drift check's restart leg then had
+            _SHA = None             # no running sha to compare until a restart; it is asked again after _SHA_REASK_S
+        if _SHA is None:
+            _SHA_MISS_T[0] = time.time()
     return _SHA or None
 
 
@@ -7727,6 +7735,37 @@ def _parked_quiet_deploy(checkout, now=None):
     return int(rec["t"]) if isinstance(rec.get("t"), (int, float)) else 0
 
 
+def _deploy_would_cut():
+    """The turns a deploy restart NOW would cut, as the drain would record them (SdkBackend.would_cut), or None when
+    that is unknown (no backend built yet, or one without the method). The gates that spare in-flight turns apply to
+    an unknown answer exactly as to a non-empty one (T352): only a KNOWN empty list waives them."""
+    be = _sdk_backend or None
+    if be is None or not hasattr(be, "would_cut"):
+        return None
+    try:
+        return list(be.would_cut())
+    except Exception:
+        return None
+
+
+def _cut_words(cut):
+    """The tail of a converge line naming what a restart now would cut: the turns, or that it is unknown."""
+    if cut is None:
+        return "; what a restart would cut is unknown (no backend yet)"
+    if not cut:
+        return "; a restart now would cut no turn"
+    names = ", ".join(str(c.get("name") or str(c.get("sid") or "")[:8]) for c in cut[:6]) + (", …" if len(cut) > 6 else "")
+    return "; a restart now would cut %d turn%s: %s" % (len(cut), "" if len(cut) == 1 else "s", names)
+
+
+def _converge_say(text):
+    """One line on the kernel's log for EVERY pass in which main has moved and this box does not converge: a hold, a
+    stand-down, an unreadable read (T352: a merged fix waited 23 minutes behind a cool-down that said nothing, so
+    the journal could not tell a hold from a dead thread). Every pass, never once per sha: the reader of the journal
+    must see the wait still standing, and the cadence is one pass per five minutes."""
+    sys.stderr.write("romp-kernel: converge: %s\n" % text)
+
+
 def _main_drift_check():
     """One origin/checkout/running comparison pass; fires the SAME banner as the release check (the
     shell's offer() renders the main-drift wording off kind:"main"). Re-fires only when the target sha
@@ -7740,7 +7779,21 @@ def _main_drift_check():
         return
     checkout = _checkout_sha()      # ONE read each: the verdict's inputs and the parked-deploy
     running = _kernel_sha()         # match below read the same shas the verdict examined
-    kind, target = _main_drift_verdict(_origin_main_sha(), checkout, running)
+    origin = _origin_main_sha()
+    kind, target = _main_drift_verdict(origin, checkout, running)
+    if not origin or not checkout or not running:
+        # an unreadable input is a NOTE each pass, never a gate (T352, and its review): the verdict keeps its per-leg
+        # shape, so main unreadable (git ls-remote failing or timing out at the release remote: offline, an auth prompt,
+        # a box too busy to answer in 15 s) still lets a checkout ahead of the running kernel converge the restart leg,
+        # while a pull needs main and the checkout both. Silence here used to read, in the journal, like a check thread
+        # that had died.
+        gone = [n for n, v in (("main at %s (git ls-remote failed or timed out)" % _release_remote(), origin),
+                               ("the checkout's HEAD", checkout), ("the running kernel's sha", running)) if not v]
+        _converge_say("%s could not be read this pass (main %s, checkout %s, running %s): %s; again in %d s"
+                      % (" and ".join(gone), origin or "?", checkout or "?", running or "?",
+                         "no verdict" if not kind else "the %s leg still decides from what was read" % kind, _MAIN_CHECK_EVERY_S))
+        if not kind:
+            return
     if kind == "restart" and target == _REBUILT_FOR[0]:
         return                                        # already converged in place (UI-only rebuild)
     if kind == "restart" and not _kernel_code_changed(running, target):
@@ -7789,23 +7842,54 @@ def _main_drift_check():
         # for the rest of the window, and a pull must not wait on a park that already delivered
         # (review find). When a stand-down ends without that landing — the row expired, the park
         # died with its manager — say so once and let the converge proceed on its own terms.
-        if not _sha_same(running, checkout) and _parked_quiet_deploy(checkout):
-            if _QUIET_PARKED_LOGGED[0] != checkout:
-                _QUIET_PARKED_LOGGED[0] = checkout
-                sys.stderr.write("romp-kernel: converge: %s already parked as a quiet deploy — leaving it "
-                                 "to the quiet window\n" % checkout[:8])
+        # Both waits below exist to spare IN-FLIGHT TURNS from a restart's cut: the quiet window waits for them to
+        # end, the cool-down spaces the cuts. A restart that would cut none (every working session under a host,
+        # T315; the default since T348) has nothing to spare, so neither wait applies to it (T352, the manager's
+        # find: a merged fix waited 23 minutes behind the cool-down on a box where every session was hosted). The
+        # answer comes from the drain's own predicate (SdkBackend.would_cut), and only a KNOWN empty list waives a
+        # wait: unknown (no backend yet) keeps both, as before. Every held pass says so, each time.
+        try:
+            cut = _deploy_would_cut()
+            spares = cut is not None and not cut
+            if not _sha_same(running, checkout) and _parked_quiet_deploy(checkout):
+                if spares:
+                    _QUIET_PARKED_LOGGED[0] = ""             # pre-empted knowingly: no "no longer pending" line below
+                    _converge_say("%s is parked as a quiet deploy, but a restart now would cut no turn: converging "
+                                  "without waiting for the window" % (checkout or "?")[:8])
+                else:
+                    _QUIET_PARKED_LOGGED[0] = checkout
+                    _converge_say("%s is parked as a quiet deploy; leaving it to the quiet window%s"
+                                  % ((checkout or "?")[:8], _cut_words(cut)))
+                    _MAIN_DRIFT[slot] = ""
+                    return
+            if _QUIET_PARKED_LOGGED[0] == checkout:
+                _QUIET_PARKED_LOGGED[0] = ""
+                _converge_say("the quiet deploy parked for %s is no longer pending; the converge proceeds on its own "
+                              "terms" % (checkout or "?")[:8])
+            last = max(_LAST_AUTO_CONVERGE[0], _last_deploy_restart_t())
+            left = _CONVERGE_COOLDOWN_S - (time.time() - last)
+            if left > 0:
+                since = time.strftime("%H:%M:%SZ", time.gmtime(last))
+                if spares:
+                    _converge_say("main is at %s (this box runs %s): %d s of the %d min cool-down since the deploy "
+                                  "restart at %s remain, but a restart now would cut no turn: converging now"
+                                  % (target, (running or "?")[:8], int(left), int(_CONVERGE_COOLDOWN_S // 60), since))
+                else:
+                    _converge_say("main is at %s (the checkout %s, this box runs %s): holding %d s more of the %d min "
+                                  "cool-down since the deploy restart at %s%s"
+                                  % (target, (checkout or "?")[:8], (running or "?")[:8], int(left), int(_CONVERGE_COOLDOWN_S // 60), since,
+                                     _cut_words(cut)))
+                    _MAIN_DRIFT[slot] = ""
+                    return
+            _LAST_AUTO_CONVERGE[0] = time.time()
+            _run_main_update(kind, target=target)
+        except Exception:
+            # a crash in the hold branches (the T352 round-two review: a None running sha inside the cool-down raised
+            # at a [:8] AFTER the latch above took the target, and the hold's own reset never ran, so every later
+            # pass returned at the latch and that commit never converged, in silence) leaves no target latched:
+            # the next pass judges afresh, and the crash itself reaches the check thread's log as before
             _MAIN_DRIFT[slot] = ""
-            return
-        if _QUIET_PARKED_LOGGED[0] == checkout:
-            _QUIET_PARKED_LOGGED[0] = ""
-            sys.stderr.write("romp-kernel: converge: the quiet deploy parked for %s is no longer pending — "
-                             "the converge proceeds on its own terms\n" % checkout[:8])
-        last = max(_LAST_AUTO_CONVERGE[0], _last_deploy_restart_t())
-        if time.time() - last < _CONVERGE_COOLDOWN_S:
-            _MAIN_DRIFT[slot] = ""
-            return
-        _LAST_AUTO_CONVERGE[0] = time.time()
-        _run_main_update(kind, target=target)
+            raise
     else:
         if target in _dismissed_updates():
             return                    # Not-now'd THIS sha, durably — a NEW sha offers again
