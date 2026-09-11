@@ -1239,13 +1239,11 @@ _stale_server_globals() {
     [ "$(grep -o '"' <<<"$line" | wc -l | tr -d ' ')" -eq 4 ]
 }
 
-@test "interrupt/escape key bindings route the session name through tmux #{q:} quoting" {
+@test "provisioning installs no key bindings and no mail-badge hook (the tmux-only interrupt heal and badge went 2026-09-11)" {
     run run_romp new -t myproject
     [ "$status" -eq 0 ]
-    grep -F 'bind -n C-c' "$MOCK_LOG"    | grep -qF 'romp-interrupt-reset #{q:session_name}'
-    grep -F 'bind -n Escape' "$MOCK_LOG" | grep -qF 'romp-interrupt-reset #{q:session_name}'
-    # the unquoted (injectable) form must be gone
-    ! grep -qF 'romp-interrupt-reset #{session_name}' "$MOCK_LOG"
+    run grep -E 'bind -n (C-c|Escape)|romp-interrupt-reset|client-session-changed|romp-mail-clear' "$MOCK_LOG"
+    [ "$status" -ne 0 ]
 }
 
 @test "resume: a session id with shell metacharacters is refused before any launch" {

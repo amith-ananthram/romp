@@ -42,7 +42,7 @@ PY
     [ -L "$HOME/.claude/hooks/tmux-status.sh" ]
     [[ "$(readlink "$HOME/.claude/hooks/tmux-status.sh")" == *"/hooks/tmux-status.sh" ]]
     [ "$(count_cmd Stop tmux-status.sh)" = "1" ]
-    [ "$(count_cmd Stop romp-summarize.sh)" = "1" ]
+    [ "$(count_cmd Stop romp-summarize.sh)" = "0" ]   # retired 2026-09-11, never registered again
     [ "$(count_cmd Stop romp-postal-drain.sh)" = "1" ]
     [ "$(count_cmd SessionStart romp-postal-ensure.sh)" = "1" ]
     [ "$(count_cmd PostToolUse tmux-status.sh)" = "1" ]
@@ -59,7 +59,7 @@ PY
     [ "$status" -eq 0 ]
     [[ "$output" == *"already registered"* ]]
     [ "$(count_cmd Stop tmux-status.sh)" = "1" ]
-    [ "$(count_cmd UserPromptSubmit romp-summarize.sh)" = "1" ]
+    [ "$(count_cmd UserPromptSubmit romp-summarize.sh)" = "0" ]
     # regression: a re-run used to FOLLOW the existing skill dir-symlink and drop a new link INSIDE
     # the repo (claude/skills/romp-postal/romp-postal → an absolute personal path). ln -sfn replaces
     # the link.
@@ -109,6 +109,52 @@ PY
     [ "$status" -eq 0 ]
 
     [ -f "$HOME/.claude/skills/romp/SKILL.md" ]
+}
+
+@test "install.sh: upgrading de-registers the retired announcer hook and unlinks it, leaving other hooks alone" {
+    # hooks/romp-summarize.sh (the live tmux phrase) was removed 2026-09-11 with the tmux backend's
+    # dead leaves. An install from before still registers it on UserPromptSubmit and Stop and holds a
+    # symlink to a file this repo no longer ships; upgrading must clear both, or Claude Code shells a
+    # missing path on every prompt and every turn end. Other hooks, romp's and the user's, stay.
+    mkdir -p "$HOME/.claude/hooks"
+    ln -s "$ROMP_DIR/hooks/romp-summarize.sh" "$HOME/.claude/hooks/romp-summarize.sh"
+    cat > "$HOME/.claude/settings.json" <<'JSON'
+{
+  "hooks": {
+    "UserPromptSubmit": [ { "hooks": [
+      { "type": "command", "command": "~/.claude/hooks/romp-summarize.sh", "timeout": 10, "async": true } ] } ],
+    "Stop": [ { "hooks": [
+      { "type": "command", "command": "my-own-hook.sh" },
+      { "type": "command", "command": "~/.claude/hooks/romp-summarize.sh", "timeout": 10, "async": true } ] } ],
+    "SubagentStop": [ { "hooks": [
+      { "type": "command", "command": "~/.claude/hooks/romp-summarize.sh", "timeout": 10, "async": true } ] } ]
+  }
+}
+JSON
+    run "$ROMP_DIR/install.sh"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"romp-summarize.sh"* ]]          # the upgrade says what it removed
+    [ ! -L "$HOME/.claude/hooks/romp-summarize.sh" ]
+    [ ! -e "$HOME/.claude/hooks/romp-summarize.sh" ]
+    [ "$(count_cmd UserPromptSubmit romp-summarize.sh)" = "0" ]
+    [ "$(count_cmd Stop romp-summarize.sh)" = "0" ]
+    [ "$(count_cmd Stop my-own-hook.sh)" = "1" ]       # the user's own hook survives
+    [ "$(count_cmd Stop tmux-status.sh)" = "1" ]       # the live hooks are registered as before
+    python3 - "$HOME/.claude/settings.json" <<'PY'
+import json, sys
+s = json.load(open(sys.argv[1]))
+assert "SubagentStop" not in s["hooks"], list(s["hooks"])   # an event emptied by the removal is pruned, no litter
+PY
+}
+
+@test "install.sh: a real file named like the retired announcer hook is left alone" {
+    # Someone's own hook of that name is theirs; only the symlink install.sh once wrote is removed.
+    mkdir -p "$HOME/.claude/hooks"
+    echo "mine" > "$HOME/.claude/hooks/romp-summarize.sh"
+    run "$ROMP_DIR/install.sh"
+    [ "$status" -eq 0 ]
+    [ -f "$HOME/.claude/hooks/romp-summarize.sh" ]
+    [ "$(cat "$HOME/.claude/hooks/romp-summarize.sh")" = "mine" ]
 }
 
 @test "install.sh: preflight fails clearly when node is missing" {

@@ -74,9 +74,7 @@ esac
 # Status emoji for the ghostty tab dot (tmux.conf set-titles-string reads
 # @romp-emoji). Mirrors the dashboard's state→color: 🔵 ready (waiting/
 # idle), 🟡 working, 🔴 needs input (permission). Updated here on every event
-# so the dot tracks Claude's live status. (A fourth dot, ⚪ inactive, is set
-# NOT here but by scripts/romp-idle-dots once a ready session sits idle > 1h —
-# the tab analog of the dashboard/timeline fade; the next event resets it here.)
+# so the dot tracks Claude's live status.
 # Compacting is the ODD ONE OUT on purpose: a monochrome compress glyph (⇲, NOT
 # a coloured dot) so a transient context-compaction reads as a PROCESS, not as
 # another live-status colour (the user 2026-06-22).
@@ -134,7 +132,7 @@ fi
 # message (or any other hook) firing mid-compaction must NOT clobber @claude-state back to
 # working/waiting — that split the timeline's compacting span and stopped the live % partway (the
 # user). With this guard prev==state==compacting, so no spurious transition is logged and the span
-# stays continuous. A missed PostCompact can't strand it: romp-idle-dots heals a stuck 'compacting'.
+# stays continuous.
 if [[ "$prev" == "compacting" && "$EVENT" != "PostCompact" ]]; then
     state="compacting"; emoji="⇲"
 fi
@@ -161,17 +159,6 @@ if [[ "$EVENT" == "Stop" && -n "$sid" ]]; then
         mkdir -p "$sdir"
         printf '{"t":%s,"awaiting":false}\n' "$now" >> "$sdir/$sid.jsonl"
     fi
-fi
-
-# Keep the timer-side watcher alive (scripts/romp-idle-dots): Claude fires NO
-# event while a session sits quiet, so nothing else would ever fade its ghostty
-# tab dot to ⚪ — and NO hook at all on an Esc-interrupt, so nothing else would
-# ever clear a stranded @claude-state=working (the watcher heals both). Ensured
-# on waiting/idle AND on UserPromptSubmit (once per typed prompt — a turn can
-# only get stuck after a prompt starts it) — never the high-frequency
-# PostToolUse path. The watcher self-exits once no romp session remains.
-if [[ "$state" == "waiting" || "$state" == "idle" || "$EVENT" == "UserPromptSubmit" ]]; then
-    command -v romp-idle-dots >/dev/null 2>&1 && romp-idle-dots --ensure >/dev/null 2>&1 || true
 fi
 
 # Store session state for dashboard + tab dot — single tmux invocation
