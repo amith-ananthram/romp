@@ -78,7 +78,7 @@ class Harness(unittest.TestCase):
         self.ck = self.td / "checkpoints"
         em.set_checkpoint_dir(lambda: self.ck)
         self.fresh()
-        em._ASM_CKPT_STATS.update(written=0, restored=0, fallbacks={}, skipped={}, hydratedBytes=0, hydratedAtoms=0)
+        em._ASM_CKPT_STATS.update(written=0, restored=0, fallbacks={}, skipped={}, hydratedBytes=0, hydratedAtoms=0, hydratedBy={})
 
     def tearDown(self):
         em.set_checkpoint_dir(None)
@@ -136,6 +136,18 @@ class Harness(unittest.TestCase):
         return max(em.parse_z(r.get("timestamp")) or 0 for r in records if r.get("timestamp")) + dt
 
 
+_KM = []
+
+
+def kernel_module():
+    """The kernel (and through it the judge, km.jd) loaded ONCE for this module: the judge module is one object for the
+    whole test process, so a second load_source of it re-executes it under every test that already holds it."""
+    if not _KM:
+        os.environ.setdefault("ROMP_KERNEL_NO_OPEN", "1")
+        _KM.append(load_source("romp_kernel_t323s4a", os.path.join(BIN, "romp-kernel")))
+    return _KM[0]
+
+
 class RestoredEqualsWhole(Harness):
     def test_every_compacting_golden_scenario_restores_identical(self):
         self.assertTrue(COMPACTING, "the golden set holds compaction scenarios")
@@ -161,6 +173,7 @@ class RestoredEqualsWhole(Harness):
         """Review find (F): only the three natively compacting scenarios were restored. Every single-file golden scenario
         gets a compaction appended, so its atoms (forks, rewinds, a /clear, absorbed attachments, skill atoms, command
         output, postal authors, eclipsed and broken chains) are the pre-cut part restored from a document."""
+        restored, skipped = [], {}
         for name in G.SINGLE_FILE:
             with self.subTest(scenario=name):
                 records, sent = G.SINGLE_FILE[name]
@@ -168,17 +181,22 @@ class RestoredEqualsWhole(Harness):
                 path = self.write("variant-" + name, recs, sent=sent)
                 whole = self.cold(path)
                 self.fresh(); self.parse(path)
+                em._ASM_CKPT_STATS["skipped"] = {}
                 wrote = em.asm_checkpoint_write(path, SID)
                 if not wrote:
-                    self.assertEqual(em.asm_checkpoint_stats()["skipped"], {"unsplittable": 1},
-                                     "the only reason not to write is an order the cut cannot split: %s" % em.asm_checkpoint_stats())
-                    em._ASM_CKPT_STATS["skipped"] = {}
+                    skipped[name] = dict(em.asm_checkpoint_stats()["skipped"])
                     continue
                 got, modes, n_lazy = self.restored(path)
                 self.assertEqual(modes, ["restore"], name)
                 self.assertGreater(n_lazy, 0)
                 self.assertEqual(got, whole, "restored and hydrated equals the whole parse: %s" % name)
                 self.assertEqual(em.asm_checkpoint_stats()["fallbacks"], {})
+                restored.append(name)
+        self.assertEqual(sorted(restored), ["author_kinds", "broken_chain_kept", "clear_breaks_lineage", "compaction_atom",
+                                            "compaction_broken_stitch", "eclipsed_branch_kept", "idle_atom", "manual_compact_detached",
+                                            "multi_input_absorbed", "popall", "queued_new_turn", "retry_superseded", "rewind_off_path",
+                                            "slash_command_turn"], "every single-file golden scenario, made to compact, writes and restores")
+        self.assertEqual(skipped, {}, "none is unsplittable")
 
     def test_a_two_file_lineage_made_to_compact_restores_identical(self):
         """The resume-lineage scenario (two files, a recorded resume fork) with a compaction in the leaf: the prior file is
@@ -333,14 +351,57 @@ class Fallbacks(Harness):
         _write_doc(path, dict(_doc(path), identity="0" * 40))
 
 
+class WriteValves(Harness):
+    def _whole(self, name="valve"):
+        records, sent = G.SINGLE_FILE["compaction_atom"]
+        path = self.write(name, records(), sent=sent)
+        self.fresh(); self.parse(path)
+        em._ASM_CKPT_STATS["skipped"] = {}
+        return path
+
+    def test_a_reconstruction_that_would_not_reproduce_the_ids_writes_nothing(self):
+        """Review find (E): the identity is the whole parse's; a document whose lazy reconstruction would not reproduce
+        it is not written, counted. Driven by answering the reconstruction's hash differently from the whole's."""
+        path = self._whole()
+        real, calls = em._pre_tree_identity, []
+        def identity(atoms, rompuuid):
+            calls.append(len(atoms))
+            h = real(atoms, rompuuid)
+            return h if len(calls) == 1 else "0" * len(h)          # the whole's hash, then a reconstruction that differs
+        em._pre_tree_identity = identity
+        try:
+            self.assertFalse(em.asm_checkpoint_write(path, SID))
+        finally:
+            em._pre_tree_identity = real
+        self.assertEqual(len(calls), 2, "the whole parse's tree and the reconstruction were both hashed")
+        self.assertEqual(em.asm_checkpoint_stats()["skipped"], {"reconstruction": 1})
+        self.assertFalse(em._asm_ckpt_file(path).exists(), "no document")
+        self.assertEqual(em.asm_checkpoint_stats()["skipped"], {"reconstruction": 1})
+        em._ASM_CKPT_STATS["skipped"] = {}
+        self.assertFalse(em.asm_checkpoint_write(path, SID), "the failure is memoized for this entry and cut")
+        self.assertEqual(em.asm_checkpoint_stats()["skipped"], {"reconstruction": 1}, "counted again, nothing rebuilt")
+        self.assertEqual(em._ASM_CACHE[next(iter(em._ASM_CACHE))].get("docSkip", (None, None))[1], "reconstruction")
+
+    def test_a_whole_entry_writes_its_document_once(self):
+        """Review find (H): a fold appends after the cut and changes nothing before it, so the settles after the first
+        write skip the build (`written`), until the entry is replaced."""
+        path = self._whole("once")
+        self.assertTrue(em.asm_checkpoint_write(path, SID))
+        st = em._asm_ckpt_file(path).stat()
+        self.assertFalse(em.asm_checkpoint_write(path, SID))
+        self.assertEqual(em.asm_checkpoint_stats()["skipped"], {"written": 1})
+        self.assertEqual(em._asm_ckpt_file(path).stat().st_mtime_ns, st.st_mtime_ns, "the document was not rewritten")
+        em._asm_ckpt_file(path).unlink()
+        self.assertTrue(em.asm_checkpoint_write(path, SID), "a missing document is written again from the same entry")
+
+
 class KernelOverRestored(Harness):
     """The kernel's and the judges' body readers over a restored tree: every consumer the audit named hydrates what it
     reads, so the same answers come from the restored tree as from the whole parse, with no LazyBodyRead."""
 
     @classmethod
     def setUpClass(cls):
-        os.environ.setdefault("ROMP_KERNEL_NO_OPEN", "1")
-        cls.km = load_source("romp_kernel_t323s4a", os.path.join(BIN, "romp-kernel"))
+        cls.km = kernel_module()
         cls.jd = cls.km.jd
 
     def answers(self, tree):
@@ -421,7 +482,7 @@ class ClearedSessionDocument(Harness):
         """Review find (B): the one-file walk asked for the leaf's document with the leaf alone as its inputs, so a
         /cleared session's document (its inputs name the anchor too) counted an inputs fallback and was unlinked on
         every reconcile pass. The walk asks quietly and the document stands."""
-        jd = load_source("romp_judge", os.path.join(BIN, "romp-judge"))
+        jd = kernel_module().jd                                # the judge through the module's one kernel load
         d = self.td / "cleared"; d.mkdir()
         anchor = d / (SID + ".jsonl")
         leaf_sid = "77777777-2222-4333-8444-000000000777"
@@ -434,8 +495,13 @@ class ClearedSessionDocument(Harness):
         em.parse_session(str(leaf), rompuuid=SID, candidate_files=cands, states=None, postal_log=[], now=NOW)
         self.assertTrue(em.asm_checkpoint_write(str(leaf), SID), em.asm_checkpoint_stats())
         em._ASM_CKPT_STATS["fallbacks"] = {}
-        rewound = em.file_rewound(leaf, rompuuid=SID, sdk_human=False)
-        self.assertIsInstance(rewound, set)
+        saved = jd._sdk_owned
+        jd._sdk_owned = lambda fsid: False
+        try:
+            rewound, fails = jd._per_file_rewound(SID, cands)     # the judges' walk itself, over the leaf and the anchor
+        finally:
+            jd._sdk_owned = saved
+        self.assertIsInstance(rewound, set); self.assertEqual(fails, 0)
         self.assertEqual(em.asm_checkpoint_stats()["fallbacks"], {}, "a quiet ask: no fallback counted")
         self.assertTrue(em._asm_ckpt_file(str(leaf)).exists(), "the display's document stands")
         self.fresh(); modes = []

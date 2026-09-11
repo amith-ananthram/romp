@@ -653,7 +653,22 @@ def read_bytes_report():
 _CKPT_V = 1
 _CKPT_DIR_FN = None               # () -> Path of the checkpoint directory; None = checkpoints off
 _CKPT_STATS = {"restored": 0, "writes": 0, "swept": 0, "skippedFolds": 0, "fallbacks": {}, "restoredFolds": {}, "droppedRestores": 0,
-               "oversizeFolds": {}}
+               "oversizeFolds": {}, "coldFolds": {}}
+_COLD = object()                  # a restored cursor with no state (its fold was oversize): fold_records inits it and steps the tail
+_SAID = set()
+
+
+def _say_once(line):
+    """One stderr line per distinct text for the process (a skip that recurs at every settle is said the first time)."""
+    if line in _SAID:
+        return
+    _SAID.add(line)
+    try:
+        sys.stderr.write(line + "\n")
+    except Exception:
+        pass
+
+
 _CKPT_FOLD_CAP = 64 * 1024        # bytes of encoded state a fold may put in a checkpoint. A state that grows with its file (the postal
 #                                   log fold's map of every sent row, the state intervals' list of every transition, the every-task
 #                                   background view on a long transcript) would make the document a second copy of the file: reading
@@ -677,6 +692,14 @@ def _next_gen():
         _GEN[0] += 1
         return _GEN[0]
 _FOLD_NAME_OF = {}                # id(cursor dict) -> checkpoint name, for callers that name their cache once (name_fold_cache)
+
+
+def entry_whole_resident(path):
+    """True when the reader holds `path`'s WHOLE file in memory (an entry read from byte zero): a fold over it costs
+    no read. False for a tail entry or none."""
+    with _JSONL_CACHE_LOCK:
+        ent = _JSONL_CACHE.get(str(path))
+    return ent is not None and ent[5] == 0
 
 
 def name_fold_cache(cache, name):
@@ -886,6 +909,12 @@ def _restored_cursor(key, name, ent):
             return None
         if count != pend["count"] or count < base or count > base + len(ent[4]):
             return None
+        if "state" not in f:                              # an oversize fold's cursor: the fold starts cold at the cut
+            with _CKPT_LOCK:
+                _CKPT_STATS["coldFolds"][name] = _CKPT_STATS["coldFolds"].get(name, 0) + 1
+            _say_once("checkpoint: fold %s of %s restarts cold over the tail (its state was over the %d KB cap)"
+                      % (name, key, _CKPT_FOLD_CAP // 1024))
+            return (count, ent[6], _COLD)
         state = _ckpt_decode(f["state"])
         with _CKPT_LOCK:
             _CKPT_STATS["restoredFolds"][name] = _CKPT_STATS["restoredFolds"].get(name, 0) + 1
@@ -917,7 +946,8 @@ def checkpoint_write(path, force=False):
             if len(json.dumps(enc, separators=(",", ":"))) > _CKPT_FOLD_CAP:
                 with _CKPT_LOCK:                          # a state the size of its file: the document must not become the file
                     _CKPT_STATS["oversizeFolds"][name] = _CKPT_STATS["oversizeFolds"].get(name, 0) + 1
-                continue
+                folds[name] = {"count": count}            # the cursor without its state: the next process starts this fold
+                continue                                  #  cold over the tail instead of reading the file whole (counted)
             folds[name] = {"count": count, "state": enc}
         except TypeError:
             with _CKPT_LOCK:
@@ -996,7 +1026,7 @@ def checkpoint_sweep():
 def checkpoint_stats():
     with _CKPT_LOCK:
         out = dict(_CKPT_STATS); out["fallbacks"] = dict(_CKPT_STATS["fallbacks"]); out["restoredFolds"] = dict(_CKPT_STATS["restoredFolds"])
-        out["oversizeFolds"] = dict(_CKPT_STATS["oversizeFolds"])
+        out["oversizeFolds"] = dict(_CKPT_STATS["oversizeFolds"]); out["coldFolds"] = dict(_CKPT_STATS["coldFolds"])
     d = _ckpt_dir()
     with _READ_BYTES_LOCK:
         out["documentBytes"] = sum(n for p_, n in _READ_BYTES.items() if d is not None and p_.startswith(str(d) + os.sep))
@@ -1268,6 +1298,8 @@ def fold_records(cache, path, init, step, on=None, ckpt=None):
         hit = _restored_cursor(key, ckpt, ent)
         if hit is not None:
             kind = "restore"
+            if hit[2] is _COLD:                           # the cursor without its state: the fold starts at the entry's
+                hit = (base, hit[1], init()); kind = "cold"   #  base and steps the tail it holds
     if hit is not None:
         n0, g0, state0 = hit
         if g0 == gen and n0 == total:
@@ -3312,10 +3344,10 @@ SEAM_PROSE_FLOOR = 80                     # tail "real work" = a tool_use atom o
 
 
 def _seam_real_work(atoms):
-    hydrate(atoms)                                            # bodies before the assembly cut: read on demand (T323 stage 4a)
     """True if `atoms` hold REAL work — any assistant tool_use, or assistant prose ≥ SEAM_PROSE_FLOOR
     chars (above connective stubs). The event condition that gates a seam split: post-settle wrap-up
     chatter never mints a noise segment."""
+    hydrate(atoms)                                            # bodies before the assembly cut: read on demand (T323 stage 4a)
     for a in atoms:
         if a.get("type") != "assistant":
             continue
@@ -3800,9 +3832,10 @@ def _asm_fold(entry, delta, leaf_recs, leaf_key, leaf_stem, rompuuid, postal_ind
 # ids and atom uuids. Bodies come back on demand (hydrate). Anything that does not verify is a counted fallback to a
 # whole parse; a compaction landing after the document demotes the tail fold to a whole parse exactly as before, and
 # the next settle writes a new document with the new cut.
-_ASM_CKPT_V = 1
+_ASM_CKPT_V = 2                       # 2: atom rows carry their record's [offset, len]; nt is written for every atom
 _ASM_CKPT_CAP = 16 * 1024 * 1024   # a document past this is not written (counted): that session parses whole as today
-_ASM_CKPT_STATS = {"written": 0, "restored": 0, "fallbacks": {}, "skipped": {}, "hydratedBytes": 0, "hydratedAtoms": 0}
+_ASM_CKPT_STATS = {"written": 0, "restored": 0, "fallbacks": {}, "skipped": {}, "hydratedBytes": 0, "hydratedAtoms": 0,
+                   "hydratedBy": {}}     # bytes per calling function: a whole-tree hydration anywhere shows here
 _ASM_CKPT_LOCK = threading.Lock()
 _ASM_CKPT_SAID = set()             # (path, reason) said once per process
 _LAZY_FILES = {}                   # rompuuid -> {fsid: path}: where hydrate finds a lazy atom's record
@@ -3848,6 +3881,7 @@ def _asm_ckpt_skip(reason):
 def asm_checkpoint_stats():
     with _ASM_CKPT_LOCK:
         out = dict(_ASM_CKPT_STATS); out["fallbacks"] = dict(out["fallbacks"]); out["skipped"] = dict(out["skipped"])
+        out["hydratedBy"] = dict(out["hydratedBy"])
     return out
 
 
@@ -3940,6 +3974,14 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
         verdicts = ad.chain_verdicts(active)
         turns = segment_turns([dict(a) for a in atoms], rompuuid)
         last_b = max(bounds, key=lambda a: (a["t"], a.get("_seq", 0)))
+        memo = entry.get("docSkip")
+        if memo is not None and memo[0] == last_b["uuid"]:
+            return _asm_ckpt_skip(memo[1])               # this cut already failed to write: nothing rebuilt until it moves
+
+        def skip(reason):
+            entry["docSkip"] = (last_b["uuid"], reason)   # memoized like a success (docWritten); re-armed when the cut moves
+            _say_once("assembly checkpoint: %s not written: %s (said once until its cut moves)" % (leaf_path, reason))
+            return _asm_ckpt_skip(reason)
         bi = next(i for i, t in enumerate(turns) if any(a.get("uuid") == last_b["uuid"] for a in t["atoms"]))
         if last_b["uuid"] in ad._adopted and bi > 0:
             bi -= 1                                       # an adopted manual compact: its /compact episode is the turn before
@@ -3960,7 +4002,7 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
             cut_seq = cand
             break
         if cut_seq is None or cut_seq <= 1:
-            return _asm_ckpt_skip("unsplittable")
+            return skip("unsplittable")
         # the files: each one's records before the cut, its witness, and where the tail read starts
         first_seq, n = {}, 0
         for fp, recs in ad._src.items():
@@ -3973,11 +4015,11 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
             try:
                 st_ = os.stat(fp)
             except OSError:
-                return _asm_ckpt_skip("stat")
+                return skip("stat")
             pre_n = max(0, min(len(recs), cut_seq - first_seq[fp]))   # records of this file before the cut
             offs = record_offsets(fp, 0)
             if offs is None or len(offs) != len(recs):
-                return _asm_ckpt_skip("offsets")
+                return skip("offsets")
             file_offs[fp] = offs
             pre_uuids = [r.get("uuid") for r in recs[:pre_n] if r.get("uuid")]
             f = {"path": fp, "size": st_.st_size, "mtime": st_.st_mtime, "pre": pre_n, "n": len(recs),
@@ -3991,7 +4033,7 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
                         fh.seek(max(0, cut_off - _JSONL_TAIL_GUARD))
                         guard = fh.read(cut_off - max(0, cut_off - _JSONL_TAIL_GUARD))
                 except OSError:
-                    return _asm_ckpt_skip("stat")
+                    return skip("stat")
                 f["cut"] = [cut_off, pre_n, guard.hex()]
             files[fsid] = f
         # the pre-cut records: identity, verdict, type, order, time, file, landed
@@ -4080,7 +4122,7 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
         identity = _pre_tree_identity(pre_whole, rompuuid)     # the WHOLE parse's ids over the pre-cut atoms (bodies in hand)
         pre_lazy = _restore_prefix_atoms(pre_atoms, rompuuid, rows, fsids)
         if _pre_tree_identity(pre_lazy, rompuuid) != identity:
-            return _asm_ckpt_skip("reconstruction")            # the lazy reconstruction would not reproduce the whole parse's ids
+            return skip("reconstruction")            # the lazy reconstruction would not reproduce the whole parse's ids
         doc = {"av": _ASM_CKPT_V, "path": os.path.realpath(str(leaf_path)), "rompuuid": str(rompuuid), "sdkHuman": bool(sdk_human),
                "cands": list(entry["cands"]), "links": dict(entry["links"]), "files": files, "fsids": fsids, "cutSeq": cut_seq,
                "records": rows, "atoms": pre_atoms, "spine": spine, "seqTs": seq_ts, "lastTs": last_ts,
@@ -4091,10 +4133,10 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
         try:
             text = json.dumps(doc, separators=(",", ":"))
         except TypeError:
-            return _asm_ckpt_skip("unencodable")
+            return skip("unencodable")
         data = gzip.compress(text.encode("utf-8"), compresslevel=6)   # identities and hashes compress about five to one; the
         if len(data) > _ASM_CKPT_CAP:                                  #  bytes a boot reads are the compressed ones
-            return _asm_ckpt_skip("oversize")
+            return skip("oversize")
         try:
             cp.parent.mkdir(parents=True, exist_ok=True)
             tmp = cp.with_name("%s.%d.%x.tmp" % (cp.name, os.getpid(), threading.get_ident()))
@@ -4105,7 +4147,7 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False):
             mtmp.write_text(json.dumps({"av": _ASM_CKPT_V, "path": doc["path"]}))
             os.replace(mtmp, meta)
         except OSError:
-            return _asm_ckpt_skip("write")
+            return skip("write")
         entry["docWritten"] = True
         with _ASM_CKPT_LOCK:
             _ASM_CKPT_STATS["written"] += 1
@@ -4339,16 +4381,22 @@ def _hydrate_one(a, rec):
     a.pop("lazy", None)
 
 
-def hydrate(atoms, rompuuid=None):
+def hydrate(atoms, rompuuid=None, by=None):
     """Fill the bodies of the lazy atoms among `atoms` (a list, a turn's atoms, a whole session's turns) from their
     records on disk, one open per file and one seek-read per atom, through a byte-capped memo; returns how many
     atoms were filled. Every consumer that reads a pre-cut atom's message, toolUseResult or skillMd calls this first
-    (a read without it raises LazyBodyRead). `rompuuid` names the session when the atoms carry none."""
+    (a read without it raises LazyBodyRead). `rompuuid` names the session when the atoms carry none. The bytes read
+    are counted per caller (`by`, else the calling function's name) under asmCheckpoint.hydratedBy."""
     if isinstance(atoms, dict):
         atoms = [a for t in atoms.get("turns", []) for a in t["atoms"]]
     lazy = [a for a in atoms if isinstance(a, dict) and a.get("lazy") is not None]
     if not lazy:
         return 0
+    if by is None:
+        try:
+            by = sys._getframe(1).f_code.co_name
+        except Exception:
+            by = "?"
     filled, by_file = 0, {}
     for a in lazy:
         u = a.get("uuid")
@@ -4379,6 +4427,7 @@ def hydrate(atoms, rompuuid=None):
                     raise LazyBodyRead("atom %s: the record at its offset is %s" % (a.get("uuid"), rec.get("uuid")))
                 with _ASM_CKPT_LOCK:
                     _ASM_CKPT_STATS["hydratedBytes"] += ln; _ASM_CKPT_STATS["hydratedAtoms"] += 1
+                    _ASM_CKPT_STATS["hydratedBy"][by] = _ASM_CKPT_STATS["hydratedBy"].get(by, 0) + ln
                     if a.get("uuid"):
                         _HYDRATED[a["uuid"]] = (rec, ln); _HYDRATED_BYTES[0] += ln
                         while _HYDRATED_BYTES[0] > _HYDRATED_CAP and _HYDRATED:
@@ -4602,6 +4651,42 @@ def task_store_plan(fsid):
     return items
 
 
+def plan_atoms(session):
+    """The atoms declared_plan reads bodies from: assistant atoms calling TaskCreate or TaskUpdate and the user atoms
+    carrying those calls' results. A lazy atom answers from its scalars (tu = [[id, name]], tr = [tool_use_id]), a
+    hydrated one from its blocks, so the list costs no read; hydrating it reads nothing for a session that declared
+    no plan (the planner asks every pass for every session with no task store: the whole prefix a pass would
+    otherwise seek-read, T323 stage 4a review)."""
+    out, ids = [], set()
+    for turn in session.get("turns", []):
+        for a in turn["atoms"]:
+            if a.get("type") != "assistant":
+                continue
+            lz = a.get("lazy")
+            if lz is not None:
+                calls = [(i, nm) for i, nm in (lz.get("tu") or [])]
+            else:
+                calls = [(b.get("id"), b.get("name")) for b in _content(a.get("message"))
+                         if isinstance(b, dict) and b.get("type") == "tool_use"]
+            mine = [i for i, nm in calls if nm in ("TaskCreate", "TaskUpdate")]
+            if mine:
+                out.append(a); ids.update(mine)
+    if not ids:
+        return out
+    for turn in session.get("turns", []):
+        for a in turn["atoms"]:
+            if a.get("type") != "user":
+                continue
+            lz = a.get("lazy")
+            if lz is not None:
+                got = lz.get("tr") or []
+            else:
+                got = [b.get("tool_use_id") for b in _content(a.get("message")) if isinstance(b, dict) and b.get("type") == "tool_result"]
+            if ids.intersection(got):
+                out.append(a)
+    return out
+
+
 def declared_plan(session):
     """The agent's OWN to-do list (Claude Code's Task tool) folded into ordered items
     [{key, text, activeForm, status}] — the FALLBACK behind task_store_plan for a session with no
@@ -4614,11 +4699,12 @@ def declared_plan(session):
     result text (a creation-order `cN` fallback if the result is unreadable); `status` rides each
     TaskUpdate. Only TaskCreate/TaskUpdate are folded — plain TodoWrite (no durable ids) is not
     used by romp. Empty list if the session declared no plan."""
-    hydrate(session)                                          # bodies before the assembly cut: read on demand (T323 stage 4a)
+    sel = plan_atoms(session)                              # the task calls and their results, in turn order per type
+    hydrate(sel, by="declared_plan")                       # only those bodies: nothing read for a session with no plan
     results = {}                                           # tool_use_id → result content (a TaskCreate's carries 'Task #N')
     rejected = set()                                       # tool_use_ids whose result came back is_error
-    for turn in session["turns"]:
-        for a in turn["atoms"]:
+    for a in sel:
+        if True:
             if a.get("type") != "user":
                 continue
             for b in (a.get("message") or {}).get("content", []) or []:
@@ -4627,8 +4713,8 @@ def declared_plan(session):
                     if b.get("is_error"):
                         rejected.add(b["tool_use_id"])
     tasks, order = {}, 0
-    for turn in session["turns"]:
-        for a in turn["atoms"]:
+    for a in sel:
+        if True:
             if a.get("type") != "assistant":
                 continue
             for b in (a.get("message") or {}).get("content", []) or []:

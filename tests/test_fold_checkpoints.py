@@ -356,23 +356,32 @@ class GenericFold(Base):
                 read = em.read_bytes_report()[self.p]
                 self.assertLessEqual(read, size + 4 * 64, "the file's content was read once, whichever thread went first (%d bytes for a %d-byte file)" % (read, size))
 
-    def test_a_fold_whose_state_is_the_size_of_its_file_is_left_out_of_the_document(self):
-        """Review find (2026-09-11): a checkpoint carried every fold's state, and a state that grows with its file (the postal
+    def test_a_fold_whose_state_is_the_size_of_its_file_keeps_its_cursor_and_restarts_cold_over_the_tail(self):
+        """Review finds (2026-09-11): a checkpoint carried every fold's state, and a state that grows with its file (the postal
         fold's map of every sent row) made the document a second copy of the file, read at every boot. A fold's encoded
-        state past the cap is left out, counted per name, and cold-folds; the bounded folds beside it restore."""
+        state past the cap is left out, counted per name; its CURSOR stays, so the next process starts that fold cold at the
+        cut and steps the tail only (counted under coldFolds, said once) instead of reading the file whole at every restart;
+        the bounded folds beside it restore whole."""
         _write(self.p, [{"n": i, "pad": "x" * 400} for i in range(400)])           # ~170 KB of records
         big = {}
         self.fold()                                                               # "t": a list of 400 ints, small
         em.fold_records(big, self.p, list, lambda st, o: st + [o], ckpt="big")    # "big": every record whole, over the cap
         self.assertTrue(em.checkpoint_write(self.p))
         d = self.doc(self.p)
-        self.assertEqual(sorted(d["folds"]), ["t"], "the oversize fold is not in the document")
+        self.assertEqual(sorted(d["folds"]), ["big", "t"], "the oversize fold's cursor is in the document")
+        self.assertEqual(d["folds"]["big"], {"count": 400}, "without its state")
         self.assertLess(em._ckpt_file(self.p).stat().st_size, em._CKPT_FOLD_CAP, "and the document stays small")
         self.assertEqual(em.checkpoint_stats()["oversizeFolds"], {"big": 1})
         self.fresh_process(); big.clear()
         self.assertEqual(self.fold(), list(range(400))); self.assertEqual(self.kinds[-1], "restore")
+        size = os.path.getsize(self.p)
         got = em.fold_records(big, self.p, self.__class__._noop_init, lambda st, o: st + [o], on=self.kinds.append, ckpt="big")
-        self.assertEqual(len(got), 400); self.assertEqual(self.kinds[-1], "refold", "the oversize fold cold-folds over the whole file")
+        self.assertEqual(got, []); self.assertEqual(self.kinds[-1], "cold", "the oversize fold starts cold at the cut: an empty tail")
+        self.assertEqual(em.checkpoint_stats()["coldFolds"], {"big": 1})
+        self.assertLess(em.read_bytes_report().get(self.p, 0), size / 2, "the file was not read whole")
+        _append(self.p, {"n": 400})
+        got = em.fold_records(big, self.p, self.__class__._noop_init, lambda st, o: st + [o], on=self.kinds.append, ckpt="big")
+        self.assertEqual(got, [{"n": 400}], "and steps the records appended since"); self.assertEqual(self.kinds[-1], "append")
 
     @staticmethod
     def _noop_init():
@@ -607,12 +616,19 @@ class KernelFolds(Base):
             km._sessions, km._turn_end_key = saved_sessions, saved_turn
         self.assertEqual(sorted(self.doc(self.leaf)["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgRunning", "sessionMeta"],
                          "the leaf's document holds every leaf fold, the judges' pairing included")
+        self.fresh_process()
+        km._session_meta(self.leaf)                               # a restored TAIL entry: priming would read the file whole
+        self.assertFalse(em.entry_whole_resident(self.leaf))
+        size = os.path.getsize(self.leaf)
+        self.assertFalse(km._prime_leaf_folds(self.leaf), "a tail entry is not primed")
+        self.assertLess(em.read_bytes_report().get(self.leaf, 0), size / 2, "and the leaf was not read whole")
+        self.assertFalse(km._prime_leaf_folds(str(self.leaf) + ".absent"), "no entry: nothing read")
         src = open(os.path.join(BIN, "romp-kernel")).read()
         self.assertIn("_prime_leaf_folds(_s[\"path\"])", src, "the exit drain primes every session's leaf before its write")
 
     def test_perf_carries_the_checkpoint_counters_and_the_kernel_wires_the_three_events(self):
         snap = km._PERF_STATS.snapshot()
-        self.assertEqual(sorted(snap["checkpoints"]), ["dirty", "documentBytes", "droppedRestores", "fallbacks", "oversizeFolds", "readByPath",
+        self.assertEqual(sorted(snap["checkpoints"]), ["coldFolds", "dirty", "documentBytes", "droppedRestores", "fallbacks", "oversizeFolds", "readByPath",
                                                         "readBytes", "restored", "restoredFolds", "skippedFolds", "swept", "writes"])
         src = open(os.path.join(BIN, "romp-kernel")).read()
         self.assertIn("em.checkpoint_write_dirty()       # every fold checkpoint that moved since its last write", src,

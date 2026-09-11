@@ -1424,9 +1424,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
 - `asmCheckpoint`: the assembly documents since boot: `written`, `restored`,
   `fallbacks` per reason (`version`, `session`, `inputs`, `lineage`, `shrunk`,
   `rewrite`, `guard`, `identity`, `corrupt`, `restore`), `skipped` per reason
-  (`noEntry`, `restored`, `noBoundary`, `unsplittable`, `oversize`, `offsets`,
-  `stat`, `write`), `hydratedAtoms` and `hydratedBytes` (bodies read on
-  demand for atoms before a cut).
+  (`noEntry`, `restored`, `written`, `noBoundary`, `unsplittable`,
+  `reconstruction`, `oversize`, `unencodable`, `offsets`, `stat`, `write`),
+  `hydratedAtoms` and `hydratedBytes` (bodies read on demand for atoms before
+  a cut) and `hydratedBy` (those bytes per calling function).
 - `parses`: the cold event-model parses through the one parse store the
   kernel and the judges share: `total` (every miss, whoever asked), `kernel`
   (the display's asks among them, with `bytes`, the parsed files' sizes, and

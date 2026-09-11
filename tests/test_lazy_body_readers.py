@@ -37,6 +37,7 @@ EVENT_MODEL_ALLOWED = {
     "_turn_id", "segment_turns", "_finalize_turn", "_segment_id", "segments", "_seam_real_work", "split_segment",
     "_text_hash8", "_stop_reason", "_has_text", "_machine_written", "_lazy_of", "_atom_kind", "_atom_scalars", "_hydrate_one",
     "hydrate", "is_lazy", "atom_tool_uses", "atom_tool_results", "atom_model", "asm_checkpoint_write", "declared_plan",
+    "plan_atoms",                                       # reads blocks only of atoms with no lazy marker; a lazy one answers from tu/tr
     "_pre_tree_identity", "_restore_prefix_atoms", "_asm_heal", "_asm_full", "_asm_fold", "_asm_restore",
     # record-level helpers over jsonl rows and postal/state rows
     "_norm_message", "_content", "_text_of", "author_of", "_record_origin", "_is_tool_result", "_scan_bg_tasks", "_bg_step",

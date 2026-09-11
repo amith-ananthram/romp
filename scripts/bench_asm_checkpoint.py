@@ -203,9 +203,9 @@ def draw(rows, out):
             sys.stderr.write("figure: every run of %r errored; the label is left out\n" % label); continue
         xs = [r["worldBytes"] / 1e6 for r in rs]
         ax.line(xs, [r["second"]["total"] / 1e6 for r in rs], label=label, color=cols[i % len(cols)], marker="o")
-        ax2.line(xs, [r["second"]["rssDelta"] / 1e6 for r in rs], label=label, color=cols[i % len(cols)], marker="o")
+        ax2.line([r["sizes"]["leaf"] / 1e6 for r in rs], [r["second"]["rssDelta"] / 1e6 for r in rs], label=label, color=cols[i % len(cols)], marker="o")
     ax.clean(xlabel="Files on disk (MB)", ylabel="Bytes a restarted kernel reads (MB)")
-    ax2.clean(xlabel="Same worlds (MB)", ylabel="Resident size the parses\nand folds add (MB)")
+    ax2.clean(xlabel="Leaf transcripts on disk (MB)", ylabel="Resident size the parses\nand folds add (MB)")
     ax.set_xlim(0, None); ax.set_ylim(0, None); ax2.set_xlim(0, None); ax2.set_ylim(0, None)
     # the slope, stated on the figure: resident bytes added per byte of leaf transcript, per tree (a fit through the origin)
     for i, label in enumerate(labels):
@@ -213,7 +213,8 @@ def draw(rows, out):
         if len(rs) >= 2:
             xs = [r["sizes"]["leaf"] for r in rs]; ys = [r["second"]["rssDelta"] for r in rs]
             slope = sum(x * y for x, y in zip(xs, ys)) / sum(x * x for x in xs)
-            ax2.text(xs[-1] / 1e6 * 1.03, ys[-1] / 1e6, "%.2f MB resident\nper MB of leaf" % slope, fontsize=8, va="center", color=cols[i % len(cols)])
+            ax2.text(xs[-1] / 1e6 * 0.97, ys[-1] / 1e6, "%.2f MB resident\nper MB of leaf" % slope, fontsize=8, ha="right",
+                     va="bottom" if i == 0 else "top", color=cols[i % len(cols)])
     newest = labels[-1]
     rs = sorted([r for r in rows if r["label"] == newest and not r.get("error")], key=lambda r: r["worldBytes"])
     names = {"leaf": "leaf transcripts", "agent": "agent files (stage 5)", "postal": "postal log", "states": "states logs", "checkpoint": "documents"}
@@ -258,7 +259,7 @@ def main(argv=None):
                 row = measure(os.path.abspath(tree), a.sessions, a.base_turns * s)
             except Exception as e:
                 row = {"error": str(e)[-600:], "worldBytes": 0}
-            row.update(label=label, size=s, tree=os.path.abspath(tree))
+            row.update(label=label, size=s)                    # the tree is named by its label only (no path in the record)
             rows.append(row); sys.stdout.write(json.dumps(row) + "\n"); sys.stdout.flush()
     with open(os.path.join(a.out, "bench.json"), "w") as f:
         json.dump({"rows": rows}, f, indent=1)

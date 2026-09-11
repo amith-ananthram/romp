@@ -9095,13 +9095,19 @@ def _prime_leaf_folds(leaf):
     cursor for the next process: without one, that fold's first run after the restart reads the file whole (measured
     in the served test: the judges' background-task fold upgraded a restored tail entry to the whole leaf, 3.8 MB).
     Over the resident whole entry a first fold costs its step over the records and no read; a current cursor costs a
-    stat. The leaf's folds: the kernel's two background-task views, the judges' pairing, the session meta and the
-    agent launch state (the agent files' and the logs' folds are their own callers'). Best-effort per fold."""
+    stat. Only a leaf whose WHOLE entry is resident is primed: over a tail entry (a restored one, or a fold's own) a
+    fold with no cursor would read the file whole, and a leaf this process never read would be read from disk, so
+    those are left to their callers. The leaf's folds: the kernel's two background-task views, the judges' pairing,
+    the session meta and the agent launch state (the agent files' and the logs' folds are their own callers').
+    Best-effort per fold; True when the leaf was primed."""
+    if not em.entry_whole_resident(leaf):
+        return False                          # a tail entry or no entry: a fold with no cursor would read the file whole
     for fn in (_bg_scan_cached, _bg_scan_all_cached, jd._bg_scan, _session_meta, _agent_launch_state):
         try:
             fn(leaf)
         except Exception:
             pass
+    return True
 
 
 def _persist_checkpoints(now):
@@ -56200,8 +56206,13 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
         _drain_sessions = [_s for _s in _sessions(time.time()) if _s.get("sid") and _s.get("path")]
     except Exception:
         _drain_sessions = []
-    for _s in _drain_sessions:            # every leaf fold current, so each leaves a cursor for the next kernel
-        _prime_leaf_folds(_s["path"])
+    _prime_t0, _primed, _skipped = time.monotonic(), 0, 0
+    for _s in _drain_sessions:            # every RESIDENT leaf's folds current, so each leaves a cursor for the next kernel;
+        if time.monotonic() - _prime_t0 > 1.0:   # bounded: the SDK drain keeps its 2 s under the manager's 5 s grace
+            _skipped += 1; continue
+        _primed += 1 if _prime_leaf_folds(_s["path"]) else 0
+    if _skipped:
+        _exit_log("romp-kernel: drain primed %d leaves' folds, %d sessions left to their checkpoints (1 s budget)\n" % (_primed, _skipped))
     try:
         em.checkpoint_write_dirty()       # every fold checkpoint that moved since its last write (T323 stage 3)
     except Exception:

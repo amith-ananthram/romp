@@ -34,7 +34,7 @@ WEB = "aaaaaaaa-4444-4222-8333-444444444444"
 WORDS = ("fixture", "suite", "backoff", "jitter", "cap", "retry", "review", "branch", "merge", "green", "README", "wire")
 
 
-def transcript(t0, turns=2000, compact_every=150):
+def transcript(t0, turns=4000, compact_every=150):
     import random
     rnd = random.Random(4)
     recs, parent, t = [], None, t0
@@ -188,9 +188,29 @@ class RestartOverACheckpointedSession(unittest.TestCase):
             self.assertLess(leaf_read - asm["hydratedBytes"], size / 4, "without the frame's hydration the leaf cost its tail and guards only: "
                                                                         "%d read, %d hydrated, %d whole" % (leaf_read, asm["hydratedBytes"], size))
             self.assertGreater(len(frame.get("events") or []), 0, "the frame carries events")
-            self.assertLess(dt2, 30.0, "the first frame of the restored kernel came in %.1fs: hydration seeks to each record's offset; a scan "
-                                       "from byte zero per atom would take minutes on this %d-record fixture" % (dt2, sum(1 for _ in open(self.leaf))))
-            self.assertEqual(asm["hydratedAtoms"], asm["hydratedAtoms"])   # hydration is counted (a read per atom, at its offset)
+            self.assertLess(dt2, 10.0, "the first frame of the restored kernel came in %.1fs: hydration seeks to each record's offset; a scan "
+                                       "from byte zero per atom measured 5.5 s on a 2000-turn fixture and grows with its square, so it "
+                                       "would take over 20 s on this %d-record one" % (dt2, sum(1 for _ in open(self.leaf))))
+            n_lazy = sum(1 for row in doc["atoms"] if row.get("lz") is not None)   # the atoms with a body to read (not a boundary)
+            self.assertGreater(asm["hydratedAtoms"], 0, "the frame hydrated the pre-cut atoms it rendered")
+            self.assertEqual(asm["hydratedAtoms"], n_lazy, "each pre-cut atom with a body read once, at its offset, whoever asked first: %s"
+                             % asm["hydratedBy"])
+            for _ in range(120):                                       # the judges' first pass over the restored session
+                perf = self._get(p2, "/perf")
+                if (perf.get("judge") or {}).get("passes", 0) >= 1:
+                    break
+                time.sleep(0.5)
+            else:
+                self.fail("no judges' pass within 60 s: %s" % perf.get("judge"))
+            asm = perf["asmCheckpoint"]
+            self.assertNotIn("declared_plan", asm["hydratedBy"], "a session with no task store and no plan hydrates nothing for the "
+                                                                    "planner's declared-plan fold: %s" % asm["hydratedBy"])
+            self.assertEqual(asm["hydratedAtoms"], n_lazy, "the judges' pass re-read no body: the memo served what the frame had read; "
+                                                           "by caller %s" % asm["hydratedBy"])
+            by = perf["checkpoints"]["readByPath"]
+            leaf_read = by.get(os.path.realpath(self.leaf), by.get(self.leaf, 0))
+            self.assertLessEqual(leaf_read, size + 8 * 64, "the judges' pass added no whole read: %d of %d bytes; hydration by caller %s; %s"
+                                 % (leaf_read, size, asm["hydratedBy"], self._leaf_trace(log2)))
             log = open(log2).read()
             self.assertNotIn("LazyBodyRead", log, "no consumer read a body before hydrating")
             self.assertNotIn("assembly checkpoint fallback", log)
