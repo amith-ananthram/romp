@@ -114,9 +114,16 @@ class Proto2Wire(A.RestartOverACheckpointedSession):
             anchor = whole2[5]["uuid"]
             c4, f4, _ = self._open(p2, 2)
             self.assertNotIn(anchor, {e["uuid"] for e in f4["events"]})
+            t_win = time.time()
             c4.send({"type": "loadAround", "id": WEB, "uuid": anchor})
             w = self._reply(c4, "chatWindow")
+            dt_win = time.time() - t_win                   # the user's click on a summary far in the past: one round trip
+            self.assertLess(dt_win, 5.0, "a deep anchor's window landed in %.2fs" % dt_win)
             self.assertEqual(w["anchor"], anchor); self.assertIn(anchor, [e["uuid"] for e in w["events"]])
+            t_win2 = time.time()
+            c4.send({"type": "loadAround", "id": WEB, "uuid": anchor})
+            self._reply(c4, "chatWindow")
+            dt_win2 = time.time() - t_win2                 # the same window again: the pages cache serves it
             self.assertEqual(w["moreBefore"], False); self.assertTrue(w["moreAfter"])
             # forward to the live tail through loadNewer: re-attached
             held, steps = self._walk_newer(c4, list(w["events"]))
@@ -167,8 +174,8 @@ class Proto2Wire(A.RestartOverACheckpointedSession):
             log = open(log2).read()
             self.assertNotIn("LazyBodyRead", log); self.assertNotIn("Traceback", log)
             sys.stderr.write("t323s4b served: first frame %.2fs (kernel 1, whole), %.2fs (kernel 2, restored, %d events); %d pages to the head; "
-                             "index client %.2fs; hydrated %d bytes; pages %s\n"
-                             % (dt1, dt2, len(f2["events"]), pages, dt3, hyd, perf["chatPages"]))
+                             "deep anchor window %.2fs cold, %.2fs from the cache; index client %.2fs; hydrated %d bytes; pages %s\n"
+                             % (dt1, dt2, len(f2["events"]), pages, dt_win, dt_win2, dt3, hyd, perf["chatPages"]))
             c2.close(); c4.close()
         finally:
             self._stop(k2)
