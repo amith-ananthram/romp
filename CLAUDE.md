@@ -208,6 +208,16 @@ Every bug fix or feature change must land with a test that covers it (user rule,
 surfaces. Reproduce the bug in a failing test first when practical; fixtures
 live in `tests/fixtures/`.
 
+### A test that mints its own state root pins `session-hosts` off (2026-09-11)
+Per-session hosts are ON by default (T348): a backend over a state directory with no
+`session-hosts` file starts a real `bin/romp-session-host` for any session it connects. The
+runner's conftest writes `off` into the one state root it floors for the run, and only that
+one. A test that builds its own temp state root (a bare `tempfile.mkdtemp()` handed to
+`SdkBackend`, a lab kernel's xdg root) is outside that belt and must write `off` into
+`<its root>/session-hosts` itself, unless it means to run a host, as the hosts-on end-to-end
+tests do by writing `on`. Precedent: `tests/test_cut_turn_tree_kill.py` `_backend` and the
+connect-loop harnesses in `tests/test_sdk_backend.py` (`_hosts_off`).
+
 ### Goal-store fixtures use a PRIVATE synthetic sid (2026-08-24)
 An instance of the standing synthetic-fixtures rule with a mechanism behind it:
 any Python test that MINTS GOALS under the shared `11111111-2222-…` placeholder

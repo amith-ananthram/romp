@@ -84,6 +84,6 @@ test("render.ts paints through the module and re-asks only the viewers still wai
   assert.ok(branch.includes('if (!only || !only.classList?.contains("tx-empty") || !placeholderStands(only, kind)) {'), "rebuilt when the kind changed");
   assert.ok(branch.includes("fillPlaceholder(ph, kind, {"), "…and filled by the module");
   assert.ok(RENDER.includes("if (s.sub && (!s.sub.loaded || s.sub.stalled) && (host === undefined || hostOf(s.sub.parentId) === host)) askSubagent(id);"), "waiting viewers only, the named host's alone");
-  for (const ev of ['window.addEventListener("romp:wsup", () => reaskWaitingSubagents(""));', 'reaskWaitingSubagents(h || undefined);', 'if (m.type === "pipeState" && m.up) reaskWaitingSubagents();'])
+  for (const ev of ['window.addEventListener("romp:wsup", () => reaskWaitingSubagents(""));', 'reaskWaitingSubagents(h);', 'if (m.type === "pipeState" && m.up) reaskWaitingSubagents();'])
     assert.ok(RENDER.includes(ev), ev);
 });
