@@ -822,11 +822,28 @@ class CodexBackend:
         return out
 
     def busy(self, sid):
+        """A turn is open, or a queued send is about to open one. A queue the worker has PARKED on a permanent
+        request rejection (a model the account refuses: _work breaks to kick.wait() with no timer) is neither:
+        nothing is in flight and nothing runs until an explicit change bumps change_generation. It must read
+        NOT busy, because the kernel takes busy() as its authoritative "turn open" word and parks a model or
+        effort pick behind it (Codex applies a pick at the next turn_start, model_switches_live False), and its
+        drain skips the session for as long as busy() holds — so a parked queue that read busy parked the very
+        pick that would have unparked it, with no way out: Codex has no unqueue, and kill + resume re-arm the
+        same queue with the same model (review, 2026-09-11). The rejection is stale the moment an explicit
+        change moves the generation (send, set_model, set_mode, set_effort, resume all bump it and kick), so
+        busy() flips back to True right then, before the worker wakes and clears the tuple, and a pick pressed
+        after that one parks behind the retry in press order. A new client generation is the worker's own
+        clear (it is kicked for it), a scheduling quantum later."""
         s = self._session(sid)
         if not s:
             return None
         with s.lock:
-            return None if s.dead else bool(s.turn_id or s.queue)
+            if s.dead:
+                return None
+            if s.turn_id:
+                return True
+            parked = s.turn_rejection is not None and s.turn_rejection[0] == s.change_generation
+            return bool(s.queue) and not parked
 
     # ── control ──────────────────────────────────────────────────────────────────────────────────
     def send(self, sid, text):
