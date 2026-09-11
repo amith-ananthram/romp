@@ -22,6 +22,8 @@ import { installPostalWash } from "./postal-wash";   // the incoming postal card
 import { applyDenseChrome } from "./dense-chrome";
 import { SessionViews, viewVisible, viewsKey, revealIn, viewTagUnion, viewTags, type TagUnion, type SessionTag } from "./session-views";
 import { prependHead, appendMore, mergeWindow, historyLabel, indexOfUuid, keyOf, windowDetached, fullFrameMerges, afterMore, reattachKeys } from "./chat-window";   // the uuid-anchored wire (T323 stage 4b)
+import { SUBAGENT_OPEN_WAIT_MS, subagentStallText, subagentStalled } from "./subagent-wait";   // the viewer's wait bound and its stall (T355)
+import { placeholderKind, placeholderStands, fillPlaceholder } from "./pane-placeholder";   // the empty pane's placeholder, by kind (T355)
 import { mintWriteId, ackOutcome, adoptViews, seqOf, capsAdopts, announcedSeq, announcedAfter, createInFlight, rederivePending, lensBlob, applyLensFields, type InflightWrite, type LensFields, type TagEditOp, type ViewsAck } from "./views-writes";
 import { lensVisible, surfaceLens } from "./tag-lens";
 import { openTagMenu, tagMenuButton, syncTagFilter, tagChip } from "./tag-menu";
@@ -331,7 +333,8 @@ interface Session { id: string; name: string; color: Color | null; events: ChatE
 // agent's own transcript, fed by {type:"subagent"} frames. Client-only — the kernel never lists it in
 // tabOrder (reconcileTabOrder keeps a known, never-kernel-seen id), so it lives exactly as long as the
 // viewer. anchorUuid = the parent's Agent tool head, for the header's link back.
-interface SubInfo { parentId: string; agentId: string; meta: SubMeta | null; running: boolean; truncated: boolean; error: string | null; loaded: boolean; anchorUuid: string | null; }
+interface SubInfo { parentId: string; agentId: string; meta: SubMeta | null; running: boolean; truncated: boolean; error: string | null; loaded: boolean; anchorUuid: string | null;
+                    stalled?: boolean; askedAt?: number; }   // stalled: the ask went unanswered past SUBAGENT_OPEN_WAIT_MS (T355)
 
 const vscodeApi =
   typeof (window as any).acquireVsCodeApi === "function" ? (window as any).acquireVsCodeApi() : undefined;
@@ -10886,40 +10889,20 @@ function syncViewInner(id: string, atBottom?: boolean): View {
   // (the user 2026-06-19). Idempotent: leaves an existing placeholder in place; the first real event clears it.
   if (s.events.length === 0) {
     const only = v.el.childNodes.length === 1 ? (v.el.firstChild as HTMLElement) : null;
-    // …and rebuild a placeholder whose STARTING loader outlived its create (the failure flips it to
-    // the couldn't-start notice below — the spinning loader would be a lie on a failed tab)
-    const staleStart = !!only && only.classList?.contains("tx-starting") && failedProvisionals.has(id);
-    if (!only || !only.classList?.contains("tx-empty") || staleStart) {
+    // The placeholder is rebuilt when its KIND changes (pane-placeholder.ts): a viewer's loader gives way to the kernel's
+    // error sentence, the stall past the wait, or "written nothing yet"; a starting tab's loader to the couldn't-start
+    // notice (its create failed); the same kind twice is left alone (no churn on repeated pushes that stay empty).
+    const kind = placeholderKind({ sub: s.sub, failedRevive: failedRevives.get(id) || null,
+                                   provisional: isProvisionalId(id), provisionalFailed: failedProvisionals.has(id) });
+    if (!only || !only.classList?.contains("tx-empty") || !placeholderStands(only, kind)) {
       while (v.el.firstChild) v.el.removeChild(v.el.firstChild);
       const ph = el("div", "tx-empty"); v.el.appendChild(ph);
-      // A PROVISIONAL tab is not empty, it is STARTING — so it wears the romp loader (the repo's rule for
-      // any wait), not the placeholder that tells you to send something. The composer below it is live
-      // either way: anything typed here is held and flushed when the session lands. A FAILED create's
-      // tab says what happened instead (the user 2026-08-08) — the loader would be a lie.
-      if (failedRevives.has(id)) {
-        ph.textContent = failedRevives.get(id) || "";
-        ph.classList.add("tx-revive-failed");
-      } else if (s.sub && s.sub.error) {
-        // the kernel could not open the agent's file: its sentence, loud, in the pane (never a blank)
-        ph.textContent = s.sub.error;
-        ph.classList.add("tx-revive-failed");
-      } else if (s.sub && !s.sub.loaded) {
-        // the viewer's first frame is in flight → the romp loader holds the pane (the wait-state rule)
-        ph.classList.add("tx-starting");
-        ph.appendChild(rompLoaderInner("opening the agent's transcript…"));
-      } else if (s.sub) {
-        ph.textContent = "This agent has written nothing yet.";
-      } else if (isProvisionalId(id) && failedProvisionals.has(id)) {
-        ph.textContent = "This session couldn't start. What you typed is kept in the box below; "
-          + "✕ on the tab discards both.";
-      } else if (isProvisionalId(id)) {
-        ph.classList.add("tx-starting");
-        const sw = el("img", "tx-starting-swirl") as HTMLImageElement;
-        sw.src = mediaSrc("romp-swirl-glyph.svg"); sw.alt = ""; sw.onerror = () => sw.remove();
-        const wm = el("div", "tx-starting-msg");
-        wm.textContent = "Starting " + s.name + "… you can type now; romp sends it when it's up.";
-        ph.append(sw, wm);
-      } else ph.textContent = "No messages yet.";
+      fillPlaceholder(ph, kind, {
+        el, loader: rompLoaderInner, button: () => document.createElement("button"), br: () => document.createElement("br"),
+        swirl: () => { const sw = el("img", "tx-starting-swirl") as HTMLImageElement; sw.src = mediaSrc("romp-swirl-glyph.svg"); sw.alt = ""; sw.onerror = () => sw.remove(); return sw; },
+        text: { error: s.sub?.error, failedRevive: failedRevives.get(id), stall: subagentStallText(), sessionName: s.name },
+        onRetry: () => askSubagent(id),
+      });
     }
     v.rendered = 0; v.stale = false; v.winStart = 0; v.winEnd = 0;
     return v;
@@ -12918,9 +12901,46 @@ function openSubagentView(parentId: string, agentId: string, anchorUuid: string 
     });
     if (!order.includes(id)) order.push(id);
     vscodeApi?.postMessage({ type: "openSubagent", id: parentId, agentId });
+    armSubagentWait(id);   // the frame is expected within SUBAGENT_OPEN_WAIT_MS (T355)
   } else if (anchorUuid && cur.sub) cur.sub.anchorUuid = anchorUuid;
   setActive(id);
 }
+
+// The viewer's ask, with its wait (T355): the frame is expected on this socket within SUBAGENT_OPEN_WAIT_MS; past that the
+// pane shows the stall and a retry in place of the loader (a frame that never arrives left "opening…" up for good).
+function askSubagent(id: string): void {
+  const s = sessions.get(id);
+  if (!s || !s.sub) return;
+  vscodeApi?.postMessage({ type: "openSubagent", id: s.sub.parentId, agentId: s.sub.agentId });
+  armSubagentWait(id);
+}
+function armSubagentWait(id: string): void {
+  const s = sessions.get(id);
+  if (!s || !s.sub) return;
+  const p = s.sub;
+  p.loaded = false; p.stalled = false; p.askedAt = Date.now();
+  const asked = p.askedAt;
+  window.setTimeout(() => {
+    const cur = sessions.get(id);
+    if (!cur || !cur.sub || cur.sub.askedAt !== asked) return;   // answered, retried or closed meanwhile
+    if (!subagentStalled(cur.sub.loaded, Date.now() - asked)) return;
+    cur.sub.stalled = true;
+    const v = views.get(id);
+    if (v) { v.rendered = 0; v.stale = true; }
+    if (activeId === id) showActive();
+  }, SUBAGENT_OPEN_WAIT_MS);
+}
+// A connection coming back: the reconnected kernel holds no viewer registry for this client, so every viewer STILL WAITING
+// (no frame yet, or stalled) asks again; a viewer that has its answer keeps it (a re-ask would put the loader back over
+// "written nothing yet"). The reconnect-class events this pane can see: the local socket's romp:wsup, a remote host's relay
+// socket reopening (romp:hostRelayUp: a remote kernel's restart fires that and not wsup, the 2026-09-01 finding the upload
+// re-ship records), and the extension's pipeState up (the VS Code webview never sees wsup).
+function reaskWaitingSubagents(host?: string): void {
+  for (const [id, s] of sessions)
+    if (s.sub && (!s.sub.loaded || s.sub.stalled) && (host === undefined || hostOf(s.sub.parentId) === host)) askSubagent(id);
+}
+window.addEventListener("romp:wsup", () => reaskWaitingSubagents(""));   // the local kernel's own viewers (a host's relay
+//                                                                            reopening re-asks in the romp:hostRelayUp listener below)
 
 function closeSubagentView(id: string): void {
   const p = subParts(id);
@@ -12946,7 +12966,7 @@ function applySubagentFrame(m: any): void {
   const id = subTabId(parentId, agentId);
   const s = sessions.get(id);
   if (!s || !s.sub) { vscodeApi?.postMessage({ type: "closeSubagent", id: parentId, agentId }); return; }
-  s.sub.loaded = true;
+  s.sub.loaded = true; s.sub.stalled = false;   // answered, late or not: no re-ask puts the loader back over it (T355)
   s.sub.error = m.error ? String(m.error) : null;
   s.sub.running = !!m.running;
   s.sub.truncated = !!m.truncated;
@@ -14767,6 +14787,7 @@ window.addEventListener("romp:hostRelayUp", (e) => {
   // event a remote kernel's restart produces (it fires neither romp:wsup nor hostUp), so settled previews
   // make their one attempt here as well
   refreshSettledPreviews();
+  reaskWaitingSubagents(h);   // …and that host's subagent viewers still waiting ask again (T355: a remote kernel's restart; an empty host is the local one)
   // …and the tab this pane is LOOKING AT, when that host owns it (T246, the user 2026-09-07): the relay's
   // open is the moment the remote kernel holds a FRESH client for this pane — after that kernel restarted,
   // one with no active tab at all. Its pusher builds and flushes a client's active tab first; every tab is
@@ -16761,6 +16782,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
     return;
   }
   // the pipe's down edge is the VS Code twin of the shim's romp:wsdown: unconfirmed sends say so (markPendingLost)
+  if (m.type === "pipeState" && m.up) reaskWaitingSubagents();   // the extension's reconnect-class event (it never sees romp:wsup), T355
   if (m.type === "pipeState") { if (!m.up) markPendingLost("connection"); pipeBanner(!!m.up, Number(m.queued) || 0); return; }
   // any kernel message proves the kernel is reachable again — heal previews whose fetch died in a
   // restart window (preview.ts retryFailedPreviews; a no-op when nothing failed). federation's

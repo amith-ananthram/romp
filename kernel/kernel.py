@@ -25362,6 +25362,7 @@ def _bg_tasks(path, spawned_at=None, live=None):
 # (mtime, size) keys, the transcript's own launch↔notification pairing, and the SDK's live sets.
 _AGENT_ID_RE = re.compile(r"^a[0-9a-f]{16}$")
 _SUBAGENT_META_CACHE = {}       # subagents dir -> (dir mtime_ns, {toolUseId: {agentId, agentType, description, spawnDepth}})
+_SUBAGENT_FILE_CACHE = {}       # (parent transcript, agentId) -> (the tree's stamps, the agent file's path or None): the walk, once per change
 _AGENT_GIST_CACHE = {}          # agent jsonl path -> em.fold_records entry (the Agent head's steps fold state)
 _AGENT_LAUNCH_CACHE = {}        # parent jsonl path -> em.fold_records entry (foreground launches + their settles)
 _SUBAGENT_FRAMES = {}           # (sid, agentId) -> (change key, frame, serialized) — shared by every client with it open
@@ -25374,10 +25375,25 @@ def _subagents_dir(path):
     return Path(str(path)).with_suffix("") / "subagents"
 
 
+def _subagent_dirs(d):
+    """The subagents directory `d` and every directory under it (Claude Code 2.1.261 writes a Workflow agent's file and
+    sidecar one level down, workflows/wf_<id>/), in walk order, no symlink followed (the walk's rule, _subagent_transcripts).
+    [] when `d` is not a directory or is a symlink."""
+    if not os.path.isdir(d) or os.path.islink(d):
+        return []
+    out = []
+    for root, dirs, _files in os.walk(d):                 # followlinks=False: never leaves the session's own tree
+        dirs.sort()
+        out.append(root)
+    return out
+
+
 def _subagent_meta_map(path):
     """toolUseId → {agentId, agentType, description, spawnDepth, parentAgentId} for every agent-*.meta.json beside the
-    transcript at `path`, cached on the DIRECTORY's mtime (a sidecar landing changes it — a stat, never a
-    timer). {} when the directory does not exist (older CLIs wrote no subagent files)."""
+    transcript at `path`, the nested workflow directories included (T355: a workflow agent's sidecar sits under
+    workflows/wf_<id>/, and a flat listing missed it, so its Agent card never learned its id), cached on the
+    directories' mtimes (a sidecar landing changes its directory's — a stat, never a timer). {} when the directory does
+    not exist (older CLIs wrote no subagent files)."""
     d = _subagents_dir(path)
     try:
         st = os.stat(d)
@@ -25385,26 +25401,39 @@ def _subagent_meta_map(path):
         _SUBAGENT_META_CACHE.pop(str(d), None)
         _chat_dep_note_taskout(str(d), None)              # a running chat build: the directory's absence is a dependency too
         return {}
-    key = st.st_mtime_ns
-    # the running chat build's dependency record (the taskout idiom, _chat_dep_note_taskout): a sidecar landing
-    # moves the directory's mtime, which the next cycle's signature re-stats
-    _chat_dep_note_taskout(str(d), (st.st_mtime, st.st_size))
+    dirs = _subagent_dirs(str(d))
+    if not dirs:                                          # a symlinked subagents/ is not this session's tree (never listed)
+        _SUBAGENT_META_CACHE.pop(str(d), None)
+        return {}
+    stamps = []
+    for sd in dirs:
+        try:
+            sst = os.stat(sd)
+        except OSError:
+            continue
+        stamps.append((sd, sst.st_mtime_ns))
+        # the running chat build's dependency record (the taskout idiom, _chat_dep_note_taskout): a sidecar landing
+        # moves its directory's mtime, which the next cycle's signature re-stats
+        _chat_dep_note_taskout(sd, (sst.st_mtime, sst.st_size))
+    key = tuple(stamps)
     hit = _SUBAGENT_META_CACHE.get(str(d))
     if hit is not None and hit[0] == key:
         return hit[1]
     out = {}
-    try:
-        names = sorted(os.listdir(d))
-    except OSError:
-        names = []
-    for nm in names:
+    entries = []
+    for sd in dirs:
+        try:
+            entries.extend((sd, nm) for nm in sorted(os.listdir(sd)))
+        except OSError:
+            continue
+    for sd, nm in entries:
         if not (nm.startswith("agent-") and nm.endswith(".meta.json")):
             continue
         aid = nm[len("agent-"):-len(".meta.json")]
         if not _AGENT_ID_RE.match(aid):
             continue
         try:
-            meta = json.loads((d / nm).read_text())
+            meta = json.loads((Path(sd) / nm).read_text())
         except (OSError, ValueError):
             continue
         if not isinstance(meta, dict) or not meta.get("toolUseId"):
@@ -25419,9 +25448,28 @@ def _subagent_meta_map(path):
     return out
 
 
-def _subagent_meta(path, agent_id):
-    """One agent's sidecar (agentType, description, spawnDepth, toolUseId) read directly; {} when absent."""
-    mp = _subagents_dir(path) / ("agent-%s.meta.json" % agent_id)
+def _dir_stamp(sd):
+    """(dir, mtime_ns) for one directory, a stat (None when missing)."""
+    try:
+        return (sd, os.stat(sd).st_mtime_ns)
+    except OSError:
+        return (sd, None)
+
+
+def _dir_stamps(dirs):
+    """(dir, mtime_ns) for each directory, once each, stats only: the resolver's memo key as a hit re-takes it. A file
+    landing in a directory moves that directory's mtime; a directory appearing moves its parent's; so the directories a
+    walk READ are exactly what a later hit must re-stat, and nothing is listed on a hit."""
+    return tuple(_dir_stamp(sd) for sd in dict.fromkeys(dirs))
+
+
+def _subagent_meta(path, agent_id, apath=None):
+    """One agent's sidecar (agentType, description, spawnDepth, toolUseId) read directly, beside the agent's own file
+    wherever that was found (a workflow agent's sits under workflows/wf_<id>/, T355; `apath` when the caller resolved it
+    already, else the memoized resolution); {} when absent."""
+    ap = apath if apath is not None else _subagent_file(path, agent_id)
+    mp = (ap.with_name("agent-%s.meta.json" % agent_id) if ap is not None
+          else _subagents_dir(path) / ("agent-%s.meta.json" % agent_id))
     try:
         meta = json.loads(mp.read_text())
     except (OSError, ValueError):
@@ -25429,24 +25477,67 @@ def _subagent_meta(path, agent_id):
     return meta if isinstance(meta, dict) else {}
 
 
+def _find_agent_file(subdir, name, read=None):
+    """`name` anywhere under the subagents directory `subdir`, one level or deeper (workflows/wf_<id>/agent-<id>.jsonl),
+    no symlink followed or taken, and never a file reached THROUGH a symlink (its real path stays under the tree's);
+    None when absent. `read` collects the directories walked."""
+    dirs = _subagent_dirs(str(subdir))
+    if read is not None:
+        read.extend(_dir_stamp(d) for d in dirs)        # stamped as read
+    real_root = os.path.realpath(str(subdir))
+    for root in dirs:
+        cand = os.path.join(root, name)
+        if os.path.isfile(cand) and not os.path.islink(cand) and os.path.realpath(cand).startswith(real_root + os.sep):
+            return Path(cand)
+    return None
+
+
 def _subagent_file(path, agent_id):
-    """The agent's own transcript beside the parent transcript `path`, or — when the sidecar dir has moved
-    under a /clear fork's fsid — the one file of that name anywhere in the project dir. None when missing."""
+    """The agent's own transcript beside the parent transcript `path`: subagents/agent-<id>.jsonl, or one level or
+    more down (a Workflow agent's, workflows/wf_<id>/agent-<id>.jsonl, since Claude Code 2.1.261: the flat lookup
+    missed it and the viewer said the file was missing, T355), or — when the sidecar dir has moved under a /clear
+    fork's fsid — the one file of that name anywhere in the project dir, nested or not. None when missing."""
     if not path or not _AGENT_ID_RE.match(str(agent_id or "")):
         return None
-    ap = _subagents_dir(path) / ("agent-%s.jsonl" % agent_id)
-    if ap.exists():
-        return ap
+    ckey = (str(path), str(agent_id))
+    hit = _SUBAGENT_FILE_CACHE.get(ckey)           # the walk once per change of what it read (the pusher asks every cycle per
+    if hit is not None and _dir_stamps([d for d, _m in hit[0]]) == hit[0]:   # open viewer, the chat build once per Agent card):
+        return hit[1]                                 #  a hit re-stats the directories the walk read, own tree and siblings, never lists
+    read = []                                         # each directory's stamp taken AS IT IS READ (a file landing between the
+    found = _subagent_file_walk(path, agent_id, read)   # listing and a later stat would memoize a miss against the newer mtime)
+    if len(_SUBAGENT_FILE_CACHE) > 1024:
+        _SUBAGENT_FILE_CACHE.clear()
+    stamps = tuple(dict.fromkeys(read))            # (dir, mtime_ns) pairs, once each
+    _SUBAGENT_FILE_CACHE[ckey] = (stamps, found)   # a miss is memoized too, on the same stamps: a file landing later under a
+    return found                                   #  sibling's tree moves that directory and re-walks
+
+
+def _subagent_file_walk(path, agent_id, read=None):
+    """_subagent_file's walk itself (no memo); `read` collects every directory it looked at, the memo's stamps."""
+    read = read if read is not None else []
+    name = "agent-%s.jsonl" % agent_id
+    own = _subagents_dir(path)
+    read.append(_dir_stamp(str(own)))
+    ap = own / name
+    if not os.path.islink(own) and os.path.isfile(ap) and not os.path.islink(ap):   # this tree's own file (a symlinked
+        return ap                                                                   #  subagents/ or file is not taken)
+    nested = _find_agent_file(own, name, read)
+    if nested is not None:
+        return nested
     # A miss is a dependency of the chat payload that asked (the taskout idiom, _chat_dep_note_taskout): the
     # file appearing at its own place, or a sibling fsid's directory gaining one, changes the Agent card.
     _chat_dep_note_taskout(str(ap), None)
     try:
-        for d in Path(str(path)).parent.iterdir():
-            if d.is_dir():                                # the directory the glob below reads: a file landing in
+        read.append(_dir_stamp(str(Path(str(path)).parent)))   # the project directory: a sibling fsid's directory appearing moves it
+        for d in sorted(Path(str(path)).parent.iterdir()):
+            if d.is_dir():                                # the directory the walk below reads: a file landing in
                 sd = d / "subagents"                      # <sib>/subagents/ moves ITS mtime, not the sibling's
                 _chat_dep_note_taskout(str(sd), _chat_stat_key(str(sd)))
-        for cand in Path(str(path)).parent.glob("*/subagents/agent-%s.jsonl" % agent_id):
-            return cand
+                if sd != own:
+                    read.append(_dir_stamp(str(sd)))
+                    cand = _find_agent_file(sd, name, read)
+                    if cand is not None:
+                        return cand
     except OSError:
         pass
     return None
@@ -25710,7 +25801,7 @@ def build_subagent(sid, agent_id, now, live_map=None):
     if apath is None:
         return {**base, "error": "The transcript file for agent %s is missing beside this session's transcript "
                                  "(subagents/agent-%s.jsonl), so it can't be shown." % (agent_id, agent_id)}
-    meta = _subagent_meta(ppath, agent_id)
+    meta = _subagent_meta(ppath, agent_id, apath)
     full = build_session(sid, now, live_map, path_override=str(apath), sidechain=True, meta_path=ppath)
     if not full:
         return {**base, "error": "This session isn't known to romp any more, so its agent can't be shown."}
@@ -25729,7 +25820,7 @@ def _subagent_frame_cached(sid, agent_id, now, live_map=None):
     live_map = _live_map() if live_map is None else live_map
     ppath = _path_of(sid, now)
     apath = _subagent_file(ppath, agent_id) if ppath else None
-    meta = _subagent_meta(ppath, agent_id) if ppath else {}
+    meta = _subagent_meta(ppath, agent_id, apath) if ppath else {}
     running = (_agent_running_for(ppath, meta.get("toolUseId"), agent_id, live_map.get(str(sid)), _sdk_spawned_at(sid))
                if ppath else False)
     key = (ppath, _chat_stat_key(str(apath)) if apath is not None else None, running, bool(meta))

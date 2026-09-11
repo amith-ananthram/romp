@@ -11,6 +11,7 @@ import * as path from "node:path";
 import { subTabId, isSubId, subParts, subLabel, gistLines, stepLines, stepsNote, agentFoldLabel, elapsedSince, subHeadParts, openIconSvg, pinIconSvg, SUB_SEP, PREVIEW_ROWS } from "../../ui/webview/subagent-view";
 
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
+const PLACEHOLDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "pane-placeholder.ts"), "utf8");   // the empty pane's placeholder, by kind (T355)
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
 
 // ── the pure module ─────────────────────────────────────────────────────────────────────────────
@@ -219,8 +220,12 @@ test("frames: events replace in place through appendActive (the chat's scroll ru
   // a frame for a viewer that is gone tells the kernel to stop pushing
   assert.match(RENDER, /if \(!s \|\| !s\.sub\) \{ vscodeApi\?\.postMessage\(\{ type: "closeSubagent", id: parentId, agentId \}\); return; \}/);
   // the empty-transcript placeholder: error sentence (loud), else the romp loader until the first frame
-  assert.match(RENDER, /\} else if \(s\.sub && s\.sub\.error\) \{[\s\S]{0,200}?ph\.textContent = s\.sub\.error;/);
-  assert.match(RENDER, /\} else if \(s\.sub && !s\.sub\.loaded\) \{[\s\S]{0,300}?ph\.appendChild\(rompLoaderInner\("opening the agent's transcript…"\)\);/);
+  // the placeholder by kind (pane-placeholder.ts, T355): the error sentence, the loader while the frame is in flight
+  assert.match(PLACEHOLDER, /if \(st\.sub\.error\) return "sub-error";[\s\S]{0,200}?if \(!st\.sub\.loaded\) return "sub-loading";/);
+  assert.match(PLACEHOLDER, /case "sub-error":[\s\S]{0,200}?ph\.textContent = ctx\.text\.error \|\| "";/);
+  assert.match(PLACEHOLDER, /case "sub-loading":[\s\S]{0,300}?ph\.appendChild\(ctx\.loader\("opening the agent's transcript…"\)\);/);
+  assert.match(RENDER, /text: \{ error: s\.sub\?\.error, failedRevive: failedRevives\.get\(id\), stall: subagentStallText\(\), sessionName: s\.name \},/);
+  assert.match(RENDER, /el, loader: rompLoaderInner, button: \(\) => document\.createElement\("button"\)/);
   // file/preview URLs bake the PARENT's id for a viewer
   assert.match(RENDER, /const subOf = subParts\(id\);\s*\n\s*if \(subOf\) renderingOwnerSid = subOf\.parentId;/);
 });
