@@ -33,12 +33,19 @@ installMenuEcho();
   function pane(id: string): HTMLIFrameElement | null {
     return document.getElementById(id) as HTMLIFrameElement | null;
   }
+  // The chat column the user last worked in (split screen, the user 2026-09-08): every chat-directed
+  // command lands there — the shell's focus script tracks it (__rompFocusedChatId); the first column
+  // when there is no split, exactly as before.
+  function chatPane(): HTMLIFrameElement | null {
+    try { const id = w.__rompFocusedChatId && w.__rompFocusedChatId(); if (id) { const f = pane(id); if (f) return f; } } catch (e) { /* no split script */ }
+    return pane("f-chat");
+  }
   function chatPost(msg: object): void {
     // Reveal the chat pane if it's toggled off, focus it, and hand it the message. The
     // __romp* globals and the pane's message handlers are read lazily at RUN time, so boot
     // order across the shell's script tags doesn't matter.
     try { if (w.__rompPaneToggle) w.__rompPaneToggle("chat", true); } catch (e) { /* rail not booted yet */ }
-    const f = pane("f-chat");
+    const f = chatPane();
     try { f!.contentWindow!.focus(); f!.contentWindow!.postMessage(msg, "*"); }
     catch (e) { /* chat pane not loaded yet — nothing to talk to */ }
   }
@@ -56,12 +63,12 @@ installMenuEcho();
   type SwitchRow = { id: string; name: string; bg: string; dir: string };
   function chatSessions(): SwitchRow[] {
     try {
-      const ls = (pane("f-chat")?.contentWindow as any)?.__rompSessionList;
+      const ls = (chatPane()?.contentWindow as any)?.__rompSessionList;
       return ls ? ls().map((r: any) => ({ id: String(r.id), name: String(r.name), bg: String(r.bg || ""), dir: "" })) : [];
     } catch (e) { return []; }
   }
   function mruIds(): string[] {
-    try { return (pane("f-chat")?.contentWindow as any)?.__rompMru?.slice() || []; }
+    try { return (chatPane()?.contentWindow as any)?.__rompMru?.slice() || []; }
     catch (e) { return []; }
   }
   function sessionItems(locals: SessionRow[] | null): PickItem[] {
@@ -113,7 +120,7 @@ installMenuEcho();
     id: "session.fork", title: "Fork this session…",
     // the chat pane owns the modal (it knows the active session); from the palette the fork is
     // from-the-tip — the whole conversation (per-message forks live on the message's own hover row)
-    run: () => { try { pane("f-chat")!.contentWindow!.postMessage({ romp: "forkSession" }, "*"); } catch (e) { /* chat not loaded */ } },
+    run: () => { try { chatPane()!.contentWindow!.postMessage({ romp: "forkSession" }, "*"); } catch (e) { /* chat not loaded */ } },
   });
   registerCommand({
     id: "settings.open", title: "Open settings",
@@ -128,11 +135,11 @@ installMenuEcho();
   // (render.ts) reads the same bindings store, so a rebind moves both at once.
   registerCommand({
     id: "chat.navBack", title: "Navigate back in the chat",
-    run: () => { try { pane("f-chat")!.contentWindow!.postMessage({ romp: "chatNav", dir: -1 }, "*"); } catch (e) { /* chat not loaded */ } },
+    run: () => { try { chatPane()!.contentWindow!.postMessage({ romp: "chatNav", dir: -1 }, "*"); } catch (e) { /* chat not loaded */ } },
   });
   registerCommand({
     id: "chat.navForward", title: "Navigate forward in the chat",
-    run: () => { try { pane("f-chat")!.contentWindow!.postMessage({ romp: "chatNav", dir: 1 }, "*"); } catch (e) { /* chat not loaded */ } },
+    run: () => { try { chatPane()!.contentWindow!.postMessage({ romp: "chatNav", dir: 1 }, "*"); } catch (e) { /* chat not loaded */ } },
   });
   registerCommand({ id: "log.open", title: "Open the log", run: () => { if (w.__rompOpenErrs) w.__rompOpenErrs(); } });
   registerCommand({ id: "net.open", title: "Remote kernels", run: () => { if (w.__rompOpenNet) w.__rompOpenNet(); } });
@@ -159,12 +166,17 @@ installMenuEcho();
         : undefined,
     });
   }
+  // Split screen (the user 2026-09-08): another chat column beside the last one, and closing the one the
+  // user is in (the last one when the first column has the focus). The shell owns the columns
+  // (_LANDING_SPLIT_JS); the rail's split action runs the same code.
+  registerCommand({ id: "chat.split", title: "Split the chat", run: () => { if (w.__rompSplitChat) w.__rompSplitChat(); } });
+  registerCommand({ id: "chat.closeSplit", title: "Close this chat split", run: () => { if (w.__rompCloseSplit) w.__rompCloseSplit(); } });
 
   // Esc (or running an item) hands focus back to the chat pane, so "palette, Esc, type"
   // never strands the keyboard on the shell document. The palette's hotkey chips show each
   // command's EFFECTIVE binding (kbdFor), so a rebound command never advertises a stale default.
   const palette = initPalette({
-    onClose: () => { try { pane("f-chat")!.contentWindow!.focus(); } catch (e) { /* no chat pane */ } },
+    onClose: () => { try { chatPane()!.contentWindow!.focus(); } catch (e) { /* no chat pane */ } },
     kbdFor: (c) => { const ch = effectiveChord(c.id, c.chord, loadOverrides(), mac); return ch ? displayChord(ch, mac) : undefined; },
   });
   w.__rompPalette = palette;   // reachable by other shell scripts (e.g. a future mobile-bar button)
@@ -233,8 +245,7 @@ installMenuEcho();
   // (the /settings page, the gear's document since 2026-09-10) is wired with the panes: the gear
   // holds the keyboard while it is open, and the hotkey worked from inside it when it rode the feed.
   document.addEventListener("keydown", onKey, true);
-  ["f-chat", "f-fleet", "f-feed", "f-files", "f-timeline", "f-settings"].forEach((id) => {
-    const f = pane(id);
+  function wireKeys(f: HTMLIFrameElement | null): void {
     if (!f) return;
     const wire = () => {
       try { if (f.contentDocument) f.contentDocument.addEventListener("keydown", onKey, true); }
@@ -242,5 +253,11 @@ installMenuEcho();
     };
     f.addEventListener("load", wire);
     wire();
-  });
+  }
+  ["f-chat", "f-fleet", "f-feed", "f-files", "f-timeline", "f-settings"].forEach((id) => wireKeys(pane(id)));
+  // the split's chat columns too (the user 2026-09-08): the ones restored before this module booted (the
+  // shell's split script runs ahead of it, so their romp-chat-cols events fired into no listener), and any
+  // made later (the shell dispatches romp-chat-cols with the new frame) — so the chords work from every column
+  ((w.__rompChatFrameIds ? w.__rompChatFrameIds() : []) as string[]).forEach((id) => { if (id !== "f-chat") wireKeys(pane(id)); });
+  window.addEventListener("romp-chat-cols", (e) => wireKeys((((e as CustomEvent).detail || {}) as { frame?: HTMLIFrameElement }).frame || null));
 })();

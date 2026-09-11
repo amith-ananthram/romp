@@ -222,7 +222,9 @@ class StaleEchoPlacement(unittest.TestCase):
         finally:
             km._pending_ledger = saved
         self.assertEqual(len(merged["turns"]), 2, "no placement for an owed send")
-        self.assertEqual(merged["turns"][-1]["atoms"][0]["uuid"], owed["uuid"], "it sorts into the tail by time, as before")
+        self.assertEqual(merged["turns"][-1]["atoms"][-1]["uuid"], owed["uuid"],
+                         "it rides the last turn's tail: an in-flight echo sorts after every atom the turn holds, whatever "
+                         "its send stamp (the model reads a mid-turn send at its next tool boundary; main's rule, 2026-09-11)")
         self.assertEqual(merged["_placed"], ())
 
     def test_the_synthetic_turn_is_marked_and_names_its_echoes(self):

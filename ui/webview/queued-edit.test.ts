@@ -43,8 +43,8 @@ test("the ✎ opens a field IN the bubble: the editor is keyed by the entry, the
     "the open records the state (the words, the caret at the end, focus, the bubble's width) and posts the hold; the repaint is the acknowledgement");
   assert.match(EDITOR, /if \(ed\.width > 0\) bubble\.style\.width = ed\.width \+ "px";/, "the field keeps the bubble's width as it stood");
   assert.match(DELEGATES, /openQueuedEditor\(sidQ, ref, bub \? bub\.getBoundingClientRect\(\)\.width : 0\);/, "measured at the click");
-  assert.match(CSS, /\.queued-bubble\.editing \{ opacity: 1; border-color: var\(--accent\); padding-right: 52px; box-sizing: border-box; \}/,
-    "the idle bubble's padding stays, so the words do not re-wrap under the caret when the field opens (review find)");
+  assert.match(CSS, /\.queued-bubble\.editing \{ --prov-ink: var\(--fg\); border-color: var\(--accent\); padding-right: 52px; box-sizing: border-box; \}/,
+    "the idle bubble's padding stays, so the words do not re-wrap under the caret when the field opens (review find); full ink while editing (the ink lift, T337)");
   assert.match(KERNEL, /def _relocate_parked\(sid, ops, md, skip=-1, prefer_held=True\):/, "a drifted slot relocates to the twin the editor holds, and refuses when nobody can tell (review find)");
   assert.match(KERNEL, /_park_holds\.pop\(sid, None\)\s+# …and the editors' holds: an obj: key must not outlive its op/);
   assert.match(EDITOR, /function holdQueuedMsg\(sid: string, ref: QueuedEditRef, hold: boolean\): Record<string, unknown> \{\s*\n\s*const m: Record<string, unknown> = \{ type: "holdQueued", id: sid, md: ref\.md, hold \};\s*\n\s*if \(ref\.idx !== undefined\) m\.idx = ref\.idx;\s*\n\s*if \(ref\.park !== undefined\) m\.park = ref\.park;\s*\n\s*if \(ref\.qid\) m\.qid = ref\.qid;/,

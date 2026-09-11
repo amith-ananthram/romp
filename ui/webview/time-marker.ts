@@ -71,7 +71,10 @@ export function dayOpens(epoch: number, prevEpoch: number | null, nowMs: number)
 export class DayWalk {
   mark: number | null = null;
   open(epoch: number, nowMs: number): string { return dayOpens(epoch, this.mark, nowMs); }
-  pass(epoch: number | null): void { if (epoch != null && (this.mark == null || epoch > this.mark)) this.mark = epoch; }
+  /** Moves the mark over a row (or a unit's exit) and returns the mark after it: the day the walk is IN at that row,
+   *  which is what the top-of-view day-context label names for it (render.ts stampWalkDay / paintRailSticky, T342);
+   *  a stale row keeps its own HH:MM in the rail but sits under the walk's day, as the dividers already say. */
+  pass(epoch: number | null): number | null { if (epoch != null && (this.mark == null || epoch > this.mark)) this.mark = epoch; return this.mark; }
 }
 
 // (A chooseStamps() spacing pass used to live here: it re-revealed a suppressed same-minute stamp every

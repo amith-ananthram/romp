@@ -63,7 +63,7 @@ class OneHeightBasis(unittest.TestCase):
         # left the picker's lower rows behind it — and the --app-h sizing is also what turns the keyboard
         # into an in-iframe resize event for the picker's short-window fold (the user 2026-08-10).
         # Horizontally it stays inset-sized (left:0;right:0), no 100vw.
-        self.assertIn("body.picker-open #f-chat{display:block;position:fixed;left:0;right:0;top:0;"
+        self.assertIn("body.picker-open iframe.lifted{display:block;position:fixed;left:0;right:0;top:0;"
                       "height:var(--app-h,100dvh);z-index:200;background:transparent}", self.html)
 
     def test_an_unpainted_pane_is_dark_not_white(self):

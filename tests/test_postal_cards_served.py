@@ -2,9 +2,10 @@
 """T302 (the user 2026-09-10): the postal cards in the chat pane, rendered by the real /chat page of a hermetic
 kernel over a synthetic chat with web (the viewed session), api and tests (its peers) — every state at once.
 
-Asserted on the page: the interaction KIND is coloured text (Delegation / Coordination / Question in the old chip
-colours), never a chip; the DELIVERY STATE is one icon per state at the head's right edge with a worded title
-(delivered, read, parked, bounced, recalled, and sent for a message handed to the relay), from what the kernel
+Asserted on the page: the interaction KIND is coloured text (Delegation / Coordination / Question, three positions
+sampled evenly along one line in the accent's hue, T337), never a chip; the DELIVERY STATE is one icon per state at the
+head's right edge with a worded title (delivered, read, parked, bounced, recalled, and sent for a message handed to the
+relay; sent / delivered / read as the circled-check ladder, the read check cut out in the page colour, T337), from what the kernel
 files (the send-time stamp, and the postal ledger's exec / relayed / bounced / recall rows joined by message id);
 both ENDS wear their sessions' colours (the peer's chip, then this session's own chip); no card wears a background
 wash; incoming cards are boxed, sent ones slim unless a fold boxes them; a sent card whose message has not landed wears
@@ -207,12 +208,19 @@ const measure = () => page.evaluate(() => {
       kindWithOrBelowEnds: kw && ends ? kw.top >= ends.getBoundingClientRect().top - 2 : null,
       gistBelowKind: kw && t.querySelector(".notice-gist") ? t.querySelector(".notice-gist").getBoundingClientRect().top >= kw.bottom - 2 : null,
       chip: !!t.querySelector(".notice-chip, .postal-service-intent"),
+      // the mark's drawing as the browser computes it (T337): the circled-check ladder, its box, its stroke, its colours
+      mark: icon ? (() => { const svg = icon.querySelector("svg"), c = icon.querySelector("circle"), p = icon.querySelector("path");
+        return { size: svg ? Math.round(svg.getBoundingClientRect().width) : null, strokeWidth: svg ? svg.getAttribute("stroke-width") : null,
+                 circles: icon.querySelectorAll("circle").length, paths: icon.querySelectorAll("path").length,
+                 circleFill: c ? getComputedStyle(c).fill : null, checkStroke: p ? getComputedStyle(p).stroke : null,
+                 checkClass: p ? (p.getAttribute("class") || "") : null, colour: getComputedStyle(icon).color }; })() : null,
       state: icon ? icon.dataset.state : null, title: icon ? (icon.getAttribute("aria-label") || "") : null,
       iconRight: icon && n ? Math.round(n.getBoundingClientRect().right - icon.getBoundingClientRect().right) : null,
       peerText: peer ? peer.textContent : null, peerBg: peer ? getComputedStyle(peer).backgroundColor : null,
       selfText: self ? self.textContent : null, selfBg: self ? getComputedStyle(self).backgroundColor : null,
       selfWidth: self ? Math.round(self.getBoundingClientRect().width) : null,
       bg: cs.backgroundColor, border: cs.borderTopStyle, provisional: n.classList.contains("queued-bubble"),
+      opacity: cs.opacity,   // T337: the provisional dress fades by its colours, never by an element opacity
       // the provisional dress at either density: the card's max-width as computed, and the box it actually takes
       maxWidth: cs.maxWidth, width: Math.round(n.getBoundingClientRect().width),
       gist: (t.querySelector(".notice-gist") || {}).textContent || "",
@@ -242,8 +250,11 @@ const contrast = (a, b) => {
 // a boxed card paints --box-bg, an rgba WASH, over the page: the colour the word actually sits on is the composite (the
 // review of 2026-09-10 found the light coordination step at 4.33:1 there while the page read 4.6:1)
 const composite = (washCss, pageCss) => {
-  const nums = (css) => css.match(/\d+(\.\d+)?/g).map(Number);
-  const w = nums(washCss), p = nums(pageCss), a = w.length > 3 ? w[3] : 1;
+  // a wash is rgba(...) or, for a color-mix() the browser resolved, color(srgb r g b / a) with channels in 0..1
+  const nums = (css) => { const m = css.match(/color\(srgb ([\d.]+) ([\d.]+) ([\d.]+)(?: \/ ([\d.]+))?\)/);
+    if (m) return [255 * +m[1], 255 * +m[2], 255 * +m[3], m[4] === undefined ? 1 : +m[4]];
+    const n = css.match(/\d+(\.\d+)?/g).map(Number); return [n[0], n[1], n[2], n.length > 3 ? n[3] : 1]; };
+  const w = nums(washCss), p = nums(pageCss), a = w[3];
   return "rgb(" + [0, 1, 2].map((i) => Math.round(w[i] * a + p[i] * (1 - a))).join(", ") + ")";
 };
 const results = {};
@@ -268,6 +279,8 @@ for (const pass of [{ width: 1000, theme: "dark" }, { width: 520, theme: "dark" 
   await page.waitForTimeout(300);
   const m = await measure();
   const boxOnPage = composite(m.boxBg, m.pageBg);
+  // every kind word against the ground it actually sits on: the page, the box, or the provisional wash (T337)
+  for (const c of m.cards) c.kindContrast = c.kind && c.kindColor ? contrast(c.kindColor, composite(c.bg, m.pageBg)) : null;
   m.contrast = {}; m.contrastOn = {}; m.contrastPage = {};
   for (const k of ["delegate", "coordinate", "question"]) {
     if (!m.kinds[k]) { m.contrast[k] = null; continue; }
@@ -382,8 +395,19 @@ class ServedPostalCards(unittest.TestCase):
             else:
                 self.assertIn(c["kind"], ("Delegation", "Coordination", "Question"), c)
             self.assertFalse(c["chip"], "no chip: %r" % c)
-        self.assertEqual(card("Take the retry-loop")["kindColor"], "rgb(127, 184, 231)", "delegation: the ramp's middle step (T320)")
-        self.assertEqual(card("Heads-up")["kindColor"], "rgb(121, 150, 175)", "coordination: the ramp's low step (T320)")
+        self.assertEqual(card("Take the retry-loop")["kindColor"], "rgb(124, 181, 227)", "delegation: the line's middle position (T320, re-sampled T337)")
+        self.assertEqual(card("Heads-up")["kindColor"], "rgb(86, 150, 200)", "coordination: the line's start (T320, re-sampled T337)")
+        self.assertEqual(card("Which cap")["kindColor"], "rgb(162, 212, 254)", "question: the line's end (T337)")
+        # T337 (the review): the provisional dress fades by its colours, not by an element opacity that dimmed the kind
+        # word too, so every kind word reads at 4.5:1 on the ground it sits on, the provisional wash included, in both themes
+        for m, name in ((wide, "dark"), (light, "light")):
+            for c in m["cards"]:
+                if c["kind"]:
+                    self.assertGreaterEqual(c["kindContrast"] or 0, 4.5, "%s: %s reads on its own ground (%s): %r" % (
+                        name, c["kind"], "the provisional wash" if c["provisional"] else "the card", c))
+                if c["provisional"]:
+                    self.assertEqual(c["opacity"], "1", "no element opacity on the provisional card: %r" % c)
+        self.assertTrue(any(c["provisional"] and c["kind"] for c in wide["cards"]), "a provisional card with a kind word is in the world")
         # (2) the delivery icon per state, at the head's right edge, with a worded title
         states = {c["gist"][:20]: c["state"] for c in cards}
         self.assertIsNone(card("Take the retry-loop")["state"], "an incoming message in hand: no icon")
@@ -406,6 +430,27 @@ class ServedPostalCards(unittest.TestCase):
                 self.assertLessEqual(c["iconRight"], 16, "the icon sits at the head's right edge: %r" % c)
         kindless = card(KINDLESS[:20])
         self.assertEqual(kindless["state"], "delivered", "the legacy card still shows its delivery state: %r" % kindless)
+        # (2b) T337 (the user 2026-09-10, who wanted the circled check messaging apps draw): sent is the hollow circle,
+        # delivered the circle with the check, read the filled circle with the check cut out in the page colour, all three
+        # in the STATE colour (dim, dim, the accent), never the kind word's; one 14 px box, a 1.5 stroke, one circle
+        sent, deliv, read = card("The remote build")["mark"], card("The backoff branch")["mark"], card("Did the fixtures")["mark"]
+        for m in (sent, deliv, read):
+            self.assertEqual((m["size"], m["strokeWidth"], m["circles"]), (14, "1.5", 1), "one circle in a 14 px box with a 1.5 stroke: %r" % m)
+        self.assertEqual((sent["paths"], sent["circleFill"]), (0, "none"), "sent: the hollow circle alone: %r" % sent)
+        self.assertEqual((deliv["paths"], deliv["circleFill"], deliv["checkClass"]), (1, "none", "postal-mark-check"), "delivered: the hollow circle with the check: %r" % deliv)
+        self.assertEqual(deliv["checkStroke"], deliv["colour"], "delivered: the check in the mark's own colour: %r" % deliv)
+        self.assertEqual(sent["colour"], deliv["colour"], "sent and delivered share the dim colour: %r %r" % (sent, deliv))
+        self.assertEqual((read["paths"], read["checkClass"]), (1, "postal-mark-check"), "read: the check…: %r" % read)
+        self.assertEqual(read["circleFill"], read["colour"], "…on the circle filled in the state colour: %r" % read)
+        self.assertEqual(read["colour"], "rgb(156, 210, 255)", "the read colour is the accent, as before (the state colour, never the kind's): %r" % read)
+        self.assertEqual(read["checkStroke"], wide["pageBg"], "read: the check cut out in the page colour: %r" % read)
+        self.assertNotEqual(read["colour"], card("Did the fixtures")["kindColor"], "the mark's colour is not the kind word's")
+        lread = next(c for c in light["cards"] if c["gist"].startswith("Did the fixtures"))["mark"]
+        self.assertEqual(lread["circleFill"], "rgb(194, 65, 12)", "light: the read circle in the light accent: %r" % lread)
+        self.assertEqual(lread["checkStroke"], light["pageBg"], "light: the check cut out in the cream page: %r" % lread)
+        self.assertEqual((card("Please run the whole")["mark"]["circles"], card("Please run the whole")["mark"]["paths"]), (1, 1), "parked keeps the clock")
+        self.assertEqual(card("Take the cap decision")["mark"]["paths"], 2, "bounced keeps the cross")
+        self.assertEqual(card("Ignore my last note")["mark"]["paths"], 2, "recalled keeps the return arrow")
         self.assertIn("isolated", card("Take the cap decision")["title"], "a bounce carries its reason")
         # (3) both ends, each in its session's colour; no wash; boxed vs slim
         for c in cards:

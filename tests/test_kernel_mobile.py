@@ -189,7 +189,8 @@ class LandingShell(unittest.TestCase):
         # +1 2026-09-08: the reload core (T265, _reload_core) ahead of the build-staleness banner script, which
         # registers as its refused fallback — its own script so a banner throw cannot take the reload with it
         # +1: the bottom bar's API health cell (_LANDING_APIH_JS), after the usage script whose backdrop it shares
-        self.assertEqual(html.count("<script>"), 20)
+        # +1 2026-09-08: the chat split columns (_LANDING_SPLIT_JS), after the pane controller it leans on
+        self.assertEqual(html.count("<script>"), 21)
 
     def test_bottom_bar_is_text_only_and_compact(self):
         html = km._landing()
