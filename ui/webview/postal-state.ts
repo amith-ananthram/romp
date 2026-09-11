@@ -81,10 +81,11 @@ export function deliveryOf(ev: { direction: "in" | "out"; status?: string | null
  *  file's own coordinates; Signal's own icon assets ship under the GPL/AGPL with its apps and are not copied into this
  *  repository, which may go public under a permissive licence. */
 export const MARK_CHECK_CLASS = "postal-mark-check";
+const CHECK = '<path class="' + MARK_CHECK_CLASS + '" d="M4.9 8.3 L7.1 10.5 L11.3 5.7"/>';   // one three-point check
 export const DELIVERY_GLYPHS: Record<PostalDeliveryState, string> = {
   sent: '<circle cx="8" cy="8" r="6.25"/>',
-  delivered: '<circle cx="8" cy="8" r="6.25"/><path class="postal-mark-check" d="M4.9 8.3 L7.1 10.5 L11.3 5.7"/>',
-  read: '<circle cx="8" cy="8" r="6.25" fill="currentColor"/><path class="postal-mark-check" d="M4.9 8.3 L7.1 10.5 L11.3 5.7"/>',
+  delivered: '<circle cx="8" cy="8" r="6.25"/>' + CHECK,
+  read: '<circle cx="8" cy="8" r="6.25" fill="currentColor"/>' + CHECK,
   parked: '<circle cx="8" cy="8" r="5.6"/><path d="M8 4.8 V8.2 L10.4 9.6"/>',
   bounced: '<path d="M4.5 4.5 L11.5 11.5"/><path d="M11.5 4.5 L4.5 11.5"/>',
   recalled: '<path d="M6.6 4.6 L3.2 8 L6.6 11.4"/><path d="M3.2 8 H10 A2.8 2.8 0 0 0 12.8 5.2"/>',

@@ -94,7 +94,8 @@ body.scheme-solarized-dark {
      three unrelated hues, ranked by how much the kind asks of the reader: coordination lowest (an FYI), delegation
      next (work handed over), question highest (an answer owed). More asking = more intense against the page. The
      three are sampled EVENLY, at positions 0, 1/2 and 1 of one straight line in OKLCH (T337, the user 2026-09-10, who
-     found the first three too alike: they spanned a fifth of the line, L .66 to .86 at one saturation). On the dark
+     found the first three too alike: T320's steps sat at L .66, .76 and .85, a span of .19 against this line's .26,
+     and the top two shared one saturation, so they read as two tints of one blue). On the dark
      page the line runs from the deepest blue that still reads on a boxed card (L .64, C .085: 4.6:1 on --box-bg, the
      review's floor being 4.5) to the brightest tint the hue holds (L .90, C .05, the sRGB gamut's edge), hue pinned
      at the accent's 244 throughout; 5.0:1, 8.1:1 and 12.5:1 on the page, 4.6:1, 7.5:1 and 11.5:1 on a boxed card,

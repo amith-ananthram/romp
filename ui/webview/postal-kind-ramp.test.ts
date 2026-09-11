@@ -1,8 +1,9 @@
 // T337 (the user 2026-09-10, who found the three kind colours of T320 too alike): each theme's three tokens sit at
 // positions 0, 1/2 and 1 of ONE straight line in OKLCH, hue pinned to the accent's, from the deepest step that still reads
 // on a boxed card to the far end of the tint the hue holds. The POSITIONS are the pin, not the hexes: a re-ink that keeps
-// the even spacing passes, one that bunches two steps (T320's spanned a fifth of the line) fails. The comment beside the
-// tokens in styles.css names the same knots.
+// the line, the even spacing and the span passes; one that narrows the span (T320's dark steps spanned .19 of lightness
+// against this line's .26, its light steps .14 against .25) or bunches two steps (T320's light steps were .05 then .09
+// apart) fails. The comment beside the tokens in styles.css names the same knots.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";

@@ -15,9 +15,18 @@ test("sent / delivered / read is the ladder messaging apps draw: a hollow circle
   // the filled circle in the page colour (the class the sheet styles).
   const { sent, delivered, read } = DELIVERY_GLYPHS;
   const circle = /<circle cx="8" cy="8" r="([\d.]+)"([^>]*)\/>/;
-  const check = new RegExp('<path class="' + MARK_CHECK_CLASS + '" d="M[^"]+"\\/>');
+  // the check is a THREE-POINT polyline (a bare line is what the user zoomed in on and rejected), every point inside the
+  // circle; the circle plus half its stroke fits the 16-unit box
+  const check = new RegExp('<path class="' + MARK_CHECK_CLASS + '" d="(M[\\d.]+ [\\d.]+ L[\\d.]+ [\\d.]+ L[\\d.]+ [\\d.]+)"\\/>');
   const radii = [sent, delivered, read].map((g) => { const m = circle.exec(g); assert.ok(m, "a circle in " + g); return m![1]; });
   assert.equal(new Set(radii).size, 1, "one radius for the three circles: " + radii.join(" "));
+  const r = parseFloat(radii[0]);
+  assert.ok(r >= 5 && r + 0.75 <= 8, "the circle fills the box without clipping its 1.5 stroke: r=" + r);
+  const pts = check.exec(delivered)![1].match(/[\d.]+/g)!.map(Number);
+  for (let i = 0; i < pts.length; i += 2) {
+    assert.ok(Math.hypot(pts[i] - 8, pts[i + 1] - 8) <= r - 0.75, "check point " + pts[i] + "," + pts[i + 1] + " sits inside the circle");
+  }
+  assert.ok(pts[3] > pts[1] && pts[3] > pts[5], "the middle point is the check's low corner");
   assert.doesNotMatch(sent, check, "sent: the hollow circle alone");
   assert.doesNotMatch(sent, /fill=/, "sent: hollow");
   assert.match(delivered, check, "delivered: the circle with the check");
