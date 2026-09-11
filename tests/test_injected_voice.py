@@ -137,6 +137,14 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
             # index, so it shipped saying "goal" twice and announcing "(Automated re-check…)" until
             # 2026-08-11 — exactly the drift this index exists to catch
             "awaiting backstop": km.AWAITING_BACKSTOP_TEXT,
+            # the relayed question (T334): a worker's block toward the peer that delegated its work, sent as the
+            # worker's own words; the why is the closer's prose, scrubbed of any clause that speaks romp
+            "relayed question": km._relay_body("api", "which client should the exporter target?"),
+            "relayed question (procedural why)": km._relay_body("api", jd.NUDGE_BLOCK_WHY),
+            "relayed question (with the conversation)": km._relay_body(
+                "api", "which client should the exporter target?",
+                "The conversation this question ends, oldest first: 1 of 1 turn.\n\n--- turn 1 of 1 ---\n"
+                "user: start on the exporter\napi: which client should it target?\n(2 tool calls)"),
             # a comment thread's opening message (the user 2026-08-13): the highlight + comment are
             # the user's own words; the quoting frame around them is romp-authored and scanned here
             "comment thread opener": km._comment_first_message(
@@ -157,6 +165,10 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
         for i, v in enumerate(km.AUTO_NUDGE_STALLED_VARIANTS, 1):
             bodies["fork nudge variant %d" % i] = v
         return bodies
+
+    def test_the_relay_scrub_speaks_this_lists_words(self):
+        # the kernel scrubs a relayed question's why by the same vocabulary this file scans for (T334): one list
+        self.assertEqual(tuple(w for w, _why in ROMP_WORDS), km.ROMP_VOICE_WORDS)
 
     def test_no_romp_vocabulary_reaches_the_session(self):
         for name, body in self._bodies().items():
@@ -273,8 +285,12 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
             if name in ("typed follow-up on a summary",
                         "debt reminder (question)", "debt reminder (handoff)",
                         "debt reminder (several)", "comment thread opener", "edit trace",
-                        "comment-thread merge", "compaction suggestion", "spend ceiling"):
-                #        ^ a housekeeping suggestion, not a progress ask — it elicits nothing
+                        "comment-thread merge", "compaction suggestion", "spend ceiling",
+                        "relayed question", "relayed question (procedural why)",
+                        "relayed question (with the conversation)"):
+                #        ^ a housekeeping suggestion, not a progress ask: it elicits nothing; and the relayed
+                #          question is a WORKER's question to the peer that delegated its work, in the worker's
+                #          words, never a progress ask to the user (T334)
                 continue
             text = prose(body).lower()
             with self.subTest(message=name):

@@ -30,6 +30,7 @@ import { selectionOpenIn } from "./path-links";
 const gclock = require("./gesture-clock.js");   // the gesture clock every settings post stamps through
 import { delegate } from "./actions";
 import { resolveDocRelative, joinDocPath, urlTitleParts, headingSlug, uniqueSlugs } from "./md-links";
+import { mdWikiExtensions } from "./md-wiki";   // the same [[wikilink]] and callout grammar the chat renders (T351)
 import { readTextCapped, overCapWords, settleUrlResponse } from "./capped-read";
 import { wrapCodeLines, addCopyBtn } from "./code-block";   // a fence's per-line rows and Copy button, the chat's own
 import { fenceCopyQueue, type Fence } from "./fence-source";   // what Copy copies: the fence's text as the file holds it, tabs and all
@@ -79,6 +80,7 @@ function langFor(path: string): string | null {
 // strikes ~~double~~) — so configuring here too is an idempotent no-op in the chat bundle, and keeps
 // this module correct anywhere it's bundled without render.ts.
 marked.setOptions({ gfm: true, breaks: false });
+marked.use(...mdWikiExtensions);
 marked.use({
   tokenizer: {
     del(src: string) {
@@ -495,10 +497,10 @@ export function closeFileView(): void {
  *  handing the open to the shell for the Files pane): the gesture is still read first, so a modified click
  *  on a PDF takes its own tab whichever pane the plain click would have landed in. */
 export function openFileClick(ev: MouseEvent | KeyboardEvent | null | undefined, path: string, sid?: string | null,
-                              relay?: (path: string, sid: string | null) => void): void {
+                              relay?: (path: string, sid: string | null, frag: string | null) => void, frag?: string | null): void {
   if (wantsOwnTab(ev) && openPdfTab(path, sid ?? null)) return;
-  if (relay) { relay(path, sid ?? null); return; }
-  openFileView(path, sid);
+  if (relay) { relay(path, sid ?? null, frag ?? null); return; }
+  openFileView(path, sid, { frag: frag ?? null });   // `frag`: the section to land on (the chat's preview card, T351)
 }
 
 /** Show `path` in a modal over this pane. Re-opening replaces whatever is up — never stacks.
@@ -1669,7 +1671,7 @@ function pdfBlock(objUrl: string, path: string): HTMLElement {
  *  with a relay contract of its own passes `onRelay` and takes the relayed message whole instead of
  *  the plain open (files.ts caches the identity for its chip and keeps its recent list). */
 export function initFileView(poster: (m: Record<string, unknown>) => void,
-                             onRelay?: (m: { path: string; sid?: unknown; identity?: unknown }) => void): void {
+                             onRelay?: (m: { path: string; sid?: unknown; identity?: unknown; frag?: unknown }) => void): void {
   post = poster;
   window.addEventListener("message", (e: MessageEvent) => {
     const m = e.data;

@@ -137,7 +137,7 @@ test("render.ts wires the math extensions into marked, through the shared chat g
   // message with math renders exactly as before); render.ts applies it to the singleton.
   const grammar = UI("chat-md.ts");
   assert.match(grammar, /import \{ mathBlock, mathInline, renderMathPlaceholders \} from "\.\/math";/);
-  assert.match(grammar, /export const chatMdExtensions: MarkedExtension\[\] = \[delDoubleTilde, \{ extensions: \[mathBlock, mathInline\] \}\];/);
+  assert.match(grammar, /export const chatMdExtensions: MarkedExtension\[\] = \[delDoubleTilde, \{ extensions: \[mathBlock, mathInline\] \}, \.\.\.mdWikiExtensions\];/);   // + the wikilink and callout grammar (T351)
   const src = UI("render.ts");
   assert.match(src, /import \{ chatMdExtensions, userMdHtml \} from "\.\/chat-md";/);
   assert.match(src, /marked\.use\(\.\.\.chatMdExtensions\);/);

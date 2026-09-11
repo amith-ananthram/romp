@@ -15,7 +15,7 @@ const RENDER = fs.readFileSync(
   path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 
 test("linkifyFileUris takes skipThumbs and excludes those paths from the thumbnail strip", () => {
-  assert.match(RENDER, /function linkifyFileUris\(root: HTMLElement, skipThumbs\?: string\[\], spacePaths\?: string\[\],\s*\n\s*pathLinks\?: Record<string, string>, pathPins\?: Record<string, string>\): void/);
+  assert.match(RENDER, /function linkifyFileUris\(root: HTMLElement, skipThumbs\?: string\[\], spacePaths\?: string\[\],\s*\n\s*pathLinks\?: Record<string, string>, pathPins\?: Record<string, string>, pathPreview\?: Record<string, string>\): void/);
   // the previewable push gates on skipThumbs — the path stays a LINK, it just doesn't render a figure
   assert.match(RENDER,
     /if \(previewKind\(open\) && !previewable\.includes\(open\) && !\(skipThumbs && skipThumbs\.includes\(open\)\)\) \{\s*\n\s*previewable\.push\(open\);\s*\n\s*mentionAt\.set\(open, link\);/);
@@ -24,9 +24,9 @@ test("linkifyFileUris takes skipThumbs and excludes those paths from the thumbna
 test("the user bubble passes its ev.images paths (caption path AND path:-src) as skipThumbs", () => {
   // both ways an in-bubble image names its file: im.path (caption) and a "path:<abs>" src
   assert.match(RENDER, /\.flatMap\(\(im\) => \[im\.path, im\.src\.startsWith\("path:"\) \? im\.src\.slice\(5\) : ""\]\)/);
-  assert.match(RENDER, /linkifyFileUris\(bubble, imgPaths, ev\.spacePaths, ev\.pathLinks, ev\.pathPins\);/);
+  assert.match(RENDER, /linkifyFileUris\(bubble, imgPaths, ev\.spacePaths, ev\.pathLinks, ev\.pathPins, ev\.pathPreview\);/);
   // the assistant reply has no ev.images — its call stays bare (mentioned plots still thumb there)
-  assert.match(RENDER, /linkifyFileUris\(body, undefined, ev\.spacePaths, ev\.pathLinks, ev\.pathPins\);/);
+  assert.match(RENDER, /linkifyFileUris\(body, undefined, ev\.spacePaths, ev\.pathLinks, ev\.pathPins, ev\.pathPreview\);/);
 });
 
 // executed: replicate the strip-collection decision — a path already rendered as an in-bubble

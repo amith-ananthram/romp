@@ -729,13 +729,13 @@ class RelayArms(unittest.TestCase):
         self.assertEqual(d["tabs"], [], "desktop: no mobile tab switch (the column is already visible)")
         self.assertEqual(d["from"], "undef", "and nothing to remember")
         self.assertEqual(d["files"], [{"romp": "viewFile", "path": "/repo/notes-api/src/app.py", "sid": SID,
-                                       "identity": {"name": "web", "color": {"bg": "#123456", "fg": "#ffffff"}}}])
+                                       "identity": {"name": "web", "color": {"bg": "#123456", "fg": "#ffffff"}}, "frag": None}])
         self.assertEqual(d["feed"], [], "nothing reaches the feed")
         self.assertEqual(d["chat"], [])
         # no identity on the relay: the forward carries null (never undefined), and the pane falls to the stub;
         # a remote session's prefixed sid rides through untouched
         b = self.out["bare"]
-        self.assertEqual(b["files"], [{"romp": "viewFile", "path": "/repo/notes-api/README.md", "sid": "TESTHOST:" + SID, "identity": None}])
+        self.assertEqual(b["files"], [{"romp": "viewFile", "path": "/repo/notes-api/README.md", "sid": "TESTHOST:" + SID, "identity": None, "frag": None}])
 
     def test_phone_the_relay_switches_to_the_files_tab_and_the_close_puts_the_person_back_once(self):
         p = self.out["phone"]

@@ -115,7 +115,7 @@ test("md-sanitize.ts holds the dashboard's ONLY DOMPurify.sanitize call; render.
   assert.deepEqual(importers, ["md-sanitize.ts"]);
   assert.match(read("render.ts"), /import \{[^}]*\bsanitizeMd\b[^}]*\} from "\.\/md-sanitize";/);
   assert.match(read("file-view.ts"), /import \{ sanitizeMd \} from "\.\/md-sanitize";/);
-  assert.equal((read("render.ts").match(/sanitizeMd\(/g) || []).length, 2, "md() and userMd()");
+  assert.equal((read("render.ts").match(/sanitizeMd\(/g) || []).length, 4, "md(), userMd(), and the file preview card's markdown (on the inert DOM, previewMdClean) and provider HTML (T351)");
   assert.equal((read("file-view.ts").match(/sanitizeMd\(/g) || []).length, 1, "mdBlock");
 });
 

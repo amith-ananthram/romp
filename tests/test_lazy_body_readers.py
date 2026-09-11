@@ -57,6 +57,7 @@ SDK_BACKEND_ALLOWED = None        # the backend builds live atoms and reads raw 
 
 JUDGE_ALLOWED = {
     "_atom_text", "_unit_text", "_seg_launches", "_human_prompt_record", "_awaiting_bg_hold",   # _has_asst_work reads scalars (T358)
+    "_relay_turn_text",   # the relayed question's conversation excerpt (T334 follow-on): hydrates the atom it renders
     # raw records, the states log, captions
     "transcript_head", "_bg_step", "_bg_unresolved",
     "_skill_load_index",                                # the skill-load boot pass reads raw jsonl rows it json.loads itself (T333)
@@ -126,7 +127,7 @@ class BodyReadersAreAudited(unittest.TestCase):
         """The leaves the audit named hydrate at the top of their body: the call sits before any body read."""
         for name, fns in (("kernel.py", ["_atom_md", "_atom_user_text", "_atom_user_texts", "_seg_prompt", "_open_turn_progress",
                                          "_fold_tasks_turn", "_turn_landed"]),
-                          ("judge.py", ["_atom_text", "_unit_text", "_seg_launches", "_human_prompt_record"])):
+                          ("judge.py", ["_atom_text", "_unit_text", "_seg_launches", "_human_prompt_record", "_relay_turn_text"])):
             src = open(os.path.join(KERNEL, name)).read()
             tree = ast.parse(src)
             defs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}

@@ -92,5 +92,21 @@ class ThreadMailOff(unittest.TestCase):
         self.assertNotIn('"postalServiceOff": _session_flag(sid, "postalServiceOff")', whole, "no row reads the raw flag past the effective reader")
 
 
+class HeldMail(unittest.TestCase):
+    def setUp(self):
+        self.td = tempfile.mkdtemp(); self.saved = km.jd.STATE; km.jd._rebind_state(Path(self.td))
+
+    def tearDown(self):
+        km.jd._rebind_state(self.saved); shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_the_held_count_is_the_boxs_unread_mail_and_zero_without_a_box(self):
+        self.assertEqual(km._held_mail_count(THREAD), 0, "no box")
+        box = Path(self.td) / "postal" / "mail" / THREAD / "new"; box.mkdir(parents=True)
+        for i in range(3):
+            (box / ("m%d" % i)).write_text("From: peer\n\nhello\n")
+        self.assertEqual(km._held_mail_count(THREAD), 3)
+        self.assertIn('"heldMail": _held_mail_count(tsid)', inspect.getsource(km._comments_frame), "the frame carries it beside mailOff")
+
+
 if __name__ == "__main__":
     unittest.main()

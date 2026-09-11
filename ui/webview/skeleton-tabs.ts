@@ -90,6 +90,11 @@ export function onFull(st: SkeletonState, id: string): boolean {
 
 /** The tab left the strip (a close, the kernel's omission, a host drop): nothing to load any more. */
 export function onDismiss(st: SkeletonState, id: string): void {
+  // its view and session left the page with the tab, so it is no longer LOADED here: a later re-listing (a host
+  // re-attach, a relay redial) names it a skeleton again and the pane asks for its frame — the way the unfocused
+  // pane gets the session the user was on back (T357); before, a once-loaded id could never be a skeleton again on
+  // the same socket, so the re-listed tab sat with an "opening…" loader and no ask
+  st.loaded.delete(id);
   if (!st.ids.delete(id)) return;
   st.order = st.order.filter((x) => x !== id);
   st.status.delete(id);

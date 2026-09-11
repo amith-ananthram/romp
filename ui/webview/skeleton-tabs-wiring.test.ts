@@ -135,7 +135,7 @@ test("showActive gates the active session on the set, shows the loader with LOAD
   // prefetch skips the active tab by design, so nothing else would load it
   assert.equal(RENDER.split('"skeleton-click"').length - 1, 2, "one call site (+ the type's literal)");
   assert.match(fn("setActive"), /renderTabs\(\);\s*\n\s*showActive\(\);/, "the click path: strip repaint, then showActive → loader + ask");
-  assert.match(fn("dismissSession"), /activeId = mru\.find\([\s\S]*?showActive\(\);/, "the fallback path lands in showActive too");
+  assert.match(fn("dismissSession"), /activeId = next\.activeId;[\s\S]*?showActive\(\);/, "the fallback path (and the unfocused one, T357) lands in showActive too");
   // The branch ends by taking the leaving tab's chips down (run in the chip tests below). They were measured
   // against ITS transcript, and a tab left at the top of a long one fires none of the chips' events on the switch:
   // no scroll clamp (scrollTop is 0 and stays 0) and no #content resize (the pane's height is the body minus its
@@ -319,6 +319,8 @@ function chipWorld(opts: { clientHeight: number; innerHeight: number; transcript
     const { sessions, views, tabMeta, skeletonTabs, commentThreads, jumpBtn, replyChips, atBottomDist, isReplyReady, hostOf, el, rompLoaderInner, HOOKS } = W;
     let activeId = null, skeletonLoading = null, replyChipSig = "";
     const placeReviveLoader = () => {}, notifyActive = () => {}, renderLedger = () => {}, renderLiveAsk = () => {}, renderBgTasks = () => {}, renderSubHead = () => {}, updateStatusline = () => {};
+    // the unfocused body's painter and the box's name overlay (T357): inert here, the strip test is about the chips
+    const paintEmptyState = () => {}, syncComposerPh = () => {}, order = [];
     // the section-at-a-glance view, inert: no section shows (snapView null), so showActive's branch is not taken
     let snapView = null, snapKeep = null;
     const renderSnapshot = () => false, hideSnapshot = () => {}, composerRestingPlaceholder = () => "";

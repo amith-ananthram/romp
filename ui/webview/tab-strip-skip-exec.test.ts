@@ -124,7 +124,7 @@ function lift(): (hooks: Hooks) => Api {
       H.heads.push({ name: sec.name, color: sec.color, ids: sec.ids.slice(), folded, active, hidden: hidden.slice() });
       return h;
     }
-    const onTabKey = () => {}; const dragImageBlank = () => el("div"); const hideTabTip = () => {}; const syncComposerPh = () => {}; const snapshotDragGeometry = () => {};   // syncComposerPh: the rebuild re-syncs the composer's name overlay (T335), inert here
+    const onTabKey = () => {}; const dragImageBlank = () => el("div"); const hideTabTip = () => {}; const syncComposerPh = () => {}; const hideFilePreview = () => {}; const snapshotDragGeometry = () => {};   // syncComposerPh: the rebuild re-syncs the composer's name overlay (T335), inert here
     const flipTabs = (f) => f(); const applyCompactSweep = () => {};
     const hostNameNodes = (name) => [document.createTextNode(name)]; const fadedColor = (h) => h;
     const tabCtxGauge = () => el("span", "tab-ctx"); const pickTone = (a, b) => b ?? a;
