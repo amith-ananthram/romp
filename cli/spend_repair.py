@@ -281,7 +281,7 @@ def plan(turns: list, restarts: list, day: str, since=None, owners=None, keyed=N
     # keeps the figure the kernel wrote) is judged AGAIN on that figure, so a run over repaired rows finds nothing new
     # when the judgement stands and restores the row when it does not (a rule tightened after the first run brings a
     # zeroed turn back); a row written by a kernel that carries the CLI's cumulative (T354's fix) is never a step.
-    marked, rs_by_sid, step_ids_by_sid = {}, {}, {}
+    marked, rs_by_sid, step_ids_by_sid, lifetimes = {}, {}, {}, {}
     for sid, rs in by_sid.items():
         # the session's typical turn: the median of its rows that are NOT a first result after a restart (those are a
         # cumulative or a fresh process's first turn, both atypical); the same figure decides the threshold and the
@@ -298,15 +298,30 @@ def plan(turns: list, restarts: list, day: str, since=None, owners=None, keyed=N
         typical = _typical([_kernel_usd(r) for r in rs if id(r) not in firsts]) or 0.0
         prev_t, prev_cum, steps, restores = day_start, None, [], []
         between = []
+        unknown_cum, since_unknown, lifetime = None, [], []
         for r in rs:
             t, usd = float(r["t"]), float(r["usd"])
             restarted = id(r) in firsts
             step = False
             if isinstance(r.get("cumulativeUsd"), (int, float)) or r.get("spendBaseline"):
                 # written by a kernel that carries the CLI's cumulative on the row, or names a first result's
-                # baseline (the fix): already right, never a step; the cumulative, where named, is the chain's baseline
-                if isinstance(r.get("cumulativeUsd"), (int, float)):
-                    prev_cum = float(r["cumulativeUsd"]); between = []
+                # baseline (the fix): right, never a step, with ONE exception the fix's first boot showed (2026-09-11
+                # 22:38Z, the rule the manager approved): a row whose dollars EQUAL its cumulative and follow the same
+                # session's attach-unknown row is the lifetime billed once more (the replayed first result left the
+                # watermark at zero), corrected to the cumulative less that row's cumulative less the rows between
+                cum = float(r["cumulativeUsd"]) if isinstance(r.get("cumulativeUsd"), (int, float)) else None
+                if cum is not None and not r.get("spendBaseline") and abs(usd - cum) < 1e-6 and usd > 0 \
+                        and unknown_cum is not None:
+                    corrected = max(0.0, cum - unknown_cum - sum(since_unknown))
+                    if abs(corrected - usd) > 1e-6:
+                        lifetime.append((r, usd, corrected, unknown_cum, list(since_unknown)))
+                    unknown_cum, since_unknown = None, []
+                elif cum is not None and r.get("spendBaseline") == "attach-unknown":
+                    unknown_cum, since_unknown = cum, []
+                elif unknown_cum is not None:
+                    since_unknown.append(usd)
+                if cum is not None:
+                    prev_cum = cum; between = []
                 prev_t = t
                 continue
             repaired = isinstance(r.get("usdRecorded"), (int, float))
@@ -366,6 +381,7 @@ def plan(turns: list, restarts: list, day: str, since=None, owners=None, keyed=N
         step_ids = {id(x[0]) for x in steps}
         ordinary = [_kernel_usd(r) for r in rs if id(r) not in step_ids]   # every row that is not a step, the kernel's figure
         marked[sid] = (steps, restores, _typical(ordinary) or 0.0)
+        lifetimes[sid] = lifetime
         rs_by_sid[sid], step_ids_by_sid[sid] = rs, step_ids
         all_ordinary.extend(ordinary)
     day_typical = _typical(all_ordinary)
@@ -397,6 +413,10 @@ def plan(turns: list, restarts: list, day: str, since=None, owners=None, keyed=N
             if abs(corrected - cur) < 1e-6:
                 continue                       # already right: a run over repaired rows
             corrections.append(entry(r, sid, rec, cur, corrected, reason))
+        for r, cur, corrected, ucum, between in lifetimes.get(sid, []):
+            corrections.append(entry(r, sid, cur, cur, corrected,
+                                     "the lifetime billed once more after the attach-unknown row (cumulative %.4f less that row's cumulative %.4f less %d row(s) between (%.4f))"
+                                     % (cur, ucum, len(between), sum(between))))
         for r, rec, cur, prev_cum, between in restores:
             if prev_cum == "since":
                 reason = "restored: %.4f precedes the hosts' start (%s), a fresh process's turn" % (

@@ -594,6 +594,26 @@ class Plan(unittest.TestCase):
         self.assertIn("note: hour %sT11 would go 489.0000 below zero; held at zero" % DAY, out.getvalue(), "said on --apply as a new line")
         self.assertEqual(json.loads((state / "spend.json").read_text())["hours"]["%sT11" % DAY]["usd"], 0.0)
 
+    def test_a_lifetime_billed_once_more_after_an_attach_unknown_row_is_corrected_and_a_first_result_row_is_not(self):
+        # the fix's first boot (2026-09-11 22:38Z, the rule the manager approved): the replayed attach-unknown first
+        # result folded nothing but left the watermark at zero, and the next live result recorded the whole cumulative
+        turns = [row(A, "web", at(10, 0), 3.0) | {"cumulativeUsd": 100.0},
+                 row(A, "web", at(10, 40), 0.0) | {"cumulativeUsd": 148.4878, "spendBaseline": "attach-unknown", "redelivered": True},
+                 row(A, "web", at(10, 50), 159.2004) | {"cumulativeUsd": 159.2004},         # usd equals its cumulative: the lifetime once more
+                 row(A, "web", at(11, 0), 2.0) | {"cumulativeUsd": 161.2004},               # an ordinary fixed-kernel row
+                 row(A, "web", at(11, 10), 4.5) | {"cumulativeUsd": 4.5, "spendBaseline": "fresh"},   # a fresh process's first result: its own
+                 row(A, "web", at(11, 20), 20.0) | {"cumulativeUsd": 24.5}]
+        p = rp.plan(turns, [at(10, 30)], DAY)
+        got = {c["t"]: (c["current"], c["corrected"], c["reason"]) for c in p["rows"]}
+        self.assertEqual(sorted(got), [at(10, 50)], "the lifetime row alone; the fresh first result and the ordinary rows stand")
+        cur, corr, why = got[at(10, 50)]
+        self.assertEqual((cur, corr), (159.2004, round(159.2004 - 148.4878, 6)))
+        self.assertIn("the lifetime billed once more after the attach-unknown row", why)
+        # a lifetime row with ordinary rows between it and the attach-unknown row subtracts them too
+        turns2 = [turns[1], row(A, "web", at(10, 45), 2.0) | {"cumulativeUsd": 150.4878}, turns[2] | {"usd": 161.2004, "cumulativeUsd": 161.2004}]
+        got2 = {c["t"]: c["corrected"] for c in rp.plan(turns2, [at(10, 30)], DAY)["rows"]}
+        self.assertEqual(got2, {at(10, 50): round(161.2004 - 148.4878 - 2.0, 6)})
+
     def test_a_fold_that_would_take_a_bucket_below_zero_is_said_not_hidden(self):
         spend = {"hours": {"%sT10" % DAY: {"usd": 1.0, "turns": 1, "bySid": {A: {"usd": 1.0}}}}, "days": {DAY: {"usd": 1.0, "turns": 1, "bySid": {A: {"usd": 1.0}}}}}
         p = {"day": DAY, "rows": [{"sid": A, "owner": A, "keyed": False, "name": "web", "t": at(10, 0), "hour": "%sT10" % DAY, "current": 5.0, "corrected": 0.0, "recorded": 5.0}]}
