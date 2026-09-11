@@ -2524,8 +2524,13 @@ cleanplots the script says so and draws nothing.
 dollars after the re-attach re-bill (the section above on the ledger across a
 host re-attach: before the fix, every kernel restart recorded each hosted
 session's whole CLI lifetime as one turn, a staircase of rows on each session).
-It reads the turn rows and the restart instants (`restart-cuts.jsonl` and
-`restart-audit.jsonl`) and judges each session's first result after a restart:
+It reads the turn rows and the restart instants (the boot rows of
+`restart-cuts.jsonl`, each written by the new kernel once its reconcile is
+done, its `t` the instant; an audit row's restart request counts only when no
+boot row answers it within five minutes, since the dying kernel records results
+for seconds after both the request and its own cut row) and judges each
+session's first result after a restart, a result at the boot's own second being
+the old kernel's:
 it is that process's cumulative when it stands at or above the previous
 cumulative plus the rows recorded between (a process's total grows by at least
 what its own rows recorded; a figure below that is a fresh process's first turn

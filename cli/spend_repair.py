@@ -39,8 +39,9 @@ def state_dir() -> Path:
                 or Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local/state")) / "romp")
 
 
-def read_jsonl(path: Path) -> list:
-    """Every parseable object row of `path`, its rotated predecessor (<name>.1) first when present."""
+def read_jsonl(path: Path, bad: list = None) -> list:
+    """Every parseable object row of `path`, its rotated predecessor (<name>.1) first when present. A line that does
+    not parse (a torn append) is counted into `bad` when a list is given, so the report can say how many were skipped."""
     out = []
     for p in (path.with_name(path.name + ".1"), path):
         try:
@@ -48,9 +49,13 @@ def read_jsonl(path: Path) -> list:
         except OSError:
             continue
         for ln in text.splitlines():
+            if not ln.strip():
+                continue
             try:
                 o = json.loads(ln)
             except Exception:
+                if bad is not None:
+                    bad.append(p.name)
                 continue
             if isinstance(o, dict):
                 out.append(o)
@@ -69,22 +74,20 @@ BOOT_ANSWER_S = 300                 # an audit row (a restart REQUEST) that a bo
 
 
 def restart_instants(cuts: list, audit: list) -> list:
-    """The moments a new kernel took over, sorted, deduplicated to the second: every restart-cuts BOOT row (the new
-    kernel's first serve: pid, settleS, firstServe) and every cut row (the old kernel's drain, cutTurns), plus an audit
-    row whose action asks for a restart only when no boot row answers it within BOOT_ANSWER_S. The audit row is the
-    REQUEST: the old kernel drains for seconds after it and records the results that land meanwhile as its own
-    (ordinary deltas), so a request taken for the instant read an ordinary row as a fresh process's first result and
-    the next real re-bill was corrected against that small figure (2026-09-11: 33 rows in those gaps, one session's
-    $1,030 lifetime read as a $1,025 turn). The boot row is written by the new kernel; every row before it is the old
-    kernel's."""
+    """The moments a new kernel took over, sorted, deduplicated to the second: every restart-cuts BOOT row (written by
+    the new kernel once its reconcile is done: pid, settleS, firstServe, its `t` the instant), plus an audit row whose
+    action asks for a restart only when no boot row answers it within BOOT_ANSWER_S. Neither the audit row nor the cut
+    row is the instant: the audit row is the REQUEST, and the cut row is written by the DYING kernel after its drain
+    while sessions are still unjoined, so results land for seconds after both and are the old kernel's (ordinary
+    deltas). Either taken for the instant read such a row as a fresh process's first result and the next real re-bill
+    was corrected against that small figure (2026-09-11: 33 rows in those gaps, one session's $1,030 lifetime read as
+    a $1,025 turn). Every row before a boot row's second is the old kernel's, a row at that very second too."""
     boots, out = [], set()
     for r in cuts:
         if not isinstance(r.get("t"), (int, float)):
             continue
         if "firstServe" in r or "settleS" in r or "bootSettled" in r:
             boots.append(int(r["t"])); out.add(int(r["t"]))
-        elif "cutTurns" in r:
-            out.add(int(r["t"]))
     for r in audit:
         if isinstance(r.get("t"), (int, float)) and str(r.get("action") or "") in RESTART_ACTIONS:
             t = int(r["t"])
@@ -97,6 +100,12 @@ def _typical(usds: list) -> float:
     return float(statistics.median(usds)) if usds else 0.0
 
 
+def _kernel_usd(r: dict) -> float:
+    """The figure the kernel wrote for a row: usdRecorded where a run corrected it, else usd."""
+    v = r.get("usdRecorded")
+    return float(v) if isinstance(v, (int, float)) else float(r["usd"])
+
+
 def read_text(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
@@ -105,11 +114,14 @@ def read_text(path: Path) -> str:
 
 
 def parse_spend(text: str) -> dict:
-    try:
-        v = json.loads(text) if text else {}
-    except ValueError:
-        v = {}
-    return v if isinstance(v, dict) else {}
+    """The ledger, or {} for no file; a file that does not parse (or is not an object) raises ValueError, and the
+    caller refuses to run (M3 of the review)."""
+    if not text.strip():
+        return {}
+    v = json.loads(text)
+    if not isinstance(v, dict):
+        raise ValueError("not a JSON object")
+    return v
 
 
 def registry_maps(state: Path):
@@ -183,11 +195,13 @@ def plan(turns: list, restarts: list, day: str, since=None, owners=None, keyed=N
         # correction, and it does not move when a first row is corrected or restored, so a second run agrees with the first
         firsts, pt = set(), day_start
         for r in rs:
-            if any(pt < x <= float(r["t"]) for x in restarts):
+            if any(pt < x < float(r["t"]) for x in restarts):    # exclusive: a row AT the boot's second is the old kernel's
                 firsts.add(id(r))
             pt = float(r["t"])
-        ordinary = [float(r["usd"]) for r in rs if id(r) not in firsts]
-        typical = _typical(ordinary) or 0.0
+        # the provisional typical turn for the first-cumulative threshold: rows following no restart, on the KERNEL's
+        # figure (usdRecorded where a run corrected the row), so it reads the same on every run; the correction's
+        # typical is taken below over the rows that are not steps, once they are known (low a of the review)
+        typical = _typical([_kernel_usd(r) for r in rs if id(r) not in firsts]) or 0.0
         prev_t, prev_cum, steps, restores = day_start, None, [], []
         between = []
         for r in rs:
@@ -246,14 +260,18 @@ def plan(turns: list, restarts: list, day: str, since=None, owners=None, keyed=N
             else:
                 between.append(usd)
             prev_t = t
-        if len(steps) == 1 and steps[0][3] is None:
-            # the day's first cumulative row is believed only when a staircase FOLLOWS it (a later row at or above it
-            # plus the turns between); alone, a big first result after a restart is as likely a fresh process's long
-            # first turn, and it stands (restored, when an earlier run took it)
-            r, rec, usd, _, _, _ = steps.pop()
+        if steps and steps[0][3] is None and not (len(steps) > 1 and steps[1][3] == steps[0][1]):
+            # the day's first cumulative row is believed only when a staircase DESCENDS from it: the session's next
+            # step must stand on it (its previous cumulative is this row's figure, so it is at or above it plus the
+            # turns between). Alone, or followed only by a chain that started afresh (a CLI that died mid-day), a big
+            # first result after a restart is as likely an honest long first turn, and it stands (restored, when an
+            # earlier run took it) (M2 of the review)
+            r, rec, usd, _, _, _ = steps.pop(0)
             if isinstance(r.get("usdRecorded"), (int, float)) and abs(rec - usd) > 1e-9:
                 restores.append((r, rec, usd, None, []))
-        marked[sid] = (steps, restores, typical)
+        step_ids = {id(x[0]) for x in steps}
+        ordinary = [_kernel_usd(r) for r in rs if id(r) not in step_ids]   # every row that is not a step, the kernel's figure
+        marked[sid] = (steps, restores, _typical(ordinary) or 0.0)
         all_ordinary.extend(ordinary)
     day_typical = _typical(all_ordinary)
 
@@ -352,14 +370,15 @@ def apply_to_spend(spend: dict, p: dict) -> dict:
     return out
 
 
-def apply_to_turns(path: Path, p: dict) -> int:
+def apply_to_turns(path: Path, p: dict) -> list:
     """turns.jsonl (and its predecessor) rewritten with each corrected row's usd, the kernel's figure kept as
     usdRecorded (a row corrected twice keeps the original); a restored row gets the kernel's figure back and loses its
-    repair marks. Returns the rows changed. The kernel appends to this file while it runs (one open-append-close per
-    result): the file is read again just before the replace and every line past the count first read rides along,
-    and read once more after it, so a row that landed in the replace's own window is appended back. Atomic per file."""
+    repair marks. Returns the plan rows actually rewritten (matched by sid, second and the figure the row held), so the
+    caller folds the buckets for those and no other. The kernel appends to this file while it runs (one open-append-
+    close per result): the file is read again just before the replace and every line past the count first read rides
+    along, and read once more after it. Atomic per file."""
     want = {(c["sid"], c["t"], c["current"]): c for c in p["rows"]}
-    changed = 0
+    done = []
     for f in (path.with_name(path.name + ".1"), path):
         try:
             lines = f.read_text(encoding="utf-8").splitlines()
@@ -374,8 +393,8 @@ def apply_to_turns(path: Path, p: dict) -> int:
                 out.append(ln); continue
             key = (str(o.get("sid") or ""), int(o["t"]) if isinstance(o.get("t"), (int, float)) else None,
                    round(float(o["usd"]), 6) if isinstance(o.get("usd"), (int, float)) else None)
-            if key in want:
-                c = want[key]
+            c = want.pop(key, None)
+            if c is not None:
                 if c.get("restore"):
                     o["usd"] = c["corrected"]
                     o.pop("usdRecorded", None); o.pop("repairedT", None)
@@ -383,29 +402,26 @@ def apply_to_turns(path: Path, p: dict) -> int:
                     o.setdefault("usdRecorded", o["usd"])
                     o["usd"] = c["corrected"]
                     o["repairedT"] = int(time.time())
-                changed += 1
+                done.append(c)
             out.append(json.dumps(o))
+        if not done:
+            continue                                  # nothing of the plan in this file: leave it untouched
         try:
             now_lines = f.read_text(encoding="utf-8").splitlines()
         except OSError:
             now_lines = lines
         if len(now_lines) > n_read and now_lines[:n_read] == lines:
             out.extend(now_lines[n_read:])
-            n_read = len(now_lines)
         tmp = f.with_name(f.name + ".repair.tmp")
         tmp.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
         os.replace(tmp, f)
-        # the replace's own window: a row the kernel appended to the OLD file between the second read and the replace
-        # is in neither; the old file is gone, so it can only be found where the kernel wrote it if the kernel held it
-        # open... it does not (open-append-close), so a row that landed after the second read went to the NEW file
-        # already. The check below is the belt for that reasoning: the new file must hold every line written.
         try:
             after = f.read_text(encoding="utf-8").splitlines()
         except OSError:
             after = out
         if len(after) < len(out):
             f.write_text("\n".join(out) + ("\n" if out else ""), encoding="utf-8")
-    return changed
+    return done
 
 
 def report(p: dict) -> str:
@@ -465,12 +481,21 @@ def main(argv=None) -> int:
     except ValueError:
         sys.stderr.write("romp spend-repair: bad --since %r (ISO instant or epoch seconds)\n" % a.since)
         return 2
-    turns = read_jsonl(state / "turns.jsonl")
+    bad = []
+    turns = read_jsonl(state / "turns.jsonl", bad)
     restarts = restart_instants(read_jsonl(state / "restart-cuts.jsonl"), read_jsonl(state / "restart-audit.jsonl"))
     owners, keyed = registry_maps(state)
     spend_text = read_text(state / "spend.json")
-    spend = parse_spend(spend_text)
+    try:
+        spend = parse_spend(spend_text)
+    except ValueError as e:
+        # a ledger that does not parse is refused, never overwritten (M3 of the review: an empty ledger written over
+        # 90 days of buckets with exit 0 was the alternative)
+        sys.stderr.write("romp spend-repair: %s does not parse (%s); refusing to run on it. Nothing written.\n" % (state / "spend.json", e))
+        return 2
     p = plan(turns, restarts, day, since, owners, keyed)
+    if bad:
+        sys.stdout.write("%d unparseable line(s) in %s skipped (a torn append)\n" % (len(bad), ", ".join(sorted(set(bad)))))
     new_spend = apply_to_spend(spend, p)      # computed either way, for the notes; written only with --apply
     if a.json:
         sys.stdout.write(json.dumps(p, indent=1, sort_keys=True) + "\n")
@@ -494,17 +519,30 @@ def main(argv=None) -> int:
             if src.exists():
                 shutil.copy2(src, src.with_name("%s.bak-%s" % (name, stamp)))
         sys.stdout.write("\nbackups: spend.json.bak-%s, turns.jsonl.bak-%s (beside the files)\n" % (stamp, stamp))
+    # turns.jsonl FIRST, then the buckets for the rows actually rewritten (low c of the review): a planned row the
+    # file no longer holds as planned (the ledger moved) is left alone in both places, said below, and the next run
+    # judges it afresh; before this the buckets moved for every planned row and a row the rewrite missed had its
+    # delta folded again on the next run
+    done = apply_to_turns(state / "turns.jsonl", p)
+    missed = len(p["rows"]) - len(done)
     fresh_text = read_text(sp)
+    try:
+        base = parse_spend(fresh_text)
+    except ValueError as e:
+        sys.stderr.write("romp spend-repair: spend.json stopped parsing between the plan and the write (%s); the rows were "
+                         "rewritten, the buckets were not: run again once it parses\n" % e)
+        return 2
     if fresh_text != spend_text:
-        new_spend = apply_to_spend(parse_spend(fresh_text), p)
         sys.stdout.write("spend.json moved since the plan's read (a result folded meanwhile): the fold was recomputed on the file as it stands\n")
+    new_spend = apply_to_spend(base, dict(p, rows=done))
     tmp = sp.with_name("spend.json.repair.tmp")
     tmp.write_text(json.dumps(new_spend), encoding="utf-8")
     os.replace(tmp, sp)
-    n = apply_to_turns(state / "turns.jsonl", p)
-    n_restore = sum(1 for c in p["rows"] if c.get("restore"))
-    sys.stdout.write("\napplied: spend.json rewritten, %d turn row(s) corrected (usdRecorded keeps the old figure)%s\n"
-                     % (n - n_restore, ", %d restored to the kernel's figure" % n_restore if n_restore else ""))
+    n_restore = sum(1 for c in done if c.get("restore"))
+    sys.stdout.write("\napplied: %d turn row(s) corrected (usdRecorded keeps the old figure)%s, then spend.json rewritten for those\n"
+                     % (len(done) - n_restore, ", %d restored to the kernel's figure" % n_restore if n_restore else ""))
+    if missed:
+        sys.stdout.write("%d planned row(s) were not in turns.jsonl as planned (the ledger moved): left as they are in both files, judged afresh next run\n" % missed)
     return 0
 
 
