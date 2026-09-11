@@ -6434,10 +6434,14 @@ function ctxIcon(kind: "feed" | "mail" | "bell" | "bill" | "folder" | "tag" | "p
 function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: the group the right-clicked copy sits in (T264b), a plain string so the menu stays id-keyed
   dismissTabMenu();
   const menu = el("div", "ctx-menu");
-  // Rename leads ONE top section with the session controls (the user 2026-08-24: it sat alone and
-  // bare above its own divider) — the standard dress like its siblings: icon + the sub-line, which
-  // says what a rename PRESERVES (sessions are uuid-keyed, the name is a label — mailboxes, goals
-  // and history follow the session, per the /rename route's contract).
+  // Four sections, dividers only; the titles live here and in tab-menu-sections.test.ts (the user
+  // 2026-09-11, who asked for the menu regrouped by what each item changes about the session).
+  // ── 1. HOW IT SHOWS: Rename; the colour swatches. Both change the tab's label and tint and nothing
+  // about the session itself (Rename stays first, the 2026-08-24 ruling).
+  // Rename leads (the user 2026-08-24: it sat alone and bare above its own divider) — the standard
+  // dress like its siblings: icon + the sub-line, which says what a rename PRESERVES (sessions are
+  // uuid-keyed, the name is a label — mailboxes, goals and history follow the session, per the /rename
+  // route's contract).
   // id only, never the tab node under the cursor: the menu (on document.body) outlives kernel pushes,
   // but the tab it was opened from does not — renderTabs() swaps the strip on every push, so a node
   // captured here is usually DETACHED by the time Rename is clicked (the click-safety rule).
@@ -6451,47 +6455,9 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
     rename.addEventListener("click", (ev) => { ev.stopPropagation(); dismissTabMenu(); startTabRename(id, copy); });
     menu.appendChild(rename);
   }
-  // Move to folder… sits with Rename (the user 2026-09-01: a subproject became its own repo and the
-  // session should follow it) — the same dress, the sub-line saying what a move KEEPS. The dialog does
-  // the rest (showMovePrompt); the kernel wraps the CLI's own relocation. Every session moves (T331: the
-  // terminal backend, which had no relocation primitive, is no longer offered).
-  {
-    const mv = el("div", "ctx-item ctx-item-toggle");
-    mv.appendChild(ctxIcon("folder", false));
-    const bodyEl = el("span", "ctx-item-body");
-    const l = el("span", "ctx-item-label"); l.textContent = "Move to folder…"; bodyEl.appendChild(l);
-    const sb = el("span", "ctx-item-sub");
-    sb.textContent = "the conversation, mail, goals and history stay with the session";
-    bodyEl.appendChild(sb);
-    mv.appendChild(bodyEl);
-    mv.addEventListener("click", (ev) => { ev.stopPropagation(); dismissTabMenu(); showMovePrompt(id); });
-    menu.appendChild(mv);
-  }
-  // Open in new split (the user 2026-09-08, who wanted several sessions open at once instead of tabbing):
-  // another chat column beside the last one, opened on this session. The shell makes the column
-  // (_LANDING_SPLIT_JS) and hands it a focus; this pane only asks. Shell-hosted only — standalone and
-  // VS Code have no row to split — and only a shell that carries the split script.
-  const shellCanSplit = (() => {   // a shell with the split script, and one that can take another column right now (the cap, the phone)
-    try { const p = window.parent as any; return inRompShell() && typeof p.__rompSplitChat === "function" && (typeof p.__rompCanSplit !== "function" || !!p.__rompCanSplit()); }
-    catch (e) { return false; }
-  })();
-  if (shellCanSplit) {
-    const split = el("div", "ctx-item ctx-item-toggle");
-    split.appendChild(ctxIcon("split", false));
-    const bodyEl = el("span", "ctx-item-body");
-    const l = el("span", "ctx-item-label"); l.textContent = "Open in new split"; bodyEl.appendChild(l);
-    const sb = el("span", "ctx-item-sub"); sb.textContent = "another chat column beside this one, on this session"; bodyEl.appendChild(sb);
-    split.appendChild(bodyEl);
-    split.addEventListener("click", (ev) => {
-      ev.stopPropagation(); dismissTabMenu();
-      try { window.parent.postMessage({ romp: "openSplit", sid: id }, "*"); } catch (e) { /* no shell to ask */ }
-    });
-    menu.appendChild(split);
-  }
-  // Colors join Rename in the AESTHETIC section (the user 2026-08-24, the final by-kind grouping:
-  // [Rename + colors] / [feed, mail, bell, billing, Tags] / [Browse]). The swatch row itself is
-  // unchanged (the user 2026-06-29): the identity palette as circles, the current one ringed,
-  // omitted until /palette has loaded.
+  // The colour swatches close the section with Rename (the user 2026-08-24, who grouped the menu by
+  // kind). The swatch row itself is unchanged (the user 2026-06-29): the identity palette as circles,
+  // the current one ringed, omitted until /palette has loaded.
   if (paletteColors.length) {
     const sNow = sessions.get(id);
     const cur = (sNow && sNow.color ? sNow.color.bg : "").toLowerCase();
@@ -6512,102 +6478,10 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
     menu.appendChild(row);
   }
   menu.appendChild(el("div", "ctx-sep"));
-  // Feed + Mail per-session toggles (the user 2026-06-26) — the same controls as the timeline lane's feed
-  // checkbox + postal mailbox, here as icon + label + a faint "what it does" sub-line. State from the session.
-  const s = sessions.get(id);
-  const offFeed = !!(s && s.hideFromFeed);
-  const offMail = !!(s && s.postalServiceOff);
-  const onBell = !!(s && s.notify);
-  const toggle = (kind: "feed" | "mail" | "bell", off: boolean, lab: string, sub: string, fn: () => void) => {
-    const item = el("div", "ctx-item ctx-item-toggle");
-    item.appendChild(ctxIcon(kind, off));
-    const bodyEl = el("span", "ctx-item-body");
-    const l = el("span", "ctx-item-label"); l.textContent = lab; bodyEl.appendChild(l);
-    const sb = el("span", "ctx-item-sub"); sb.textContent = sub; bodyEl.appendChild(sb);
-    item.appendChild(bodyEl);
-    item.addEventListener("click", (ev) => { ev.stopPropagation(); dismissTabMenu(); fn(); });
-    menu.appendChild(item);
-  };
-  toggle("feed", offFeed,
-    offFeed ? "Show in feed" : "Hide from feed",
-    offFeed ? "let its prompts make feed cards again" : "stop its prompts making feed cards",
-    () => setSessionFlag(id, "hideFromFeed", !offFeed));
-  toggle("mail", offMail,
-    offMail ? "Rejoin mail" : "Mute mail",
-    offMail ? "reconnect it to the postal service" : "hide from peers — no messages in or out",
-    () => setSessionFlag(id, "postalServiceOff", !offMail));
-  // system-notification bell (the user 2026-07-28) — same flag the timeline lane bell toggles. NOTE the
-  // inverted polarity vs the two above: `notify` true is the ENABLED state, so the icon slashes on !onBell.
-  toggle("bell", !onBell,
-    onBell ? "Stop notifying" : "Notify me",
-    onBell ? "no more system notifications for this session" : "system notification when its work blocks on you or completes",
-    () => setSessionFlag(id, "notify", !onBell));
-  // (The hide-session mechanism is fully RETIRED, the user 2026-08-24 — the tag system covers
-  // backgrounding; the kernel migrated existing hidden entries into the "archived" tag. revealIn
-  // survives for the picker's tagged-session jump.)
-  // Billing submenu (the user 2026-08-09, who wants the login/API-key switch here rather than as a
-  // statusline badge). For EVERY SDK session (st.auth is set; the user 2026-09-08: the picker never
-  // disappears — it once existed only when the machine offered both choices, so a one-auth box had
-  // the fact on the tab hover and no control beside it). The flyout lists BOTH choices always; the one
-  // this box cannot bill (st.authAvail, with the kernel's reason) renders disabled, greyed, the reason
-  // in its hover, and a click on it posts nothing. The session's current pick is check-marked even
-  // when it is the unavailable one: the launch fell to the other side (st.authPickUnavailable, the
-  // kernel's honest record) and the sub-line says so. The key stays labelled plainly 'API key', no
-  // fragment of it anywhere. A pick posts the same setAuth the badge used (the session reconnects to
-  // apply, so the sub-line says "applying…" while st.authPending rides the status). An older kernel
-  // sends no authAvail: its authBoth keeps the old both-or-nothing gate.
-  const st = s ? s.status : null;
-  if (st && st.auth && (st.authAvail || st.authBoth)) {
-    const avail: AuthAvail = st.authAvail || { login: true, key: true };
-    const otherOf = (v: string) => (v === "key" ? "login" : "key");
-    const wordOf = (v: string) => (v === "key" ? "API key" : "login");
-    // (no divider: billing sits in the behavior section with the toggles — the by-kind grouping)
-    const item = el("div", "ctx-item ctx-item-toggle ctx-item-billing");
-    item.appendChild(ctxIcon("bill", false));
-    const bodyEl = el("span", "ctx-item-body");
-    const l = el("span", "ctx-item-label"); l.textContent = "Billing"; bodyEl.appendChild(l);
-    const sb = el("span", "ctx-item-sub");
-    sb.textContent = st.authPending ? "applying…"
-      : st.authPickUnavailable === st.auth
-        // the pick names a side this box cannot bill — the launch went to the other one when it exists
-        ? `⚠ ${wordOf(st.auth)} unavailable` + (authFellTo(st) ? `, billing ${wordOf(authFellTo(st))}` : "")
-      : st.authLive && st.authLive !== st.auth
-        ? `⚠ CLI reports ${st.authLive === "key" ? "API key" : "login"}`   // the pick did not take — say so where the switch lives (T124)
-        : (st.auth === "key" ? "API key" : (st.authAcct ? `Login (${st.authAcct})` : "Login"));
-    bodyEl.appendChild(sb);
-    item.appendChild(bodyEl);
-    const caret = el("span", "ctx-caret"); caret.textContent = "▸"; item.appendChild(caret);
-    item.addEventListener("click", (ev) => {
-      ev.stopPropagation();
-      const open = menu.querySelector(".ctx-sub");
-      if (open) { open.remove(); return; }                       // second click folds the flyout
-      const sub = el("div", "ctx-menu ctx-sub");
-      for (const c of [{ label: st.authAcct ? `Login (${st.authAcct})` : "Login", value: "login", why: avail.login ? "" : (avail.loginWhy || "no Claude login signed in on this machine") },
-                       { label: "API key", value: "key", why: avail.key ? "" : (avail.keyWhy || "no apiKeyHelper configured") }]) {
-        const opt = el("div", "ctx-item" + (st.auth === c.value ? " current" : "") + (c.why ? " disabled" : ""));
-        opt.textContent = c.label;
-        if (c.why) {   // unavailable here: greyed, the reason on hover, inert (the user 2026-09-08)
-          opt.title = c.why;
-          opt.setAttribute("aria-disabled", "true");
-        }
-        opt.addEventListener("click", (ev2) => {
-          ev2.stopPropagation();
-          if (c.why) return;                                       // a disabled option posts nothing, and the menu stays
-          dismissTabMenu();
-          if (st.auth !== c.value && vscodeApi) vscodeApi.postMessage({ type: "setAuth", id, value: c.value });
-        });
-        sub.appendChild(opt);
-      }
-      // INSIDE the menu node (so dismissTabMenu and the outside-mousedown check cover it), placed
-      // beside the item — .ctx-menu is position:fixed, so the coords are viewport-space, clamped
-      menu.appendChild(sub);
-      const ir = item.getBoundingClientRect();
-      const sr = sub.getBoundingClientRect();
-      sub.style.left = Math.max(0, Math.min(ir.right + 2, window.innerWidth - sr.width - 4)) + "px";
-      sub.style.top = Math.max(0, Math.min(ir.top, window.innerHeight - sr.height - 4)) + "px";
-    });
-    menu.appendChild(item);
-  }
+  // ── 2. WHERE IT BELONGS: Tags (flyout); Move to folder…; Open in new split. Membership and location
+  // are functional: they change what the kernel and the file system know about the session, and the
+  // user placed Move beside Tags. Open in new split sits third here until the drag lands (then it
+  // becomes Move to a new column, once the partition makes a column a place a session belongs).
   // TAGS (the user 2026-08-24, overruling the earlier skip: tag editing belongs everywhere a
   // session is in front of you — you might not have the timeline open and still want to organize
   // or dispatch). A compact one-line row — the current tag names as the sub-line — with the
@@ -6895,8 +6769,147 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
     });
     menu.appendChild(tagsItem);
   }
+  // Move to folder… sits beside Tags (the user 2026-09-01: a subproject became its own repo and the
+  // session should follow it; the user 2026-09-11 placed it here) — the same dress, the sub-line saying what a move KEEPS. The dialog does
+  // the rest (showMovePrompt); the kernel wraps the CLI's own relocation. Every session moves (T331: the
+  // terminal backend, which had no relocation primitive, is no longer offered).
+  {
+    const mv = el("div", "ctx-item ctx-item-toggle");
+    mv.appendChild(ctxIcon("folder", false));
+    const bodyEl = el("span", "ctx-item-body");
+    const l = el("span", "ctx-item-label"); l.textContent = "Move to folder…"; bodyEl.appendChild(l);
+    const sb = el("span", "ctx-item-sub");
+    sb.textContent = "the conversation, mail, goals and history stay with the session";
+    bodyEl.appendChild(sb);
+    mv.appendChild(bodyEl);
+    mv.addEventListener("click", (ev) => { ev.stopPropagation(); dismissTabMenu(); showMovePrompt(id); });
+    menu.appendChild(mv);
+  }
+  // Open in new split (the user 2026-09-08, who wanted several sessions open at once instead of tabbing):
+  // another chat column beside the last one, opened on this session. The shell makes the column
+  // (_LANDING_SPLIT_JS) and hands it a focus; this pane only asks. Shell-hosted only — standalone and
+  // VS Code have no row to split — and only a shell that carries the split script.
+  const shellCanSplit = (() => {   // a shell with the split script, and one that can take another column right now (the cap, the phone)
+    try { const p = window.parent as any; return inRompShell() && typeof p.__rompSplitChat === "function" && (typeof p.__rompCanSplit !== "function" || !!p.__rompCanSplit()); }
+    catch (e) { return false; }
+  })();
+  if (shellCanSplit) {
+    const split = el("div", "ctx-item ctx-item-toggle");
+    split.appendChild(ctxIcon("split", false));
+    const bodyEl = el("span", "ctx-item-body");
+    const l = el("span", "ctx-item-label"); l.textContent = "Open in new split"; bodyEl.appendChild(l);
+    const sb = el("span", "ctx-item-sub"); sb.textContent = "another chat column beside this one, on this session"; bodyEl.appendChild(sb);
+    split.appendChild(bodyEl);
+    split.addEventListener("click", (ev) => {
+      ev.stopPropagation(); dismissTabMenu();
+      try { window.parent.postMessage({ romp: "openSplit", sid: id }, "*"); } catch (e) { /* no shell to ask */ }
+    });
+    menu.appendChild(split);
+  }
+  menu.appendChild(el("div", "ctx-sep"));
+  // ── 3. WHAT REACHES YOU: Hide from feed / Show in feed; Mute mail / Rejoin mail; Notify me / Stop
+  // notifying; Billing (flyout). Per-session switches on how the session takes part in the dashboard's
+  // surfaces and who pays; the icon-plus-sub-line toggle dress throughout.
+  // Feed + Mail per-session toggles (the user 2026-06-26) — the same controls as the timeline lane's feed
+  // checkbox + postal mailbox, here as icon + label + a faint "what it does" sub-line. State from the session.
+  const s = sessions.get(id);
+  const offFeed = !!(s && s.hideFromFeed);
+  const offMail = !!(s && s.postalServiceOff);
+  const onBell = !!(s && s.notify);
+  const toggle = (kind: "feed" | "mail" | "bell", off: boolean, lab: string, sub: string, fn: () => void) => {
+    const item = el("div", "ctx-item ctx-item-toggle");
+    item.appendChild(ctxIcon(kind, off));
+    const bodyEl = el("span", "ctx-item-body");
+    const l = el("span", "ctx-item-label"); l.textContent = lab; bodyEl.appendChild(l);
+    const sb = el("span", "ctx-item-sub"); sb.textContent = sub; bodyEl.appendChild(sb);
+    item.appendChild(bodyEl);
+    item.addEventListener("click", (ev) => { ev.stopPropagation(); dismissTabMenu(); fn(); });
+    menu.appendChild(item);
+  };
+  toggle("feed", offFeed,
+    offFeed ? "Show in feed" : "Hide from feed",
+    offFeed ? "let its prompts make feed cards again" : "stop its prompts making feed cards",
+    () => setSessionFlag(id, "hideFromFeed", !offFeed));
+  toggle("mail", offMail,
+    offMail ? "Rejoin mail" : "Mute mail",
+    offMail ? "reconnect it to the postal service" : "hide from peers — no messages in or out",
+    () => setSessionFlag(id, "postalServiceOff", !offMail));
+  // system-notification bell (the user 2026-07-28) — same flag the timeline lane bell toggles. NOTE the
+  // inverted polarity vs the two above: `notify` true is the ENABLED state, so the icon slashes on !onBell.
+  toggle("bell", !onBell,
+    onBell ? "Stop notifying" : "Notify me",
+    onBell ? "no more system notifications for this session" : "system notification when its work blocks on you or completes",
+    () => setSessionFlag(id, "notify", !onBell));
+  // (The hide-session mechanism is fully RETIRED, the user 2026-08-24 — the tag system covers
+  // backgrounding; the kernel migrated existing hidden entries into the "archived" tag. revealIn
+  // survives for the picker's tagged-session jump.)
+  // Billing submenu (the user 2026-08-09, who wants the login/API-key switch here rather than as a
+  // statusline badge). For EVERY SDK session (st.auth is set; the user 2026-09-08: the picker never
+  // disappears — it once existed only when the machine offered both choices, so a one-auth box had
+  // the fact on the tab hover and no control beside it). The flyout lists BOTH choices always; the one
+  // this box cannot bill (st.authAvail, with the kernel's reason) renders disabled, greyed, the reason
+  // in its hover, and a click on it posts nothing. The session's current pick is check-marked even
+  // when it is the unavailable one: the launch fell to the other side (st.authPickUnavailable, the
+  // kernel's honest record) and the sub-line says so. The key stays labelled plainly 'API key', no
+  // fragment of it anywhere. A pick posts the same setAuth the badge used (the session reconnects to
+  // apply, so the sub-line says "applying…" while st.authPending rides the status). An older kernel
+  // sends no authAvail: its authBoth keeps the old both-or-nothing gate.
+  const st = s ? s.status : null;
+  if (st && st.auth && (st.authAvail || st.authBoth)) {
+    const avail: AuthAvail = st.authAvail || { login: true, key: true };
+    const otherOf = (v: string) => (v === "key" ? "login" : "key");
+    const wordOf = (v: string) => (v === "key" ? "API key" : "login");
+    // (no divider: billing closes the what-reaches-you section with the toggles — who pays is a per-session switch too)
+    const item = el("div", "ctx-item ctx-item-toggle ctx-item-billing");
+    item.appendChild(ctxIcon("bill", false));
+    const bodyEl = el("span", "ctx-item-body");
+    const l = el("span", "ctx-item-label"); l.textContent = "Billing"; bodyEl.appendChild(l);
+    const sb = el("span", "ctx-item-sub");
+    sb.textContent = st.authPending ? "applying…"
+      : st.authPickUnavailable === st.auth
+        // the pick names a side this box cannot bill — the launch went to the other one when it exists
+        ? `⚠ ${wordOf(st.auth)} unavailable` + (authFellTo(st) ? `, billing ${wordOf(authFellTo(st))}` : "")
+      : st.authLive && st.authLive !== st.auth
+        ? `⚠ CLI reports ${st.authLive === "key" ? "API key" : "login"}`   // the pick did not take — say so where the switch lives (T124)
+        : (st.auth === "key" ? "API key" : (st.authAcct ? `Login (${st.authAcct})` : "Login"));
+    bodyEl.appendChild(sb);
+    item.appendChild(bodyEl);
+    const caret = el("span", "ctx-caret"); caret.textContent = "▸"; item.appendChild(caret);
+    item.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      const open = menu.querySelector(".ctx-sub");
+      if (open) { open.remove(); return; }                       // second click folds the flyout
+      const sub = el("div", "ctx-menu ctx-sub");
+      for (const c of [{ label: st.authAcct ? `Login (${st.authAcct})` : "Login", value: "login", why: avail.login ? "" : (avail.loginWhy || "no Claude login signed in on this machine") },
+                       { label: "API key", value: "key", why: avail.key ? "" : (avail.keyWhy || "no apiKeyHelper configured") }]) {
+        const opt = el("div", "ctx-item" + (st.auth === c.value ? " current" : "") + (c.why ? " disabled" : ""));
+        opt.textContent = c.label;
+        if (c.why) {   // unavailable here: greyed, the reason on hover, inert (the user 2026-09-08)
+          opt.title = c.why;
+          opt.setAttribute("aria-disabled", "true");
+        }
+        opt.addEventListener("click", (ev2) => {
+          ev2.stopPropagation();
+          if (c.why) return;                                       // a disabled option posts nothing, and the menu stays
+          dismissTabMenu();
+          if (st.auth !== c.value && vscodeApi) vscodeApi.postMessage({ type: "setAuth", id, value: c.value });
+        });
+        sub.appendChild(opt);
+      }
+      // INSIDE the menu node (so dismissTabMenu and the outside-mousedown check cover it), placed
+      // beside the item — .ctx-menu is position:fixed, so the coords are viewport-space, clamped
+      menu.appendChild(sub);
+      const ir = item.getBoundingClientRect();
+      const sr = sub.getBoundingClientRect();
+      sub.style.left = Math.max(0, Math.min(ir.right + 2, window.innerWidth - sr.width - 4)) + "px";
+      sub.style.top = Math.max(0, Math.min(ir.top, window.innerHeight - sr.height - 4)) + "px";
+    });
+    menu.appendChild(item);
+  }
+  // ── 4. FILES: Browse files (web only). A different kind of thing, it opens another surface; last and
+  // alone behind its own divider (the 2026-08-24 ruling).
   // BROWSE FILES — at the BOTTOM behind its own divider (the user 2026-08-24: it is a different
-  // kind of thing from the toggles above), wearing the standard icon + sub-description dress. It opens
+  // kind of thing from the switches above), wearing the standard icon + sub-description dress. It opens
   // where a folder click opens (openBrowse's ladder: the Files pane, or over this chat), and the sub-line
   // names that place, read when the menu builds. Web-only: the VS Code webview cannot reach the kernel
   // origin, and the editor has its own explorer.

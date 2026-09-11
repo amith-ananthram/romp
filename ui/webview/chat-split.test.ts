@@ -42,9 +42,13 @@ test("the tab menu offers Open in new split when a shell that can split hosts th
   assert.match(block, /if \(shellCanSplit\) \{/);
   assert.match(block, /ctxIcon\("split", false\)/);
   assert.match(block, /window\.parent\.postMessage\(\{ romp: "openSplit", sid: id \}, "\*"\)/);
-  // it sits with Rename and Move (where this session shows), ahead of the colour swatches
-  assert.ok(i > RENDER.indexOf('l.textContent = "Move to folder…"'), "after Move to folder…");
-  assert.ok(i < RENDER.indexOf("// Colors join Rename in the AESTHETIC section"), "before the colours");
+  // it closes the where-it-belongs section (Tags, Move to folder…, then this), ahead of the switches
+  // (the user 2026-09-11, who regrouped the menu by what each item changes; tab-menu-sections.test.ts)
+  const menuAt = RENDER.indexOf("function showTabMenu(");
+  const tagsAt = RENDER.indexOf('l.textContent = "Tags"', menuAt);
+  const moveAt = RENDER.indexOf('l.textContent = "Move to folder…"', menuAt);
+  assert.ok(tagsAt > 0 && tagsAt < moveAt && moveAt < i, "after Tags and Move to folder…");
+  assert.ok(i < RENDER.indexOf('toggle("feed"', menuAt), "before the switches");
   // the icon: two columns side by side
   assert.match(RENDER, /kind === "split"\n\s*\? '<rect x="2" y="3" width="5" height="10" rx="1"\/><rect x="9" y="3" width="5" height="10" rx="1"\/>'/);
 });
