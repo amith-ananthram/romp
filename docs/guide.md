@@ -338,16 +338,20 @@ The timeline draws an arc for each message. Hover one for its gist:
 Underneath, a local message bus writes the message into a mailbox on disk that
 belongs to the recipient, then delivers it: straight away if that session is
 idle, otherwise when its current turn ends. The recipient reads it as a message
-in its chat, and it appears in the user interface as a card naming the sender
-and the kind:
+in its chat, and it appears in the user interface as a card. The card's head
+names both ends, the other session and this one, each in its session's color. A
+message this session sent also carries a delivery mark at the head's right edge,
+the way a messaging app does: sent, delivered, read, parked while the recipient
+is unreachable, bounced, or recalled. A send that failed has no mark; its tool
+call's result says what happened. An incoming message that waited while this
+session was offline wears the parked mark. Hover a mark for the state and when
+it was reached.
 
-![A message from another session, as the recipient's chat shows it](assets/guide/postal-chat.png){ width="100%" }
+Every message declares its kind, which the card shows as colored text:
 
-Every message declares its kind, which the card wears as a chip:
-
-- <span class="romp-chip-kind romp-chip-delegate">delegation</span> — the recipient owns the work now.
-- <span class="romp-chip-kind romp-chip-coordinate">coordination</span> — a heads-up; a reply is optional.
-- <span class="romp-chip-kind romp-chip-question">question</span> — an answer is required.
+- <span class="romp-kind romp-kind-delegate">Delegation</span>: the recipient owns the work now.
+- <span class="romp-kind romp-kind-coordinate">Coordination</span>: a heads-up; a reply is optional.
+- <span class="romp-kind romp-kind-question">Question</span>: an answer is required.
 
 The same mailbox is on the command line, for you and for scripts:
 
