@@ -348,12 +348,24 @@ class Plan(unittest.TestCase):
         repaired = [dict(r) for r in turns]
         for r in repaired:
             if r["t"] in got:
-                r["usdRecorded"], r["usd"] = r["usd"], got[r["t"]]
+                r["usdRecorded"], r["usd"], r["repairRule"] = r["usd"], got[r["t"]], rp.REPAIR_RULE
         later = repaired + [row(A, "web", at(11, 0), 40.0)]          # an atypical ordinary turn later in the day
-        self.assertEqual(rp.plan(later, restarts, DAY)["rows"], [], "a re-run moves nothing: the standing 2.5 is kept")
+        self.assertEqual(rp.plan(later, restarts, DAY)["rows"], [], "a re-run moves nothing: the standing 2.5 this rule wrote is kept")
+        # the round-four HIGH: a figure an EARLIER rule left on the first cumulative (a parked request's phantom baseline
+        # made 500 -> 497 'the turn') is not a plausible typical turn and carries no rule stamp: judged again
+        frozen = [dict(r) for r in turns]
+        frozen[2] = dict(frozen[2], usd=297.0, usdRecorded=300.0, repairedT=1)     # 300 - a phantom 3: 'the turn', frozen
+        frozen[4] = dict(frozen[4], usd=16.0, usdRecorded=320.0, repairedT=1, repairRule=rp.REPAIR_RULE)
+        again = {c["t"]: (c["current"], c["corrected"]) for c in rp.plan(frozen, restarts, DAY)["rows"]}
+        self.assertEqual(again, {at(9, 40): (297.0, 2.5)}, "the frozen 297 is re-judged to the typical 2.5; the stamped 16 stands")
+        # even with the stamp, a standing figure that is no plausible turn is judged again
+        frozen[2]["repairRule"] = rp.REPAIR_RULE
+        self.assertEqual({c["t"]: c["corrected"] for c in rp.plan(frozen, restarts, DAY)["rows"]}, {at(9, 40): 2.5})
 
-    def test_a_failure_between_the_two_writes_is_recovered_from_the_journal(self):
-        # low D of round three: rows corrected and buckets unfolded, and the printed advice did nothing
+    def test_a_failure_between_the_two_writes_is_recovered_from_the_journal_and_a_folded_entry_is_never_refolded(self):
+        # low D of round three, reshaped by round four: the fold's completion is recorded INSIDE spend.json in the same
+        # atomic write (repairJournal.folded), so a death between the two writes, or a restore of spend.json from a
+        # copy, leaves exactly the unfolded entries pending; a delta is folded only while its row holds the figure recorded
         d = tempfile.mkdtemp()
         state = Path(d)
         (state / "turns.jsonl").write_text("".join(json.dumps(r) + chr(10) for r in self.turns))
@@ -367,11 +379,12 @@ class Plan(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             self.assertEqual(rp.main(["--day", DAY, "--state", d, "--apply", "--no-backup"]), 0)
         journal = [json.loads(l) for l in (state / rp.REPAIR_JOURNAL).read_text().splitlines()]
-        self.assertEqual([j["phase"] for j in journal], ["rows", "buckets"], "the deltas, then the mark that their buckets were folded")
-        self.assertEqual(journal[1]["ref"], journal[0]["t"])
-        # the failure: the buckets never folded (the ledger as before the fold, the journal without its mark)
+        self.assertEqual([j["phase"] for j in journal], ["rows"], "the deltas alone; the mark lives in the ledger")
+        self.assertEqual([round(x["corrected"], 2) for x in journal[0]["deltas"]], [3.5, 6.0], "each delta names the figure its row holds")
+        folded = json.loads((state / "spend.json").read_text())
+        self.assertEqual(folded["repairJournal"]["folded"], [journal[0]["t"]], "the completion rides the same write")
+        # the death between the writes: the ledger as before the fold (no mark), the journal with its rows entry
         (state / "spend.json").write_text(json.dumps(spend))
-        (state / rp.REPAIR_JOURNAL).write_text(json.dumps(journal[0]) + chr(10))
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(rp.main(["--day", DAY, "--state", d]), 0)
@@ -383,13 +396,48 @@ class Plan(unittest.TestCase):
         self.assertIn("2 delta(s) from 1 earlier run(s) whose bucket write did not complete were folded now", out.getvalue())
         after = json.loads((state / "spend.json").read_text())
         self.assertEqual((after["hours"]["%sT10" % DAY]["usd"], after["hours"]["%sT11" % DAY]["usd"], after["days"][DAY]["usd"]), (16.5, 6.0, 22.5))
-        journal = [json.loads(l) for l in (state / rp.REPAIR_JOURNAL).read_text().splitlines()]
-        self.assertEqual([j["phase"] for j in journal], ["rows", "buckets"])
+        self.assertEqual(after["repairJournal"]["folded"], [journal[0]["t"]])
+        # a restore of spend.json from a copy that already carried the mark, then a re-run: nothing is folded again
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(rp.main(["--day", DAY, "--state", d, "--apply", "--no-backup"]), 0)
         self.assertIn("nothing to apply", out.getvalue())
-        self.assertEqual(json.loads((state / "spend.json").read_text()), after, "and a third run folds nothing again")
+        self.assertEqual(json.loads((state / "spend.json").read_text()), after, "a folded entry is never re-folded")
+        # a delta whose row moved since the entry was written folds against the row's PRESENT figure, and the plan's own
+        # correction of that row folds on top: the buckets end where the rows say
+        (state / "spend.json").write_text(json.dumps(spend))
+        rows = [json.loads(l) for l in (state / "turns.jsonl").read_text().splitlines()]
+        for r in rows:
+            if r["t"] == at(11, 10):
+                r["usd"] = 5.5                         # edited by hand since the entry was written (the plan re-judges it to 6.0)
+        (state / "turns.jsonl").write_text("".join(json.dumps(r) + chr(10) for r in rows))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(rp.main(["--day", DAY, "--state", d, "--apply", "--no-backup"]), 0)
+        self.assertIn("2 delta(s) from 1 earlier run(s) whose bucket write did not complete were folded now; 1 against the row's present figure, which moved since", out.getvalue())
+        got = json.loads((state / "spend.json").read_text())["hours"]
+        self.assertEqual((got["%sT10" % DAY]["usd"], got["%sT11" % DAY]["usd"]), (16.5, 6.0), "515 -> 5.5 by the journal, then 5.5 -> 6.0 by the plan: the rows' truth")
+        # an entry the earlier rule marked folded in the journal itself is not pending either
+        (state / "spend.json").write_text(json.dumps(spend))
+        (state / rp.REPAIR_JOURNAL).write_text(json.dumps(journal[0]) + chr(10) + json.dumps({"t": 5, "phase": "buckets", "ref": journal[0]["t"]}) + chr(10))
+        self.assertEqual(rp.journal_pending(state, spend, []), [], "the journal's own mark from the earlier rule is honoured")
+        (state / rp.REPAIR_JOURNAL).write_text(json.dumps(journal[0]) + chr(10))
+        self.assertEqual(len(rp.journal_pending(state, spend, [])), 1)
+        (state / "spend.json").write_text(json.dumps(after))
+        # a torn journal line: the dry run says so and --apply is refused
+        with open(state / rp.REPAIR_JOURNAL, "a") as f:
+            f.write('{"t": 99, "phase": "rows", "deltas": [' + chr(10))
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(rp.main(["--day", DAY, "--state", d, "--apply", "--no-backup"]), 2)
+        self.assertIn("1 unparseable line(s) in", err.getvalue()); self.assertIn("--apply is refused until the journal is whole", err.getvalue())
+
+    def test_a_fold_that_would_take_a_bucket_below_zero_is_said_not_hidden(self):
+        spend = {"hours": {"%sT10" % DAY: {"usd": 1.0, "turns": 1, "bySid": {A: {"usd": 1.0}}}}, "days": {DAY: {"usd": 1.0, "turns": 1, "bySid": {A: {"usd": 1.0}}}}}
+        p = {"day": DAY, "rows": [{"sid": A, "owner": A, "keyed": False, "name": "web", "t": at(10, 0), "hour": "%sT10" % DAY, "current": 5.0, "corrected": 0.0, "recorded": 5.0}]}
+        out = rp.apply_to_spend(spend, p)
+        self.assertEqual(out["hours"]["%sT10" % DAY]["usd"], 0.0)
+        self.assertTrue(any("would go 4.0000 below zero; held at zero" in n for n in p["notes"]), p["notes"])
 
     def test_the_rows_are_written_first_and_the_buckets_follow_only_the_rows_found(self):
         # low c: a planned row the file no longer holds as planned (the ledger moved) is left alone in both places
@@ -458,9 +506,9 @@ class Plan(unittest.TestCase):
         # the ledger as an earlier run with the request as its instant left it: the $5 row stands (it was 'fresh'), the
         # 320 row corrected to 315, the first cumulative to 2.0 (then the only row following no restart); judged again,
         # 315 becomes 15 and the typical turn is the median of 2 and the $5 turn now counted ordinary
-        repaired = [turns[0], turns[1] | {"usd": 2.0, "usdRecorded": 300.0}, turns[2], turns[3] | {"usd": 315.0, "usdRecorded": 320.0}]
+        repaired = [turns[0], turns[1] | {"usd": 2.0, "usdRecorded": 300.0, "repairRule": rp.REPAIR_RULE}, turns[2], turns[3] | {"usd": 315.0, "usdRecorded": 320.0}]
         again = {c["t"]: (c["current"], c["corrected"]) for c in rp.plan(repaired, restarts, DAY)["rows"]}
-        self.assertEqual(again, {at(10, 5): (315.0, 15.0)}, "315 becomes 15; the standing 2.0 on the first cumulative is kept as it was made (low C)")
+        self.assertEqual(again, {at(10, 5): (315.0, 15.0)}, "315 becomes 15; the standing 2.0 this rule wrote on the first cumulative is kept (low C)")
 
 
 if __name__ == "__main__":

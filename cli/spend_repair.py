@@ -70,7 +70,10 @@ def local_hour(t) -> str:
     return datetime.fromtimestamp(float(t)).strftime("%Y-%m-%dT%H")
 
 
-REPAIR_JOURNAL = "spend-repair.jsonl"   # beside the ledger: each --apply's row deltas, then the mark that their buckets were folded
+REPAIR_JOURNAL = "spend-repair.jsonl"   # beside the ledger: each --apply's row deltas; the mark that their buckets were folded
+#                                          lives INSIDE spend.json (repairJournal.folded), written in the same atomic replace
+REPAIR_RULE = 4                          # stamped on every row this rule corrects (repairRule); a standing correction is kept
+#                                          only when this rule wrote it and it reads as a plausible typical turn
 
 
 def restart_instants(cuts: list, audit: list = None) -> list:
@@ -102,17 +105,35 @@ def _kernel_usd(r: dict) -> float:
     return float(v) if isinstance(v, (int, float)) else float(r["usd"])
 
 
-def journal_pending(state: Path) -> list:
+def journal_pending(state: Path, spend: dict, bad: list = None) -> list:
     """Row deltas an earlier --apply wrote to turns.jsonl whose bucket write never completed: every `rows` entry of
-    the repair journal with no `buckets` entry naming it (low D of the round-three review: rows corrected and buckets
-    unfolded, with printed advice that did nothing). Returns the entries, oldest first."""
-    rows, folded = [], set()
-    for o in read_jsonl(state / REPAIR_JOURNAL):
+    the repair journal whose stamp is not among the refs spend.json itself carries (repairJournal.folded, written in
+    the same atomic replace as the fold, so a death between the two writes, or a restore of spend.json from a copy,
+    leaves exactly the unfolded entries pending and never re-folds a folded one: the round-four MEDIUM). A torn journal
+    line is counted into `bad` (the round-four low). Oldest first."""
+    folded = set()
+    rj = spend.get("repairJournal") if isinstance(spend, dict) and isinstance(spend.get("repairJournal"), dict) else {}
+    for x in rj.get("folded") or []:
+        folded.add(x)
+    rows = []
+    for o in read_jsonl(state / REPAIR_JOURNAL, bad):
         if o.get("phase") == "rows" and isinstance(o.get("deltas"), list):
             rows.append(o)
-        elif o.get("phase") == "buckets":
-            folded.add(o.get("ref"))
+        elif o.get("phase") == "buckets" and o.get("ref") is not None:
+            folded.add(o.get("ref"))          # the earlier rule's mark, written to the journal after the fold: honoured, so a
+            #                                   ledger those runs folded is not folded again by this one
     return [o for o in rows if o.get("t") not in folded]
+
+
+def mark_folded(spend: dict, refs: list) -> dict:
+    """The fold's completion recorded inside the ledger (the last 500 refs kept)."""
+    rj = spend.setdefault("repairJournal", {}) if isinstance(spend.get("repairJournal"), dict) else spend.__setitem__("repairJournal", {}) or spend["repairJournal"]
+    have = list(rj.get("folded") or [])
+    for r in refs:
+        if r not in have:
+            have.append(r)
+    rj["folded"] = have[-500:]
+    return spend
 
 
 def journal_append(state: Path, entry: dict) -> None:
@@ -120,10 +141,32 @@ def journal_append(state: Path, entry: dict) -> None:
         f.write(json.dumps(entry) + chr(10))
 
 
-def fold_deltas(spend: dict, deltas: list, day: str) -> dict:
-    """The journal's deltas folded into the buckets, the same fold as a plan's rows."""
-    p = {"day": day, "rows": [dict(d, current=0.0, corrected=float(d["delta"]), name=d.get("name") or "") for d in deltas]}
-    return apply_to_spend(spend, p)
+def fold_deltas(spend: dict, deltas: list, day: str, turns: list) -> tuple:
+    """The journal's deltas folded into the buckets, the same fold as a plan's rows. Each entry names the figure its
+    row held before that run (`corrected - delta`) and the figure it wrote (`corrected`); the fold is the row's PRESENT
+    figure less the former, on `turns` as they stood before this run's own rewrite, so a row edited or re-judged since
+    the entry was written still brings its buckets to what the rows say (the plan's own delta folds on top). A row the
+    ledger no longer holds is skipped. Returns (spend, rows folded against a present figure other than the recorded one,
+    rows skipped)."""
+    held = {(str(r.get("sid") or ""), int(r["t"])): round(float(r["usd"]), 6) for r in turns
+            if isinstance(r.get("t"), (int, float)) and isinstance(r.get("usd"), (int, float))}
+    take, moved, skipped = [], 0, 0
+    for d in deltas:
+        key = (str(d.get("sid") or ""), int(d["t"]))
+        present = held.get(key)
+        if present is None:
+            skipped += 1
+            continue
+        corrected = d.get("corrected")
+        if isinstance(corrected, (int, float)):
+            before = round(float(corrected) - float(d["delta"]), 6)
+            if present != round(float(corrected), 6):
+                moved += 1
+            take.append(dict(d, current=0.0, corrected=round(present - before, 6), name=d.get("name") or ""))
+        else:
+            take.append(dict(d, current=0.0, corrected=float(d["delta"]), name=d.get("name") or ""))
+    p = {"day": day, "rows": take}
+    return apply_to_spend(spend, p), moved, skipped
 
 
 def read_text(path: Path) -> str:
@@ -306,10 +349,14 @@ def plan(turns: list, restarts: list, day: str, since=None, owners=None, keyed=N
         typical = typical or day_typical
         for r, rec, cur, prev_cum, between, no_instant in steps:
             if prev_cum is None:
-                if isinstance(r.get("usdRecorded"), (int, float)):
-                    continue                   # a standing correction is kept: the day's later rows do not rewrite it (low C)
                 before = [_kernel_usd(x) for x in rs_by_sid[sid] if id(x) not in step_ids_by_sid[sid] and float(x["t"]) < float(r["t"])]
                 typical_before = _typical(before) or typical
+                if isinstance(r.get("usdRecorded"), (int, float)) and r.get("repairRule") == REPAIR_RULE \
+                        and cur < max(MIN_STAIRCASE_USD, TYPICAL_MULTIPLE * (typical_before or typical)):
+                    continue                   # a standing correction THIS rule wrote, and a plausible typical turn: kept, so the
+                    #                            day's later rows do not rewrite it (low C). One an earlier rule wrote (a phantom
+                    #                            baseline from a parked request left 497 standing as 'the turn') is judged again
+                    #                            (the round-four HIGH)
                 corrected, reason = typical_before, "the day's first cumulative row: a typical turn (median %.4f of the session's earlier rows)" % typical_before
             else:
                 corrected = rec - prev_cum - sum(between)      # >= 0 by the bound that made this a step, to float noise
@@ -363,19 +410,28 @@ def apply_to_spend(spend: dict, p: dict) -> dict:
     hours = out.setdefault("hours", {}) if isinstance(out.get("hours"), dict) else out.__setitem__("hours", {}) or out["hours"]
     days = out.setdefault("days", {}) if isinstance(out.get("days"), dict) else out.__setitem__("days", {}) or out["days"]
 
-    def fold(bucket, owner, delta, keyed):
+    clamped = []
+
+    def add(d, delta, where):
+        v = float(d.get("usd") or 0) + delta
+        if v < -1e-6:
+            clamped.append("%s would go %.4f below zero; held at zero" % (where, -v))   # said, never silent (round four)
+            v = 0.0
+        d["usd"] = round(v, 6)
+
+    def fold(bucket, owner, delta, keyed, where):
         if not isinstance(bucket, dict):
             return False
-        bucket["usd"] = round(max(0.0, float(bucket.get("usd") or 0) + delta), 6)
+        add(bucket, delta, where)
         k = bucket.get("key")
         if keyed and isinstance(k, dict) and isinstance(k.get("usd"), (int, float)):
-            k["usd"] = round(max(0.0, float(k["usd"]) + delta), 6)
+            add(k, delta, where + " key")
         by = bucket.get("bySid")
         if isinstance(by, dict) and isinstance(by.get(owner), dict):
-            by[owner]["usd"] = round(max(0.0, float(by[owner].get("usd") or 0) + delta), 6)
+            add(by[owner], delta, where + " bySid " + owner[:8])
             sk = by[owner].get("key")
             if keyed and isinstance(sk, dict) and isinstance(sk.get("usd"), (int, float)):
-                sk["usd"] = round(max(0.0, float(sk["usd"]) + delta), 6)
+                add(sk, delta, where + " bySid " + owner[:8] + " key")
         elif isinstance(by, dict):
             return "no bySid entry for %s" % owner[:8]
         return True
@@ -384,7 +440,7 @@ def apply_to_spend(spend: dict, p: dict) -> dict:
     for c in p["rows"]:
         delta = c["corrected"] - c["current"]      # against the row as it stands now (a repaired row's current figure)
         for where, bucket in (("hour %s" % c["hour"], hours.get(c["hour"])), ("day %s" % p["day"], days.get(p["day"]))):
-            got = fold(bucket, c["owner"], delta, c["keyed"])
+            got = fold(bucket, c["owner"], delta, c["keyed"], where)
             if got is False:
                 notes.append("no bucket for %s (%s)" % (where, c["name"]))
             elif got is not True:
@@ -392,7 +448,7 @@ def apply_to_spend(spend: dict, p: dict) -> dict:
     if p.get("unkeyedRows"):
         notes.append("%d corrected row(s) belong to sessions the registry does not mark as API-key billed: their buckets' "
                      "key split is left as recorded" % p["unkeyedRows"])
-    p["notes"] = sorted(set(notes))
+    p["notes"] = sorted(set(notes)) + clamped
     return out
 
 
@@ -423,11 +479,12 @@ def apply_to_turns(path: Path, p: dict) -> list:
             if c is not None:
                 if c.get("restore"):
                     o["usd"] = c["corrected"]
-                    o.pop("usdRecorded", None); o.pop("repairedT", None)
+                    o.pop("usdRecorded", None); o.pop("repairedT", None); o.pop("repairRule", None)
                 else:
                     o.setdefault("usdRecorded", o["usd"])
                     o["usd"] = c["corrected"]
                     o["repairedT"] = int(time.time())
+                    o["repairRule"] = REPAIR_RULE
                 done.append(c)
             out.append(json.dumps(o))
         if not done:
@@ -527,7 +584,13 @@ def main(argv=None) -> int:
         sys.stdout.write(json.dumps(p, indent=1, sort_keys=True) + "\n")
     else:
         sys.stdout.write(report(p) + "\n")
-    pending = journal_pending(state)
+    jbad = []
+    pending = journal_pending(state, spend, jbad)
+    if jbad:
+        sys.stderr.write("romp spend-repair: %d unparseable line(s) in %s (a torn write); a pending fold may hide in them, so "
+                         "--apply is refused until the journal is whole\n" % (len(jbad), state / REPAIR_JOURNAL))
+        if a.apply:
+            return 2
     if pending:
         sys.stdout.write("%d delta(s) from %d earlier run(s) are journaled with their bucket write incomplete: --apply folds them first\n"
                          % (sum(len(o["deltas"]) for o in pending), len(pending)))
@@ -558,7 +621,7 @@ def main(argv=None) -> int:
     missed = len(p["rows"]) - len(done)
     stamp_t = time.time()
     deltas = [{"sid": c["sid"], "t": c["t"], "hour": c["hour"], "owner": c["owner"], "keyed": c["keyed"], "name": c["name"],
-               "delta": round(c["corrected"] - c["current"], 6)} for c in done]
+               "delta": round(c["corrected"] - c["current"], 6), "corrected": round(c["corrected"], 6)} for c in done]
     if deltas:
         journal_append(state, {"t": stamp_t, "phase": "rows", "day": day, "deltas": deltas})
     fresh_text = read_text(sp)
@@ -570,19 +633,26 @@ def main(argv=None) -> int:
         return 2
     if fresh_text != spend_text:
         sys.stdout.write("spend.json moved since the plan's read (a result folded meanwhile): the fold was recomputed on the file as it stands\n")
+    pending = [o for o in journal_pending(state, base, []) if o.get("t") != stamp_t]   # against the ledger as it stands now,
+    #                                                                                    this run's own entry excluded (folded below)
     if pending:
+        n_folded = n_moved = n_skipped = 0
         for o in pending:
-            base = fold_deltas(base, o["deltas"], str(o.get("day") or day))
-        sys.stdout.write("%d delta(s) from %d earlier run(s) whose bucket write did not complete were folded now\n"
-                         % (sum(len(o["deltas"]) for o in pending), len(pending)))
-    new_spend = apply_to_spend(base, dict(p, rows=done))
+            base, moved, skipped = fold_deltas(base, o["deltas"], str(o.get("day") or day), turns)   # the rows as the plan read them
+            n_folded += len(o["deltas"]) - skipped; n_moved += moved; n_skipped += skipped
+        sys.stdout.write("%d delta(s) from %d earlier run(s) whose bucket write did not complete were folded now%s%s\n"
+                         % (n_folded, len(pending),
+                            "; %d against the row's present figure, which moved since" % n_moved if n_moved else "",
+                            "; %d skipped, their rows are gone" % n_skipped if n_skipped else ""))
+    p2 = dict(p, rows=done)
+    new_spend = apply_to_spend(base, p2)
+    for n in p2.get("notes") or []:
+        if "below zero" in n:
+            sys.stdout.write("note: %s\n" % n)
+    mark_folded(new_spend, [o["t"] for o in pending] + ([stamp_t] if deltas else []))   # the completion rides the same write
     tmp = sp.with_name("spend.json.repair.tmp")
     tmp.write_text(json.dumps(new_spend), encoding="utf-8")
     os.replace(tmp, sp)
-    for o in pending:
-        journal_append(state, {"t": time.time(), "phase": "buckets", "ref": o["t"]})
-    if deltas:
-        journal_append(state, {"t": time.time(), "phase": "buckets", "ref": stamp_t})
     n_restore = sum(1 for c in done if c.get("restore"))
     sys.stdout.write("\napplied: %d turn row(s) corrected (usdRecorded keeps the old figure)%s, then spend.json rewritten for those\n"
                      % (len(done) - n_restore, ", %d restored to the kernel's figure" % n_restore if n_restore else ""))
