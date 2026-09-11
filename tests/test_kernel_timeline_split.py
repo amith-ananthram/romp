@@ -117,11 +117,11 @@ process.stdout.write(JSON.stringify(out));
 
     def test_the_lanes_skeleton_does_not_parse_any_transcript(self):
         # cold-start speed (the user 2026-06-26): a fresh kernel (the refresh button = POST /restart) re-parses
-        # every transcript (~1.3s). The lanes don't need it — derive them from tmux + goals + the transcript
+        # every transcript (~1.3s). The lanes don't need it — derive them from the live map + goals + the transcript
         # mtime. Only the {type:"bars"} build (with_bars=True) does the real parse.
         calls = {"parse": 0}
         o_ts, o_parse = km._timeline_sessions, km._parse
-        km._timeline_sessions = lambda now, tmux, live_only=False: [{"sid": "S", "name": "n", "path": "/no/such/transcript"}]
+        km._timeline_sessions = lambda now, live, live_only=False: [{"sid": "S", "name": "n", "path": "/no/such/transcript"}]
         km._parse = lambda path, sid, now: (calls.__setitem__("parse", calls["parse"] + 1), {"turns": []})[1]
         try:
             km.build_timeline(0, {}, with_bars=False)
@@ -156,18 +156,18 @@ class PushSplit(unittest.TestCase):
                 "messages": [], "now": 1, "usage": {}}
         FULL = {"type": "timeline", "sessions": [{"id": "S"}], "turns": {"S": [{"id": "b1"}]},
                 "judging": [{"k": "planner"}], "messages": [{"m": 1}], "now": 1}
-        o_bt, o_ct, o_tmux, o_sig = (km.build_timeline, km._cached_timeline,
+        o_bt, o_ct, o_live, o_sig = (km.build_timeline, km._cached_timeline,
                                      km._live_map, km._fleet_view_sig)
-        km.build_timeline = lambda now, tmux, with_bars=True, live_only=False: (
+        km.build_timeline = lambda now, live, with_bars=True, live_only=False: (
             builds.append(with_bars) or (FULL if with_bars else SKEL))
-        km._cached_timeline = lambda now, tmux, sig, connect=False: FULL
+        km._cached_timeline = lambda now, live, sig, connect=False: FULL
         km._live_map = lambda: {}
-        km._fleet_view_sig = lambda now, tmux: ("sig",)
+        km._fleet_view_sig = lambda now, live: ("sig",)
         try:
             km._push([client])
         finally:
             (km.build_timeline, km._cached_timeline,
-             km._live_map, km._fleet_view_sig) = o_bt, o_ct, o_tmux, o_sig
+             km._live_map, km._fleet_view_sig) = o_bt, o_ct, o_live, o_sig
         msgs = [json.loads(s) for s in sent]
         types = [m["type"] for m in msgs]
         self.assertIn("data", types)
@@ -197,13 +197,13 @@ class PushSplit(unittest.TestCase):
                  "judging": {}, "messages": [], "now": 2}
         holder = {"tl": FULL1}
         calls = []
-        o_bt, o_ct, o_tmux, o_sig, o_frac, o_order, o_wire = (km.build_timeline, km._cached_timeline, km._live_map,
+        o_bt, o_ct, o_live, o_sig, o_frac, o_order, o_wire = (km.build_timeline, km._cached_timeline, km._live_map,
                                                              km._fleet_view_sig, km._DELTA_MAX_FRACTION, km._client_order,
                                                              km._bars_wire)
-        km.build_timeline = lambda now, tmux, with_bars=True, live_only=False: (holder["tl"] if with_bars else SKEL)
-        km._cached_timeline = lambda now, tmux, sig, connect=False: holder["tl"]
+        km.build_timeline = lambda now, live, with_bars=True, live_only=False: (holder["tl"] if with_bars else SKEL)
+        km._cached_timeline = lambda now, live, sig, connect=False: holder["tl"]
         km._live_map = lambda: {}
-        km._fleet_view_sig = lambda now, tmux: ("sig",)
+        km._fleet_view_sig = lambda now, live: ("sig",)
         km._DELTA_MAX_FRACTION = 10.0         # synthetic payloads are tiny: the size guard would send the whole instead
         km._client_order = lambda *a: calls.append(1) or o_order(*a)
         try:
@@ -217,7 +217,7 @@ class PushSplit(unittest.TestCase):
             km._push([client])
         finally:
             (km.build_timeline, km._cached_timeline, km._live_map, km._fleet_view_sig, km._DELTA_MAX_FRACTION,
-             km._client_order, km._bars_wire) = o_bt, o_ct, o_tmux, o_sig, o_frac, o_order, o_wire
+             km._client_order, km._bars_wire) = o_bt, o_ct, o_live, o_sig, o_frac, o_order, o_wire
         bars = [(k, m) for k, m in sent if m["type"] in ("bars", "delta")]
         self.assertEqual([m["type"] for _k, m in bars], ["bars", "delta"])
         self.assertEqual([k for k, _m in bars], [("timelinebars",), ("timelinebars",)],
@@ -258,11 +258,11 @@ class SkeletonFromCache(unittest.TestCase):
         self.saved_wire = (km._bars_wire, km._skel_wire)
         km._bars_wire = km._skel_wire = None
         self.builds = []
-        km.build_timeline = lambda now, tmux, with_bars=True, live_only=False: (
+        km.build_timeline = lambda now, live, with_bars=True, live_only=False: (
             self.builds.append((with_bars, live_only)) or self.rebuilt())
-        km._cached_timeline = lambda now, tmux, sig, connect=False: self.FULL
+        km._cached_timeline = lambda now, live, sig, connect=False: self.FULL
         km._live_map = lambda: {}
-        km._fleet_view_sig = lambda now, tmux: ("sig",)
+        km._fleet_view_sig = lambda now, live: ("sig",)
         self.clock = km.time = self._Clock(time)
 
     def tearDown(self):
@@ -326,8 +326,8 @@ class SkeletonFromCache(unittest.TestCase):
         # between rebuilds send nothing at all.
         km._cached_timeline = self.saved[1]             # the real cache
         sig, lanes = [("sig",)], [self.FULL["sessions"]]
-        km._fleet_view_sig = lambda now, tmux: sig[0]
-        km.build_timeline = lambda now, tmux, with_bars=True, live_only=False: (
+        km._fleet_view_sig = lambda now, live: sig[0]
+        km.build_timeline = lambda now, live, with_bars=True, live_only=False: (
             self.builds.append((with_bars, live_only)) or dict(self.FULL, now=now, sessions=lanes[0]))
         t = time.time()
         km._built_timeline[:] = [("sig",), self.FULL, t, t]
@@ -435,7 +435,7 @@ class SkeletonFromCache(unittest.TestCase):
         # timeline never drew a compaction marker; the projection carries the full build's list, which
         # comes from the fresh parse (the authoritative source). The stub below is the OLD skeleton's
         # shape (no compactions), so a push that built a skeleton would ship [] here.
-        km.build_timeline = lambda now, tmux, with_bars=True, live_only=False: (
+        km.build_timeline = lambda now, live, with_bars=True, live_only=False: (
             self.rebuilt() if with_bars else dict(self.FULL, turns={}, judging=[], messages=[],
                                                   sessions=[dict(self.FULL["sessions"][0], compactions=[])]))
         c, frames = self._client()
@@ -541,9 +541,9 @@ class SkeletonSerializedOncePerBuild(unittest.TestCase):
         self.saved_wire = (km._skel_wire, km._bars_wire)
         km._skel_wire = km._bars_wire = None
         km.build_timeline = lambda *a, **k: self.fail("a warm push builds nothing")
-        km._cached_timeline = lambda now, tmux, sig, connect=False: self.FULL
+        km._cached_timeline = lambda now, live, sig, connect=False: self.FULL
         km._live_map = lambda: {}
-        km._fleet_view_sig = lambda now, tmux: ("sig",)
+        km._fleet_view_sig = lambda now, live: ("sig",)
         self.json = km.json = self._Json(json)
 
     def tearDown(self):
@@ -585,7 +585,7 @@ class ProjectionMatchesColdSkeleton(unittest.TestCase):
                  "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}], "stop_reason": "end_turn"}}]
         self.path.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
         self.saved = km._timeline_sessions
-        km._timeline_sessions = lambda now, tmux, live_only=False: [
+        km._timeline_sessions = lambda now, live, live_only=False: [
             {"sid": self.SID, "name": "web", "anchor": None, "path": str(self.path), "mtime": self.now - 590}]
         self.live = {self.SID: {"state": "working", "since": self.now - 590, "model": "m", "effort": "high",
                                 "context": 42, "compactPct": None, "color": None, "mode": ""}}
@@ -652,7 +652,7 @@ class OpenIntervals(unittest.TestCase):
 
     def test_the_lane_payload_ends_the_open_interval_at_its_own_clock(self):
         o_ts = km._timeline_sessions
-        km._timeline_sessions = lambda now, tmux, live_only=False: [
+        km._timeline_sessions = lambda now, live, live_only=False: [
             {"sid": self.SID, "name": "web", "path": "/no/such/transcript-web"}]
         live = {self.SID: {"state": "permission", "since": self.now - 100, "model": "", "effort": "",
                            "context": None, "compactPct": None, "color": None, "mode": ""}}
@@ -682,14 +682,14 @@ class OpenIntervals(unittest.TestCase):
         saved = (km._timeline_sessions, km._live_map, km._fleet_view_sig, list(km._built_timeline),
                  km._views_dirty[0], km._skel_wire, km._bars_wire)
         try:
-            km._timeline_sessions = lambda now, tmux, live_only=False: [
+            km._timeline_sessions = lambda now, live, live_only=False: [
                 {"sid": self.SID, "name": "web", "path": "/no/such/transcript-web"}]
             cached = km.build_timeline(built, live, with_bars=False)
             km._built_timeline[:] = [("sig",), cached, time.time(), time.time()]   # fresh by the kernel's own rule
             km._views_dirty[0] = 0.0
             km._skel_wire = km._bars_wire = None
             km._live_map = lambda: {}
-            km._fleet_view_sig = lambda now, tmux: ("sig",)
+            km._fleet_view_sig = lambda now, live: ("sig",)
             frames = []
             km._push([{"app": "timeline", "send": frames.append, "sent": {}, "alive": True}], connect=True)
         finally:
@@ -712,7 +712,7 @@ class DeadLaneWindow(unittest.TestCase):
     def test_dead_lanes_limited_to_12h_live_only_drops_them_all(self):
         now = 1_000_000
         o_alive, o_sessions, o_ordered = km._alive_sessions, km._sessions, km._ordered
-        km._alive_sessions = lambda now, tmux: [{"sid": "LIVE", "name": "l", "path": "/l", "mtime": now}]
+        km._alive_sessions = lambda now, live: [{"sid": "LIVE", "name": "l", "path": "/l", "mtime": now}]
         km._sessions = lambda now: [
             {"sid": "LIVE", "name": "l", "path": "/l", "mtime": now},
             {"sid": "RECENT", "name": "r", "path": "/r", "mtime": now - 6 * 3600},    # dead, within 12h
@@ -734,18 +734,18 @@ class DeadLaneWindow(unittest.TestCase):
               "now": 1, "usage": {}}
         FB = {"type": "timeline", "sessions": [], "turns": {"S": []}, "judging": {},
               "messages": [], "now": 1}
-        o_bt, o_tmux, o_sig = km.build_timeline, km._live_map, km._fleet_view_sig
+        o_bt, o_live, o_sig = km.build_timeline, km._live_map, km._fleet_view_sig
         o_built = list(km._built_timeline)
-        km.build_timeline = lambda now, tmux, with_bars=True, live_only=False: (
+        km.build_timeline = lambda now, live, with_bars=True, live_only=False: (
             calls.append(("bars" if with_bars else "skel", live_only)) or (FB if with_bars else SK))
         km._live_map = lambda: {}
-        km._fleet_view_sig = lambda now, tmux: ("sig",)
+        km._fleet_view_sig = lambda now, live: ("sig",)
         km._built_timeline[0], km._built_timeline[1], km._built_timeline[2] = None, None, 0.0   # cold cache
         km._producer_wake.clear()
         try:
             km._push([client], connect=True)
         finally:
-            km.build_timeline, km._live_map, km._fleet_view_sig = o_bt, o_tmux, o_sig
+            km.build_timeline, km._live_map, km._fleet_view_sig = o_bt, o_live, o_sig
             km._built_timeline[:] = o_built
         self.assertIn(("skel", True), calls, "cold connect: the lanes skeleton is built LIVE-ONLY")
         self.assertIn(("bars", True), calls, "cold connect: the bars are built LIVE-ONLY (no dead reads)")

@@ -28,8 +28,10 @@ km = load_source("romp_kernel_model_live", os.path.join(BIN, "romp-kernel"))
 SID = "11111111-2222-3333-4444-555555555555"
 
 
-class _Tmux:
-    """A backend that cannot take input mid-turn (forwards_sends False) — set_model TYPES /model into a pane."""
+class _Typed:
+    """A backend of the ABC's base shape: it cannot take input mid-turn (forwards_sends False) and its set_model
+    TYPES /model into the composer, so a pick mid-turn is a race. No shipped backend has this shape since the
+    terminal backend's removal (2026-09-11); the fake keeps the rule's parking arm pinned."""
     def __init__(self): self.calls = []
     def owns(self, sid): return True
     def forwards_sends(self): return False
@@ -37,7 +39,7 @@ class _Tmux:
     def send(self, sid, t): self.calls.append(("send", t))
 
 
-class _Sdk(_Tmux):
+class _Sdk(_Typed):
     """A backend that takes a send mid-turn (forwards_sends) AND can apply a model change mid-turn
     (model_switches_live) — the shape the open-turn exception is for. The real SdkBackend has the channel
     for it but declares False until the CLI persists a mid-turn switch correctly (see its docstring)."""
@@ -54,7 +56,7 @@ class _Codex(_Sdk):
 
 class ModelLiveMidTurn(unittest.TestCase):
     def setUp(self):
-        self.tmux, self.sdk = _Tmux(), _Sdk()
+        self.typed, self.sdk = _Typed(), _Sdk()
         km._pending_ops.pop(SID, None)
         self._saved = (km._compacting_now, km._working_now, km._limit_hold, km._mark_model_pending,
                        km._note_model_pick, km.Sessions.backend_for)
@@ -90,10 +92,10 @@ class ModelLiveMidTurn(unittest.TestCase):
         self.assertNotIn(SID, km._pending_ops)
 
     # ── every other park reason still stands ──
-    def test_tmux_still_parks_while_a_turn_is_open(self):
-        km.Sessions.backend_for = lambda sid: self.tmux
-        km._set_model_or_park(self.tmux, SID, "claude-fable-5-1")
-        self.assertEqual(self.tmux.calls, [], "typing /model into a busy pane is the race the FIFO exists for")
+    def test_a_typing_backend_still_parks_while_a_turn_is_open(self):
+        km.Sessions.backend_for = lambda sid: self.typed
+        km._set_model_or_park(self.typed, SID, "claude-fable-5-1")
+        self.assertEqual(self.typed.calls, [], "typing /model into a busy composer is the race the FIFO exists for")
         self.assertEqual(km._pending_ops.get(SID), [("model", "claude-fable-5-1")])
 
     def test_a_compaction_still_parks_it(self):
@@ -175,7 +177,7 @@ class ModelLiveMidTurn(unittest.TestCase):
         self.assertEqual(km._pending_ops.get(SID), [("model", "opus")])
 
     def test_no_shipped_backend_declares_the_capability_yet(self):
-        # Codex applies a pick at the next turn_start; the base class (tmux's shape) types it; and the SDK,
+        # Codex applies a pick at the next turn_start; the base class types it into the composer; and the SDK,
         # which HAS the control channel, says no for now: on CLI 2.1.257 a switch applied inside a turn
         # mis-parents its transcript breadcrumbs and the rest of that turn is read as a rewound branch by
         # romp and dropped by --resume (review of #923, 2026-09-04). Flipping the SDK is a one-line change

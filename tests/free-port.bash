@@ -10,7 +10,7 @@
 #
 # Why not a literal: a literal shared by two files collides within one run (romp-manager-ensure.bats
 # once ran `up` on romp-manager-origin.bats's control port, and a manager SIGTERM'd there outlives
-# the kill by shutdownAll's exit grace, so `up` exited "already running" and never called tmux), and
+# the kill by shutdownAll's exit grace, so `up` exited "already running" and never called the launcher), and
 # any literal collides when two checkouts run bats at once on one machine.
 #
 # Ports come from 20000-24999: below Linux's ephemeral range (32768-60999) and macOS's (49152-65535),
