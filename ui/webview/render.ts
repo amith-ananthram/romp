@@ -7480,11 +7480,10 @@ function backendTakesTags(be: string): boolean { return be === "sdk" || be === "
 // chip prefilled from a tagged active tab turns every terminal create into a refusal.
 // The Tags row's option paints as the tag chip itself (T321, the user 2026-09-10): the thin border in the tag's own
 // colour that the tab strip, the feed and the outline draw, and on versus off by the visual the tag toggles already
-// use, the faded chip, here the STRUCK one (tagChip's `struck`, T321b: a diagonal in the chip's colour, since the fade
-// alone read too faint in this row), never a dot and never the Backend row's accent
+// use, the faded chip (tagChip's `off`, TAG_CHIP_OFF_CLASS at 0.45), never a dot and never the Backend row's accent
 // fill. The `sel` class on the button stays the state the create reads; the chip is repainted from it on each click.
 function paintPickerTagChip(b: HTMLButtonElement, u: { name: string; color?: string | null }): void {
-  b.replaceChildren(tagChip(u.name, u.color, { inheritSize: true, struck: !b.classList.contains("sel") }));   // off = struck (T321b)
+  b.replaceChildren(tagChip(u.name, u.color, { inheritSize: true, off: !b.classList.contains("sel") }));
 }
 
 function syncPickerTags(): void {
@@ -7989,7 +7988,7 @@ function openPicker(pick = false, prompt?: string, allowNew = false) {
     for (const u of unions) {
       const b = el("button", "picker-be-opt" + (preset.has(u.name) ? " sel" : "")) as HTMLButtonElement;
       b.type = "button"; b.dataset.tag = u.name;
-      paintPickerTagChip(b, u);   // the tag chip every surface draws, full when selected, struck when not (T321, T321b)
+      paintPickerTagChip(b, u);   // the tag chip every surface draws, full when selected, faded when not (T321)
       b.title = preset.has(u.name)
         ? `the session you are looking at is in ${u.name} — the new one joins it too unless you unpick this`
         : `put the new session in ${u.name}`;
@@ -17022,8 +17021,9 @@ function markMentions(root: HTMLElement): void {
 // chip word counts, a run of letters inside a chip does not and copies as rendered. Every range is read (a
 // multi-select holds several and sel.toString() concatenates them). A selection with no whole chip is left
 // to the browser in both flavours, including a copy inside the composer (the document's selection holds no
-// chip then). The rich flavour is the ranges' own markup with each chip's hover title (live status text) and
-// data attributes dropped, so a paste keeps the chip's class and text and nothing about the session behind it.
+// chip then). The rich flavour is the ranges' own markup with each chip's hover titles (live status text, on the
+// chip and on a down host's prefix) and data attributes dropped, so a paste keeps the chip's class and text and
+// nothing about the session behind it.
 // The Comment/Quote seed (transcriptSelection) keeps reading the rendered text: a thread's quoted passage
 // anchors on what the transcript shows.
 function mentionCopyText(sel: Selection): { text: string; html: string } | null {
@@ -17050,7 +17050,9 @@ function mentionCopyText(sel: Selection): { text: string; html: string } | null 
   try {
     const scratch = document.createElement("div");
     for (let i = 0; i < sel.rangeCount; i++) scratch.appendChild(sel.getRangeAt(i).cloneContents());
-    for (const c of Array.from(scratch.querySelectorAll<HTMLElement>(".mention-chip"))) {   // class and text travel; the hover title and the ids do not
+    // class and text travel; the hover titles and the ids do not: the chip's own, and the reconnect note a down
+    // host's prefix span wears (hostNameNodes sets it), so the chip's descendants are stripped with it
+    for (const c of Array.from(scratch.querySelectorAll<HTMLElement>(".mention-chip, .mention-chip *"))) {
       c.removeAttribute("title");
       for (const k of Object.keys(c.dataset)) delete c.dataset[k];
     }

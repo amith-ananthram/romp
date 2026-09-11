@@ -147,8 +147,7 @@ dialog's is `ui/timeline-tags-scale.test.ts`, with the measured layout in
 `ui/webview/tag-menu.ts` builds every tag the UI shows (the strip's group rows and filter
 chips, the feed's and outline's filter chips, the tag-lens menu, the tab menu's Tags flyout,
 the picker's Tags row), a thin border and the text in the tag's colour, weight 400, the
-context's size, faded when off (struck through with a diagonal in its colour where a fade alone
-reads too faint: the picker's Tags row); never bold, which is the session names' weight
+context's size, faded when off; never bold, which is the session names' weight
 (`ui/webview/tag-chip-everywhere.test.ts` pins the sites and the sheets; the two documents
 that load no module, the landing page's spend panel and the Obsidian timeline view, inline
 the same bytes under drift pins in `tests/test_spend_detail.py` and

@@ -9343,8 +9343,8 @@ def _pure_delegation_top(nodes, top_id, sid=None, path=None):
         pu = root.get("promptUuid")
         if pu and not isinstance(root.get("origin"), dict):
             latch = root.get("askAnchor")
-            if latch in ("human", "absent"):
-                return False                          # the dictated ask (or durable doubt) — stable
+            if latch in ("human", "absent", "scheduled"):
+                return False                          # the dictated ask, a scheduled prompt's, or durable doubt: stable
             if latch != "machine" and _dictated_prompt_uuid(sid, path, pu) is not False:
                 return False                          # unlatched → the cached-parse read, fail-open
     children = {}
@@ -25820,6 +25820,101 @@ def _bg_scan_all_cached(path):
     return em.scan_bg_tasks_cached(path, _bgall_cache, want_all=True)
 
 
+def _session_started_face(nodes, nid, healed):
+    """The one-line story for a session-started ROOT card: {why, parent} or None for an ordinary ask."""
+    nd = nodes.get(nid) or {}
+    born = nd.get("born") if isinstance(nd.get("born"), dict) else None
+    if born is None and nid in healed:
+        born = healed[nid][1]
+    if not born:
+        return None
+    parent = str(born.get("parentText") or "") or None   # recorded at demotion / heal time: names the request
+    pid = nd.get("parentId")                              # even after the parent node itself is gone
+    if not parent and pid and pid in nodes:
+        parent = str(nodes[pid].get("text") or "") or None
+    return {"why": str(born.get("why") or ""), "parent": parent}
+
+
+_HEAL_LOG = {"n": 0}          # tops the feed has nested as session-started this boot (logged once per rise)
+_HEAL_STOP = {"the", "and", "for", "with", "over", "into", "from", "that", "this", "each", "then", "them", "they", "their", "your", "onto", "about"}   # function words: never a shared word
+
+
+def _heal_session_tops(path, nodes, status=None, keep=()):
+    """READ-SIDE heal for stores written before the minting-time rule (T319): a top-level goal rooted in a
+    MACHINE record, not in anything the user asked for, is rendered inside the session's human-asked top that
+    was current when it was minted. The deciding fact is the judge's own latched anchor verdict (askAnchor
+    "machine": the node's prompt anchor resolved to a peer mail, the agent's own record or romp bookkeeping,
+    _latch_ask_anchors); never a word match, and never a top that merely lacks an anchor (older stores hold
+    plain tops without one). Excluded: cleared tops, handoff trackers, delegate-rooted tops (origin.peer: a
+    chain the courier traced) and steps born of a session (never tops). A top a live floor RESOLVES to (a
+    permission prompt, an API error or a judge-auth refusal keys the card on it) is un-nested by build_feed once
+    the floors are known: it keeps its card and its face record, like a blocked one. HOSTS are the asks that trace to the user: human-anchored
+    prompt tops and courier-planted delegated goals whose chain the courier proved to a human (origin.peer with
+    userAsk), never a handoff
+    tracker (the delegation fold hides those) and never a session-born step; a completed host still holds its
+    rows and a cleared host hides them with it (what a real step does; a cleared ask never resurfaces its rows
+    as root cards). NEEDS-YOU BREAKS THROUGH: a candidate that is blocked (its own flag or its exported status)
+    or a clear wrap-up's decision card is not nested, keeps its card, and still gets the face record so it
+    never poses as an ask. The launch match reads the launch record's OWN description (`launchDesc`, kept from
+    the dispatch and never overwritten by the completion's summary; never the brief or script) and shares by
+    the smaller word set, more than half and at least two, so one stray word never carries it; it only picks
+    WHICH launch supplies the why and, when several hosts are open, which is the parent; with no matching
+    launch the parent is the newest host minted before the node (else the oldest) and the why says the record
+    it is rooted in. Returns {nid: (parent nid or None, born)}; None for a top not nested (blocked, or no
+    host). Deterministic: a pure function of the store and the task stream. Never writes the store."""
+    out = {}
+    status = status or {}
+    def toks(x):
+        return {w for w in re.findall(r"[a-z0-9]+", str(x or "").lower()) if len(w) > 3 and w not in _HEAL_STOP}
+    def delegate(nd):
+        return isinstance(nd.get("handoff"), dict) or (isinstance(nd.get("origin"), dict) and nd["origin"].get("peer"))
+    cands = [(nid, nd) for nid, nd in nodes.items()
+             if nd.get("parentId") is None and not nd.get("cleared") and not nd.get("born") and not delegate(nd)
+             and nd.get("askAnchor") == "machine"]      # never "scheduled": a scheduled prompt's top is the user's
+             #                                           configured work (the mint-time rule's sdk carve-out)
+    if not cands:
+        return out
+    try:
+        tasks = _bg_scan_all_cached(path) if path else []
+    except Exception:
+        tasks = []
+    launches = [t for t in tasks if isinstance(t, dict) and _bg_is_agent(t.get("type")) and (t.get("launchDesc") or t.get("summary"))]
+    def planted(hd):                                  # a courier-planted goal whose chain the courier PROVED reaches the
+        return (isinstance(hd.get("origin"), dict) and hd["origin"].get("peer")   # user (userAsk); a mid-chain coordination
+                and isinstance(hd.get("userAsk"), dict))                          # top the feed folds away never hosts
+    hosts = sorted(((hid, hd) for hid, hd in nodes.items()
+                    if hd.get("parentId") is None and not hd.get("born") and not isinstance(hd.get("handoff"), dict)
+                    and hd.get("askAnchor") != "machine" and (hd.get("promptUuid") or planted(hd))),
+                   key=lambda h: (h[1].get("t") or 0, h[0]))      # keyed by the store's own ids, never a node's "id" field
+    for nid, nd in sorted(cands, key=lambda c: (c[1].get("t") or 0, c[0])):
+        tt = toks(nd.get("text"))
+        best, hit = 0.0, None
+        for l in launches:
+            lt = toks(l.get("launchDesc") or l.get("summary"))    # the dispatch's own words, never the brief
+            shared = len(tt & lt)
+            share = shared / float(min(len(tt), len(lt))) if tt and lt and shared >= 2 else 0.0
+            if share > 0.5 and share > best:
+                best, hit = share, l
+        via = ("workflow" if hit.get("type") == "local_workflow" else "agent") if hit else "work"
+        why = ("matched a background %s the session started (%s)" % (via, " ".join(str(hit.get("launchDesc") or hit.get("summary")).split())[:120])
+               if hit else "rooted in the session's own record (a peer's line, a report, its own turn), not in a request")
+        born = {"kind": "session", "via": via, "why": why, "healed": True}
+        nest = not (nd.get("blocked") or status.get(nid) == "blocked" or nd.get("clearWrap") or nid in set(keep or ()))
+        host = None
+        if nest:
+            before = [h for h in hosts if (h[1].get("t") or 0) <= (nd.get("t") or 0) and h[0] != nid]
+            pool = before or [h for h in hosts if h[0] != nid][:1]
+            if pool:
+                host = pool[-1]
+                if hit and len(pool) > 1:            # several open: the launch's words pick the parent, ties the newest
+                    ht = toks(hit.get("launchDesc") or hit.get("summary"))
+                    host = max(pool, key=lambda h: (len(toks(h[1].get("text")) & ht), h[1].get("t") or 0))
+        if host:
+            born["parentText"] = str(host[1].get("text") or "")[:120]
+        out[nid] = (host[0] if host else None, born)
+    return out
+
+
 def _bg_tasks(path, spawned_at=None, live=None):
     """The chat's background-task box payload: {count, tasks}. count = how many tasks to surface (drives the
     'N background tasks' header); tasks = up to 16 of them (newest first) enriched with each one's output tail
@@ -35300,6 +35395,7 @@ def build_feed(now, tmux=None):
     dbg_rows = _judge_error_rows(now) if jd._debug_mode() else None
     asks, working, awaiting = [], [], []
     serving_folds = []                                # T137: worker mirror cards awaiting the view-side fold
+    heal_total = 0                                    # T319: session-started tops nested this build (logged once per rise)
     bg_services = {}          # session name -> live SERVICE descs (judge-classified, _bg_split) → the neutral chip
     alive = _alive_sessions(now, tmux)               # hard filter: living sessions only
     wmap = _wait_for_graph(now, {s["sid"] for s in alive})   # per-session 'waiting on a live peer' (the user 2026-06-22)
@@ -35420,9 +35516,15 @@ def build_feed(now, tmux=None):
                             cite_uuids.add(_a["uuid"])
         except Exception:
             pass
+        healed = _heal_session_tops(s.get("path"), nodes, status)   # T319: machine-rooted tops nest (read-side)
+        heal_total += sum(1 for v in healed.values() if v[0])
         children = {}
         for nid, nd in nodes.items():
-            children.setdefault(nd.get("parentId"), []).append(nid)
+            _hp = healed.get(nid)
+            _pk = _hp[0] if (_hp and _hp[0]) else nd.get("parentId")
+            if _pk is not None and _pk not in nodes and isinstance(nd.get("born"), dict):
+                _pk = None                           # T319: a born step whose parent is gone renders as a root that says so
+            children.setdefault(_pk, []).append(nid)
         agent_open = _agent_open_set(nodes, children)   # authoritative-open subtree → never rendered 'done' (see helper)
         parked_rows = _parked_rows(nodes, children)     # leapfrogged open rows → the quiet "parked" row cue (see helper)
 
@@ -35536,7 +35638,9 @@ def build_feed(now, tmux=None):
             # courier-recorded handoff.peer, never inferred.
             _ho = nd.get("handoff") if isinstance(nd.get("handoff"), dict) else None
             _ho_sid = str(_ho.get("peer") or "") if _ho else ""
+            _born = nd.get("born") if isinstance(nd.get("born"), dict) else (healed.get(nid) or (None, None))[1]
             out.append({"id": nid, "kind": "handoff" if _ho_sid else "ask", "text": nd["text"],
+                        "born": _born or None,   # T319: a step the session started on its own (why it sits here)
                         "who": (_name_of(_ho_sid) or _ho_sid[:8]) if _ho_sid else name,
                         "whoSid": _ho_sid or fsid,
                         "whoColor": _name_color(_ho_sid) if _ho_sid else color,
@@ -35655,6 +35759,18 @@ def build_feed(now, tmux=None):
                 f = nodes[f]["parentId"]
             if f in nodes and status.get(f) not in ("completed", "cleared"):
                 jauth_top = f
+        _unnested = False
+        for _f in (perm_top, api_top, jauth_top):    # T319: a floor that RESOLVES to a healed top un-nests exactly that top:
+            _h = healed.get(_f) if _f else None      #   it keeps its card (the floor keys the card on it) and its face; the
+            if _h and _h[0] and _f in children.get(_h[0], []):   #   host's other rows are untouched
+                children[_h[0]].remove(_f)
+                children.setdefault(None, []).append(_f)
+                healed[_f] = (None, _h[1])
+                heal_total -= 1
+                _unnested = True
+        if _unnested:                                # the derivations below read the tree the card SHOWS (item 8 of the
+            agent_open = _agent_open_set(nodes, children)   #   fourth review): recomputed over the un-nested layout
+            parked_rows = _parked_rows(nodes, children)
         plain_user_t = _last_plain_user_turn_t(ps["turns"]) if ps else 0   # re-check: a plain reply after a soft block de-urgents it
         had_working = False                          # does this session show ANY working card? → drives the provisional placeholder
         had_awaiting = False                         # …and does any of them read AWAITING? → the session's await-green dot (below)
@@ -36197,6 +36313,10 @@ def build_feed(now, tmux=None):
                 "warnRows": (_card_warn_rows(dbg_rows, fsid, set(_subtree(nid)),
                                              store.get("placements") or {}) or None)
                             if dbg_rows is not None else None,   # debug mode only: the card's judge failures, modal "Warnings" section
+                # T319: this root is work the SESSION started (a planner-born step whose parent is gone, or a
+                # pre-rule machine-rooted top the heal found no request to nest under): the face names the
+                # parent request when one is known and says why the work exists, in one line
+                "sessionStarted": _session_started_face(nodes, nid, healed),
                 "tree": flatten(nid, [], boundary=jd.review_boundary(nodes[nid]))}
             # THE SERVING FOLD, candidate side (the user 2026-08-28, T137: fan-out lives inside the
             # ask card — the T101 ruling applied to the mirror, view-side): a to-do mirror top the
@@ -36256,6 +36376,10 @@ def build_feed(now, tmux=None):
     # globally unique, so the tracker id is the whole key). A candidate whose tracker row is not
     # on this build's board keeps its own card — suppression without a rendered home would
     # silently hide live work.
+    if heal_total > _HEAL_LOG["n"]:                   # T319: said once per boot, and again only when the count rises
+        _HEAL_LOG["n"] = heal_total
+        sys.stderr.write("feed: %d session-started top(s) nested under the goal they ran in "
+                         "(no request behind them; the planner nests new ones at mint time)\n" % heal_total)
     if serving_folds:
         _byrow = {}
         for _c in asks:
@@ -38633,7 +38757,8 @@ def _lane_segments(sid, session, goals, caps, live, bft, full_prompts=None):
     memo (_lane_memo; the comment above _lanes_memo names every input) can hold its result: (bars, seg_ends,
     last_t, compactions, cap_marks, other_marks, nsegs, complained). bars are the lane's wire bars in turn order
     (the compact shape below, every default omitted); seg_ends maps a segment's start t to its work-END t; last_t
-    is the lane's last awake activity (its `since` when the liveness snapshot has none); compactions are the
+    is the lane's last recorded activity, the newest atom time of its newest bar (its `since` when the liveness
+    snapshot has none), never a turn's `end`, which for the tail turn is the parse clock (T324); compactions are the
     compact_boundary markers; cap_marks and other_marks are this lane's judging marks, unfiltered
     (_derive_judging_marks); nsegs counts the segments visited (the cost a memo hit saves); complained is True
     when the seams or the marks stage failed, or a mark carries a time the assembly could not compare, and
@@ -38669,8 +38794,22 @@ def _lane_segments(sid, session, goals, caps, live, bft, full_prompts=None):
             # asleep gaps between pieces read as idle (and collapse under 'collapse gaps'). The segment's
             # atom times go in too: an awake stretch with NO activity in it is a dark-wake sliver, not
             # work, and drawing it redrew this segment's summary all night long (the user 2026-07-23).
-            spans = _awake_spans(seg["t"], seg["end"], [a.get("t") for a in seg["atoms"]])
-            last_t = max(last_t or 0, spans[-1][1])            # the true work END (last awake activity) — drives the lane `since`
+            acts = [a.get("t") for a in seg["atoms"]]
+            # A bar stretched by an IDLE atom ends at the segment's last recorded EVENT instead (T324, the user
+            # 2026-09-10): a finished turn's end is its trailing idle atom's end (synthesize_idle), the NEXT state
+            # record, or, for the tail turn, the PARSE CLOCK, and the parse is cached until the transcript moves, so
+            # every dormant session's last bar reached the same instant, the first build after the last kernel boot,
+            # and the board read as every session stopping at once. Only a segment whose end IS an idle span's end is
+            # clipped (the idle atom's own `t` is the Stop transition, the moment work ended, so it stays in): a
+            # segment cut at the next input keeps that input's time as its end, so a follow-up absorbed mid-turn on
+            # the live echo road (stamped at send time, minutes ahead of the tool result the turn is inside) leaves
+            # no hole before it (review find on the first cut), and an open turn has no idle atom and ends at its
+            # newest record as before.
+            bar_end = seg["end"]
+            if any(a.get("type") == "idle" and a.get("end") == seg["end"] for a in seg["atoms"]):
+                bar_end = max(seg["t"], max((t for t in acts if t is not None), default=seg["end"]))
+            spans = _awake_spans(seg["t"], bar_end, acts)
+            last_t = max(last_t or 0, spans[-1][1])            # the true work END (last recorded activity) — drives the lane `since`
             seg_ends[seg["t"]] = spans[-1][1]                  # a completion mark lands at its segment's END (after the work)
             cap = _seg_work_caption(caps, seg["id"])       # WORK caption (the bar) — drift-safe
             msg_cap = _seg_caption(caps, seg["id"])    # MESSAGE caption (the dot) — gist of the ask, ready early; drift-safe
@@ -38710,7 +38849,7 @@ def _lane_segments(sid, session, goals, caps, live, bft, full_prompts=None):
                 mids = _seg_mids(seg)
                 if mids:
                     bar["d"] = mids
-                if turn_open and si == len(segs) - 1 and sj == len(spans) - 1 and bend == seg["end"]:
+                if turn_open and si == len(segs) - 1 and sj == len(spans) - 1 and bend == bar_end:
                     bar["u"] = True                        # open: the live turn's last piece
                 if sj > 0:
                     bar["t"] = True                        # a post-sleep continuation piece: NO new prompt dot
@@ -40615,7 +40754,19 @@ def _resolve_reconnect(c, chat_list):
     it (the pusher, the connect push a `ready` triggers included, _push_session_now, _confirm_close_now), so no
     strip can reach a reconnecting client before its set exists: a close confirmation landing in the gap before
     the pusher's first pass would otherwise paint the page's stale sessions as loaded tabs. No active hint (no
-    localStorage) → the kernel cannot know what the page shows → no set → today's full push (fail safe)."""
+    localStorage) → the kernel cannot know what the page shows → no set → today's full push (fail safe).
+    Returns whether the flag was popped HERE, so the caller knows the strip it is about to send is the redial's
+    first. That strip stands in for the `ready` a redial never posts: the bundle posted its one ready on an
+    earlier socket of this page, so no ready arm runs for this socket, and the pop stamps the client `ready` in
+    the arm's place (the target filter of _reveal_request reads the stamp); the caller then consumes a reveal
+    parked for the page's window right behind the strip (_consume_pending_reveal): strip, then focus, the order
+    the ready arm sends them in. The stamp itself lands earlier than the arm's (the arm stamps after its push;
+    this stamps before the caller's strip is enqueued), so a tap that reaches _reveal_request between this lock's
+    release and the strip's enqueue is sent ahead of the strip. Accepted: a redial is not a reload, so the page
+    still shows every tab it had, and a focus naming a session created during the outage arrives ahead of the
+    strip that lists it only the way a live tap outruns the pusher today (the bundle's focus handler acts by id
+    and treats the session's presence as optional). A client that declared no redial is left as it was, and the
+    caller does nothing more."""
     # ATOMIC under the client's slot lock, flag to set (review find 2026-09-07): with the pop and the stats outside
     # it, a second strip sender racing this one popped False, sent a keyless strip and a FULL for some sid, and
     # this sender then wrote a set still naming that sid — held whole by the client yet served only status frames
@@ -40623,14 +40774,19 @@ def _resolve_reconnect(c, chat_list):
     # holds whole (echat) is excluded outright, so a full that won the race can never be re-listed.
     with _client_lock(c):
         if not c.pop("reconnect", False):
-            return
+            return False
+        # The redial's stamp (2026-09-10): the page listens (the shim dials ?reconnect=1 only once the kernel's caps
+        # frame has answered its bundle's ready), and the bundle posts ready once, so nothing else would ever stamp
+        # this socket; without the stamp a tap for this window parked for the rest of the page's life.
+        c["ready"] = True
         act = c.get("active")
         if not act:
-            return
+            return True
         held = c.get("echat") or {}
         skel = [sid for sid in _skeleton_for(c, str(act), chat_list) if sid not in held]
         c["skeleton"] = set(skel)
         c["skeletonOrder"] = skel
+    return True
 
 
 def _send_tab_order(c, tab_order, tab_meta, live):
@@ -43088,8 +43244,10 @@ def _push(targets, connect=False, tmux=None):
                 _send_client(c, ("globalRetryPaused",), {"type": "globalRetryPaused", "value": _retry_paused_on(),
                                                          "resumeAt": _retry_resume_at(),   # limit reset epoch → the card counts down to the real retry
                                                          "reason": _retry_pause_reason()})   # "spend" → the card says 'raise your cap', no countdown
-                _resolve_reconnect(c, chat_list)         # a redialing page: fix its skeleton set BEFORE any strip
+                redialed = _resolve_reconnect(c, chat_list)   # a redialing page: fix its skeleton set BEFORE any strip
                 _send_tab_order(c, tab_order, tab_meta, tmux)
+                if redialed:                             # the redial's first strip stands in for the ready it never posts:
+                    _consume_pending_reveal(c, why="the pane's redial")   # a reveal parked for its window lands behind the strip
             active = {c.get("active") for c in chat_clients if c.get("active")}
             # Stable: active tabs first — and TRANSCRIPT-LESS sessions with them. A just-created session
             # has no transcript, so its build is near-free, and its creator is guaranteed to be staring
@@ -43593,8 +43751,10 @@ def _push_session_now(sid):
             return                                   # the periodic pusher owns the sid until content returns
         ms = None                                    # lazy: the first full send materializes it, the rest reuse
         for c in targets:
-            _resolve_reconnect(c, chat_list)         # a redialing page must never see a strip before its set exists
+            redialed = _resolve_reconnect(c, chat_list)   # a redialing page must never see a strip before its set exists
             _send_tab_order(c, tab_order, tab_meta, tmux)
+            if redialed:                             # this strip is the redial's first: a reveal parked for its window lands behind it
+                _consume_pending_reveal(c, why="the pane's redial")
             ms = _send_chat(c, m, ms, 0, True)       # change_from 0 → always the full-session form (…and releases a skeleton)
     except Exception:
         sys.stderr.write("push-session-now (%s): %s\n" % (sid, traceback.format_exc()))
@@ -43643,8 +43803,10 @@ def _confirm_close_now(sid):
             targets = [c for c in _clients if c["app"] == "chat"]
         for c in targets:
             try:
-                _resolve_reconnect(c, chat_list)     # a confirmation may be the FIRST strip a redialing page sees
+                redialed = _resolve_reconnect(c, chat_list)   # a confirmation may be the FIRST strip a redialing page sees
                 _send_tab_order(c, tab_order, tab_meta, tmux)
+                if redialed:                         # ...and then the sender that lands a reveal parked for its window
+                    _consume_pending_reveal(c, why="the pane's redial")
             except Exception:
                 c["alive"] = False
         return sid not in tab_order
@@ -45557,7 +45719,8 @@ def _sw_js():
 # mints and every same-window pane shares — so a second dashboard's reload cannot steal it). One
 # slot, latest wins: two taps before a boot completes should land on the newer notification.
 # `sent` (2026-09-06): the clients a LIVE tap was already handed to while unproven — see
-# _reveal_request; a pong from one of them retires the slot, a redial's ready consumes it.
+# _reveal_request; a pong from one of them retires the slot, a redial's first tab strip consumes it (a
+# redialed socket carries no ready, so _resolve_reconnect stamps it and its strip sender consumes).
 _PENDING_REVEAL = [None]                     # {"sid": ..., "wid": ...[, "sent": [clients]]} or None
 # The roads a shell may name in /reveal's `via`, the log line's first word (the ledger block above _push_ledger has
 # the design): the worker's message to a live window ('sw'), the deep link the page opened on or was navigated to
@@ -45607,8 +45770,12 @@ def _reveal_request(sid, wid, boot=False, via=""):
               the peer is unproven since the last heartbeat). Deliver as before AND keep a copy
               parked, tagged with who it went to: the pong that proves that socket alive retires it
               (_note_ws_inbound — the focus frame is ordered behind the ping it answers); a dead
-              socket never pongs, the pane redials, and its ready consumes the copy instead of
-              finding nothing. A socket with no ping outstanding is proven: nothing parked, so a
+              socket never pongs, the pane redials, and the redial's first tab strip consumes the
+              copy instead of finding nothing: a redialed socket carries no ready (the bundle posted
+              its one ready on the socket that died), so _resolve_reconnect stamps the client when
+              the first strip sender pops the flag, and that sender consumes behind its strip. A tap
+              in the gap between the redial's handshake and that strip parks like any other and is
+              landed by the same strip. A socket with no ping outstanding is proven: nothing parked, so a
               later ready never replays a landed tap — except on the boot road, where the copy is
               kept whatever the ping state (above) and the pane's own answer retires it.
 
@@ -45624,7 +45791,9 @@ def _reveal_request(sid, wid, boot=False, via=""):
         # same-wid chat socket exists from its handshake, but until its bundle posts ready it has no message
         # listener, so a focus sent to it vanishes — and its ready message, counted as an answer by
         # _note_ws_inbound, would retire the parked copy before the ready handler could consume it (the
-        # review find on T312). Such a socket is left alone: the park stands and its ready consumes.
+        # review find on T312). Such a socket is left alone: the park stands and its ready consumes. A
+        # redial (?reconnect=1) never posts a ready: _resolve_reconnect stamps it at its first tab strip,
+        # and that strip's sender consumes the park.
         targets = [c for c in _clients if c["app"] == "chat" and (c.get("wid") or "") == wid and c.get("ready")]
     delivered, sent = False, []
     for c in targets:
@@ -45663,18 +45832,23 @@ def _reveal_proven(client):
         print("[reveal] sid=%s: copy retired — its target answered" % str(p["sid"])[:8], file=sys.stderr)
 
 
-def _consume_pending_reveal(client):
+def _consume_pending_reveal(client, why="the pane's ready"):
     """Called from the WS 'ready' handler: if this is the chat pane the parked reveal was aimed
     at, deliver and clear. Runs AFTER the ready push, so the session tabs this focus names are
     already on the client (same socket, ordered delivery). An empty parked wid matches the first
-    chat pane to arrive — the no-sessionStorage fallback, better than dropping the tap."""
+    chat pane to arrive — the no-sessionStorage fallback, better than dropping the tap.
+    Also called by each tab-strip sender right after a redial's FIRST strip (_resolve_reconnect
+    popped the flag): a redialed socket never carries a ready, so that strip is the event that
+    consumes; the strip is sent first, for the same reason the ready push precedes the arm's
+    consume. `why` names the event on the journal line, so a park's end says which of the two
+    landed it."""
     p = _PENDING_REVEAL[0]
     if not p or client.get("app") != "chat":
         return
     if p["wid"] and (client.get("wid") or "") != p["wid"]:
         return
     _PENDING_REVEAL[0] = None
-    print("[reveal] sid=%s wid=%s: consumed — the pane's ready" % (str(p["sid"])[:8], str(p["wid"] or "")[:8]), file=sys.stderr)
+    print("[reveal] sid=%s wid=%s: consumed — %s" % (str(p["sid"])[:8], str(p["wid"] or "")[:8], why), file=sys.stderr)
     try:
         client["send"](json.dumps(_reveal_msg(p["sid"])))
     except Exception:
