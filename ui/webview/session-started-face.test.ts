@@ -15,11 +15,13 @@ test("the card item and the tree node carry the session-started records the kern
   assert.match(FEED, /interface AskTreeNode \{\n  born\?: \{ kind: string; via: string; why: string; healed\?: boolean \} \| null;/, "the tree row's why");
 });
 
-test("a session-started root says so in one line on the distill line, yielding to a real takeaway", () => {
-  const face = FEED.indexOf("if (it.sessionStarted && !distillShown && !(isJudgeAuth && it.blocked)) {");
-  assert.ok(face > 0, "shown only when no takeaway or decision brief occupies the line, and never over a judge-auth explanation");
+test("a session-started root says so on its own line beside the sections, shown with or without a takeaway", () => {
+  const face = FEED.indexOf('fe = el("div", "fask-distill fask-face");');
+  assert.ok(face > 0, "the face has its own element (the distill line's look), created once");
+  assert.ok(FEED.includes("secs.parentNode!.insertBefore(fe, secs.nextSibling);"), "kept OUTSIDE the collapsible sections, whose logic hides the distill line");
   const sections = FEED.indexOf("applySections(a, it, !!distillShown);");
-  assert.ok(sections > 0 && face > sections, "set AFTER applySections, whose no-takeaway branch hides the distill line the face borrows");
+  assert.ok(sections > 0 && face > sections, "set after the section logic runs");
   assert.ok(FEED.includes('"Started by the session while working on \\u201c" + ss.parent + "\\u201d: "'), "names the parent request when known");
   assert.ok(FEED.includes('"Started by the session on its own: "'), "and says so plainly when none is known");
+  assert.ok(FEED.includes('fe.style.display = "none";'), "and clears on a later push when the record is gone");
 });

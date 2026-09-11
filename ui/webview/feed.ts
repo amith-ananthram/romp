@@ -2278,14 +2278,27 @@ function updateAskCard(card: HTMLElement, it: AskItem) {
   // forgot the thread, collapsed by default) above the takeaway (expanded by default), each with a +/−.
   applySections(a, it, !!distillShown);   // bg/summary/sub-goals (mutually exclusive) — applyDistillLine returns the line's TEXT (string), coerce to "has content"
   // A SESSION-STARTED root (T319): work the session began on its own (a Workflow run, an agent, a thread of
-  // its own) that stands as a card only because its parent is gone or no request could host it. The face
-  // says what it is and why in one line, so it never reads as something the user asked for. AFTER
-  // applySections: with no takeaway that logic hides the distill line, and the face borrows that line.
-  if (it.sessionStarted && !distillShown && !(isJudgeAuth && it.blocked)) {
-    const dle = a._distill as HTMLElement;
+  // its own) that stands as a card only because its parent is gone, no request could host it, or it is
+  // blocked (needs-you breaks through). The face says what it is and why in one line, so it never reads as
+  // something the user asked for. Its OWN line, created once beside the sections and kept outside them: the
+  // distill line lives inside the collapsible sections, whose logic hides it without a takeaway and whose
+  // decision brief would otherwise displace the face; both show.
+  {
+    let fe = a._face as HTMLElement | undefined;
+    if (!fe) {
+      fe = el("div", "fask-distill fask-face");
+      const secs = a._secs as HTMLElement;
+      secs.parentNode!.insertBefore(fe, secs.nextSibling);
+      a._face = fe;
+    }
     const ss = it.sessionStarted;
-    dle.textContent = (ss.parent ? "Started by the session while working on \u201c" + ss.parent + "\u201d: " : "Started by the session on its own: ") + (ss.why || "");
-    dle.style.display = "";
+    if (ss) {
+      fe.textContent = (ss.parent ? "Started by the session while working on \u201c" + ss.parent + "\u201d: " : "Started by the session on its own: ") + (ss.why || "");
+      fe.style.display = "";
+    } else {
+      fe.textContent = "";
+      fe.style.display = "none";
+    }
   }
   // API error → a red "API error" badge + a Retry button that pastes "retry" into the session to resume
   // the stalled turn (the user 2026-06-16). The card STAYS in Working (the user 2026-06-29) — an API error is

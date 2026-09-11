@@ -25628,25 +25628,28 @@ _HEAL_LOG = {"n": 0}          # tops the feed has nested as session-started this
 _HEAL_STOP = {"the", "and", "for", "with", "over", "into", "from", "that", "this", "each", "then", "them", "they", "their", "your", "onto", "about"}   # function words: never a shared word
 
 
-def _heal_session_tops(path, nodes, status=None):
+def _heal_session_tops(path, nodes, status=None, keep=()):
     """READ-SIDE heal for stores written before the minting-time rule (T319): a top-level goal rooted in a
     MACHINE record, not in anything the user asked for, is rendered inside the session's human-asked top that
     was current when it was minted. The deciding fact is the judge's own latched anchor verdict (askAnchor
     "machine": the node's prompt anchor resolved to a peer mail, the agent's own record or romp bookkeeping,
     _latch_ask_anchors); never a word match, and never a top that merely lacks an anchor (older stores hold
     plain tops without one). Excluded: cleared tops, handoff trackers, delegate-rooted tops (origin.peer: a
-    chain the courier traced), and steps born of a session (never tops). HOSTS are human-asked tops only
-    (promptUuid with no machine verdict, not a tracker, not born), never cleared (a row under a cleared host
-    would vanish with it, and a live floor resolved to the row with it), completed allowed (the row stays in
-    the completed card). NEEDS-YOU BREAKS THROUGH: a candidate that is blocked (its own flag or its exported
-    status) or a clear wrap-up's decision card is not nested, keeps its card, and still gets the face record so
-    it never poses as an ask. Word overlap with the transcript's recorded launches, on the LAUNCH record's words
-    (the dispatch's description and detail, not the completion's summary, which overwrites it when the run
-    ends) only picks WHICH launch supplies the why and, when several human tops are open, which is the parent;
-    with no overlapping launch the parent is the newest human top minted before the node (else the oldest)
-    and the why says the record it is rooted in. Returns {nid: (parent nid or None, born)}; None for a top not
-    nested (blocked, or no host). Deterministic: a pure function of the store and the task stream (sorted
-    hosts, first-match launches). Never writes the store."""
+    chain the courier traced) and steps born of a session (never tops). A top in `keep` (the top a live floor
+    stands on: a permission prompt, an API error or a judge-auth refusal keys the card on it) is not nested: it
+    keeps its card and still gets the face record, like a blocked one. HOSTS are the asks that trace to the user: human-anchored
+    prompt tops and courier-planted delegated goals (origin.peer, a chain the courier proved), never a handoff
+    tracker (the delegation fold hides those) and never a session-born step; a completed host still holds its
+    rows and a cleared host hides them with it (what a real step does; a cleared ask never resurfaces its rows
+    as root cards). NEEDS-YOU BREAKS THROUGH: a candidate that is blocked (its own flag or its exported status)
+    or a clear wrap-up's decision card is not nested, keeps its card, and still gets the face record so it
+    never poses as an ask. The launch match reads the launch record's OWN description (`launchDesc`, kept from
+    the dispatch and never overwritten by the completion's summary; never the brief or script) and shares by
+    the TITLE's word count, more than half and at least two, so one stray word never carries it; it only picks
+    WHICH launch supplies the why and, when several hosts are open, which is the parent; with no matching
+    launch the parent is the newest host minted before the node (else the oldest) and the why says the record
+    it is rooted in. Returns {nid: (parent nid or None, born)}; None for a top not nested (blocked, or no
+    host). Deterministic: a pure function of the store and the task stream. Never writes the store."""
     out = {}
     status = status or {}
     def toks(x):
@@ -25662,24 +25665,27 @@ def _heal_session_tops(path, nodes, status=None):
         tasks = _bg_scan_all_cached(path) if path else []
     except Exception:
         tasks = []
-    launches = [t for t in tasks if isinstance(t, dict) and _bg_is_agent(t.get("type")) and (t.get("summary") or t.get("command"))]
+    launches = [t for t in tasks if isinstance(t, dict) and _bg_is_agent(t.get("type")) and (t.get("launchDesc") or t.get("summary"))]
+    def planted(hd):
+        return isinstance(hd.get("origin"), dict) and hd["origin"].get("peer")
     hosts = sorted(((hid, hd) for hid, hd in nodes.items()
-                    if hd.get("parentId") is None and not hd.get("born") and not hd.get("cleared")
-                    and not delegate(hd) and hd.get("askAnchor") != "machine" and hd.get("promptUuid")),
+                    if hd.get("parentId") is None and not hd.get("born") and not isinstance(hd.get("handoff"), dict)
+                    and hd.get("askAnchor") != "machine" and (hd.get("promptUuid") or planted(hd))),
                    key=lambda h: (h[1].get("t") or 0, h[0]))      # keyed by the store's own ids, never a node's "id" field
     for nid, nd in sorted(cands, key=lambda c: (c[1].get("t") or 0, c[0])):
         tt = toks(nd.get("text"))
         best, hit = 0.0, None
         for l in launches:
-            lt = toks(l.get("command")) | toks(l.get("summary"))   # the launch's own words first; the summary rides along
-            share = len(tt & lt) / float(min(len(tt), len(lt))) if tt and lt else 0.0
-            if share > best:
+            lt = toks(l.get("launchDesc") or l.get("summary"))    # the dispatch's own words, never the brief
+            shared = len(tt & lt)
+            share = shared / float(len(tt)) if tt and lt and shared >= 2 else 0.0
+            if share > 0.5 and share > best:
                 best, hit = share, l
         via = ("workflow" if hit.get("type") == "local_workflow" else "agent") if hit else "work"
-        why = ("matched a background %s the session started (%s)" % (via, " ".join(str(hit.get("summary") or hit.get("command")).split())[:120])
+        why = ("matched a background %s the session started (%s)" % (via, " ".join(str(hit.get("launchDesc") or hit.get("summary")).split())[:120])
                if hit else "rooted in the session's own record (a peer's line, a report, its own turn), not in a request")
         born = {"kind": "session", "via": via, "why": why, "healed": True}
-        nest = not (nd.get("blocked") or status.get(nid) == "blocked" or nd.get("clearWrap"))
+        nest = not (nd.get("blocked") or status.get(nid) == "blocked" or nd.get("clearWrap") or nid in set(keep or ()))
         host = None
         if nest:
             before = [h for h in hosts if (h[1].get("t") or 0) <= (nd.get("t") or 0) and h[0] != nid]
@@ -25687,7 +25693,7 @@ def _heal_session_tops(path, nodes, status=None):
             if pool:
                 host = pool[-1]
                 if hit and len(pool) > 1:            # several open: the launch's words pick the parent, ties the newest
-                    ht = toks(hit.get("command")) | toks(hit.get("summary"))
+                    ht = toks(hit.get("launchDesc") or hit.get("summary"))
                     host = max(pool, key=lambda h: (len(toks(h[1].get("text")) & ht), h[1].get("t") or 0))
         if host:
             born["parentText"] = str(host[1].get("text") or "")[:120]
@@ -34984,7 +34990,15 @@ def build_feed(now, tmux=None):
                             cite_uuids.add(_a["uuid"])
         except Exception:
             pass
-        healed = _heal_session_tops(s.get("path"), nodes, status)   # T319: pre-rule stores' machine-rooted tops nest (read-side)
+        _floor_keep = set()                          # T319: the top a live floor will stand on keeps its card (see the heal)
+        if (tm and str(tm.get("state")) in _NEEDS_INPUT_STATES) or _jauth_map.get(fsid) \
+                or (ps is not None and _api_error(s["path"])):
+            _f = store.get("lastNode")
+            while _f and nodes.get(_f, {}).get("parentId") is not None:
+                _f = nodes[_f]["parentId"]
+            if _f in nodes:
+                _floor_keep.add(_f)
+        healed = _heal_session_tops(s.get("path"), nodes, status, _floor_keep)   # T319: machine-rooted tops nest (read-side)
         heal_total += sum(1 for v in healed.values() if v[0])
         children = {}
         for nid, nd in nodes.items():

@@ -3583,7 +3583,8 @@ PLAN_SYS = (
     "diagnosing, a follow-up it volunteers) is not an ask, so block the goal that surfaced the offer, "
     "with the offer as the why, and mint nothing. It earns a card of its own once the user says go. "
     "The session's own background workflows, review rounds and agents are its process, not deliverables: "
-    "file them as steps under the goal they serve, never as a new top-level goal.\n"
+    "file them as steps under the goal they serve, never as a new top-level goal. Put \"ask\": true on the one "
+    "mint that is the deliverable the user's own message asked for, never on work the session started.\n"
     '- {\"why\",\"do\":\"sub\",\"under\":<n>,\"text\":\"<step ≤10 words>\"}: a step or progress under '
     "card #n, where #n must be a **top-level card** (a flush-left line in <open-goals>; the indented "
     "sub-goals are context and done/block targets, not filing spots — where inside the card the step "
@@ -3805,7 +3806,10 @@ def _parse_plan(raw, menu_len, allow_extend=False):
             ops.append({"do": "skip", "why": why})
         elif do == "mint":
             if _has_alpha(text):
-                ops.append({"do": "mint", "why": why, "text": text})
+                op = {"do": "mint", "why": why, "text": text}
+                if o.get("ask") is True:
+                    op["ask"] = True                   # the planner's mark: this mint is the user's own ask (T319)
+                ops.append(op)
         elif do == "sub":
             n, r = _int(o, "under"), _int(o, "ref")
             if not _has_alpha(text):
@@ -6444,8 +6448,14 @@ def _demote_session_mints(ops, seg, store, menu, p_target, human):
     mints = [o for o in ops if o.get("do") == "mint"]
     ask_op = None
     if human and parent is None:
-        # the ask's own placement: the mint nearest the user's words (the first mint when none is near)
-        ask_op = max(mints, key=lambda o: (prompt_match(o), -mints.index(o)))
+        # the ask's own placement: the mint the planner MARKED as the user's ask, else the mint nearest the user's
+        # words (a paraphrased title shares no words; a tie by position is no evidence), and never a mint a launch's
+        # words fit better than the user's (that one is the session's process, whatever its position)
+        pool = [o for o in mints if launch_match(o) <= prompt_match(o)]
+        marked = [o for o in pool if o.get("ask") is True]
+        pool = marked or pool
+        if pool:
+            ask_op = max(pool, key=lambda o: (prompt_match(o), -mints.index(o)))
     # `ref` indexes the reply's CREATED nodes (mints and subs) in the reply's own order. The ask's mint is processed
     # FIRST so a demoted mint can nest under it wherever the planner listed it; every op keeps its original created
     # position for ref resolution (orig -> new), and a dropped mint takes the ops chained onto it.

@@ -220,6 +220,24 @@ def _result_text(content):
     return ""
 
 
+_WF_META_DESC_RE = re.compile(r"\b(description|name)\s*:\s*(['\"])(.*?)\2", re.S)
+
+
+def _launch_desc(name, inp):
+    """The dispatch's OWN words at launch time: an Agent/Task's description, a Workflow's meta description
+    (else its meta name) read off the script, else ''. Kept on the task row as `launchDesc` and never
+    overwritten by the completion notification, whose summary replaces `summary` when the run ends (T319: the
+    feed matches a session-started goal to the launch that produced it on these words)."""
+    inp = inp if isinstance(inp, dict) else {}
+    d = str(inp.get("description") or "").strip()
+    if not d and name == "Workflow":
+        meta = {m.group(1): m.group(3) for m in _WF_META_DESC_RE.finditer(str(inp.get("script") or "")[:4000])}
+        d = str(meta.get("description") or meta.get("name") or "").strip()
+        if not d and inp.get("scriptPath"):
+            d = os.path.splitext(os.path.basename(str(inp["scriptPath"])))[0]
+    return " ".join(d.split())[:200]
+
+
 def _parse_task_notification(txt):
     """Parse a <task-notification> block's fields, or None if it isn't one. Keys on the exact tags the
     harness emits (status / summary / output-file / tool-use-id), not a guess. tool_use_id is the join
@@ -376,6 +394,7 @@ def _bg_step(state, o):
                 # never be consumed (both creation paths refuse the id), so it is not captured.
                 dispatch[b["id"]] = {
                     "desc": str(inp.get("description") or "").strip(),
+                    "launchDesc": _launch_desc(b.get("name"), inp),
                     "detail": _clip_detail(inp.get("prompt") or inp.get("script")
                                            or ("script: " + str(inp["scriptPath"])
                                                if inp.get("scriptPath") else "")),
@@ -395,6 +414,7 @@ def _bg_step(state, o):
             if tid and tid not in tasks and tid not in done:
                 tasks[tid] = {"id": tid, "status": "running", "t": parse_z(o.get("timestamp")),
                               "summary": (inp.get("description") or b.get("name") or "Background task"),
+                              "launchDesc": _launch_desc(b.get("name"), inp),
                               "command": inp.get("command") or (inp.get("ws") or {}).get("url", ""),
                               "outputFile": ""}
                 d = dispatch.pop(tid, None)
@@ -434,6 +454,8 @@ def _bg_step(state, o):
                                   "summary": (tur.get("description") or tur.get("summary")
                                               or d.get("desc")
                                               or ("workflow " + str(wf) if wf else "Background agent")),
+                                  "launchDesc": (d.get("launchDesc") or str(tur.get("description") or "").strip()
+                                                 or ("workflow " + str(wf) if wf else "")),
                                   "command": d.get("detail")
                                              or _clip_detail(tur.get("prompt")
                                                              or ("script: " + str(tur["scriptPath"])
@@ -452,6 +474,8 @@ def _bg_step(state, o):
                     # the launch row lacks, never overwrite what it has
                     tk = tasks[tid]
                     tk["outputFile"] = tk["outputFile"] or tur.get("outputFile") or ""
+                    if not tk.get("launchDesc") and tur.get("description"):
+                        tk["launchDesc"] = str(tur["description"]).strip()[:200]
                     if tur.get("taskType"):
                         tk["type"] = tur["taskType"]
                     if tur.get("agentId") and not tk.get("agentId"):

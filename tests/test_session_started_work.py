@@ -194,6 +194,33 @@ class WorkflowMidGoal(_Harness):
         step = self._by_text(store, "Wrote the retry loop")
         self.assertEqual(step["parentId"], tops[0]["id"], "the same-reply ref followed the ask's remapped position")
 
+    def test_the_planners_ask_mark_wins_over_words_a_paraphrased_title_keeps_the_card(self):
+        # the planner marks the ask's mint ("ask": true); a paraphrased title shares no word with the user's message,
+        # and the review-first order would once have crowned the review. The mark crowns the paraphrase.
+        marked = ('{"ops":[{"why":"a distinct review deliverable","do":"mint","text":"Adversarial review of the retry diff"},'
+                  '{"why":"the user asked for resilience","do":"mint","ask":true,"text":"Make the client resilient to flaky networks"}]}')
+        calls, store = self._run(self._records(), [("adversarial review workflow", marked), (ASK[:40], PLACE_ASK)])
+        tops = self._tops(store)
+        self.assertEqual([nd["text"] for nd in tops], ["Make the client resilient to flaky networks"])
+        rev = self._by_text(store, "Adversarial review")
+        self.assertEqual(rev["parentId"], tops[0]["id"])
+        self.assertEqual(rev["born"]["parentText"], "Make the client resilient to flaky networks")
+
+    def test_a_launch_favoured_mint_is_never_crowned_even_when_marked_or_tied(self):
+        # every mint shares no word with the user's message (a tie); the review's words fit the launch, so it is
+        # never the ask, whatever its position or a stray mark; the other mint is crowned
+        tied = ('{"ops":[{"why":"a distinct review deliverable","do":"mint","ask":true,"text":"Adversarial review of the retry diff"},'
+                '{"why":"the user asked for resilience","do":"mint","text":"Make the client resilient to flaky networks"}]}')
+        calls, store = self._run(self._records(), [("adversarial review workflow", tied), (ASK[:40], PLACE_ASK)])
+        tops = self._tops(store)
+        self.assertEqual([nd["text"] for nd in tops], ["Make the client resilient to flaky networks"])
+        self.assertEqual(self._by_text(store, "Adversarial review")["parentId"], tops[0]["id"])
+
+    def test_the_parser_carries_the_ask_mark_and_the_prompt_asks_for_it(self):
+        ops = jd._parse_plan('{"ops":[{"why":"w","do":"mint","ask":true,"text":"Add retries"},{"why":"w","do":"mint","text":"Other"}]}', 0)
+        self.assertEqual([o.get("ask") for o in ops], [True, None])
+        self.assertIn('Put "ask": true on the one mint that is the deliverable the user\'s own message asked for', jd.PLAN_SYS)
+
     def test_a_two_ask_message_with_a_launch_keeps_both_asks_and_nests_the_review(self):
         records = [
             uline(T0, ASK + " and also write me a comparison of the two retry libraries", "u1"),

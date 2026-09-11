@@ -145,9 +145,11 @@ human-triggered segment the mints demote when the segment's assistant turns
 started background work by the event model's own criterion (a Workflow run, or an
 Agent or Task with `run_in_background` or an asynchronous ack; a foreground
 subagent the turn waited on is no launch), whatever they are called, and the ask
-itself keeps its card
-(the segment's placement, or the reply's first mint when the segment was planned
-in one work-run). Word overlap never decides top versus step: it only picks which
+itself keeps its card:
+the mint the planner marks `"ask": true` (the deliverable the user's own message
+asked for), else the mint nearest the user's words, never one a launch's words
+fit better; a scheduled or programmatic prompt's mints are never demoted. Word
+overlap otherwise never decides top versus step: it only picks which
 launch supplies the step's one-line why, and which open goal is the parent when
 the turn ran in none. A demoted step carries `born` (`{kind: session, via:
 workflow | agent | work, why}`); with nothing the user asked for to nest under,

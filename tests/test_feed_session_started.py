@@ -220,56 +220,68 @@ class HealOlderStores(_Feed):
         self.assertIsNone(asks[wf]["sessionStarted"]["parent"], "not nested: no parent named")
         self.assertEqual(err, "", "nothing nested, nothing counted")
 
-    def test_a_cleared_ask_never_hosts_and_a_tracker_never_hosts(self):
-        # a row under a cleared host would vanish with it (and a live floor resolved to the row with it); a delegate's
-        # tracker is hidden by the delegation fold, taking any row along: neither is a host, so the machine top keeps
-        # its card and says what it is
+    def test_a_cleared_host_hides_its_row_and_a_tracker_never_hosts(self):
+        # a cleared ask keeps hosting (its row hides with it, never resurfacing as a root card); a delegate's tracker
+        # is no host (the delegation fold hides those), so with only a tracker the machine top keeps its card
         ask, wf, tracker = SID + ":g1", SID + ":g2", SID + ":g5"
         self._store({ask: self._node(ask, "Add retries to the notes-api client", promptUuid="u1", askAnchor="human", cleared=True),
-                     tracker: self._node(tracker, "delegated: review the retry diff", t=T0 + 100, handoff={"peer": "22222222-3333-4444-5555-666666666666", "msgId": "m1"}),
+                     wf: self._node(wf, "Lens review of the retry diff", t=T0 + 500, promptUuid="a2", askAnchor="machine")},
+                    status={ask: "cleared"})           # a top is cleared through the ledger; the export reads cleared
+        feed, err = self._feed()
+        self.assertEqual([a["itemId"] for a in feed["asks"] if a["sid"] == SID], [], "hidden with its cleared host, no root card")
+        self._store({tracker: self._node(tracker, "delegated: review the retry diff", t=T0 + 100, handoff={"peer": "22222222-3333-4444-5555-666666666666", "msgId": "m1"}),
                      wf: self._node(wf, "Lens review of the retry diff", t=T0 + 500, promptUuid="a2", askAnchor="machine")})
         feed, err = self._feed()
         asks = {a["itemId"]: a for a in feed["asks"] if a["sid"] == SID}
         self.assertIn(wf, asks, "no host: still a card")
         self.assertEqual(asks[wf]["sessionStarted"]["parent"], None)
-        self.assertEqual(err, "")
 
-    def test_a_completed_host_keeps_its_healed_row(self):
-        # the ask completes: the row stays in the completed card's tree instead of resurfacing as a root card
-        # (a cleared host hides the same way: cards are built per root, and the row's root is the host)
-        ask, wf = SID + ":g1", SID + ":g2"
-        self._store({ask: self._node(ask, "Add retries to the notes-api client", promptUuid="u1", askAnchor="human", nodeComplete=True),
-                     wf: self._node(wf, "Lens review of the retry diff", t=T0 + 500, promptUuid="a2", askAnchor="machine")},
-                    status={ask: "completed"})
+    def test_a_delegated_goal_the_courier_planted_is_a_host(self):
+        planted, wf = SID + ":g7", SID + ":g2"
+        self._store({planted: self._node(planted, "Review the retry diff for the manager", origin={"peer": "22222222-3333-4444-5555-666666666666", "msgId": "m2"}),
+                     wf: self._node(wf, "Lens review of the retry diff", t=T0 + 500, promptUuid="a2", askAnchor="machine")})
         feed, err = self._feed()
         asks = {a["itemId"]: a for a in feed["asks"] if a["sid"] == SID}
-        self.assertEqual(set(asks), {ask}, "the completed ask still hosts the row; the row is no root")
-        self.assertEqual(asks[ask]["column"], "completed")
-        self.assertIn(wf, {r["id"] for r in asks[ask]["tree"]})
+        self.assertEqual(set(asks), {planted}, "the worker's process top nests under the delegated goal")
+        self.assertIn(wf, {r["id"] for r in asks[planted]["tree"]})
 
-    def test_an_anchorless_top_is_older_data_not_evidence_and_keeps_its_card(self):
-        # a top with no promptUuid and no latched verdict (an older store's plain mint) is never healed, even
-        # when its words match a recorded run: only the judge's machine verdict is the event
-        ask = SID + ":g1"; odd = SID + ":g9"; old = SID + ":g8"
-        self._store({ask: self._node(ask, "Add retries to the notes-api client", promptUuid="u1"),
-                     odd: self._node(odd, "Rename the widget colours", t=T0 + 500),
-                     old: self._node(old, "Lens review of the retry diff", t=T0 + 600)})
-        feed, err = self._feed()
-        self.assertEqual({a["itemId"] for a in feed["asks"] if a["sid"] == SID}, {ask, odd, old})
-        self.assertEqual(err, "")
-
-    def test_a_permission_floor_on_a_healed_top_reaches_its_host_card(self):
+    def test_the_top_a_live_floor_stands_on_keeps_its_card(self):
+        # the session is stopped on a permission prompt whose focus is a machine top whose host is cleared: nesting
+        # would lose the needs-you floor with the hidden host, so the top keeps its card and the floor
         ask, wf = SID + ":g1", SID + ":g2"
-        self._store({ask: self._node(ask, "Add retries to the notes-api client", promptUuid="u1", askAnchor="human"),
+        self._store({ask: self._node(ask, "Add retries to the notes-api client", promptUuid="u1", askAnchor="human", cleared=True),
                      wf: self._node(wf, "Lens review of the retry diff", t=T0 + 500, promptUuid="a2", askAnchor="machine")},
-                    last=wf)
+                    status={ask: "cleared"}, last=wf)
         km._tmux_sessions = lambda: {SID: {"state": "permission", "since": NOW - 10, "model": "", "effort": "",
                                            "context": None, "compactPct": None, "color": None}}
         feed, err = self._feed()
         asks = {a["itemId"]: a for a in feed["asks"] if a["sid"] == SID}
-        self.assertEqual(set(asks), {ask}, "the healed top is no card")
-        self.assertEqual(asks[ask]["column"], "needs_input", "the live prompt's floor lands on the host")
-        self.assertEqual((asks[ask].get("blocked") or {}).get("state"), "permission")
+        self.assertEqual(set(asks), {wf})
+        self.assertEqual(asks[wf]["column"], "needs_input")
+        self.assertIn("matched a background workflow", asks[wf]["sessionStarted"]["why"])
+
+    def test_the_launch_match_reads_the_dispatch_not_the_completion_summary(self):
+        # the run completes and its notification's summary overwrites the task's summary; the heal still matches on
+        # the words the dispatch carried at launch (launchDesc), so the why and the parent do not change when a run ends
+        done_recs = json.loads("[" + ",".join(l for l in self.tpath.read_text().splitlines() if l.strip()) + "]")
+        done_recs.append({"type": "user", "timestamp": iso(T0 + 900), "uuid": "u9", "parentUuid": "a2",
+                          "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_a1",
+                                      "content": "<task-notification><task-id>w1</task-id><tool-use-id>toolu_a1</tool-use-id><status>completed</status>"
+                                                 "<summary>Findings: two nits on the colour names</summary></task-notification>"}]}})
+        self.tpath.write_text("\n".join(json.dumps(r) for r in done_recs) + "\n")
+        km._bgall_cache.clear()
+        tasks = km._bg_scan_all_cached(str(self.tpath))
+        wf_task = next(t for t in tasks if t.get("type") == "local_workflow")
+        self.assertIn("two nits", wf_task["summary"], "the completion overwrote the summary")
+        self.assertEqual(wf_task["launchDesc"], "Lens reviewers over the retry diff", "the dispatch's words stay")
+        ask, wf = SID + ":g1", SID + ":g2"
+        self._store({ask: self._node(ask, "Add retries to the notes-api client", promptUuid="u1", askAnchor="human"),
+                     wf: self._node(wf, "Lens review of the retry diff", t=T0 + 500, promptUuid="a2", askAnchor="machine")})
+        nodes = json.loads((jd.GOALDIR / (SID + ".json")).read_text())["nodes"]
+        h = km._heal_session_tops(str(self.tpath), nodes, {})
+        self.assertEqual(h[wf][0], ask)
+        self.assertIn("Lens reviewers over the retry diff", h[wf][1]["why"], "matched on the launch, not the completion")
+        self.assertEqual(h[wf][1]["via"], "workflow")
 
     def test_a_machine_top_with_no_human_top_to_nest_under_shows_as_a_card_that_says_so(self):
         wf = SID + ":g2"
