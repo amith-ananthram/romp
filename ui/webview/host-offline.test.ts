@@ -125,7 +125,7 @@ test("the note the tab carries on hover is still the one wording of it", () => {
 });
 
 test("both surfaces repaint on the reachability event", () => {
-  assert.match(RENDER, /window\.addEventListener\("romp-hosts", \(\) => \{ renderTabs\(\); \}\)/);
+  assert.match(RENDER, /window\.addEventListener\("romp-hosts", \(\) => \{ renderTabs\(\); syncComposerPh\(\); \}\)/, "the strip and the composer's name overlay (its host span wears the same mark, T328) repaint together");
   assert.match(TL, /window\.addEventListener\('romp-hosts', this\._onHosts\)/);
   assert.match(TL, /window\.removeEventListener\('romp-hosts', this\._onHosts\)/, "and let go on teardown");
 });
