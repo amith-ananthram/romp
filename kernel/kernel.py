@@ -24077,6 +24077,36 @@ def _pending_queued(path):
     return [m["md"] for m in _pending_queued_meta(path)]
 
 
+def _queue_ledger_step(pending, o):
+    """One transcript record folded onto the CLI queue ledger's pending list — _pending_queued's rules (its
+    docstring): enqueue appends, a content-bearing remove discards exactly that entry, an anonymous remove
+    or a dequeue resolves the oldest, popAll clears. Shared by the display fold (_pending_queued_meta) and
+    the SDK echo settle's owed read (_pending_ledger), so the two read one ledger the same way."""
+    if o.get("type") != "queue-operation":
+        return pending
+    op = o.get("operation")
+    content = o.get("content") if isinstance(o.get("content"), str) else None
+    if op == "enqueue":
+        pending.append((content or "", o.get("timestamp")))
+    elif op == "popAll":                                 # the whole queue recalled — nothing is left owed
+        pending.clear()
+    elif op == "remove" and content is not None and any(c == content for c, _ts in pending):
+        pending.pop(next(i for i, (c, _ts) in enumerate(pending) if c == content))   # that entry only; the rest keep their places
+    elif op in ("dequeue", "remove") and pending:
+        del pending[0]                                   # anonymous resolution: the oldest is the one taken
+    return pending
+
+
+def _pending_ledger(path):
+    """Every text the CLI's queue ledger still lists as pending, UNFILTERED — _pending_queued's fold without
+    its _genuine_queued cut. The "still owed" read the SDK echo settle takes (sdk_backend.settle_echoes,
+    2026-09-11): there a romp-authored echo (a nudge) waiting in the CLI's queue must count as waiting like
+    any other, where the display fold drops it on purpose (it is not the user's queued input). Same cache
+    as the display fold, so the read is free on a quiet transcript."""
+    return [c.strip() for c, _ts in _fold_records(_queued_parse_cache, path, list, _queue_ledger_step)
+            if isinstance(c, str) and c.strip()]
+
+
 def _pending_queued_meta(path):
     """_pending_queued's copies with what the CLI's ledger knows about each (T252c): the enqueue record's
     stamp (`qts`, epoch ms) and NO id. The ledger carries none, the kernel's tmux echo is minted before the
@@ -24084,21 +24114,7 @@ def _pending_queued_meta(path):
     chain could share an id the ledger copy wore, and an id the chat latched from it would make it reject
     the echo and the landing as another send's (the review of the first cut). The chat reads this route
     by text; `qid` is None on every copy."""
-    def step(pending, o):
-        if o.get("type") != "queue-operation":
-            return pending
-        op = o.get("operation")
-        content = o.get("content") if isinstance(o.get("content"), str) else None
-        if op == "enqueue":
-            pending.append((content or "", o.get("timestamp")))
-        elif op == "popAll":                                 # the whole queue recalled — nothing is left owed
-            pending.clear()
-        elif op == "remove" and content is not None and any(c == content for c, _ts in pending):
-            pending.pop(next(i for i, (c, _ts) in enumerate(pending) if c == content))   # that entry only; the rest keep their places
-        elif op in ("dequeue", "remove") and pending:
-            del pending[0]                                   # anonymous resolution: the oldest is the one taken
-        return pending
-    pending = _fold_records(_queued_parse_cache, path, list, step)
+    pending = _fold_records(_queued_parse_cache, path, list, _queue_ledger_step)
     out = []
     for text, ts in pending:
         if not _genuine_queued(text):
@@ -32085,6 +32101,21 @@ def _merge_live_atoms(session, sid, shown_texts=()):
     if withheld:
         tx_uuids = tx_uuids - withheld           # a NEW set: the memoized one is shared with every later build
     be.prune_live(sid, tx_uuids, tx_text_t, human_floor)
+    # An SDK input echo the transcript has OVERTAKEN — a genuine-human turn stamped strictly later than its
+    # send (_echo_overtaken), its text landed nowhere — is a LOSS, and the backend flags it `dropped` so the
+    # chat draws "never delivered" with its ✕ instead of a sent bubble riding above every newer message
+    # (sdk_backend.settle_echoes, 2026-09-11; TmuxBackend.prune_live settles its own echoes the same way).
+    # Guarded on a pure pass over the snapshot, so the CLI's queue ledger is read only when there is
+    # something to rule on. The ledger is handed over here because the two backends keep their queues in
+    # different places: the tmux settle reads the transcript's queue-operation fold AS its queue, while an
+    # SDK session's queue view is the backend's in-memory list and the CLI's ledger is the second place a
+    # fed message can wait (a message fed into a running turn sits there until the splice) — a send still
+    # listed in either is waiting, not lost.
+    settle = getattr(be, "settle_echoes", None)
+    if settle is not None and any(_echo_overtaken(a, human_floor) and not a.get("dropped") and not a.get("_landed")
+                                  for a in live):
+        p = _path_of(sid)
+        settle(sid, human_floor, still_queued=_pending_ledger(p) if p else ())
     hide = tx_texts | {sb.echo_text_key(t) for t in shown_texts if t}    # transcript dups + already-shown queued msgs
     # `live` was snapshotted before the prune, so each of prune_live's three exits has its paint-side twin
     # here: by uuid (tx_uuids), by text (hide), and the recorded landing (`_landed`: the backend's boot/spawn
