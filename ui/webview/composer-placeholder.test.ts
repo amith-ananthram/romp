@@ -50,7 +50,7 @@ test("render.ts: the overlay mirrors the placeholder, wears the identity colour,
   assert.match(fn, /const parts = phParts\(ta\.placeholder, live\?\.name \|\| meta\?\.name \|\| "", activeId\);/, "the sid rides along: a remote host's prefix is told from the name by the sid (host-prefix.ts)");
   // T328: the host is the tab label's own quiet span (hostNameNodes: .host-prefix, marked when the host is down), a
   // sibling of the bold name, never inside it
-  assert.match(fn, /if \(parts\.host\) \{[\s\S]*?ph\.appendChild\(hostNameNodes\(parts\.host \+ parts\.name, activeId\)\[0\]\);\s*\n\s*\}\s*\n\s*const nm = el\("b", "composer-ph-name"\); nm\.textContent = parts\.name;/);
+  assert.match(fn, /if \(parts\.host\) \{[\s\S]*?ph\.appendChild\(hostNameNodes\(parts\.host \+ parts\.name, activeId\)\[0\]\);\s*\n\s*\}\s*\n(\s*\/\/[^\n]*\n)*\s*const nm = el\("b", "composer-ph-name"\); nm\.textContent = parts\.name;/);
   assert.doesNotMatch(CSS, /#composer-ph \.host-prefix/, "no dress of the overlay's own for the host: the global .host-prefix rule, the tab label's, is the one");
   // the host's link dropping or returning flips the span's .off mark on the tab (the romp-hosts event, host-offline.test.ts);
   // the overlay's span is repainted on the same event, so the two never disagree until the next keystroke
@@ -58,7 +58,16 @@ test("render.ts: the overlay mirrors the placeholder, wears the identity colour,
   assert.match(fn, /parts\.kind === "named" && !ta\.value/, "the styled form only for the resting placeholder, only while the box is empty");
   assert.match(fn, /ta\.classList\.toggle\("ph-on", show\);/, "the native placeholder goes transparent beneath the overlay");
   assert.match(fn, /const colorBg = \(live\?\.color\?\.bg \|\| meta\?\.color\?\.bg\) \|\| null;/, "the identity colour: the live session's, else the strip's own word on the tab (a skeleton's), never a stale session (skeleton-tabs-wiring)");
-  assert.match(fn, /if \(colorBg\) nm\.style\.color = colorBg; else nm\.style\.removeProperty\("color"\);/, "the name wears the session's identity colour — the tab label's");
+  // T335 (the user 2026-09-10): the name is painted at an INACTIVE tab label's level, the strip's own perceptual fade of the
+  // identity colour (fadedColor, what an at-rest tab wears), so it sits with the faded placeholder text instead of outshining
+  // it; the weight stays; the host span fades in tandem through the strip's .name-faded class carried by the overlay
+  assert.match(fn, /if \(colorBg\) nm\.style\.color = fadedColor\(colorBg\); else nm\.style\.removeProperty\("color"\);/, "the name wears the session's identity colour at the at-rest tab label's fade");
+  assert.match(fn, /ph\.classList\.add\("name-faded"\);/, "the overlay carries the strip's at-rest class, once, at its making");
+  assert.match(RENDER, /^function fadedColor\(hex: string\): string \{/m, "…the one fade rule, the strip's (bright hues fade as far as dim ones)");
+  // the fade reads the page background live, so the overlay re-syncs on the strip's REBUILD (the event that repaints every
+  // at-rest label's fade), beside the tip hide: a host-rewritten background reaches the box when it reaches the strip
+  const tabs = RENDER.slice(RENDER.indexOf("function renderTabs() {"), RENDER.indexOf("function stripAftermath("));
+  assert.match(tabs, /tabStripSig = stripSig;\s*\n(\s*\/\/[^\n]*\n)*\s*hideTabTip\(\);\s*\n(\s*\/\/[^\n]*\n)*\s*syncComposerPh\(\);/, "the strip's rebuild re-syncs the overlay");
   assert.match(fn, /el\("b", "composer-ph-name"\)/, "…bold");
   // re-synced by the value and placeholder writers: growth after a value write, the active-tab show, a rename or
   // a recolour of the active session, the ask-mode placeholder swap, the width refit and every keystroke
@@ -81,6 +90,8 @@ test("render.ts: the overlay mirrors the placeholder, wears the identity colour,
 test("styles.css: the overlay sits over the box, dim like a placeholder, the name bold; the native placeholder is transparent while it shows", () => {
   assert.match(CSS, /#composer-ph \{ position: absolute; pointer-events: none; color: var\(--dim\);/);
   assert.match(CSS, /#composer-ph \.composer-ph-name \{ font-weight: 600; \}/);
+  assert.match(CSS, /^\.name-faded \.host-prefix, \.name-faded \.host-prefix\.off \{ opacity: 0\.5; \}/m, "the host prefix fades by the strip's own rule wherever the class is carried (T335)");
+  assert.doesNotMatch(CSS, /#composer-ph[^\n]*opacity/, "no opacity of the overlay's own: the fade is the colour the strip computes");
   assert.match(CSS, /#composer-input\.ph-on::placeholder \{ color: transparent; \}/);
   // the question flow (the user 2026-09-10): the answering tint rule sits at that rule's specificity and came later, so
   // both texts showed — the overlay takes the tint, the native placeholder stays transparent under it

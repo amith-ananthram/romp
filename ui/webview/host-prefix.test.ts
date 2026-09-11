@@ -68,7 +68,7 @@ test("the host prefix FADES in tandem with the name it precedes (the user 2026-0
   assert.match(RENDER, /label\.classList\.add\("name-faded"\)/);
   assert.match(RENDER, /mouseenter", \(\) => \{ label\.style\.color = full; label\.classList\.remove\("name-faded"\); \}/);
   assert.match(RENDER, /mouseleave", \(\) => \{ label\.style\.color = fadedColor\(full\); label\.classList\.add\("name-faded"\); \}/);
-  assert.match(CSS, /\.tab-label\.name-faded \.host-prefix \{ opacity: 0\.5; \}/);
+  assert.match(CSS, /^\.name-faded \.host-prefix, \.name-faded \.host-prefix\.off \{ opacity: 0\.5; \}/m, "one rule for both carriers of the class: the tab label and the composer's name overlay (T335)");
   // TIMELINE: the SVG twin — a tspan's own fill beats the parent <text>, so fade it explicitly and
   // register it for the same hover un-fade the name uses
   assert.match(TL, /hostTsp = el\('tspan', \{ fill: F\(MODEL_FG\)/);

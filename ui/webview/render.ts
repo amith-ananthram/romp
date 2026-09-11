@@ -5967,6 +5967,10 @@ function renderTabs() {
   // 2026-09-10: its screenshots caught the tip after every pick). The rebuild is the event: hide it here, once, before
   // the nodes go.
   hideTabTip();
+  // the rebuild repaints every at-rest label's fade against the page background as it stands (fadedColor reads it live),
+  // and the composer's name overlay wears that same fade (T335): re-sync it on the same event, so a background the host
+  // rewrote (a VS Code colour-theme switch, which fires no romp event) reaches the box when it reaches the strip
+  syncComposerPh();
   // Preserve TAB-MODE keyboard focus across the rebuild (the user 2026-06-29). renderTabs runs on EVERY kernel
   // push (0.5–3s), and replaceChildren() destroys the focused tab — dropping focus out of the strip (often out
   // of the chat iframe entirely), which silently killed ←/→/Enter nav after a send or any push: you were left
@@ -13046,6 +13050,7 @@ function syncComposerPh(): void {
   let ph = document.getElementById("composer-ph");
   if (!ph) {
     ph = el("div", ""); ph.id = "composer-ph"; ph.setAttribute("aria-hidden", "true"); box.appendChild(ph);
+    ph.classList.add("name-faded");   // the strip's at-rest class: a remote host's prefix fades with the name it precedes (styles.css .name-faded .host-prefix; T335)
     // The box's LAYOUT moves the textarea too, not only its value: a quote chip seeded by a highlight, a dropped
     // file or a staged note adds a row above it (the user 2026-09-10: the name overlay sat on top of the chip
     // row). Every such change resizes #composer, so its ResizeObserver re-places the overlay — event-based,
@@ -13071,8 +13076,11 @@ function syncComposerPh(): void {
     // the quiet .host-prefix span, marked when the host's link is down, and only the name below is bold and coloured
     ph.appendChild(hostNameNodes(parts.host + parts.name, activeId)[0]);
   }
+  // the name at an INACTIVE tab label's level (T335, the user 2026-09-10: it stood out brighter than every other word of
+  // the faded placeholder): the strip's own perceptual fade of the identity colour (fadedColor, what an at-rest tab's
+  // label wears), the weight kept; the host span fades in tandem through the strip's own class on the overlay
   const nm = el("b", "composer-ph-name"); nm.textContent = parts.name;
-  if (colorBg) nm.style.color = colorBg; else nm.style.removeProperty("color");
+  if (colorBg) nm.style.color = fadedColor(colorBg); else nm.style.removeProperty("color");
   ph.appendChild(nm);
   ph.appendChild(document.createTextNode(parts.after));
   // where the box's own first line sits: inside its border and padding, in its font (offsets are relative to

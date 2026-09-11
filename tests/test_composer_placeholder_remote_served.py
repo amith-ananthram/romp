@@ -80,13 +80,17 @@ const measure = () => page.evaluate(() => {
   return { active: tab ? tab.dataset.id : null, tabLabel: tab ? (tab.querySelector(".tab-label") || tab).textContent : null,
            tabHost: dress(tab && tab.querySelector(".tab-label .host-prefix")), tabBg: tab ? tab.style.getPropertyValue("--chip-bg") : null,
            phText: ph ? ph.textContent : null, phHost: dress(ph && ph.querySelector(".host-prefix")), phHostInsideName: !!(nm && nm.querySelector(".host-prefix")),
-           phName: dress(nm), phNameColor: nm ? nm.style.color : null, nativePlaceholder: ta ? ta.placeholder : null,
+           phName: dress(nm), phNameColor: nm ? nm.style.color : null, phFaded: !!ph && ph.classList.contains("name-faded"),
+           bodyBg: getComputedStyle(document.body).backgroundColor, nativePlaceholder: ta ? ta.placeholder : null,
            theme: document.body.classList.contains("theme-light") ? "light" : "dark" };
 });
 const out = {};
 out.dark = await measure();
 if (cfg.shots) { fs.mkdirSync(cfg.shots, { recursive: true }); await page.screenshot({ path: cfg.shots + "/romp_chat-composer-remote-host-dark.png", fullPage: false }); }
 await page.evaluate(() => document.body.classList.add("theme-light")); await page.waitForTimeout(300);
+// the overlay's name colour is computed against the page background at paint time (T335): a keystroke and its undo repaint
+// it under the light theme, as any edit of the box would
+await page.focus("#composer-input"); await page.keyboard.type("x"); await page.keyboard.press("Backspace"); await page.waitForTimeout(300);
 out.light = await measure();
 if (cfg.shots) await page.screenshot({ path: cfg.shots + "/romp_chat-composer-remote-host-light.png", fullPage: false });
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
@@ -237,7 +241,20 @@ class ServedComposerPlaceholderRemoteHost(unittest.TestCase):
             self.assertEqual(m["phHost"]["style"], "italic"); self.assertEqual(m["phHost"]["weight"], "400", "the host is quiet, not bold")
             self.assertEqual(m["phName"]["text"], "api", "only the name is the bold run: %r" % m["phName"])
             self.assertEqual(m["phName"]["weight"], "600")
-            self.assertEqual(m["phNameColor"], "rgb(100, 181, 246)", "…in the session's identity colour (the tab's --chip-bg): %r / %r" % (m["phNameColor"], m["tabBg"]))
+            # …in the session's identity colour at an at-rest tab label's fade (T335): every channel moved from the identity
+            # colour toward the page background, never the full colour, and the overlay carries the strip's at-rest class so
+            # the host span fades with the name (the exact level is proven against a real at-rest label in
+            # tests/test_session_name_served.py)
+            rgb = lambda c: tuple(int(x) for x in re.findall(r"\d+", c or "")[:3])
+            ident, name, bg = (100, 181, 246), rgb(m["phNameColor"]), rgb(m["bodyBg"])
+            if theme == "dark":
+                self.assertNotEqual(name, ident, "faded, not the full identity colour: %r" % m["phNameColor"])
+            else:
+                self.assertEqual(name, ident, "the light theme: the strip's fade is a no-op on a light page, so the name keeps its colour: %r" % m["phNameColor"])
+            for i in range(3):
+                lo, hi = sorted((ident[i], bg[i]))
+                self.assertTrue(lo <= name[i] <= hi, "channel %d of the name lies between the identity colour and the page background in %s: %r %r %r" % (i, theme, ident, name, bg))
+            self.assertTrue(m["phFaded"], "the overlay carries the strip's at-rest class")
             self.assertNotEqual(m["phHost"]["color"], m["phNameColor"], "the host does not wear the identity colour")
             self.assertTrue((m["nativePlaceholder"] or "").startswith("Message this session"), "the native placeholder beneath stays the plain resting text for assistive tech")
 
