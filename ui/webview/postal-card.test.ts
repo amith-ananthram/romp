@@ -51,11 +51,23 @@ test("the kind is coloured text in the meta slot, never a chip, at prose weight,
     "the postal meta never shrinks (the kind word stays whole) and grows to the head's edge to carry the icon (T313)");
 });
 
+const STATE = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "postal-state.ts"), "utf8");
+
 test("the delivery state is one icon per state at the head's right edge, each with a worded title", () => {
+  // the glyph map lives in the pure module (postal-state.test.ts executes it: the T337 ladder); the renderer imports it
   for (const st of ["sent", "delivered", "read", "parked", "bounced", "recalled"]) {
-    assert.match(RENDER, new RegExp("^  " + st + ": '<", "m"), st + " has a glyph");
+    assert.match(STATE, new RegExp("^  " + st + ": '<", "m"), st + " has a glyph");
   }
-  assert.match(RENDER, /const DELIVERY_GLYPHS: Record<PostalDeliveryState, string>/);
+  assert.match(STATE, /export const DELIVERY_GLYPHS: Record<PostalDeliveryState, string>/);
+  assert.doesNotMatch(RENDER, /const DELIVERY_GLYPHS/, "one map, in the module");
+  assert.match(RENDER, /import \{ kindLabel, deliveryOf, deliveryTitle, DELIVERY_GLYPHS, type PostalDelivery, type PostalReceipt \} from "\.\/postal-state";/);
+  assert.doesNotMatch(RENDER, /type PostalDeliveryState/, "the state type left the renderer with the map");
+  // the mark's wrapper (T337, the user 2026-09-10 wanting the circled check): a 16-unit box drawn at 14 px, a 1.5 stroke,
+  // round caps and joins, no fill unless a rung says so; the read rung's check is knocked out in the page colour by the
+  // sheet (a presentation attribute cannot carry a var())
+  assert.match(fn("deliveryIcon"), /'<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" '\s*\+ 'stroke-width="1\.5" stroke-linecap="round" stroke-linejoin="round">' \+ DELIVERY_GLYPHS\[d\.state\] \+ "<\/svg>"/);
+  assert.match(CSS, /\.postal-delivery-read \.postal-mark-check \{ stroke: var\(--bg\); \}/, "the read rung's check is cut out of the filled circle");
+  assert.match(STATE, /export const MARK_CHECK_CLASS = "postal-mark-check";/);
   assert.match(fn("deliveryIcon"), /span\.dataset\.state = d\.state;/);
   assert.match(fn("deliveryIcon"), /span\.setAttribute\("role", "img"\);/, "a labelled span is announced only with an image role");
   assert.match(fn("deliveryIcon"), /const title = deliveryTitle\(d, clockOf\);[^\n]*\n\s*setTip\(span, title\);[^\n]*\n\s*span\.setAttribute\("role", "img"\);[^\n]*\n\s*span\.setAttribute\("aria-label", title\);/);

@@ -103,7 +103,7 @@ import { reconcileRewindPass, type RewindEvent } from "./rewind-reconcile";
 import { watchChatVisibility, browserChatVisibilityDeps } from "./chat-visibility";
 import type { PaneHiddenHost } from "./paint-gate";
 import { gistOf, collapseWs, postalHead } from "./gist";   // the shared gist rule + the postal head (T294)
-import { kindLabel, deliveryOf, deliveryTitle, type PostalDelivery, type PostalDeliveryState, type PostalReceipt } from "./postal-state";   // the postal card's kind word + delivery state (T302)
+import { kindLabel, deliveryOf, deliveryTitle, DELIVERY_GLYPHS, type PostalDelivery, type PostalReceipt } from "./postal-state";   // the postal card's kind word + delivery state (T302), the marks' drawings (T337)
 
 for (const [name, lang] of Object.entries({
   bash, sh: bash, shell: bash, python, py: python, javascript, js: javascript,
@@ -4859,26 +4859,17 @@ function postalServiceIntent(body: string | undefined): { label: string; cls: st
 }
 
 // The delivery-state icon at the postal head's right edge (T302, the user 2026-09-10): the way messaging apps
-// show sent / delivered / read. One check = sent (handed to the relay), two dim checks = delivered (in the
-// recipient's inbox, or the far host's ack), two coloured checks = read (the recipient consumed it: the
-// ledger's own exec event, never inferred), a clock = parked, a red mark = bounced, a return arrow = recalled.
-// Each carries a worded title with the clock. States and words: postal-state.ts.
-const DELIVERY_GLYPHS: Record<PostalDeliveryState, string> = {
-  sent: '<path d="M3 8.6 L6.4 12 L13 5"/>',
-  delivered: '<path d="M1.6 8.6 L4.8 11.8 L10.2 5.4"/><path d="M6.6 11.6 L14.4 5.4"/>',
-  read: '<path d="M1.6 8.6 L4.8 11.8 L10.2 5.4"/><path d="M6.6 11.6 L14.4 5.4"/>',
-  parked: '<circle cx="8" cy="8" r="5.6"/><path d="M8 4.8 V8.2 L10.4 9.6"/>',
-  bounced: '<path d="M4.5 4.5 L11.5 11.5"/><path d="M11.5 4.5 L4.5 11.5"/>',
-  recalled: '<path d="M6.6 4.6 L3.2 8 L6.6 11.4"/><path d="M3.2 8 H10 A2.8 2.8 0 0 0 12.8 5.2"/>',
-};
+// show sent / delivered / read. The drawings, states and words live in postal-state.ts (DELIVERY_GLYPHS: the
+// circled-check ladder for sent / delivered / read since T337, a clock = parked, a cross = bounced, a return
+// arrow = recalled); this wraps one in its box: 14 px, a 1.5 stroke in the state's colour, round caps and joins.
 function clockOf(epochS: number): string {
   return new Date(epochS * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 function deliveryIcon(d: PostalDelivery): HTMLElement {
   const span = el("span", "postal-delivery postal-delivery-" + d.state);
   span.dataset.state = d.state;
-  span.innerHTML = '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" '
-    + 'stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">' + DELIVERY_GLYPHS[d.state] + "</svg>";
+  span.innerHTML = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" '
+    + 'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">' + DELIVERY_GLYPHS[d.state] + "</svg>";
   const title = deliveryTitle(d, clockOf);
   setTip(span, title);                       // the pane's styled tip on hover…
   span.setAttribute("role", "img");          // …and the same words for a screen reader: a labelled span is announced

@@ -2521,9 +2521,13 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
   .turn-postal-service .notice-src-self .notice-src-name { display: none; }
 }
 /* the DELIVERY STATE icon at the head's right edge (postal-state.ts for the map): dim for sent and delivered, the
-   accent for read, the heads-up amber for parked, the blocked red for bounced */
+   accent for read, the heads-up amber for parked, the blocked red for bounced. The mark keeps the STATE colour, never
+   the kind word's. sent / delivered / read is the circled-check ladder (T337): the read rung is the filled circle with
+   its check cut out in the page colour, so the check reads as a hole, not a second colour */
 .postal-delivery { flex: 0 0 auto; margin-left: auto; display: inline-flex; align-self: center; color: var(--dim); }
+.postal-delivery svg { display: block; }
 .postal-delivery-read { color: var(--accent); }
+.postal-delivery-read .postal-mark-check { stroke: var(--bg); }
 .postal-delivery-parked { color: var(--warn); }   /* the heads-up amber: waiting, not an error */
 .postal-delivery-bounced { color: var(--st-blocked-bg); }
 /* a postal card with NOTHING TO FOLD hides nothing behind a fold, so it may not hide anything behind an ellipsis
