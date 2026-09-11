@@ -26,6 +26,13 @@ os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "test-token-DO-NOT-USE")
+# the postal trio (2026-09-10): this kernel runs IN-PROCESS, and an attach whose bus call is refused revives the bus;
+# without these it started one on the machine's fixed port while the real bus was down for a restart. Client-only, so
+# ensure starts nothing; its own port and no peers, read at load (the kernel binds them at import)
+import socket as _socket
+_s = _socket.socket(); _s.bind(("127.0.0.1", 0)); os.environ.setdefault("ROMP_POSTAL_PORT", str(_s.getsockname()[1])); _s.close()
+os.environ["ROMP_POSTAL_PEERS"] = "0"
+os.environ["ROMP_POSTAL_CLIENT_ONLY"] = "1"
 load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
 load_source("romp_judge", os.path.join(BIN, "romp-judge"))
 km = load_source("romp_kernel", os.path.join(BIN, "romp-kernel"))

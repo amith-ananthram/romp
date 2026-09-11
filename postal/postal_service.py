@@ -2799,7 +2799,42 @@ def _sweep_unfinished_writes():
     if parts:
         _refused_notice("mail service start: %s (the log names each)" % "; ".join(parts))
 
+TESTS_ROOT_MARK = "romp-tests-"   # the test runner's temporary roots (/tmp/romp-tests-*): a state root under one belongs to a test
+
+
+def _fixed_port_refusal():
+    """Why this process must NOT bind the machine's fixed bus port, or None (2026-09-10). A hermetic kernel, a test's
+    lab process or the kernel module loaded inside a test process, runs `ensure` at boot and again whenever a bus
+    call is refused; with ROMP_POSTAL_PORT unset that started a bus on the FIXED port the moment the machine's real
+    bus was down for a restart (three leaks in one afternoon, two spawn shapes, three worktrees), and every real
+    session's mail then failed against the lab's token. Fixture hygiene (kernel_env's trio, tests/test_hermetic_
+    kernel_postal.py) covers the spawn sites it can see; this is the belt for the rest: under a test
+    (PYTEST_CURRENT_TEST set) or with the state root under a test runner's temporary directory, the fixed port is
+    refused unless ROMP_POSTAL_PORT names a port explicitly. Loud: the reason goes to stderr and the bus log."""
+    if os.environ.get("ROMP_POSTAL_PORT"):
+        return None
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return ("under a test (PYTEST_CURRENT_TEST is set) with no ROMP_POSTAL_PORT: refusing to bind the machine's fixed bus "
+                "port %d; a hermetic bus names its own port (ROMP_POSTAL_PORT) or runs client-only (ROMP_POSTAL_CLIENT_ONLY=1)" % PORT)
+    if TESTS_ROOT_MARK in str(STATE):
+        return ("the state root %s is a test runner's temporary directory and ROMP_POSTAL_PORT is unset: refusing to bind the "
+                "machine's fixed bus port %d; a hermetic bus names its own port or runs client-only" % (STATE, PORT))
+    return None
+
+
+def _refuse_loudly(why):
+    sys.stderr.write("romp-postal-service: " + why + "\n")
+    try:
+        _log("refused: " + why)
+    except Exception:
+        pass
+
+
 def serve():
+    why = _fixed_port_refusal()
+    if why:
+        _refuse_loudly(why)
+        return 2
     STATE.mkdir(parents=True, exist_ok=True)
     MAILROOT.mkdir(parents=True, exist_ok=True)
     _reconcile_markers()
@@ -4501,6 +4536,10 @@ def ensure():
         return True
     if is_client_only():
         return ping()
+    why = _fixed_port_refusal()   # the belt (2026-09-10): a hermetic kernel's ensure never takes the shared port
+    if why:
+        _refuse_loudly(why)
+        return False
     STATE.mkdir(parents=True, exist_ok=True)
     logf = open(LOG, "a")
     subprocess.Popen([sys.executable, os.path.abspath(__file__), "serve"],
