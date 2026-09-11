@@ -1531,7 +1531,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   live roots, keyed on the parsed transcript's identity, the store's
   identity and seams, `cleared.jsonl`'s identity and the warm-anchor table's
   per-session revision: `hit` and `miss`, `bypass_live` (a build that merged
-  live atoms: the last turn's segments differ from the parse's),
+  live atoms: the last turn's segments differ from the parse's, and since
+  T344 a stale echo may sit in an earlier turn or a turn of its own),
   `bypass_hold` (an armed rewind hold filters a store copy per build),
   `bypass_empty` (a store with no nodes), `evict` (entries dropped for tabs
   no longer shown) and the gauge `entries`. `chatFoldTasks` is the per-turn

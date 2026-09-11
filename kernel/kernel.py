@@ -31216,14 +31216,12 @@ def _merge_live_atoms(session, sid, shown_texts=()):
         stale = [a for a in stale if not _echo_landed_in(a["_echo_text"], owed)]
     placed = ()
     if stale:
-        turns = _place_stale_echoes(turns, stale)
+        # `placed` is what the chat fold keys its sealed prefix on (build_session, the "echo" refold): a placed
+        # echo sits in a turn the fold seals, and its state moves without a parse change (dismissed, flagged
+        # dropped, landed), so the fold compares this tuple build to build instead of re-reading the turns.
+        turns, placed = _place_stale_echoes(turns, stale)
         stale_ids = {id(a) for a in stale}
         fresh = [a for a in fresh if id(a) not in stale_ids]
-        # What the chat fold keys its sealed prefix on (build_session, the "echo" refold): a placed echo
-        # sits in a turn the fold seals, and its state moves without a parse change (dismissed, flagged
-        # dropped, landed), so the fold compares this tuple build to build instead of re-reading the turns.
-        placed = tuple((i, a.get("uuid"), bool(a.get("dropped")))
-                       for i, turn in enumerate(turns) for a in turn["atoms"] if id(a) in stale_ids)
     if fresh:
         turns[-1] = dict(turns[-1])
         # An in-flight input ECHO — the kernel's copy of a send the model has not read yet — sorts AFTER every atom the
@@ -31249,17 +31247,29 @@ def _merge_live_atoms(session, sid, shown_texts=()):
     return {**session, "turns": turns, "_placed": placed}
 
 
+def _turn_activity_end(turn):
+    """When the turn's RECORDED activity ended: the latest non-idle atom's time. Never the turn's `end`: a
+    finished SDK turn carries a synthesized idle atom (event_model.synthesize_idle) whose end is the NEXT
+    state row, and _finalize_turn takes the max end, so a turn that ended at 22:01 reads as ending when the
+    next turn began. A window decided on that would swallow every notice sent while the session sat idle."""
+    return max((a.get("t") or 0 for a in turn.get("atoms") or [] if a.get("type") != "idle"),
+               default=turn.get("t") or 0)
+
+
 def _place_stale_echoes(turns, echoes):
     """Place echo atoms stamped before the last turn's start where their send time belongs (T344). Each echo
-    joins the turn whose window [t, end] holds it; an echo that falls in the gap between two turns, or before
-    the first, goes into a closed synthetic turn at that place (trigger None, like the turn a transcript-less
-    session gets), one turn per gap holding every echo sent in it, sorted, so two notices sent together stay
-    a run. The synthetic turn's id derives from its first echo's uuid, so the same echo yields the same turn
-    build after build. Returns a new turns list; the caller's turn dicts are copied before a write (the parse
-    cache is never mutated)."""
+    joins the turn whose ACTIVITY window holds it, [turn.t, _turn_activity_end(turn)]; an echo that falls in
+    the gap between two turns' activity, or before the first, goes into a closed synthetic turn at that place
+    (trigger None, like the turn a transcript-less session gets), one turn per gap holding every echo sent in
+    it, sorted, so two notices sent together stay a run. The synthetic turn's id derives from its first echo's
+    uuid, so the same echo yields the same turn build after build. Returns (turns, placed): a new turns list
+    (the caller's turn dicts are copied before a write; the parse cache is never mutated) and the fold's key,
+    a tuple of (destination turn index, uuid, dropped) per echo, read off the destinations rather than by a
+    scan of every atom (three merges per push cycle while a dropped echo exists)."""
     out = list(turns)
     key = lambda a: (a.get("t", 0), a.get("_seq", 0))
     gaps = {}                                   # insertion index in `turns` → the echoes sent in that gap
+    dest = []                                   # (the destination turn dict, echo) per echo, resolved to indexes below
     for a in sorted(echoes, key=key):
         t = a.get("t", 0)
         i = None                                # the last turn starting at or before the echo
@@ -31268,18 +31278,23 @@ def _place_stale_echoes(turns, echoes):
                 i = k
             else:
                 break
-        if i is not None and t <= (out[i].get("end") or out[i].get("t") or 0):
+        if i is not None and t <= _turn_activity_end(out[i]):
             out[i] = dict(out[i])
             out[i]["atoms"] = sorted(list(out[i]["atoms"]) + [a], key=key)
             out[i]["placedEchoes"] = list(out[i].get("placedEchoes") or []) + [a.get("uuid")]
+            dest.append((out[i], a))
         else:
             gaps.setdefault(0 if i is None else i + 1, []).append(a)
     for idx in sorted(gaps, reverse=True):      # back to front, so earlier indices stay valid
         atoms = sorted(gaps[idx], key=key)
-        out.insert(idx, {"id": "live-" + str(atoms[0].get("uuid") or atoms[0].get("t", 0)), "trigger": None,
-                         "t": atoms[0].get("t", 0), "end": atoms[-1].get("t", 0), "ended": True, "atoms": atoms,
-                         "echoTurn": True, "placedEchoes": [a.get("uuid") for a in atoms]})
-    return out
+        turn = {"id": "live-" + str(atoms[0].get("uuid") or atoms[0].get("t", 0)), "trigger": None,
+                "t": atoms[0].get("t", 0), "end": atoms[-1].get("t", 0), "ended": True, "atoms": atoms,
+                "echoTurn": True, "placedEchoes": [a.get("uuid") for a in atoms]}
+        out.insert(idx, turn)
+        dest.extend((turn, a) for a in atoms)
+    index_of = {id(turn): k for k, turn in enumerate(out)}
+    placed = tuple(sorted((index_of[id(turn)], a.get("uuid"), bool(a.get("dropped"))) for turn, a in dest))
+    return out, placed
 
 
 def _turn_sans_placed_echoes(turn):

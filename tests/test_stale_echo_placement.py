@@ -87,6 +87,21 @@ def _two_days():
     return [a, b]
 
 
+def _idle(t, end):
+    """The idle atom event_model.synthesize_idle appends to a finished turn: from the Stop state row to the
+    NEXT state row, so a finished turn's `end` reaches the next turn's start (the production shape)."""
+    return {"type": "idle", "uuid": None, "session_id": SID, "t": t, "end": end, "_seq": 10 ** 12 + t}
+
+
+def _two_days_idle():
+    """The production shape: the earlier day's turn carries a trailing idle atom stretched to the later day's
+    turn start, so its parsed `end` is 07:05 the next day although its work ended at 22:01."""
+    a, b = _two_days()
+    a["atoms"].append(_idle(a["end"], b["t"]))
+    a["end"] = b["t"]
+    return [a, b]
+
+
 def _flat(session):
     return [a for turn in session["turns"] for a in turn["atoms"]]
 
@@ -121,6 +136,32 @@ class StaleEchoPlacement(unittest.TestCase):
         self.assertEqual([t["id"] for t in merged["turns"]], ["t1", holder["id"], "t2"], "…placed before the later day's turn")
         # the last turn keeps its own window and ended state: a stale echo is not live work
         self.assertEqual((merged["turns"][-1]["end"], merged["turns"][-1]["ended"]), (T_DAY2 + 7 * 3600 + 360, True))
+
+    def test_a_finished_turns_idle_stretch_is_not_its_window(self):
+        # the manager's review of the first cut: every finished SDK turn's `end` is the NEXT turn's start (the
+        # synthesized idle atom), so a window read off `end` swallowed every notice sent while the session sat
+        # idle; the window ends at the turn's last recorded non-idle activity
+        turns = _two_days_idle()
+        self.assertEqual(turns[0]["end"], turns[1]["t"], "the fixture has the production shape")
+        stale = _echo(T_DAY1 + 22 * 3600 + 28 * 60)                     # 27 minutes after the work ended
+        merged, _ = self._merge(turns, [stale])
+        self.assertEqual([t["id"] for t in merged["turns"]][::2], ["t1", "t2"], "a synthetic turn in the gap")
+        self.assertTrue(merged["turns"][1].get("echoTurn"))
+        self.assertNotIn(stale["uuid"], [a["uuid"] for a in merged["turns"][0]["atoms"]],
+                         "the echo never joins a turn that ended before it was sent")
+        self.assertEqual(km._turn_activity_end(turns[0]), T_DAY1 + 22 * 3600 + 60, "the last reply, not the idle atom's end")
+        inside = _echo(T_DAY1 + 22 * 3600 + 30, key="echo:" + "f" * 32)  # between the prompt and the reply
+        merged2, _ = self._merge(_two_days_idle(), [inside])
+        self.assertIn(inside["uuid"], [a["uuid"] for a in merged2["turns"][0]["atoms"]], "inside the activity: joins")
+        self.assertEqual(len(merged2["turns"]), 2)
+
+    def test_the_placer_returns_the_destinations_with_the_turns(self):
+        stale = _echo(T_DAY1 + 22 * 3600 + 28 * 60, dropped=True)
+        inside = _echo(T_DAY1 + 22 * 3600 + 30, key="echo:" + "f" * 32)
+        turns, placed = km._place_stale_echoes(_two_days(), [stale, inside])
+        self.assertEqual([t["id"] for t in turns][::2], ["t1", "t2"])
+        self.assertEqual(placed, ((0, inside["uuid"], False), (1, stale["uuid"], True)),
+                         "(destination index, uuid, dropped) per echo, indexes after the insertions")
 
     def test_an_echo_inside_an_earlier_turns_window_joins_that_turn(self):
         turns = _two_days()
@@ -250,6 +291,10 @@ class StaleEchoPlacement(unittest.TestCase):
         self.assertNotEqual([seg["id"] for seg in km.em.segments(merged["turns"][0])], before,
                             "(the raw placed turn WOULD split: that is what the helper prevents)")
         self.assertEqual([seg["id"] for seg in km._segs_seam(merged["turns"][0], {})], before, "the seam-aware segmenter reads it too")
+        # the anchors too (the dot's prompt atom, the bar's first work atom, the reply): byte-identical with and
+        # without the placed echo, for the chat build's maps and the lanes' bars alike
+        anchors = lambda t: [km._seg_anchors(seg["atoms"]) for seg in km._segs_seam(t, {})]
+        self.assertEqual(anchors(km._turn_sans_placed_echoes(merged["turns"][0])), anchors(turns[0]))
         untouched = merged["turns"][-1]
         self.assertIs(km._turn_sans_placed_echoes(untouched), untouched, "a turn with nothing placed is handed back as is")
 

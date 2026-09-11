@@ -995,6 +995,27 @@ class PlacedEchoes(Gates):
         self.assertEqual(km._chat_fold_get(SID)["placed"], ((0, self.ECHO, True),))
         self.assert_folding()                           # and folds again once the state is sealed anew
 
+    def test_a_placed_echo_that_lands_refolds_and_leaves_the_prefix(self):
+        # the third exit the fold's docstring names: the echo's TEXT lands in the transcript (a record carrying
+        # it), the display dedup drops the echo from the merge, `placed` empties, the sealed copy must go
+        self.grow(3)
+        t_first = self.s.now - 3 * 86400 + 6
+        self.be.live.append(self._echo(t_first))
+        self.equiv("stale echo placed")
+        self.assert_folding()
+        s = self.s
+        u = s.uid(); s.append([uline(s.tick(), self.NOTICE, u, s.last)])   # the notice lands as a user record
+        # The landing is a parse change too, and the sealed turn's fingerprint moves with the echo's departure
+        # (one atom fewer), so the gate chain demotes on "turnfp" before it reaches "echo"; either way the
+        # build refolds, and `placed` records the emptiness. What matters is that no ghost survives.
+        n_fp, n_echo = km._CHAT_FOLD_STATS.get("g:turnfp", 0), km._CHAT_FOLD_STATS.get("g:echo", 0)
+        inc = self.equiv("the placed echo landed")
+        self.assertTrue(km._CHAT_FOLD_STATS.get("g:turnfp", 0) > n_fp or km._CHAT_FOLD_STATS.get("g:echo", 0) > n_echo,
+                        "the landing refolds: the turn fingerprint moved with the echo's departure, or the echo gate fired")
+        self.assertNotIn(self.ECHO, self._sealed_uuids(), "the landed echo's sealed copy is gone")
+        self.assertNotIn(self.ECHO, [ev.get("uuid") for ev in inc["events"]], "…and the payload shows the record, not the echo")
+        self.assertEqual(km._chat_fold_get(SID)["placed"], ())
+
     def test_a_fresh_echo_in_the_last_turn_never_touches_the_fold(self):
         self.grow(3)
         self.assert_folding()
