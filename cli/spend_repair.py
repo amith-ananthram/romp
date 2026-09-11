@@ -142,6 +142,34 @@ def journal_append(state: Path, entry: dict) -> None:
         f.write(json.dumps(entry) + chr(10))
 
 
+def journal_compact(state: Path, spend: dict) -> int:
+    """The journal rewritten to the entries still pending against `spend` (round six of the review: never trimmed, it
+    was re-read whole on every run, and an entry folded long ago stayed a candidate for a ledger that lost its refs).
+    Returns the entries dropped. Atomic replace; a torn line is kept (counted elsewhere, --apply refuses on it)."""
+    path = state / REPAIR_JOURNAL
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return 0
+    pending = {o.get("t") for o in journal_pending(state, spend)}
+    keep, dropped = [], 0
+    for ln in lines:
+        if not ln.strip():
+            continue
+        try:
+            o = json.loads(ln)
+        except Exception:
+            keep.append(ln); continue
+        if o.get("phase") == "rows" and o.get("t") in pending:
+            keep.append(ln)
+        else:
+            dropped += 1                                  # folded entries and their marks (both are in the ledger's refs)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text("".join(l + chr(10) for l in keep), encoding="utf-8")
+    os.replace(tmp, path)
+    return dropped
+
+
 def fold_deltas(spend: dict, deltas: list, day: str, turns: list) -> tuple:
     """The journal's deltas folded into the buckets, the same fold as a plan's rows. Each entry names the figure its
     row held before that run (`corrected - delta`) and the figure it wrote (`corrected`); the fold is the row's PRESENT
@@ -597,6 +625,17 @@ def main(argv=None) -> int:
     if pending:
         sys.stdout.write("%d delta(s) from %d earlier run(s) are journaled with their bucket write incomplete: --apply folds them first\n"
                          % (sum(len(o["deltas"]) for o in pending), len(pending)))
+        # the preview (round six of the review): the recovery fold run in memory on the ledger as read, its bucket
+        # moves and its notes, so the operator sees the figures an --apply would produce, clamps included
+        preview = json.loads(json.dumps(spend))
+        for o in pending:
+            preview, _m, _s, notes = fold_deltas(preview, o["deltas"], str(o.get("day") or day), turns)
+            for n in notes:
+                sys.stdout.write("  recovery fold would say: %s\n" % n)
+        for h in sorted(set(k for o in pending for d_ in o["deltas"] for k in [d_.get("hour")]) - {None}):
+            before = float(((spend.get("hours") or {}).get(h) or {}).get("usd") or 0)
+            after_ = float(((preview.get("hours") or {}).get(h) or {}).get("usd") or 0)
+            sys.stdout.write("  recovery fold would move hour %s: %.2f -> %.2f\n" % (h, before, after_))
     if not a.apply:
         sys.stdout.write("\ndry run: nothing written (pass --apply to write spend.json and turns.jsonl)\n")
         return 0
@@ -654,15 +693,19 @@ def main(argv=None) -> int:
                             "; %d against the row's present figure, which moved since" % n_moved if n_moved else "",
                             "; %d skipped, their rows are gone" % n_skipped if n_skipped else ""))
     p2 = dict(p, rows=done)
+    said = set(p.get("notes") or [])                  # the report's own note lines, printed above
     new_spend = apply_to_spend(base, p2)
-    if fresh_text != spend_text:
-        for n in p2.get("notes") or []:               # the report above already said the plan's own notes; on a moved ledger the
-            if "below zero" in n:                     # fold ran on other figures, so its clamps are said once more
-                sys.stdout.write("note: %s\n" % n)
-    mark_folded(new_spend, [o["t"] for o in pending] + ([stamp_t] if deltas else []))   # the completion rides the same write
+    for n in p2.get("notes") or []:                   # the fold ran on the ledger as it stands, after any recovery fold and on
+        if "below zero" in n and n not in said:       # the rows found: a clamp that is a NEW line is said (round six: a text gate
+            sys.stdout.write("note: %s\n" % n)       # on spend.json missed a base the recovery fold had moved in memory)
+    refs = [o["t"] for o in pending] + ([stamp_t] if deltas else [])
+    mark_folded(new_spend, refs)                      # the completion rides the same write
     tmp = sp.with_name("spend.json.repair.tmp")
     tmp.write_text(json.dumps(new_spend), encoding="utf-8")
     os.replace(tmp, sp)
+    for r in refs:
+        journal_append(state, {"t": time.time(), "phase": "buckets", "ref": r})   # the belt: a ledger rebuilt without its refs still finds the mark here
+    dropped = journal_compact(state, new_spend)       # folded entries and their marks leave the journal; only pending ones stay
     n_restore = sum(1 for c in done if c.get("restore"))
     sys.stdout.write("\napplied: %d turn row(s) corrected (usdRecorded keeps the old figure)%s, then spend.json rewritten for those\n"
                      % (len(done) - n_restore, ", %d restored to the kernel's figure" % n_restore if n_restore else ""))
