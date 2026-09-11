@@ -699,14 +699,6 @@ body.chat-theme-yatharth .tab.active.colored:not(.tab-blocked) {
 /* a tag chip standing for an UNSELECTED toggle (the tag-lens menu, T283): faded, its colour kept —
    the state class; tag-menu.ts paints the same opacity inline for a sheet-less host (TAG_CHIP_OFF_OPACITY) */
 .tag-chip-off { opacity: 0.45; }
-/* an OFF tag drawn as STRUCK (T321b, the user 2026-09-10: in the picker's Tags row a faded chip alone did not read as
-   off): a 1px diagonal from the chip's bottom-left to its top-right in the chip's own colour (currentColor, so the same
-   tag colour on either theme). The gradient's middle stop is the line through the two corners the keyword does not
-   name, so `to bottom right` draws bottom-left to top-right; the pseudo-element takes the pill's radius so the line's
-   ends stay inside the curve; over the lighter fade the renderer sets inline with the class (tagChip's `struck`). The
-   class alone positions the chip, for a host that adds it by hand; the same bytes on both sheets */
-.tag-chip-struck { position: relative; }
-.tag-chip-struck::after { content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; background: linear-gradient(to bottom right, transparent calc(50% - 0.5px), currentColor calc(50% - 0.5px), currentColor calc(50% + 0.5px), transparent calc(50% + 0.5px)); }
 .ctx-tag-x { flex: 0 0 auto; background: none; border: none; color: var(--dim); cursor: pointer; font: inherit; padding: 0 2px; }
 .ctx-tag-x:hover { color: var(--fg); }
 .ctx-item-newtag { cursor: default; }
@@ -1286,9 +1278,10 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 .mention-chip { display: inline-block; line-height: 1.35; font-weight: 600; color: var(--chip-bg, #fff); }
 
 /* A SECTION AT A GLANCE (tab-snapshot.ts, render.ts renderSnapshot): one row per session of a tab-strip
-   section, in the transcript's place. Two sizes only: the body size for the name and the now line, and
-   0.82em, the header's label size, for the heading, the flag word, the time and the note (labels match
-   labels, times match the strip's sub-lines). The heading wears the header's own dress (letter-spaced dim
+   section, in the transcript's place. Two sizes of its own: the body size for the name and the now line, and
+   0.82em, the header's label size, for the heading, the time and the note (labels match
+   labels, times match the strip's sub-lines); the state chip keeps the shared .chip rule's 0.7em, the bar's
+   own size (T322b). The heading wears the header's own dress (letter-spaced dim
    label + the tag's swatch bar); a row is a real button with the one action hover (accent border + accent
    wash) and the accent focus ring; the pip wears the tab's state colors by the tab's rule (the retrying
    amber is the same status token the tab and the folded header's pip use); the name takes the session's
@@ -1313,8 +1306,8 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 .snap-sess { flex: 0 0 auto; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .snap-row.closed .snap-sess { text-decoration: line-through; opacity: 0.6; }
 .snap-row.loading .snap-sess { opacity: 0.6; }
-.snap-flag { flex: 0 0 auto; padding: 0 6px; border: 1px solid var(--box-border); border-radius: var(--radius-pill); font-size: 0.82em; color: var(--dim); }
-.snap-flag.needs { border-color: transparent; background: var(--st-blocked-bg); color: var(--st-blocked-fg); }
+/* (the row's state words are the SHARED status chip, .chip / .chip-<state> below, the same the bar under the transcript
+   wears — the row adds no rule of its own for it; its grey "waiting" pill is gone, T322b) */
 .snap-now { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dim); }
 /* the row's second line: the session's own working note (render.ts fillSnapshotRow), the header's 0.82em in
    the dim token a step quieter, one line, indented past the pip and its gap so it sits under the name */
@@ -1403,6 +1396,7 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
   display: inline-flex; align-items: center;
   font-size: 0.7em; font-weight: 700; letter-spacing: 0.07em;
   padding: 3px 10px; border-radius: 11px;
+  line-height: normal;   /* a span chip and a button chip stand the same height: the UA gives a button normal, a span would inherit the body's 1.6 (T322b: the overview row's span beside the bar's button) */
 }
 /* the session badge (the user 2026-09-09): the session's name on its identity colour (render.ts sets the fill from
    the same colour the tab label wears), the text black by request; the neutral fill is for a session not yet coloured */
@@ -2951,7 +2945,7 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
 .picker-auth-fixed { flex: 0 0 auto; color: var(--fg); font-size: 0.82em; padding: 4px 0; }
 /* the picker's Tags row (tab groups, the user 2026-09-04): one option per tag; several may be selected, a session
    can hold several tags. Each option IS the tag chip every surface draws (T321, the user 2026-09-10): the thin
-   border in the tag's colour, the struck chip (.tag-chip-struck, T321b) for unselected, so the button around it carries no
+   border in the tag's colour, the faded chip (.tag-chip-off) for unselected, so the button around it carries no
    chrome: no border, no padding, the page's typeface (a bare button wears the browser's control face), and never
    the Backend row's accent fill or hover wash; the hover cue is the strip's own, the chip brightened */
 .picker-tags { flex-wrap: wrap; }
@@ -2959,7 +2953,7 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
 .picker-tags .picker-be-opt:hover, .picker-tags .picker-be-opt.sel { background: transparent; border-color: transparent; color: inherit; }
 .picker-tags .picker-be-opt:hover { filter: brightness(1.3); }
 /* the tmux pick: the chips stay in place, disabled, behind the note (tags apply to SDK and Codex sessions). Greyed
-   and nothing else: the off chip's own fade (0.7 under its strike) stays the only fade, so on and off still read */
+   and nothing else: the off chip's own 0.45 stays the only fade, so on and off still read in both themes */
 .picker-tags.disabled .picker-be-opt { filter: grayscale(1); cursor: default; pointer-events: none; }
 .picker-list { overflow-y: auto; }
 /* The resume list's heading (the user 2026-08-12): the list sits LAST in the dialog — typing in the

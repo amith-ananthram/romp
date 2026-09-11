@@ -70,6 +70,25 @@ class PaneRailTest(unittest.TestCase):
         # default: Chat + Feed + Timeline on, Fleet off (the user 2026-06-25; inlined on <body> for first paint)
         self.assertIn("<body class='po-chat po-feed po-timeline'>", self.html)
 
+    def test_the_optional_panes_are_served_unloaded_and_the_controller_reads_the_gear(self):
+        # The gear's Panes section (the user 2026-09-10): Sessions, the Outline and the Feed can be hidden from
+        # this browser's dashboard altogether, per browser (romp:settings.panes). The markup carries data-src
+        # for those three, the controller copies it to src for a pane this browser shows and hides the rail
+        # button and phone tab of one it does not; the chat (required) and the Files pane (its own rail
+        # toggle) keep src. The behaviour runs under node in tests/test_pane_state_broadcast.py OptionalPanes.
+        for k in ("fleet", "feed", "timeline"):
+            self.assertIn("<iframe id=f-%s data-src=/%s>" % (k, k), self.html)
+        self.assertIn("<iframe id=f-chat class=m-on src=/chat>", self.html)
+        self.assertIn("<iframe id=f-files src=/files>", self.html)
+        self.assertIn(".rail-btn[hidden]{display:none}", self.html, "the controller's hidden must beat .rail-btn's display:flex")
+        self.assertIn("var ALL=KEYS.slice(),OPT=['timeline','fleet','feed'],SK='romp:settings';", self.html)
+        # reconcile(live): the boot call keeps a shown pane's stored rail flag; the storage listener's call brings a
+        # pane the gear just turned on ON SCREEN (the row promises the column back, not its button alone)
+        self.assertIn("function reconcile(live){", self.html)
+        self.assertIn("reconcile(true);apply();", self.html)
+        # the default body class still ships chat+feed+timeline; the controller reconciles before its first apply
+        self.assertIn("<body class='po-chat po-feed po-timeline'>", self.html)
+
     def test_gutters_show_only_between_two_visible_panes(self):
         # gv-a sits chat|fleet → only when BOTH are shown
         self.assertIn("body:not(.po-chat) #gv-a,body:not(.po-fleet) #gv-a{display:none}", self.html)

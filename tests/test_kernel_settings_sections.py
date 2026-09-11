@@ -31,7 +31,10 @@ class SettingsSectionsTest(unittest.TestCase):
         for sec in ("Sessions", "Chat", "Sessions pane", "Feed", "Appearance",   # Colors renamed 2026-08-28: it owns the overall Theme now
                     "Keyboard shortcuts", "Judges", "Updates & debug"):
             self.assertIn("<div class=rs-sec>%s</div>" % sec, h)
-        order = [">Account<", ">Sessions<", ">Chat<", ">Sessions pane<", ">Feed<",
+        # Panes (the user 2026-09-10): which optional panes this browser shows; the per-pane view prefs follow it
+        self.assertIn("<div class=rs-sec id=rs-panes-sec>Panes</div>", h)
+        # header forms for Sessions and Feed: the Panes rows carry those words as labels (<b>Feed</b>)
+        order = [">Account<", "rs-sec>Sessions<", ">Chat<", ">Panes<", ">Sessions pane<", "rs-sec>Feed<",
                  ">Appearance<", ">Keyboard shortcuts<", ">Judges<", ">Updates & debug<",
                  ">romp · version<"]
         idx = [h.index(t) for t in order]
@@ -47,10 +50,23 @@ class SettingsSectionsTest(unittest.TestCase):
             self.assertTrue(h.index(">Sessions<") < h.index(rid) < h.index(">Chat<"), rid)
         # Chat: transcript prefs AND the comment defaults (comments are part of the chat)
         for rid in ("id=rs-compact", "id=rs-dense", "id=rs-branch", "id=rs-striprows", "id=rs-filelink", "id=rs-cmtmodel", "id=rs-cmtfast"):
-            self.assertTrue(h.index(">Chat<") < h.index(rid) < h.index(">Sessions pane<"), rid)
+            self.assertTrue(h.index(">Chat<") < h.index(rid) < h.index(">Panes<"), rid)
+        # Panes: three checkboxes, Sessions, Outline, Feed, in the rail's order and words (the chat is required,
+        # so it is not listed); each on by default, each with a one-line hint
+        for rid in ("id=rs-pane-timeline checked", "id=rs-pane-fleet checked", "id=rs-pane-feed checked"):
+            self.assertTrue(h.index(">Panes<") < h.index(rid) < h.index(">Sessions pane<"), rid)
+        panes = h[h.index(">Panes<"):h.index(">Sessions pane<")]
+        self.assertEqual(panes.count("<label class=\"rs-row rs-panes-row\">"), 3)
+        self.assertEqual(panes.count("<span class=rs-sub>"), 3, "one hint per row")
+        for lbl in ("<b>Sessions</b>", "<b>Outline</b>", "<b>Feed</b>"):
+            self.assertIn(lbl, panes)
+        self.assertNotIn("id=rs-pane-chat", h, "the chat is required")
+        self.assertNotIn("id=rs-pane-files", h, "the Files pane keeps its rail toggle")
+        self.assertLess(panes.index("<b>Sessions</b>"), panes.index("<b>Outline</b>"))
+        self.assertLess(panes.index("<b>Outline</b>"), panes.index("<b>Feed</b>"))
         # Sessions pane, then Feed, then Colors
-        self.assertTrue(h.index(">Sessions pane<") < h.index("id=rs-collapsegaps") < h.index(">Feed<"))
-        self.assertTrue(h.index(">Feed<") < h.index("id=rs-feedcollapsed") < h.index(">Appearance<"))
+        self.assertTrue(h.index(">Sessions pane<") < h.index("id=rs-collapsegaps") < h.index("rs-sec>Feed<"))
+        self.assertTrue(h.index("rs-sec>Feed<") < h.index("id=rs-feedcollapsed") < h.index(">Appearance<"))
         self.assertTrue(h.index(">Appearance<") < h.index("id=rs-cmap") < h.index(">Keyboard shortcuts<"))
         self.assertTrue(h.index(">Appearance<") < h.index("id=rs-pal") < h.index(">Keyboard shortcuts<"))
         # Judges sit low: the six dropdowns between Judges and the bottom group
@@ -163,6 +179,18 @@ class SettingsSectionsTest(unittest.TestCase):
         self.assertEqual(_gear_src().count("stripGroupRows: true"), 2, "on in both of load()'s default literals")
         self.assertIn("s.stripGroupRows = sr.checked", _gear_src())
         self.assertIn("sr.checked = s.stripGroupRows !== false", _gear_src())
+
+    def test_the_panes_section_is_wired_to_the_shared_panes_setting_and_is_the_dashboards_own(self):
+        # the three boxes rewrite romp:settings.panes as a whole set (a missing key reads as shown, settings.ts
+        # paneSet), the modal's open fills them from it, and the section is hidden off the dashboard's own page
+        # (VS Code's panels have no dashboard shell to hide a pane from)
+        h = _gear_src()
+        self.assertIn("pn = { timeline: document.getElementById('rs-pane-timeline'), fleet: document.getElementById('rs-pane-fleet'), feed: document.getElementById('rs-pane-feed') }", h)
+        self.assertIn("function panesOf(s)", h)
+        self.assertIn("p[k] = pn[k].checked; s.panes = p; save(s);", h)
+        self.assertIn("pn[k].checked = p[k]; }); })(panesOf(s));", h)
+        self.assertIn("if (!ownPage) Array.prototype.forEach.call(document.querySelectorAll('#rs-panes-sec,.rs-panes-row'), function (el) { el.hidden = true; });", h)
+        self.assertIn("#rsettings .rs-row[hidden], #rsettings .rs-sec[hidden] { display: none; }", _gear_css_src())
 
     def test_section_header_styling_exists(self):
         self.assertIn("#rsettings .rs-sec {", _gear_css_src())

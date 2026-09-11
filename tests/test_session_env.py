@@ -517,9 +517,12 @@ class SessionIdentityEnv(unittest.TestCase):
 
     def test_the_terminal_launcher_exports_the_same_identity(self):
         # both backends: the tmux launch line carries ROMP_SID + ROMP_SESSION_NAME into the CLI's
-        # environment (the user 2026-08-16 — external tools attribute env-first, never via tmux)
+        # environment (the user 2026-08-16 — external tools attribute env-first, never via tmux), through
+        # `env` since 2026-09-11: the pane runs the line as `exec <cmd>`, and an assignment-led exec is a
+        # command named ROMP_SID=… to every shell (status 127), which killed every terminal pane at spawn
         launcher = Path(os.path.join(os.path.dirname(HERE), "bin", "romp")).read_text()
-        self.assertIn('claude_cmd="ROMP_SID=$sid ROMP_SESSION_NAME=\\"$display\\" $claude_cmd"', launcher)
+        self.assertIn('claude_cmd="env ROMP_SID=$sid ROMP_SESSION_NAME=\\"$display\\" $claude_cmd"', launcher)
+        self.assertNotIn('claude_cmd="ROMP_SID=$sid', launcher, "the assignment-led form must not come back")
 
     def test_one_env_overlay_only(self):
         # both vars ride _options' single env= overlay (additive over os.environ via

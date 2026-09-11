@@ -4803,7 +4803,8 @@ class ViewBuilder(unittest.TestCase):
         self.assertNotIn("explanations", _gear_src())                               # every trace of the pref is gone
         self.assertIn("dispatchEvent(new Event('romp:settings'))", _gear_src())     # same-doc re-render signal (compact toggle etc.)
         # the ↻ refresh + ⛭ gear BUTTONS moved to the shell's far-left rail (the user 2026-06-25); only the
-        # settings MODAL stays in the feed, opened by the rail gear via a {romp:'openSettings'} postMessage.
+        # settings MODAL stays in a pane iframe (the /settings page since 2026-09-10), opened by the rail gear
+        # via a {romp:'openSettings'} postMessage.
         self.assertNotIn("id=rrefresh", _gear_src())                              # refresh is on the rail now
         self.assertIn("e.data.romp === 'openSettings'", _gear_src())                  # the modal opens on the rail's request
         landing = km._landing()
@@ -7772,7 +7773,7 @@ class ServeSecurity(unittest.TestCase):
         import urllib.request
         with urllib.request.urlopen("http://127.0.0.1:%d/?token=testtok" % self.port, timeout=5) as r:
             body = r.read().decode("utf-8", "replace")
-        for pane in ("src=/chat", "src=/feed", "src=/timeline"):
+        for pane in ("src=/chat", "data-src=/feed", "data-src=/timeline"):   # the optional panes load from data-src (the gear's Panes setting decides); an eager src returning would fail this
             self.assertIn(pane, body)
 
     def test_landing_has_a_focused_pane_cue(self):
@@ -7817,12 +7818,12 @@ class ServeSecurity(unittest.TestCase):
         self.assertIn("placeLifted(5)", _gear_src())             # measure the pane rect (retrying while the shell reacts)
         self.assertIn("getElementById('feed-pane')", _gear_src())
         self.assertIn("if (e.target === p) closeSettings()", _gear_src())   # backdrop click closes
-        # shell side: the feed iframe lifts to cover the whole window (the panes show THROUGH the transparent
-        # feed). background:transparent on the LIFTED IFRAME ELEMENT is load-bearing: the shell's default
-        # iframe{background:#1e1e1e} otherwise sits under the transparent page and turns the modal's dim
-        # into a full-window black-out (the user 2026-08-08).
+        # shell side: the settings iframe (the /settings page, 2026-09-10; the feed iframe before) lifts to
+        # cover the whole window (the panes show THROUGH the transparent page). background:transparent on the
+        # LIFTED IFRAME ELEMENT is load-bearing: the shell's default iframe{background:#1e1e1e} otherwise sits
+        # under the transparent page and turns the modal's dim into a full-window black-out (the user 2026-08-08).
         html = km._landing()
-        self.assertIn("body.settings-open #f-feed{display:block;position:fixed;inset:0;z-index:200;background:transparent}", html)
+        self.assertIn("body.settings-open #f-settings{display:block;position:fixed;inset:0;z-index:200;background:transparent}", html)
         self.assertIn("m.romp==='settings'", html)
         self.assertIn("document.body.classList.toggle('settings-open',!!m.on)", html)
 
@@ -7925,7 +7926,7 @@ class ServeSecurity(unittest.TestCase):
         # For back-compat the chat tab bar / Fleet foot still post {romp:'toggleFleet'}; the shell routes that
         # to the same pane toggle (window.__rompPaneToggle('fleet',to?)). The old floating button stays gone.
         html = km._landing()
-        self.assertIn("<iframe id=f-fleet src=/fleet>", html)
+        self.assertIn("<iframe id=f-fleet data-src=/fleet>", html)   # data-src: an optional pane, loaded where the gear shows it (2026-09-10)
         self.assertIn("<div class=pane id=fleet-pane>", html)      # Fleet is a real pane, not an overlay
         self.assertNotIn("chat-fleet-toggle", html)               # the floating shell button is removed
         self.assertNotIn("show-fleet", html)                      # the swap mechanism is gone entirely

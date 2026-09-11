@@ -32,6 +32,7 @@ import { badgeNotices, clearBoundaryNotices, sdkProblemNotices, syncNotices,
 import { initStrip } from "./strip";
 import { installSettingsSync, loadSettings, onExternalSettingsChange } from "./settings";
 import { applyTheme } from "./theme";
+import { hostsGear, openGear } from "./gear-host";
 import { canPreview } from "./preview";
 import { initFileView, setFileViewIdentity, hostStub } from "./file-view";
 import { initFileBrowse, openFileBrowse } from "./file-browse";
@@ -53,6 +54,8 @@ interface AskQuestion { reply_id: string; sid: string; name: string; t: number; 
 // One node of the ask's request DAG (flat list, root first; nest via children ids;
 // a node under two parents appears in both → render twice, dim the repeat).
 interface AskTreeNode {
+  born?: { kind: string; via: string; why: string; healed?: boolean } | null;   // T319: a step the session started on its own
+                                                                                //   (via: workflow | agent | work); why it sits under this goal
   id: string; kind: "ask" | "handoff"; text: string; who: string;
   whoSid: string; whoColor: { bg: string; fg: string } | null;   // agent → colored session link
   whoWorking?: boolean;                                          // that agent is currently WORKING → yellow dot before its name
@@ -80,6 +83,9 @@ interface NodeLogRow {
   at?: number | null; evT?: number | null; anchorUuid?: string | null;
 }
 interface AskItem {
+  sessionStarted?: { why: string; parent: string | null } | null;   // T319: the root is work the SESSION started (a workflow, an
+                                                                    //   agent, its own thread) with no request of the user's to nest
+                                                                    //   under; the face says so in one line instead of posing as an ask
   itemId: string; sid: string; name: string; color: { bg: string; fg: string } | null;
   text: string; t: number; live: boolean;
   turnId: string;
@@ -482,13 +488,15 @@ function prRepoOfSender(frm: string | undefined, origin: string | undefined): st
   return senderPrRepo(sessionsMeta, frm || "", host);
 }
 
-// The settings gear (the ⛭ modal + analytics) is part of THIS bundle now —
-// gear.js builds its DOM here and rides our one kernel channel, so both hosts
-// (the kernel's /feed page and the VS Code feed panel) get the same modal.
-// Opened by a {romp:'openSettings'} window message (web shell rail / VS Code menu).
+// The settings gear (the ⛭ modal + analytics) rides THIS bundle for VS Code's feed panel: gear.js
+// builds its DOM here and rides our one kernel channel, opened by a {romp:'openSettings'} window
+// message (the VS Code menu). The kernel's dashboard serves the gear on its own /settings page
+// instead (settings-page.ts; the user 2026-09-10, so the Feed pane is no longer required for
+// settings) and flags its feed page so no second gear is mounted here — an opener in this document
+// (the login card below) then goes up to the shell, which forwards it there (gear-host.ts).
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { initGear } = require("./gear.js");
-initGear((m: Record<string, unknown>) => vscodeApi?.postMessage(m));
+if (hostsGear(window)) initGear((m: Record<string, unknown>) => vscodeApi?.postMessage(m));
 // the gesture clock the gear stamps its settings posts with — one module graph per document, so
 // the gear's learning (each store's stamp from /version on open) serves the banner below too
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -497,7 +505,7 @@ const gclock = require("./gesture-clock.js");
 // The romp strip (VS Code only — the host opts in via __rompShowStrip): usage
 // bars + the gear button, docked below #feed-foot. The gear raises the modal
 // in THIS document (the gear listener above).
-initStrip(() => window.postMessage({ romp: "openSettings" }, "*"),
+initStrip(() => openGear(window),
   (m: Record<string, unknown>) => vscodeApi?.postMessage(m));
 installSettingsSync();   // a gear save in ANOTHER VS Code pane lands here via the host
 // the overall theme applies to THIS document too (2026-08-28): at boot and on every settings
@@ -2272,6 +2280,29 @@ function updateAskCard(card: HTMLElement, it: AskItem) {
   // TWO collapsible distiller sections (the user 2026-07-02): BACKGROUND (re-orientation for a reader who
   // forgot the thread, collapsed by default) above the takeaway (expanded by default), each with a +/−.
   applySections(a, it, !!distillShown);   // bg/summary/sub-goals (mutually exclusive) — applyDistillLine returns the line's TEXT (string), coerce to "has content"
+  // A SESSION-STARTED root (T319): work the session began on its own (a Workflow run, an agent, a thread of
+  // its own) that stands as a card only because its parent is gone, no request could host it, or it is
+  // blocked (needs-you breaks through). The face says what it is and why in one line, so it never reads as
+  // something the user asked for. Its OWN line, created once beside the sections and kept outside them: the
+  // distill line lives inside the collapsible sections, whose logic hides it without a takeaway and whose
+  // decision brief would otherwise displace the face; both show.
+  {
+    let fe = a._face as HTMLElement | undefined;
+    if (!fe) {
+      fe = el("div", "fask-distill fask-face");
+      const secs = a._secs as HTMLElement;
+      secs.parentNode!.insertBefore(fe, secs.nextSibling);
+      a._face = fe;
+    }
+    const ss = it.sessionStarted;
+    if (ss) {
+      fe.textContent = (ss.parent ? "Started by the session while working on \u201c" + ss.parent + "\u201d: " : "Started by the session on its own: ") + (ss.why || "");
+      fe.style.display = "";
+    } else {
+      fe.textContent = "";
+      fe.style.display = "none";
+    }
+  }
   // API error → a red "API error" badge + a Retry button that pastes "retry" into the session to resume
   // the stalled turn (the user 2026-06-16). The card STAYS in Working (the user 2026-06-29) — an API error is
   // a transient stall, not a block — so this badge + Retry are the only API-error cue; no column move.
@@ -2300,7 +2331,7 @@ function updateAskCard(card: HTMLElement, it: AskItem) {
   loginBtn.style.display = (showApiErr && authErr) ? "" : "none";
   if (showApiErr && authErr) loginBtn.onclick = (ev: Event) => {
     ev.stopPropagation();
-    window.postMessage({ romp: "openSettings" }, "*");   // the login flow lives in the gear's Billing block
+    openGear(window);   // the login flow lives in the gear's Billing block (here, or on the shell's settings page)
   };
   // "Continue" shows on a LIVE needs-you card with no live ask attached: the gesture claims "you're not
   // waiting on me", which means nothing in Working/Completed, can't answer a real permission prompt or

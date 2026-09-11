@@ -240,8 +240,17 @@ lose it) from `send()` until the transcript carries the same text. For a message
 into a running turn that record is the `queued_command` attachment the CLI writes
 when it splices the message in at its next tool boundary. On the SDK route no floor
 retires an echo: it retires when its text lands in a record stamped at or after the
-send (a user record or that attachment), or when the CLI dies holding it (`dropped`,
-which the chat shows as never delivered, with restore and dismiss). The chat's own
+send (a user record or that attachment), or it is flagged `dropped` (which the chat
+shows as never delivered, with restore and dismiss) on one of two events: the CLI dies
+holding it, or the transcript OVERTAKES it — a later genuine-human turn lands, in a
+later second, while the send's text has landed nowhere and no queue still owes it
+(the backend's own, or the CLI's queue ledger). The composer's messages travel one
+channel in order, so a later one going through means the CLI skipped this one: lost,
+not waiting (`settle_echoes`, the SDK twin of the tmux settle; before 2026-09-11 a
+CLI that wedged, swallowed a send and carried on left a solid bubble nothing could
+clear). At boot the same evidence turns the re-delivery of an unlanded human send
+into the flag: a message the conversation has moved past is not re-sent behind the
+newer ones. The chat's own
 pending bubble, painted at the press, has no lifetime either: it ends on the same
 events, read from the events after the send (a landing of the text, the kernel's
 never-delivered verdict, or the user's ✕), and a record the CLI wrote from several
@@ -321,6 +330,30 @@ blocked / completed). A sub-goal never gets its own card: a block anywhere in th
 tree rolls UP, so the *top-level card* moves to BLOCKED and its modal shows which
 leaf is blocking; likewise a completed step shows inside the modal, not as its own
 Completed card. No read-time DAG rebuild, no status derivation, no handoff repair.
+
+Work a session started on its own is never a card of its own (the user
+2026-09-10). At mint time the planner nests it under the goal it ran in (see the
+judges' origin rule); for stores written before that rule, `build_feed` heals
+read-side: a top rooted in a machine record (the judge's latched `askAnchor`
+verdict: a peer's line, the agent's own record, romp bookkeeping; never a top that
+merely lacks an anchor, and never a scheduled prompt's top, which the latch marks
+`scheduled` as the user's configured work) is rendered inside the session's human-asked top that was current
+when it was minted; word overlap with the transcript's recorded background
+launches only picks which launch supplies the why and, among several open tops,
+the parent. Hosts are the asks that trace to the user: human-anchored tops and
+courier-planted delegated goals, never a handoff tracker; a completed host still
+holds its rows and a cleared host hides them with it. A blocked top keeps its
+card until the block lifts (needs-you breaks through) and still wears the face
+that says what it is; the top a live prompt or error floor stands on keeps its
+card too. The launch match reads the dispatch's own description, kept on the
+task record from launch time, never the completion's summary or the brief. Deterministic on the same store and stream
+(nothing moves between builds without a new record), never written back, and
+said once per rise on stderr. A tree row born
+of the session carries `born` with its why; a session-started root that still
+shows (its parent gone, or no top to nest under) carries `sessionStarted` and
+its face says in one line what it is and, when known, the request it served.
+The awaiting panel's `local_workflow` / `local_agent` rows are the run's own
+place in the parent card.
 
 - A card's modal shows the goal's trail (its filed segments + sub-goal tree,
   interleaved).

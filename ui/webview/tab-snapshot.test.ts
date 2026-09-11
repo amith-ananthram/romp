@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import { snapshotModel, snapshotRow, snapshotHeading, rowWords, rowState, nowLine, noteLine, lastActivity, lastMessage,
-         plainText, sameModel, FEED_BLOCK_STATE, type SnapSessionLike, type SnapLedgerLike } from "./tab-snapshot";
+         plainText, sameModel, type SnapSessionLike, type SnapLedgerLike } from "./tab-snapshot";
 
 const T0 = 1781100000;
 const iso = (t: number) => new Date(t * 1000).toISOString();
@@ -42,7 +42,7 @@ test("executed: one row per member in strip order, from what the client already 
   assert.deepEqual([api.pip, api.state, api.needsYou], ["awaiting", "needs you: waiting on your answer", true], "a live prompt is on you: the tab's red");
   assert.equal(api.now, "Pick a database", "the current task");
   assert.equal(api.note, "", "no note, no second line");
-  assert.deepEqual([tests.pip, tests.state, tests.waiting, tests.needsYou], ["waiting", "waiting on background work", true, false], "awaitingBg: waiting, not on you");
+  assert.deepEqual([tests.pip, tests.state, tests.waiting, tests.needsYou], ["waiting", "Awaiting agents", true, false], "awaitingBg: waiting, not on you; the state in the chip's own words (no kind, no count: the historic default word)");
   assert.equal(tests.now, "Run the notes-api suite", "no current task, no summary: the most recent top");
   assert.equal(tests.lastT, T0 - 900, "an empty tail: the state's start, converted from the wire's milliseconds");
   assert.equal(tests.lastMsg, "");
@@ -63,9 +63,9 @@ test("executed: the now line's precedence (current task, summary, recent top, no
 test("executed: needs you follows the FEED's column, not the tab's chip: a judge-filed block flags the row whether the session is idle or active", () => {
   // the common case the tab's rule misses: the agent asked a question and went idle; the feed files its card under needs-you
   const idle = snapshotRow("web", { name: "web", status: { state: "idle" } }, { needsInput: true, tree: [{ text: "Pick a database", current: true }] });
-  assert.deepEqual([idle.pip, idle.needsYou, idle.state], ["", true, FEED_BLOCK_STATE], "idle + feed needs-you: flagged, with the feed's word; the pip stays the tab's (none)");
+  assert.deepEqual([idle.pip, idle.needsYou, idle.state, idle.chip], ["", true, "", { state: "needsInput", text: "Blocked", peer: null }], "idle + feed needs-you: flagged; the chip is the feed's column word and the row's only word for it; the pip stays the tab's (none)");
   const ready = snapshotRow("web", { name: "web", status: { state: "ready" } }, { needsInput: true });
-  assert.deepEqual([ready.pip, ready.needsYou, ready.state], ["", true, FEED_BLOCK_STATE]);
+  assert.deepEqual([ready.pip, ready.needsYou, ready.state, ready.chip && ready.chip.text], ["", true, "", "Blocked"]);
   // blocked while active: the feed's verdict stands until the judges rule again, even with a turn open (a rejudge in flight)
   const active = snapshotRow("web", { name: "web", status: { state: "working" } }, { needsInput: true });
   assert.deepEqual([active.pip, active.needsYou, active.state], ["working", true, "working"], "active + feed needs-you: flagged; the tab's own state word and pip stay");
@@ -76,27 +76,30 @@ test("executed: needs you follows the FEED's column, not the tab's chip: a judge
   assert.equal(snapshotRow("web", { name: "web", status: { state: "needsInput" } }, { needsInput: null }).needsYou, true, "the tab's live prompt still counts (the feed trails the chip by a push)");
   assert.equal(snapshotRow("web", { name: "web", status: { state: "blocked", apiTooLong: true } }, { needsInput: false }).needsYou, true, "the tab's on-you API error too");
   assert.equal(snapshotRow("web", { name: "web", status: { state: "closed" } }, { needsInput: true }).state, "closed", "a closed session keeps its own word");
-  assert.equal(rowWords(idle).label, "web; needs you; Pick a database", "the spoken label carries the feed's word, once");
+  assert.equal(rowWords(idle).label, "web; Blocked; Pick a database", "the spoken label says the chip's words, once (T322b: what is heard is what is shown)");
 });
 
-test("executed: the feed's word claims only what is true of every card in its column: needs you, nothing about being stopped", () => {
-  // the column also holds a peer's held message waiting for approval (the session idle, taking input); the
-  // feed's own word for a goal in that column is the one every card there deserves
-  assert.equal(FEED_BLOCK_STATE, "needs you");
-  assert.doesNotMatch(FEED_BLOCK_STATE, /stop|answer/);
+test("executed: the on-you chip's words: Blocked for the feed's column and a live prompt; API error only for the tab's own on-you API error, never for a flagless auto-retried one", () => {
+  const chipOf = (status: any, lg: any = { needsInput: false }) => snapshotRow("api", { name: "api", status, events: [] }, lg).chip;
+  assert.deepEqual(chipOf({ state: "needsInput" }), { state: "needsInput", text: "Blocked", peer: null }, "a live prompt");
+  assert.deepEqual(chipOf({ state: "blocked", apiTooLong: true }), { state: "blocked", text: "API error", peer: null }, "an API error only you can clear: the flags say so");
+  assert.deepEqual(chipOf({ state: "blocked", apiSpendLimit: true }, { needsInput: true }), { state: "blocked", text: "API error", peer: null });
+  assert.deepEqual(chipOf({ state: "blocked" }, { needsInput: true }), { state: "needsInput", text: "Blocked", peer: null }, "a flagless API error is the kernel's transient, auto-retried one: with a feed-filed block the row reads Blocked like any other on-you row");
+  assert.deepEqual(chipOf({ state: "retrying" }, { needsInput: true }), { state: "needsInput", text: "Blocked", peer: null }, "…the same as its retrying twin");
+  assert.equal(chipOf({ state: "blocked" }), null, "a flagless API error with no feed verdict is not on you: the amber pip alone");
 });
 
-test("executed: the spoken label carries NEEDS YOU whenever the row wears it, whatever the state word, and never twice", () => {
+test("executed: the spoken label says the chip's words whenever the row wears one, once, then the tab's own phrase", () => {
   const prompt = snapshotRow("api", { name: "api", status: { state: "needsInput" } }, { needsInput: true });
-  assert.equal(rowWords(prompt).label, "api; needs you: waiting on your answer");
+  assert.equal(rowWords(prompt).label, "api; Blocked; needs you: waiting on your answer");
   const apiErr = snapshotRow("api", { name: "api", status: { state: "blocked", apiTooLong: true } }, null);
-  assert.equal(rowWords(apiErr).label, "api; needs you: stopped on an API error");
+  assert.equal(rowWords(apiErr).label, "api; API error; needs you: stopped on an API error");
   const rejudge = snapshotRow("web", { name: "web", status: { state: "working" } }, { needsInput: true, tree: [{ text: "Pick a database", current: true }] });
-  assert.equal(rowWords(rejudge).label, "web; needs you; working; Pick a database");
-  assert.equal(rowWords(snapshotRow("web", { name: "web", status: { state: "closed" } }, { needsInput: true })).label, "web; needs you; closed");
+  assert.equal(rowWords(rejudge).label, "web; Blocked; working; Pick a database");
+  assert.equal(rowWords(snapshotRow("web", { name: "web", status: { state: "closed" } }, { needsInput: true })).label, "web; Blocked; closed");
   assert.equal(rowWords(snapshotRow("web", { name: "web", status: { state: "working" } }, { needsInput: false })).label, "web; working");
-  assert.equal(rowWords(snapshotRow("web", { name: "web", status: { state: "awaitingBg" } }, { needsInput: null })).label, "web; waiting on background work");
-  assert.equal(rowWords(snapshotRow("new1", null, { needsInput: true })).label, "(unnamed); needs you; opening", "a loading row can wear the flag only through a ledger the client has no session for; spoken all the same");
+  assert.equal(rowWords(snapshotRow("web", { name: "web", status: { state: "awaitingBg" } }, { needsInput: null })).label, "web; Awaiting agents", "an awaiting row's phrase IS the chip's words: said once");
+  assert.equal(rowWords(snapshotRow("new1", null, { needsInput: true })).label, "(unnamed); Blocked; opening", "a loading row can wear the chip only through a ledger the client has no session for; spoken all the same");
 });
 
 test("executed: the pip and the state word follow tab-state.ts: on-you red, transient amber, closed struck, idle none", () => {
@@ -197,6 +200,43 @@ test("executed: the words: the heading's count and label, the row's spoken label
   const m = snapshotModel(sec, look(sessions), look(ledgers), null);
   assert.equal(rowWords(m.rows[0]).label, "web; working; Add the notes list page; its note: editing the list page template", "the task first, the note last, named as the session's own");
   assert.equal(rowWords(m.rows[0]).title, "Last message: Adding the list page now: the route and the template.\nClick to open this session.");
-  assert.equal(rowWords(m.rows[1]).label, "api; needs you: waiting on your answer; Pick a database");
+  assert.equal(rowWords(m.rows[1]).label, "api; Blocked; needs you: waiting on your answer; Pick a database");
   assert.equal(rowWords(m.rows[2]).title, "No messages yet.\nClick to open this session.");
+});
+
+test("executed: the row's chip is the SHARED status chip's words (T322b): Blocked for the feed's column and a live prompt, API error for an on-you API error, 'Awaiting <word>' from the kind, count and rows, the one peer's name; none for working, ready and retrying; a change in it is a model change", () => {
+  const m = snapshotModel(sec, look(sessions), look(ledgers), null);
+  const [web, api, tests] = m.rows;
+  assert.equal(web.chip, null, "working: the pip alone");
+  assert.deepEqual(api.chip, { state: "needsInput", text: "Blocked", peer: null }, "a live prompt: the bar's Blocked");
+  assert.deepEqual(tests.chip, { state: "awaitingBg", text: "Awaiting agents", peer: null }, "no kind, no count: the historic default word");
+  const chipOf = (status: any, lg: any = { needsInput: false }) => snapshotRow("tests", { name: "tests", status, events: [] }, lg).chip;
+  assert.deepEqual(chipOf({ state: "awaitingBg", awaitingKind: "agents", awaitingCount: 3 }), { state: "awaitingBg", text: "Awaiting 3 agents", peer: null });
+  assert.deepEqual(chipOf({ state: "awaitingBg", awaitingKind: "job", awaitingCount: 1 }), { state: "awaitingBg", text: "Awaiting watch", peer: null }, "the plain words: a job is a watch");
+  assert.deepEqual(chipOf({ state: "awaitingBg", awaitingKind: "mixed", awaitingCount: 4 }), { state: "awaitingBg", text: "Awaiting 4", peer: null }, "mixed kinds: the number alone");
+  assert.deepEqual(chipOf({ state: "awaitingBg", awaitingItems: [{ kind: "agents", id: "a1" }, { kind: "commands", id: "c1" }] }), { state: "awaitingBg", text: "Awaiting 2", peer: null }, "rows of two kinds: the number alone");
+  assert.deepEqual(chipOf({ state: "awaitingBg", awaitingItems: [{ kind: "watches", id: "w1" }, { kind: "watches", id: "w2" }] }), { state: "awaitingBg", text: "Awaiting 2 watches", peer: null });
+  const peer = { name: "api", host: "TESTHOST", color: { bg: "#d53a3a", fg: "#ffffff" } };
+  assert.deepEqual(chipOf({ state: "awaitingBg", awaitingKind: "peer", awaitingCount: 1, awaitingPeers: [peer] }), { state: "awaitingBg", text: "Awaiting TESTHOST:api", peer }, "one peer: the chip names it");
+  assert.deepEqual(chipOf({ state: "awaitingBg", awaitingKind: "peer", awaitingCount: 2, awaitingPeers: [peer, { name: "web" }] }), { state: "awaitingBg", text: "Awaiting 2 peers", peer: null }, "several peers: the count");
+  assert.deepEqual(chipOf({ state: "blocked", apiTooLong: true }), { state: "blocked", text: "API error", peer: null }, "the tab's on-you API error: the bar's word for it");
+  assert.deepEqual(chipOf({ state: "needsInput" }), { state: "needsInput", text: "Blocked", peer: null }, "a live prompt");
+  assert.deepEqual(chipOf({ state: "idle" }, { needsInput: true }), { state: "needsInput", text: "Blocked", peer: null }, "a judge-filed block on an idle session: the feed's column word");
+  assert.deepEqual(chipOf({ state: "working" }, { needsInput: true }), { state: "needsInput", text: "Blocked", peer: null }, "…and on an active one");
+  assert.equal(chipOf({ state: "ready" }), null); assert.equal(chipOf({ state: "idle" }), null); assert.equal(chipOf({ state: "retrying" }), null, "retrying rides the pip alone");
+  assert.equal(chipOf({ state: "closed" }), null, "closed: the struck name says it");
+  assert.equal(snapshotRow("tests", null, null, { name: "tests" }).chip, null, "a placeholder tab: no chip");
+  // the spoken label says the chip's words, once
+  assert.equal(rowWords(snapshotRow("tests", { name: "tests", status: { state: "awaitingBg", awaitingKind: "job", awaitingCount: 1 }, events: [] }, null)).label, "tests; Awaiting watch");
+  // a change in the chip alone is a model change; nothing changed is the same object
+  const s2 = new Map(sessions); s2.set("tests", { ...sessions.get("tests")!, status: { state: "awaitingBg", sinceEpoch: ms(T0 - 900), awaitingKind: "agents", awaitingCount: 3 } });
+  assert.notEqual(snapshotModel(sec, look(s2), look(ledgers), m), m, "the count came: a new model");
+  // …and a change the chip alone carries (the state phrase unchanged): the one peer's identity colour
+  const peerA = { name: "api", color: { bg: "#d53a3a", fg: "#ffffff" } }, peerB = { name: "api", color: { bg: "#3a7bd5", fg: "#ffffff" } };
+  const s3 = new Map(sessions); s3.set("tests", { ...sessions.get("tests")!, status: { state: "awaitingBg", sinceEpoch: ms(T0 - 900), awaitingKind: "peer", awaitingCount: 1, awaitingPeers: [peerA] } });
+  const m3 = snapshotModel(sec, look(s3), look(ledgers), null);
+  const s4 = new Map(s3); s4.set("tests", { ...s3.get("tests")!, status: { ...s3.get("tests")!.status, awaitingPeers: [peerB] } });
+  assert.equal(snapshotModel(sec, look(s3), look(ledgers), m3), m3, "the same peer: the same object");
+  assert.notEqual(snapshotModel(sec, look(s4), look(ledgers), m3), m3, "the peer's colour changed and nothing else the row says: a new model (sameChip)");
+  assert.equal(snapshotModel(sec, look(sessions), look(ledgers), m), m, "nothing changed: the same object");
 });

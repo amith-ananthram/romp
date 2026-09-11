@@ -3208,7 +3208,10 @@ fi
 # through the API and this var, never tmux). Mirrors the SDK backend's spawn env (sdk_backend
 # _options); both values are already sanitized above (sid: hex+hyphens, name: [A-Za-z0-9_-]),
 # so the interpolation into the respawn-pane exec line is injection-safe.
-claude_cmd="ROMP_SID=$sid ROMP_SESSION_NAME=\"$display\" $claude_cmd"
+# Through `env`: the pane runs this as `exec <cmd>` (respawn-pane below), and an assignment-led exec is a command
+# named ROMP_SID=… to every shell (zsh, bash and sh all answer "command not found", status 127), so from
+# 2026-08-16 to 2026-09-11 a terminal session's pane died the instant it was spawned (found by the T325 lab).
+claude_cmd="env ROMP_SID=$sid ROMP_SESSION_NAME=\"$display\" $claude_cmd"
 
 # Load the Romp Postal Service MCP server (tool-native messaging) into romp
 # sessions only (scoped via --mcp-config), when installed.

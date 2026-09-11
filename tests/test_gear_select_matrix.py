@@ -200,7 +200,7 @@ class ServedMatrix(unittest.TestCase):
         cfg = os.path.join(self.lab, "cfg.json")
         with open(cfg, "w") as f:
             json.dump({"stateDir": self.state, "rounds": rounds,
-                       "url": "http://127.0.0.1:%d/feed?token=%s" % (self.port, self.token)}, f)
+                       "url": "http://127.0.0.1:%d/settings?token=%s" % (self.port, self.token)}, f)   # the page that hosts the gear (2026-09-10)
         driver = os.path.join(self.lab, "driver.mjs")
         with open(driver, "w") as f:
             f.write(DRIVER)

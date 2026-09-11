@@ -1873,14 +1873,6 @@ a.fileview-gh-note { border-style: dashed; }
 /* a tag chip standing for an UNSELECTED toggle (the tag-lens menu, T283): faded, its colour kept —
    the state class; tag-menu.ts paints the same opacity inline for a sheet-less host (TAG_CHIP_OFF_OPACITY) */
 .tag-chip-off { opacity: 0.45; }
-/* an OFF tag drawn as STRUCK (T321b, the user 2026-09-10: in the picker's Tags row a faded chip alone did not read as
-   off): a 1px diagonal from the chip's bottom-left to its top-right in the chip's own colour (currentColor, so the same
-   tag colour on either theme). The gradient's middle stop is the line through the two corners the keyword does not
-   name, so `to bottom right` draws bottom-left to top-right; the pseudo-element takes the pill's radius so the line's
-   ends stay inside the curve; over the lighter fade the renderer sets inline with the class (tagChip's `struck`). The
-   class alone positions the chip, for a host that adds it by hand; the same bytes on both sheets */
-.tag-chip-struck { position: relative; }
-.tag-chip-struck::after { content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none; background: linear-gradient(to bottom right, transparent calc(50% - 0.5px), currentColor calc(50% - 0.5px), currentColor calc(50% + 0.5px), transparent calc(50% + 0.5px)); }
 /* the bell BUTTON (the user 2026-07-28, round 4): inline in row1's metadata cluster, right after the
    timestamp — shown only once the card is hovered or it's armed. Off = slashed dim bell; armed (.on) =
    accent bell, always visible. Accent = mechanics chrome, never a status colour.

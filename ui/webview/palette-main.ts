@@ -12,6 +12,7 @@ import { initShortcutsModal } from "./shortcuts-modal";
 import { chordMap, chordOf, dispatchable, displayChord, effectiveChord, keyHint, loadOverrides, titleWithKey, KEYS_EVENT } from "./keybindings";
 import { hostPrefix } from "./host-prefix";   // pure display helper — safe here (never federation.ts, which boots a manager on import)
 import { installMenuEcho } from "./tag-menu";   // model deps only (tag-lens/session-views) — no manager, no DOM cost
+import { loadSettings, OPTIONAL_PANES, type PaneSet } from "./settings";   // the gear's store, read at every palette open (no side effects at import)
 
 type SessionRow = { id: string; name: string; dir: string; bg: string };
 
@@ -116,7 +117,10 @@ installMenuEcho();
   });
   registerCommand({
     id: "settings.open", title: "Open settings",
-    run: () => { try { pane("f-feed")!.contentWindow!.postMessage({ romp: "openSettings" }, "*"); } catch (e) { /* feed not loaded */ } },
+    // the gear lives on its own served page, the shell's hidden #f-settings iframe (the user 2026-09-10;
+    // it rode the feed pane before, which made that pane required), loaded on the first open: the shell's one
+    // opener (kernel _LANDING_SETTINGS_JS __rompOpenSettings) gives it its src and holds the ask for its load
+    run: () => { if (w.__rompOpenSettings) w.__rompOpenSettings(); },
   });
   // Chat history back/forward (the user 2026-08-14; their own Obsidian nav keys — Ctrl+M / Ctrl+,
   // per their vault's hotkeys.json). The chat pane owns the trail (it knows the tabs + scroll spots);
@@ -136,14 +140,23 @@ installMenuEcho();
   registerCommand({ id: "kernel.restart", title: "Restart the romp kernel", run: () => { if (w.__rompRestart) w.__rompRestart(); } });
   // Pane toggles. The Outline pane's INTERNAL key stays 'fleet' (the pane controller's API);
   // the command speaks the user-facing name.
+  // A pane hidden from this browser's dashboard in the gear (romp:settings.panes, the user 2026-09-10) is not
+  // LISTED: the shell never loads its iframe and the toggle refuses its key (out of the controller's set), so a
+  // dead entry would be noise. The check is a `when` predicate over the live setting (settings.ts's reader, the
+  // same store the shell's reconcile reads), re-read at every open like the Files predicate below, never a
+  // boot-time look at the iframe's src: a pane enabled later gains its command with the gear save, and a pane
+  // hidden later loses it, no reload either way (review, 2026-09-10).
   const panes: Array<[string, string]> = [["chat", "chat"], ["timeline", "timeline"], ["fleet", "outline"], ["feed", "feed"], ["files", "files"]];
+  const optional = new Set<string>(OPTIONAL_PANES);
   for (const [key, label] of panes) {
     registerCommand({
       id: "pane." + label, title: "Show or hide the " + label + " pane",
       run: () => { if (w.__rompPaneToggle) w.__rompPaneToggle(key); },
       // the Files control hidden by its gear setting (T317): the shell's body wears no-files-control, the toggle refuses,
       // so the entry is not listed either (re-read at every open: the gear's change reaches the body class live)
-      when: key === "files" ? () => !document.body.classList.contains("no-files-control") : undefined,
+      when: key === "files" ? () => !document.body.classList.contains("no-files-control")
+        : optional.has(key) ? () => loadSettings().panes[key as keyof PaneSet]
+        : undefined,
     });
   }
 
@@ -216,9 +229,11 @@ installMenuEcho();
   // The same dual wiring as the Alt+Arrow pane nav (_LANDING_FOCUS_JS): capture on the shell
   // document AND on every same-origin pane document, re-attached on every iframe (re)load.
   // render.ts's own window-capture Cmd+O handler stands down inside the shell (inRompShell),
-  // so a keystroke in the chat document lands here exactly once.
+  // so a keystroke in the chat document lands here exactly once. The hidden #f-settings iframe
+  // (the /settings page, the gear's document since 2026-09-10) is wired with the panes: the gear
+  // holds the keyboard while it is open, and the hotkey worked from inside it when it rode the feed.
   document.addEventListener("keydown", onKey, true);
-  ["f-chat", "f-fleet", "f-feed", "f-files", "f-timeline"].forEach((id) => {
+  ["f-chat", "f-fleet", "f-feed", "f-files", "f-timeline", "f-settings"].forEach((id) => {
     const f = pane(id);
     if (!f) return;
     const wire = () => {

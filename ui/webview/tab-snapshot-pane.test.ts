@@ -17,6 +17,7 @@ import { viewTagUnion } from "./session-views";
 import { parseTabGroups, planStrip, setSectionCollapsed, homeSectionOf, neighborOfFolded, headWords, type StripItem, type TabSection } from "./tab-groups";
 import { sectionPip, sectionPipMembers, sectionPipTitle } from "./tab-state";
 import { snapshotModel, snapshotHeading, rowWords, type SnapModel } from "./tab-snapshot";
+import { statusChip } from "./status-chip";
 import { rowStillOpen, installSnapshotEscape, reconcileRows } from "./tab-snapshot-view";
 
 const requireCjs = createRequire(__filename);
@@ -130,7 +131,7 @@ type Hooks = {
   calls: string[]; delegates: Array<{ root: FakeEl; handlers: Record<string, (node: FakeEl, ev: Event) => void> }>;
   winCap: Function[]; winBub: Function[]; writes: any[];
   FakeEl: typeof FakeEl; doc: FakeDoc;
-  snapshotModel: typeof snapshotModel; snapshotHeading: typeof snapshotHeading; rowWords: typeof rowWords;
+  snapshotModel: typeof snapshotModel; snapshotHeading: typeof snapshotHeading; rowWords: typeof rowWords; statusChip: typeof statusChip;
   rowStillOpen: typeof rowStillOpen; installSnapshotEscape: typeof installSnapshotEscape; reconcileRows: typeof reconcileRows;
   homeSectionOf: typeof homeSectionOf; neighborOfFolded: typeof neighborOfFolded; setSectionCollapsed: typeof setSectionCollapsed;
   headWords: typeof headWords; sectionPip: typeof sectionPip; sectionPipMembers: typeof sectionPipMembers; sectionPipTitle: typeof sectionPipTitle;
@@ -182,6 +183,7 @@ function lift(): (H: Hooks) => Api {
     const ageColorReadable = (s) => "age-" + Math.floor(s);
     const hostNameNodes = (name) => [document.createTextNode(name)];
     const snapshotModel = H.snapshotModel, snapshotHeading = H.snapshotHeading, rowWords = H.rowWords;
+    const statusChip = (w, tag) => H.statusChip(w, tag, document);   // the shared status chip, built in the fake document (T322b)
     const rowStillOpen = H.rowStillOpen, installSnapshotEscape = H.installSnapshotEscape, reconcileRows = H.reconcileRows;
     const homeSectionOf = H.homeSectionOf, neighborOfFolded = H.neighborOfFolded, setSectionCollapsed = H.setSectionCollapsed;
     const tabGroups = () => H.groups;
@@ -234,7 +236,7 @@ function world(active = "web", groups = parseTabGroups(null), ids = ["web", "api
   const H: Hooks = { content, bar, composer, sendBtn: new FakeEl("button"), sessions, ledgers, tabMeta: new Map([["tests", { name: "tests", color: null }]]),
     closingTabs: new Map(), views: new Map(), lastStripItems: plan.items, order: ids, collapsed: plan.folded, nowMs: T0 * 1000, pickerOpen: false,
     calls: [], delegates: [], winCap: [], winBub: [], writes: [], FakeEl, doc: DOC,
-    snapshotModel, snapshotHeading, rowWords, rowStillOpen, installSnapshotEscape, reconcileRows, homeSectionOf, neighborOfFolded, setSectionCollapsed,
+    snapshotModel, snapshotHeading, rowWords, statusChip, rowStillOpen, installSnapshotEscape, reconcileRows, homeSectionOf, neighborOfFolded, setSectionCollapsed,
     headWords, sectionPip, sectionPipMembers, sectionPipTitle, groups, navDeps: null };
   const api = lift()(H);
   api.set({ activeId: active });
@@ -287,8 +289,8 @@ test("executed: the view paints one row per member from the model: heading, keye
   assert.equal(web.children[2].textContent, "Add the notes list page");
   assert.deepEqual([web.children[3].dataset.t, web.children[3].textContent, web.children[3].style.color], [String(T0 - 40), "40s ago", "age-40"], "the model carries the epoch; the renderer formats it");
   assert.equal(web.children[4].textContent, "editing the list page");
-  assert.deepEqual(api_.children.map((c) => c.className), ["snap-pip", "snap-sess", "snap-flag needs", "snap-now", "snap-when"], "an idle session the feed files under needs-you: no pip, the word");
-  assert.equal(api_.children[2].textContent, "needs you");
+  assert.deepEqual(api_.children.map((c) => c.className), ["snap-pip", "snap-sess", "chip chip-needsInput", "snap-now", "snap-when"], "an idle session the feed files under needs-you: no pip, the bar's Blocked chip (T322b)");
+  assert.deepEqual([api_.children[2].tag, api_.children[2].textContent], ["span", "Blocked"], "the shared status chip, a span inside the row's button");
   assert.equal(H.delegates.length, 1, "one delegate, on the stable host, installed with it");
   assert.equal(H.delegates[0].root, host);
 });
@@ -649,9 +651,32 @@ test("pinned: the sheet: the shown header's wash and the stand-in's mark on the 
   assert.match(block, /\.snap-pip\.retrying \{ background: var\(--st-retrying-bg\); \}/, "the same status token the tab and the folded header's pip use");
   assert.match(block, /\.snap-row:hover \{ border-color: var\(--accent\); background: var\(--accent-wash\); \}/);
   assert.match(block, /\.snap-row:focus-visible \{ outline: 1px solid var\(--accent\); outline-offset: -1px; \}/);
-  assert.match(block, /\.snap-flag\.needs \{ border-color: transparent; background: var\(--st-blocked-bg\); color: var\(--st-blocked-fg\); \}/, "needs you in the status red, not the accent");
+  assert.doesNotMatch(block, /\.snap-flag/, "no pill of the view's own (T322b): the state words are the shared status chip, .chip / .chip-<state>");
   const stripped = block.replace(/\/\*[\s\S]*?\*\//g, "").replace(/var\([^)]*\)/g, "V");
   assert.equal(stripped.match(/#[0-9a-fA-F]{3,8}\b/g), null, "no raw color: the light theme needs no override");
+});
+
+test("executed: the row's state words are the SHARED status chip (T322b): the awaiting row wears chip-awaitingBg with 'Awaiting <word>' from the status's kind and count, the needs-you row the bar's Blocked; the pip stays; a count change re-texts the chip", () => {
+  const { api, content, sessions } = world();
+  sessions.set("tests", { name: "tests", color: null, status: { state: "awaitingBg", sinceEpoch: (T0 - 900) * 1000, awaitingKind: "agents", awaitingCount: 3, awaitingItems: [] }, events: [] });
+  api.set({ lastStripItems: [{ head: { name: "infra", localId: "g2", color: "#4EC9B0", ids: ["web", "api", "tests"] }, folded: false, active: true, hidden: [] }, { id: "web" }, { id: "api" }, { id: "tests" }], snapView: "infra" });
+  api.renderSnapshot();
+  const host = content.byId("tab-snapshot")!;
+  const [web, api_, tests] = rowsOf(host).map((i) => i.children[0]);
+  assert.deepEqual(tests.children.map((c) => c.className), ["snap-pip waiting", "snap-sess", "chip chip-awaitingBg", "snap-now", "snap-when"], "the green pip stays; the chip beside the name");
+  assert.deepEqual([tests.children[2].tag, tests.children[2].textContent], ["span", "Awaiting 3 agents"], "the bar's words: the kind, agreeing in number");
+  assert.equal(tests.getAttribute("aria-label"), "tests; Awaiting 3 agents", "spoken as shown");
+  assert.deepEqual([api_.children[2].className, api_.children[2].textContent], ["chip chip-needsInput", "Blocked"], "on you: the feed's column word, the bar's chip");
+  assert.equal(web.querySelector(".chip"), null, "a working row says it with the pip alone");
+  assert.equal(host.querySelector(".snap-flag"), null, "no pill of the view's own");
+  // new information: the kind and count change → the button stands, the chip re-texts
+  const m1 = api.get().snapModel;
+  sessions.set("tests", { ...sessions.get("tests"), status: { ...sessions.get("tests").status, awaitingKind: "job", awaitingCount: 1 } });
+  api.renderSnapshot();
+  assert.notEqual(api.get().snapModel, m1, "a chip change is a model change");
+  assert.equal(rowsOf(host)[2].children[0], tests, "the button stands");
+  assert.equal(tests.querySelector(".chip")!.textContent, "Awaiting watch");
+  assert.equal(tests.getAttribute("aria-label"), "tests; Awaiting watch");
 });
 
 test("executed: the guide describes the fold rule and the view", () => {

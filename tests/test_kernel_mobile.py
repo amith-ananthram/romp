@@ -58,14 +58,14 @@ class LandingShell(unittest.TestCase):
         self.assertIn("data-act=net data-keycmd=net.open aria-label='Remote kernels'", html)
         self.assertIn("<rect x='1' y='3' width='9' height='4' rx='1' fill='currentColor'/>", html)   # the used-bar fill
         self.assertNotIn(">Gear</button>", html)
-        self.assertIn("{romp:'openSettings'}", km._LANDING_MOBILE_JS)   # same path as the desktop gear
+        self.assertIn("window.__rompOpenSettings&&window.__rompOpenSettings();", km._LANDING_MOBILE_JS)   # same path as the desktop gear: the settings iframe
         self.assertIn("__rompOpenNet", km._LANDING_MOBILE_JS)           # opens the shell's remotes panel
         self.assertIn("window.__rompOpenNet=open", km._LANDING_REMOTES_JS)
         self.assertIn("__rompUsagePanel", km._LANDING_MOBILE_JS)        # the tooltip's bars as a modal
         self.assertIn("window.__rompUsagePanel=function", km._LANDING_USAGE_JS)
         self.assertIn("#ru-tip.ru-modal", html)                         # centered placement for the panel
         # the lifted-fullscreen settings iframe must override the mobile display:none
-        self.assertIn("body.settings-open #f-feed{display:block;position:fixed", html)
+        self.assertIn("body.settings-open #f-settings{display:block;position:fixed", html)
 
     def test_mobile_restart_button_reuses_the_rail_refresh_kernel_restart(self):
         # the user 2026-07-22: there was no restart-kernel affordance on mobile (the rail's own ↻ is hidden
@@ -118,8 +118,8 @@ class LandingShell(unittest.TestCase):
         # the desktop shell is the flex pane row (chat | fleet | feed | timeline)
         self.assertIn(".col{display:flex", html)
         self.assertIn("src=/chat", html)
-        self.assertIn("src=/feed", html)
-        self.assertIn("src=/timeline", html)
+        self.assertIn("data-src=/feed", html)   # optional panes load from data-src (the Panes setting)
+        self.assertIn("data-src=/timeline", html)
 
     def test_the_shell_leaves_a_hair_of_slack_down_the_right_edge(self):
         # The panes tiled flush to the window, so whatever sat hard right inside one — a feed card's
@@ -169,7 +169,9 @@ class LandingShell(unittest.TestCase):
         # carries id=f-timeline inside #tl-pane, and the old stale-id splitter bug must not regress.
         html = km._landing()
         self.assertIn("id=f-timeline", html)                      # the iframe carries this id
-        self.assertIn("<div class=pane id=tl-pane><iframe id=f-timeline src=/timeline></iframe></div>", html)
+        # data-src, not src (the user 2026-09-10): the band is an optional pane, loaded by the pane controller
+        # only where this browser's gear shows it (tests/test_pane_state_broadcast.py OptionalPanes)
+        self.assertIn("<div class=pane id=tl-pane><iframe id=f-timeline data-src=/timeline></iframe></div>", html)
         self.assertNotIn("getElementById('t')", km._LANDING_JS)   # the stale id is gone
 
     def test_mobile_switcher_is_isolated_in_its_own_script(self):

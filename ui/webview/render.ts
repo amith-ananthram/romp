@@ -32,6 +32,7 @@ import { backendLabel, effectiveDefaultBackend } from "./backend-names";
 import { delegate } from "./actions";
 import { flash } from "./actions";   // its own line: the import above is pinned verbatim by click-safe.test.ts (the file-view precedent)
 import { awaitWord, awaitBreakdown, groupRows, rowIds, waitsNote, GROUP_TITLE, workingFor, type AwaitRow } from "./spin-caption";
+import { CHIP_LABEL, chipWords, statusChip, type ChipState } from "./status-chip";   // the session status chip: its words and its classes, the one builder the bar and the tag overview's rows share (T322b)
 import { isClearCmd, openTopTitles, clearConfirmDetail, endConfirmDetail } from "./clear-confirm";
 import { prebuildPlan, type ViewState } from "./prebuild";
 import { historyMarks, historyBands, windowSpans, HIST_H, HIST_GAP } from "./glow-history";
@@ -290,7 +291,9 @@ type ChatEvent = (
 
 interface TodoTask { id: string; subject: string; activeForm?: string; status: string }
 
-type ChipState = "working" | "ready" | "needsInput" | "awaiting" | "awaitingBg" | "idle" | "closed" | "compacting" | "clearing" | "blocked" | "retrying" | "interrupting" | "opening";   // needsInput = a live permission/picker prompt (on YOU) — renamed from the legacy "awaiting" (2026-08-15), which stays accepted for OLDER REMOTE KERNELS across federation; awaitingBg = idle main thread waiting on background work it dispatched (the user 2026-07-13)
+// ChipState, the kernel's chip states, lives in status-chip.ts since T322b beside its labels (imported above), so the label
+// map is checked exhaustive over it: needsInput = a live permission/picker prompt (on YOU), the legacy "awaiting" accepted
+// for older remote kernels; awaitingBg = idle main thread waiting on background work it dispatched (the user 2026-07-13).
 type PeerIdent = { name: string; host?: string; sid?: string; color?: { bg: string; fg: string } | null };   // a named peer behind a peer-kind wait (kernel _peer_identity, 2026-08-26)
 // which billing sides this box can bill, and why not for the other (kernel _auth_avail, 2026-09-08): the
 // Billing submenu lists both and greys the unavailable one with the reason in its hover
@@ -5967,6 +5970,12 @@ function renderTabs() {
   const mslotEl = document.getElementById("mtag-slot");
   if (stripSig === tabStripSig && !(mslotEl && !mslotEl.firstChild)) { stripAftermath(visibleIds, ids); return; }
   tabStripSig = stripSig;
+  // the strip is about to be REBUILT: the hover tip belongs to a tab node this rebuild discards, and its mouseleave
+  // (the tip's only closer) never fires on a discarded node, so a tip shown for the tab the user just clicked stood
+  // stranded over the page until another tab was hovered and left (T327, found by the tag-overview served lab on
+  // 2026-09-10: its screenshots caught the tip after every pick). The rebuild is the event: hide it here, once, before
+  // the nodes go.
+  hideTabTip();
   // Preserve TAB-MODE keyboard focus across the rebuild (the user 2026-06-29). renderTabs runs on EVERY kernel
   // push (0.5–3s), and replaceChildren() destroys the focused tab — dropping focus out of the strip (often out
   // of the chat iframe entirely), which silently killed ←/→/Enter nav after a send or any push: you were left
@@ -7480,11 +7489,10 @@ function backendTakesTags(be: string): boolean { return be === "sdk" || be === "
 // chip prefilled from a tagged active tab turns every terminal create into a refusal.
 // The Tags row's option paints as the tag chip itself (T321, the user 2026-09-10): the thin border in the tag's own
 // colour that the tab strip, the feed and the outline draw, and on versus off by the visual the tag toggles already
-// use, the faded chip, here the STRUCK one (tagChip's `struck`, T321b: a diagonal in the chip's colour, since the fade
-// alone read too faint in this row), never a dot and never the Backend row's accent
+// use, the faded chip (tagChip's `off`, TAG_CHIP_OFF_CLASS at 0.45), never a dot and never the Backend row's accent
 // fill. The `sel` class on the button stays the state the create reads; the chip is repainted from it on each click.
 function paintPickerTagChip(b: HTMLButtonElement, u: { name: string; color?: string | null }): void {
-  b.replaceChildren(tagChip(u.name, u.color, { inheritSize: true, struck: !b.classList.contains("sel") }));   // off = struck (T321b)
+  b.replaceChildren(tagChip(u.name, u.color, { inheritSize: true, off: !b.classList.contains("sel") }));
 }
 
 function syncPickerTags(): void {
@@ -7989,7 +7997,7 @@ function openPicker(pick = false, prompt?: string, allowNew = false) {
     for (const u of unions) {
       const b = el("button", "picker-be-opt" + (preset.has(u.name) ? " sel" : "")) as HTMLButtonElement;
       b.type = "button"; b.dataset.tag = u.name;
-      paintPickerTagChip(b, u);   // the tag chip every surface draws, full when selected, struck when not (T321, T321b)
+      paintPickerTagChip(b, u);   // the tag chip every surface draws, full when selected, faded when not (T321)
       b.title = preset.has(u.name)
         ? `the session you are looking at is in ${u.name} — the new one joins it too unless you unpick this`
         : `put the new session in ${u.name}`;
@@ -11456,8 +11464,12 @@ function fillSnapshotRow(btn: HTMLElement, r: SnapRow, now: number): void {
   const name = el("span", "snap-sess"); name.replaceChildren(...hostNameNodes(r.name, r.id));
   if (r.color) name.style.color = r.color.bg;
   btn.appendChild(name);
-  if (r.needsYou) { const f = el("span", "snap-flag needs"); f.textContent = "needs you"; btn.appendChild(f); }
-  else if (r.waiting) { const f = el("span", "snap-flag"); f.textContent = "waiting"; btn.appendChild(f); }
+  // the state in words, when the row says one: the SHARED status chip (status-chip.ts), the same words and dress the
+  // bar under the transcript wears for the session you are reading — Blocked (API error when that is the state) on
+  // you, "Awaiting 3 agents" / "Awaiting watch" / the peer's name for background work (T322b, the user 2026-09-10:
+  // a grey outlined pill of the row's own reading "waiting" was not it). The model picks the chip (tab-snapshot.ts
+  // snapshotRow); the pip stays beside it: the strip's colour language says the state, the chip says what.
+  if (r.chip) btn.appendChild(statusChip(r.chip));
   const nowEl = el("span", "snap-now"); nowEl.textContent = r.loading ? "opening…" : r.now; btn.appendChild(nowEl);
   if (r.lastT) {
     const when = el("span", "snap-when"); when.dataset.t = String(r.lastT);
@@ -14171,15 +14183,8 @@ function setCtxBar(bar: HTMLElement, ctxStr: string | undefined, compacting = fa
     : `context ${pct}% used — click to /compact`;
 }
 
-const CHIP_LABEL: Record<ChipState, string> = {
-  working: "Working", ready: "Ready", needsInput: "Blocked",
-  awaiting: "Blocked",   // the legacy name for needsInput — an older remote kernel still sends it
-  awaitingBg: "Awaiting",   // idle, waiting on background work it dispatched — the romp await-green, not working-yellow (the user 2026-07-13; recolored from straw 2026-07-22)
-  idle: "Idle", closed: "Closed", compacting: "Compacting", clearing: "Clearing", blocked: "API error",
-  retrying: "API retrying…",   // a live session stalled on an API rate-limit/overload auto-retry (api 2026-06-23)
-  interrupting: "Interrupting…",   // stop sent, turn not yet settled (the user 2026-07-02) — clears to READY on its own
-  opening: "Opening…",             // spawned, transcript not on disk yet — the first record clears it (the user 2026-08-05)
-};
+// CHIP_LABEL, the state words, lives in status-chip.ts since T322b (the user 2026-09-10): the tag overview's rows wear
+// the same chip as this bar, so the words and the classes have one home the two import (imported above).
 
 // A stop/interrupt button that lives beside the state badge in the statusline (the user 2026-06-19):
 // it sends the SAME interrupt the composer's Ctrl+C does (host → Esc into the pane) — a less fiddly way
@@ -14283,37 +14288,20 @@ function updateStatusline() {
     // #bg-tasks box below and scrolls it into view — the chip used to be the one status word on the
     // pane you could not click through. data-act on the stable #statusline delegate (click-safe across
     // the per-push rebuild); the delegate's .romp-acted pulse acknowledges the press.
-    const chip = el("button", "chip chip-awaitingBg chip-btn") as HTMLButtonElement;
+    // the chip itself is the SHARED status chip (status-chip.ts chipWords + statusChip, T322b): `chip chip-awaitingBg`
+    // wearing "Awaiting <word>" — the KIND rides the label so a glance says WHAT is awaited (the user 2026-08-15;
+    // tooltips are dead on the touch PWA), by ONE rule (awaitWord, agreeing in number, T225): "Awaiting agent" /
+    // "Awaiting command" / "Awaiting watch" for one, "Awaiting 3 agents" for several of a kind, "Awaiting 4" when
+    // the kinds are mixed; a single named peer's NAME in its identity colour on the .chip-peer-name backing (the
+    // user 2026-08-26). The tag overview's rows build theirs from the same two calls, so the two cannot drift. This
+    // bar adds what only it has: the button, the per-kind hook and the tip (the breakdown "2 agents · 1 command ·
+    // 1 watch" rides there).
+    const chip = statusChip(chipWords(s.status), "button") as HTMLButtonElement;
+    chip.classList.add("chip-btn");
     chip.type = "button";
     chip.dataset.act = "awaitingChip";
-    // the KIND rides the label so a glance says WHAT is awaited (the user 2026-08-15) — tooltips are
-    // dead on the touch PWA, so the word must be visible; the subject stays in the #bg-tasks box. ONE
-    // rule words it (awaitWord): "Awaiting agent" / "Awaiting command" / "Awaiting watch" for one,
-    // "Awaiting 3 agents" for several of a kind, "Awaiting 4" when the kinds are mixed — the
-    // breakdown ("2 agents · 1 command · 1 watch") rides the tooltip.
     const chipItems = s.status.awaitingItems || [];
     chip.classList.add("chip-awaiting-" + (s.status.awaitingKind || "untyped"));   // per-kind hook, one hue today
-    const chipPeers = s.status.awaitingPeers || [];
-    const chipWord = awaitWord(s.status.awaitingKind, s.status.awaitingCount, chipItems);
-    if (chipPeers.length && groupRows(chipItems).every((g) => g.kind === "peer")) {
-      // the pill names the actual session (the user 2026-08-26): "Awaiting <name>", the NAME itself
-      // in the peer's identity colour — the dot it launched with retired the same day (round two:
-      // it read stupid). The name sits on an always-on ~85% black backing (.chip-peer-name), mostly
-      // opaque so ANY identity colour reads against any chip hue (their green-on-green example),
-      // translucent enough that the chip's own colour still glows through around it. Several peers
-      // keep the one-line rule as a count, names on the tooltip.
-      chip.append(CHIP_LABEL.awaitingBg + " ");
-      if (chipPeers.length === 1) {
-        const nm = el("span", "chip-peer-name");
-        // the HOUSE session-reference idiom (the user 2026-08-26, round three — one undifferentiated
-        // string read wrong): the shared renderer, so the host prefix wears .host-prefix (italic
-        // gray) and the NAME text takes the identity colour — the card headers' own treatment,
-        // never a restyled copy
-        nm.replaceChildren(...hostPartsNodes(chipPeers[0].host, chipPeers[0].name));
-        if (chipPeers[0].color && chipPeers[0].color.bg) nm.style.color = chipPeers[0].color.bg;
-        chip.appendChild(nm);
-      } else chip.append(chipWord || chipPeers.length + " peers");
-    } else chip.textContent = CHIP_LABEL.awaitingBg + (chipWord ? " " + chipWord : "");   // agrees in number (T225); the plain words of slice 2
     // the tip: the per-kind breakdown when there are rows, the kernel's why, and what the click does
     setTip(chip, [awaitBreakdown(chipItems), s.status.awaitingWhy || "idle, waiting on background work it dispatched",
                   "click to see what it's waiting on"].filter(Boolean).join("\n"));
@@ -14336,9 +14324,7 @@ function updateStatusline() {
   } else if (s.status.state === "opening") {
     sl.appendChild(openingLine());             // spawned, transcript not on disk yet — dots until the first record
   } else {
-    const chip = el("span", `chip chip-${s.status.state}`);
-    chip.textContent = CHIP_LABEL[s.status.state] ?? (s.status.state[0].toUpperCase() + s.status.state.slice(1).toLowerCase());
-    sl.appendChild(chip);
+    sl.appendChild(statusChip(chipWords(s.status)));   // the shared chip (status-chip.ts): `chip chip-<state>`, the state's words in sentence case
   }
 
   // The right-side cluster — dir · branch · mode/model/effort/fast badges · ctx battery — grouped in ONE
@@ -17022,8 +17008,9 @@ function markMentions(root: HTMLElement): void {
 // chip word counts, a run of letters inside a chip does not and copies as rendered. Every range is read (a
 // multi-select holds several and sel.toString() concatenates them). A selection with no whole chip is left
 // to the browser in both flavours, including a copy inside the composer (the document's selection holds no
-// chip then). The rich flavour is the ranges' own markup with each chip's hover title (live status text) and
-// data attributes dropped, so a paste keeps the chip's class and text and nothing about the session behind it.
+// chip then). The rich flavour is the ranges' own markup with each chip's hover titles (live status text, on the
+// chip and on a down host's prefix) and data attributes dropped, so a paste keeps the chip's class and text and
+// nothing about the session behind it.
 // The Comment/Quote seed (transcriptSelection) keeps reading the rendered text: a thread's quoted passage
 // anchors on what the transcript shows.
 function mentionCopyText(sel: Selection): { text: string; html: string } | null {
@@ -17050,7 +17037,9 @@ function mentionCopyText(sel: Selection): { text: string; html: string } | null 
   try {
     const scratch = document.createElement("div");
     for (let i = 0; i < sel.rangeCount; i++) scratch.appendChild(sel.getRangeAt(i).cloneContents());
-    for (const c of Array.from(scratch.querySelectorAll<HTMLElement>(".mention-chip"))) {   // class and text travel; the hover title and the ids do not
+    // class and text travel; the hover titles and the ids do not: the chip's own, and the reconnect note a down
+    // host's prefix span wears (hostNameNodes sets it), so the chip's descendants are stripped with it
+    for (const c of Array.from(scratch.querySelectorAll<HTMLElement>(".mention-chip, .mention-chip *"))) {
       c.removeAttribute("title");
       for (const k of Object.keys(c.dataset)) delete c.dataset[k];
     }

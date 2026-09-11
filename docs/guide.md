@@ -194,17 +194,19 @@ tags stays short.
 **A section at a glance.** Clicking a header also shows the section in the transcript's place: one
 row per session, with its color, a dot for its state (yellow working, red stopped on a prompt or an
 API error only you can clear, amber retrying an API error on its own, teal compacting, green waiting
-on background work, none while it is idle), a **needs you** or **waiting** word, what it is doing
-now in a few words, and how long ago it last did anything. **Needs you** appears when the feed shows
-one of the session's cards under Blocked, or when the session is stopped on a prompt or an API error
-only you can clear; **waiting**, when it is waiting on background work. A session that asked a
-question and went quiet shows the word with no dot: the dot follows the session's own state, the
-word follows the feed. What it is doing now comes from its current task, else from the headline of
+on background work, none while it is idle), a state chip when the state is worth a word, what it is
+doing now in a few words, and how long ago it last did anything. The chip is the one the bar under
+the transcript wears for the session you are reading, with the same words and colours: **Blocked**
+when the feed shows one of the session's cards under Blocked or the session is stopped on a prompt
+(**API error** when it is stopped on one only you can clear), and **Awaiting** with what is awaited
+(**Awaiting 3 agents**, **Awaiting watch**, the peer's name) when it is waiting on background work.
+A session that asked a question and went quiet shows the chip with no dot: the dot follows the
+session's own state, the chip follows the feed. What it is doing now comes from its current task, else from the headline of
 its work so far, else from the last task it had; a session that has published a note of what it is
 working on shows the note as a quieter second line. Hover a row for its last message, shown without
 its formatting; click one to open that session, which also opens its section if the section is
 folded (with several tags, the first folded group of them). The rows update as the sessions work and
-change only when something about a session changes; the **needs you** word follows the feed, one
+change only when something about a session changes; the **Blocked** chip follows the feed, one
 refresh behind it at most. The transcript comes back when you pick a session, press Escape, or click
 that header again while its section is open and holds the tab you are reading.
 
@@ -284,10 +286,12 @@ find past work: the search box reaches every session, live or closed.
 
 The Files pane holds the file viewer in a column of its own, beside the chat
 and the feed, so an open file covers neither. While the pane is open, a file
-link clicked in the chat opens in it. When it is closed, the gear's **File
-links open in** setting decides where a link opens: over the pane you clicked
-(the default), or in the Files pane, which then opens and stays open; on a
-phone, closing the file takes you back to the tab you came from. The folder
+link clicked in the chat opens in it. When it is closed and the Files control
+is on, the gear's **File links open in** setting decides where a link opens:
+over the pane you clicked (the default), or in the Files pane, which then
+opens and stays open; with the control off (the default), a link always opens
+over the pane you clicked. On a phone, closing the file takes you back to the
+tab you came from. The folder
 shown under the chat (the session's working directory), the **Directory** row
 of the **System context** card and **Browse files** on a tab's right-click menu
 open a listing of that folder by the same rule: in this pane while it is open
@@ -295,8 +299,10 @@ or when the setting names it, otherwise over the chat. Pick a file in the
 listing and it opens where the listing is. Selecting a passage in the viewer
 puts the quote in the chat's composer, as it does from the viewer over the
 chat. When no file is open, the pane lists the files most recently opened in
-it; click one to open it again. The pane is off by default; the bottom bar
-turns it on, and on a phone it is a tab like the others.
+it; click one to open it again. The pane and its control are both off by
+default: the gear's **Files control in the dashboard bar** setting adds a
+Files toggle to the bottom bar (on a phone, a Files tab like the others), and
+that toggle turns the pane on.
 
 ## Automatic nudges
 
