@@ -5009,7 +5009,15 @@ function bgRgb(): [number, number, number] {
 // as a dim one (blue) — consistent "faded-ness" regardless of color. Never
 // touches the bright color (only used for at-rest tabs).
 const CLASSIC_FADE_SCALE = 0.9;   // T118 (the user 2026-08-27): +10% brighter faded tab labels under Classic — one tunable knob (half the parked T113 number)
-function fadedColor(hex: string): string {
+// The composer's name overlay fades HALFWAY (T341, the user 2026-09-11: at the strip's full fade the name in the box read
+// too faint; at none it outshone the placeholder). The strength of the one fade rule, not a second colour formula: 0.5
+// covers half the perceptual distance the strip's at-rest label covers. Its host prefix sits at the matching midpoint
+// (styles.css --host-fade on #composer-ph).
+const PH_NAME_FADE = 0.5;
+// `amount` is the fade's strength: 1 (the default) is the strip's at-rest fade, unchanged for tabs; 0.5 is half the way
+// from the identity colour toward the page background. It scales the one blend, so the dim-hue early return holds at every
+// strength and a light page (already past the luminance target) stays a no-op.
+function fadedColor(hex: string, amount = 1): string {
   const m = /^#?([0-9a-fA-F]{6})$/.exec(hex.trim());
   if (!m) return hex;
   const n = parseInt(m[1], 16);
@@ -5020,7 +5028,7 @@ function fadedColor(hex: string): string {
   if (Lc <= Lt) return hex; // already dim — leave it
   // Classic fades 10% less far toward the background (T118); Yatharth keeps his full fade.
   const scale = settings.chatTabTheme === "yatharth" ? 1 : CLASSIC_FADE_SCALE;
-  const t = Math.min(0.85, (Lc - Lt) / (Lc - Lb)) * scale;
+  const t = Math.min(0.85, (Lc - Lt) / (Lc - Lb)) * scale * amount;
   const hx = (a: number, c: number) => Math.round(a * (1 - t) + c * t).toString(16).padStart(2, "0");
   return `#${hx(r, br)}${hx(g, bgc)}${hx(b, bb)}`;
 }
@@ -13076,11 +13084,12 @@ function syncComposerPh(): void {
     // the quiet .host-prefix span, marked when the host's link is down, and only the name below is bold and coloured
     ph.appendChild(hostNameNodes(parts.host + parts.name, activeId)[0]);
   }
-  // the name at an INACTIVE tab label's level (T335, the user 2026-09-10: it stood out brighter than every other word of
-  // the faded placeholder): the strip's own perceptual fade of the identity colour (fadedColor, what an at-rest tab's
-  // label wears), the weight kept; the host span fades in tandem through the strip's own class on the overlay
+  // the name HALFWAY between its identity colour and an inactive tab label's level (T335, the user 2026-09-10: at the full
+  // colour it stood out brighter than every other word of the faded placeholder; T341, the user 2026-09-11: at the strip's
+  // full fade it read too faint): the strip's own perceptual fade of the identity colour (fadedColor) at half strength,
+  // the weight kept; the host span fades in tandem through the strip's own class on the overlay, at the matching midpoint
   const nm = el("b", "composer-ph-name"); nm.textContent = parts.name;
-  if (colorBg) nm.style.color = fadedColor(colorBg); else nm.style.removeProperty("color");
+  if (colorBg) nm.style.color = fadedColor(colorBg, PH_NAME_FADE); else nm.style.removeProperty("color");
   ph.appendChild(nm);
   ph.appendChild(document.createTextNode(parts.after));
   // where the box's own first line sits: inside its border and padding, in its font (offsets are relative to

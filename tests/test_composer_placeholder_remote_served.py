@@ -73,7 +73,7 @@ await page.waitForTimeout(600);
 // the dress of a host span: the class, the italic, the ink, the weight (the four the tab label's rule sets), and its words
 // (defined inside the page's evaluate, where getComputedStyle lives)
 const measure = () => page.evaluate(() => {
-  const dress = (n) => { if (!n) return null; const cs = getComputedStyle(n); return { cls: n.className, text: n.textContent, style: cs.fontStyle, color: cs.color, weight: cs.fontWeight, size: cs.fontSize }; };
+  const dress = (n) => { if (!n) return null; const cs = getComputedStyle(n); return { cls: n.className, text: n.textContent, style: cs.fontStyle, color: cs.color, weight: cs.fontWeight, size: cs.fontSize, opacity: cs.opacity }; };
   const tab = document.querySelector("#tabs .tab.active[data-id]");
   const ph = document.getElementById("composer-ph"); const nm = ph && ph.querySelector(".composer-ph-name");
   const ta = document.getElementById("composer-input");
@@ -241,10 +241,10 @@ class ServedComposerPlaceholderRemoteHost(unittest.TestCase):
             self.assertEqual(m["phHost"]["style"], "italic"); self.assertEqual(m["phHost"]["weight"], "400", "the host is quiet, not bold")
             self.assertEqual(m["phName"]["text"], "api", "only the name is the bold run: %r" % m["phName"])
             self.assertEqual(m["phName"]["weight"], "600")
-            # …in the session's identity colour at an at-rest tab label's fade (T335): every channel moved from the identity
-            # colour toward the page background, never the full colour, and the overlay carries the strip's at-rest class so
-            # the host span fades with the name (the exact level is proven against a real at-rest label in
-            # tests/test_session_name_served.py)
+            # …in the session's identity colour HALFWAY toward an at-rest tab label's fade (T335 set the full at-rest fade;
+            # T341 halves it, render.ts PH_NAME_FADE): every channel moved from the identity colour toward the page
+            # background, never the full colour, and the overlay carries the strip's at-rest class so the host span fades
+            # with the name (the exact midpoint is proven against a real at-rest label in tests/test_session_name_served.py)
             rgb = lambda c: tuple(int(x) for x in re.findall(r"\d+", c or "")[:3])
             ident, name, bg = (100, 181, 246), rgb(m["phNameColor"]), rgb(m["bodyBg"])
             if theme == "dark":
@@ -256,6 +256,10 @@ class ServedComposerPlaceholderRemoteHost(unittest.TestCase):
                 self.assertTrue(lo <= name[i] <= hi, "channel %d of the name lies between the identity colour and the page background in %s: %r %r %r" % (i, theme, ident, name, bg))
             self.assertTrue(m["phFaded"], "the overlay carries the strip's at-rest class")
             self.assertNotEqual(m["phHost"]["color"], m["phNameColor"], "the host does not wear the identity colour")
+            # the host prefix fades in tandem with the name it precedes, at the name's midpoint (T341): the strip's rule at the
+            # overlay's strength, 0.75, between the active label's full 1 and an at-rest label's 0.5
+            self.assertEqual(m["tabHost"]["opacity"], "1", "the ACTIVE tab's host wears no fade: %r" % m["tabHost"])
+            self.assertEqual(m["phHost"]["opacity"], "0.75", "the overlay's host at the midpoint in %s: %r" % (theme, m["phHost"]))
             self.assertTrue((m["nativePlaceholder"] or "").startswith("Message this session"), "the native placeholder beneath stays the plain resting text for assistive tech")
 
 

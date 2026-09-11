@@ -88,7 +88,7 @@ test("the mark goes on the HOST token, never on the session name", () => {
   // the two rules that both set the token's opacity (T335 review): the at-rest fade (0.5) and this cue (0.75). The fade wins
   // by SPECIFICITY through its compound selector, whatever their order in the sheet: an at-rest label on a down host fades
   // with its name and still wears the cue's italic and dotted underline
-  assert.match(CSS, /^\.name-faded \.host-prefix, \.name-faded \.host-prefix\.off \{ opacity: 0\.5; \}/m, "the fade names the .off token too");
+  assert.match(CSS, /^\.name-faded \.host-prefix, \.name-faded \.host-prefix\.off \{ opacity: var\(--host-fade, 0\.5\); \}/m, "the fade names the .off token too");
   assert.match(CSS, /^\.host-prefix\.off \{\s*\n\s*opacity: 0\.75;/m, "the cue keeps its own opacity for an active label's token");
   assert.match(FEEDCSS, /\.host-prefix\.off \{[\s\S]*?text-decoration: underline dotted 1px/,
     "the feed page loads only feed.css");

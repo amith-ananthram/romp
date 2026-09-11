@@ -1,9 +1,9 @@
 """The chat names the session it messages (the user 2026-09-09), in a real browser against a hermetic kernel: the composer's
 resting placeholder reads "Message <name>…" with the name bold in the session's identity colour and follows the active tab;
-since T335 (the user 2026-09-10) the name is painted at an INACTIVE tab label's level: the strip's own perceptual fade of the
-identity colour, so it sits with the faded placeholder text; this test reads the same session's at-rest label colour once the
-tab is inactive and requires the placeholder's name colour to equal it, dark and light (PH_SHOTS=<dir> writes screenshots of
-the box under the strip; PH_BEFORE_DIST=<dist> serves another tree's bundle for the before shots and skips the fade checks);
+since T335 (the user 2026-09-10) the name is painted with the strip's own perceptual fade of the identity colour, so it sits
+with the faded placeholder text, and since T341 (the user 2026-09-11: the full fade read too faint) at HALF strength; this test
+reads the same session's at-rest label colour once the tab is inactive and requires the placeholder's name colour to sit
+halfway between it and the identity colour, dark and light (PH_SHOTS=<dir> writes screenshots of the box under the strip; PH_BEFORE_DIST=<dist> serves another tree's bundle for the before shots and skips the fade checks);
 the statusline badge (the name in black on that colour) is a SETTING, off by default (the maintainers via the user,
 2026-09-10), and a flip of the setting shows it and hides it again without a reload. Skips LOUDLY when the extension deps
 or a playwright browser are absent (CI installs none). Synthetic sessions and text only."""
@@ -108,7 +108,7 @@ await fr.click('#tabs .tab[data-id="' + cfg.sidA + '"]'); await waitActive(cfg.s
 await waitFn(() => { const d = document.getElementById("f-chat").contentDocument; const ph = d.getElementById("composer-ph"); return !!(ph && ph.querySelector(".composer-ph-name")); }, null, "the placeholder overlay never named the session");
 out.a = await naming();
 await page.mouse.move(700, 500); await page.waitForTimeout(300);   // off the strip: no hover un-fade, no tooltip in the shot
-await shot("romp_chat-composer-name-fade-dark");
+await shot("romp_chat-composer-name-half-fade-dark");
 // the other tab: the placeholder follows the active session
 await fr.click('#tabs .tab[data-id="' + cfg.sidB + '"]'); await waitActive(cfg.sidB);
 await waitFn((b) => { const d = document.getElementById("f-chat").contentDocument; const nm = d.querySelector("#composer-ph .composer-ph-name"); return !!nm && nm.textContent !== b; }, out.a.phName, "the placeholder never followed the tab switch");
@@ -120,7 +120,7 @@ await fr.click('#tabs .tab[data-id="' + cfg.sidA + '"]'); await waitActive(cfg.s
 await waitFn((a) => { const d = document.getElementById("f-chat").contentDocument; const nm = d.querySelector("#composer-ph .composer-ph-name"); return !!nm && nm.textContent === a; }, out.a.phName, "the placeholder never named A again under the light theme");
 await page.mouse.move(700, 500); await page.waitForTimeout(300);
 out.aLight = await naming();
-await shot("romp_chat-composer-name-fade-light");
+await shot("romp_chat-composer-name-half-fade-light");
 await fr.click('#tabs .tab[data-id="' + cfg.sidB + '"]'); await waitActive(cfg.sidB);
 await waitFn((b) => { const d = document.getElementById("f-chat").contentDocument; const nm = d.querySelector("#composer-ph .composer-ph-name"); return !!nm && nm.textContent === b; }, out.b.phName, "the placeholder never followed to B under the light theme");
 out.bLight = await naming();
@@ -292,7 +292,7 @@ class ServedSessionName(unittest.TestCase):
             return "rgb(%d,%d,%d)" % tuple(int(c[i:i + 2], 16) for i in (1, 3, 5))
         return c
 
-    def test_1_the_placeholder_names_the_active_session_bold_at_an_inactive_labels_fade_and_follows_the_tab(self):
+    def test_1_the_placeholder_names_the_active_session_bold_halfway_to_an_inactive_labels_fade_and_follows_the_tab(self):
         r = self._r(); a, b = r["a"], r["b"]
         self.assertEqual((a["active"], a["phName"]), (SID_A, "web"))
         self.assertEqual((b["active"], b["phName"]), (SID_B, "api"), "the placeholder follows the active tab")
@@ -304,22 +304,28 @@ class ServedSessionName(unittest.TestCase):
         self.assertNotEqual(a["tabBg"], b["tabBg"], "two sessions, two colours")
         if self.before:
             self.skipTest("a before-the-change dist: screenshots only, the fade checks describe the change")
-        # T335: the name's colour is the SAME session's at-rest label colour (the strip's perceptual fade), read off A's label
-        # once B is active, dark and light; not the full identity colour it wore before
+        # T335: the name's colour is the strip's perceptual fade of the SAME session's identity colour, read off A's at-rest
+        # label once B is active; T341 (the user 2026-09-11: the full fade read too faint): at HALF strength, so every
+        # channel sits at the midpoint of the identity colour and the at-rest label's, dark and light
+        chan = lambda c: tuple(int(x) for x in re.findall(r"\d+", self._rgb(c))[:3])
         for act, rest, theme in ((a, b, "dark"), (r["aLight"], r["bLight"], "light")):
             self.assertEqual((act["theme"], rest["theme"]), (theme, theme))
             restA = next(t for t in rest["tabs"] if t["id"] == SID_A)
             self.assertFalse(restA["active"]); self.assertTrue(restA["faded"], "A's tab is at rest and faded in %s: %r" % (theme, restA))
             self.assertTrue(restA["labelColor"], "the at-rest label carries the computed fade inline: %r" % restA)
-            self.assertEqual(self._rgb(act["phColor"]), self._rgb(restA["labelColor"]), "the box names A at A's inactive label colour in %s: %r vs %r" % (theme, act["phColor"], restA))
-            self.assertEqual(act["phComputed"], restA["labelComputed"], "…and the computed inks agree")
+            ident, at_rest, name = chan(act["tabBg"]), chan(restA["labelColor"]), chan(act["phColor"])
+            mid = tuple(round((i + f) / 2) for i, f in zip(ident, at_rest))
+            self.assertTrue(all(abs(n - m) <= 1 for n, m in zip(name, mid)), "the box names A halfway between A's identity colour and A's inactive label colour in %s: identity %r, at rest %r, box %r" % (theme, ident, at_rest, name))
             self.assertTrue(act["phFaded"], "the overlay carries the strip's at-rest class, so a remote host's prefix would fade with the name")
             if theme == "dark":
-                self.assertNotEqual(self._rgb(act["phColor"]), self._rgb(act["tabBg"]), "faded, not the full identity colour, in the dark theme")
+                self.assertNotEqual(at_rest, ident, "the at-rest label is faded in the dark theme")
+                self.assertNotEqual(name, ident, "the box: not the full identity colour")
+                self.assertNotEqual(name, at_rest, "…nor the at-rest label's fade (T335's level): the midpoint")
             else:
                 # the strip's fade blends toward a LOW luminance target (fadedColor), which a light page already exceeds, so an
-                # at-rest label keeps its full colour there by the strip's own rule; the box matches that, whatever it is
-                self.assertEqual(self._rgb(act["phColor"]), self._rgb(act["tabBg"]), "the light theme: the strip's at-rest label is unfaded, and so is the box's name")
+                # at-rest label keeps its full colour there by the strip's own rule at any strength; the box matches that
+                self.assertEqual(at_rest, ident, "the light theme: the strip's at-rest label is unfaded")
+                self.assertEqual(name, ident, "…and so is the box's name")
 
     def test_2_the_badge_is_off_by_default_and_a_flip_of_the_setting_shows_it_and_hides_it_live(self):
         r = self._r(); a, b, on, off = r["a"], r["b"], r["bOn"], r["bOff"]
