@@ -72,6 +72,15 @@ class HermeticKernelPostal(unittest.TestCase):
         self.assertEqual(env.get("ROMP_POSTAL_PEERS"), "0")
         port = int(env.get("ROMP_POSTAL_PORT") or 0)
         self.assertTrue(port and port != 25302, "an ephemeral port, never the machine's fixed bus port: %r" % env.get("ROMP_POSTAL_PORT"))
+        self.assertEqual(env.get("ROMP_POSTAL_HERMETIC"), "1", "…marked as the run's own, so the bus honours it under a test (2026-09-11)")
+
+    def test_the_runner_pops_an_inherited_bus_port_and_marks_the_runs_own(self):
+        src = open(os.path.join(HERE, "conftest.py"), encoding="utf-8", errors="replace").read()
+        self.assertIn('os.environ.pop("ROMP_POSTAL_PORT", None)', src, "a machine's named bus port never reaches a lab or an in-process kernel")
+        self.assertIn('os.environ["ROMP_POSTAL_HERMETIC"] = "1"', src)
+        floor = src.index('os.environ.pop("ROMP_STATE_DIR", None)')
+        self.assertLess(floor, src.index('os.environ.pop("ROMP_POSTAL_PORT", None)'), "…beside the state floor, at import, before any test module loads")
+        self.assertLess(src.index('os.environ.pop("ROMP_POSTAL_PORT", None)') - floor, 600, "…right beside it")
 
     def test_every_test_that_starts_a_kernel_process_carries_the_trio(self):
         offenders = []

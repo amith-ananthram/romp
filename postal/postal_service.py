@@ -2800,37 +2800,64 @@ def _sweep_unfinished_writes():
         _refused_notice("mail service start: %s (the log names each)" % "; ".join(parts))
 
 TESTS_ROOT_MARK = "romp-tests-"   # the test runner's temporary roots (/tmp/romp-tests-*): a state root under one belongs to a test
+DEFAULT_PORT = 25302              # the machine's fixed bus port, the one every real client dials
+OWN_PORT_MARK = "ROMP_POSTAL_HERMETIC"   # set by the test runner and the lab builder: a ROMP_POSTAL_PORT under it is the run's own choice
+
+
+def _machine_state_root():
+    """The state root the machine's own bus runs under: ROMP_STATE_DIR when the service or a profile names one, else
+    the XDG default under the home directory. A bus under any other root is somebody's lab."""
+    d = os.environ.get("ROMP_STATE_DIR")
+    return os.path.normpath(d) if d else os.path.normpath(os.path.join(os.path.expanduser("~"), ".local", "state", "romp"))
 
 
 def _fixed_port_refusal():
-    """Why this process must NOT bind the machine's fixed bus port, or None (2026-09-10). A hermetic kernel, a test's
-    lab process or the kernel module loaded inside a test process, runs `ensure` at boot and again whenever a bus
-    call is refused; with ROMP_POSTAL_PORT unset that started a bus on the FIXED port the moment the machine's real
-    bus was down for a restart (three leaks in one afternoon, two spawn shapes, three worktrees), and every real
-    session's mail then failed against the lab's token. Fixture hygiene (kernel_env's trio, tests/test_hermetic_
-    kernel_postal.py) covers the spawn sites it can see; this refusal, in the bus itself, covers every shape: under a
-    test (PYTEST_CURRENT_TEST set) or with the state root under a temporary directory (a test runner's romp-tests-
-    root, or the system's temporary directory at all, which is where a bare unittest run puts its state), the fixed
-    port is refused unless ROMP_POSTAL_PORT names the port this process bound at import. The reason goes to stderr,
-    which a detached serve's log carries and which the kernel's ensure runner copies into its own log."""
+    """Why this process must NOT bind the machine's fixed bus port, or None (2026-09-10, widened 2026-09-11). A hermetic
+    kernel, a test's lab process or the kernel module loaded inside a test process, runs `ensure` at boot and again
+    whenever a bus call is refused; that started a bus on the FIXED port the moment the machine's real bus was down for
+    a restart (four leaks in one afternoon, three sites), and every real session's mail then failed against the lab's
+    token. Fixture hygiene (kernel_env's trio, tests/test_hermetic_kernel_postal.py) covers the spawn sites it can
+    see; this refusal, in the bus itself, covers every shape.
+
+    The signals, any one enough: the state root is not the machine's own (_machine_state_root: a lab's root, whatever
+    runner or none put it there, the strongest signal and the one a module run directly with unittest still trips);
+    the root is under a temporary directory (a test runner's romp-tests- root, or the system's temporary directory at
+    all); PYTEST_CURRENT_TEST is set. Under a signal, only a port the RUN chose licenses a bind: ROMP_POSTAL_PORT
+    naming the port this process read at import AND the OWN_PORT_MARK beside it (the test runner and kernel_env set
+    both), never the machine's fixed port. A name inherited from the shell does not count: a machine whose bus runs
+    on a named port (the service writes ROMP_POSTAL_PORT into its unit, a profile's postalPort) hands that name to
+    every session's shell and so to any test run from one, which is the same leak under a different number. With no
+    signal the machine's own bus binds its port as ever, named or default. The reason goes to stderr, which a detached
+    serve's log carries and which the kernel's ensure runner copies into its own log."""
     import tempfile
     named = (os.environ.get("ROMP_POSTAL_PORT") or "").strip()
-    if named and named == str(PORT):
-        return None
-    root = str(STATE)
+    root = os.path.normpath(str(STATE.parent))
     tmp = tempfile.gettempdir().rstrip("/") + "/"
     if os.environ.get("PYTEST_CURRENT_TEST"):
         why = "under a test (PYTEST_CURRENT_TEST is set)"
     elif TESTS_ROOT_MARK in root:
-        why = "the state root %s is under a test runner's temporary directory" % STATE
-    elif root.startswith(tmp) or root.startswith("/tmp/"):
-        why = "the state root %s is under the temporary directory" % STATE
+        why = "the state root %s is under a test runner's temporary directory" % root
+    elif (root + "/").startswith(tmp) or root.startswith("/tmp/"):
+        why = "the state root %s is under the temporary directory" % root
+    elif root != _machine_state_root():
+        why = "the state root %s is not the machine's own (%s)" % (root, _machine_state_root())
     else:
         return None
-    return ("%s and no ROMP_POSTAL_PORT names this process's port%s: refusing to bind the machine's fixed bus port %d; a "
-            "hermetic bus names its own port (ROMP_POSTAL_PORT), or runs client-only with peers off (ROMP_POSTAL_CLIENT_ONLY=1 "
-            "and ROMP_POSTAL_PEERS=0) so it never starts one"
-            % (why, (" (it names %s, this process bound %d at import)" % (named, PORT)) if named else "", PORT))
+    own = named and named == str(PORT) and os.environ.get(OWN_PORT_MARK) and PORT != DEFAULT_PORT
+    if own:
+        return None
+    if named and named == str(PORT) and not os.environ.get(OWN_PORT_MARK):
+        how = " ROMP_POSTAL_PORT names %s, but not as this run's own (%s unset), so it is the machine's name inherited from the shell;" % (named, OWN_PORT_MARK)
+    elif named and named != str(PORT):
+        how = " ROMP_POSTAL_PORT names %s, but this process read %d at import;" % (named, PORT)
+    elif named:
+        how = " ROMP_POSTAL_PORT names the machine's fixed port itself;"
+    else:
+        how = " no ROMP_POSTAL_PORT names a port of this run's own;"
+    return ("%s and%s refusing to bind the machine's fixed bus port %d. A hermetic bus names its own port (ROMP_POSTAL_PORT "
+            "with %s=1, as the test runner and kernel_env set them), or runs client-only with peers off "
+            "(ROMP_POSTAL_CLIENT_ONLY=1 and ROMP_POSTAL_PEERS=0) so it never starts one; a real bus under its own state "
+            "root names it with ROMP_STATE_DIR" % (why, how, PORT, OWN_PORT_MARK))
 
 
 def _refuse_loudly(why):
