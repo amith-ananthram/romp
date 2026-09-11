@@ -13059,14 +13059,18 @@ def _relay_write_entry(sid, nid, marker="", rev=0):
     """One queue entry: the node, the marker it was written for (its id) and the store revision whose publish carried
     the marker, so the tick can tell a spent entry (a record names the marker; the node moved on to a newer marker; a
     published revision at or past this one lacks the marker) from one whose publish it has not read yet. The marker
-    "recall" names the node's recall entry, its own file beside the marker's."""
+    "recall" names the node's recall entry, its own file beside the marker's. Every entry carries a token of its own,
+    so the spend's re-read tells a fresh entry flushed over the path from the one it read (see _relay_spend)."""
     try:
         d = _relay_queue_dir()
         d.mkdir(parents=True, exist_ok=True)
         tmp = d / (".tmp-%s-%d-%s" % (re.sub(r"[^A-Za-z0-9_.-]", "_", nid), os.getpid(), secrets.token_hex(3)))
         #             the judge's flush and the tick's rewrite share one process: a private name each
         tmp.write_text(json.dumps({"sid": sid, "nid": nid, "t": int(time.time()), "marker": str(marker or ""),
-                                   "rev": int(rev or 0)}))
+                                   "rev": int(rev or 0), "token": secrets.token_hex(4)}))
+        #   token: the entry's own identity, compared by the tick's spend on its re-read (the third verdict: every
+        #   recall entry's marker is the constant "recall", so a fresh one the judge flushed over the path DURING a
+        #   pass read as the spent one and was unlinked with it; the marker id told marker entries apart, nothing did recalls)
         tmp.rename(_relay_recall_entry_path(sid, nid) if marker == "recall" else _relay_entry_path(sid, nid))
         return True
     except OSError as e:
@@ -15837,10 +15841,12 @@ def _owed_why(nd):
     """The owed question the block brief is fed for a blocked node: its blockWhy, and, when a relay of that question to
     the peer that delegated the work was refused (relayRefusal, the kernel's note beside the block: nobody could be
     asked), that note in brackets after it, so the brief can say why the decision came back to the user (the manager's
-    eighth review: the note was written and read by nothing)."""
+    eighth review: the note was written and read by nothing); the same for the kernel's note on a question a far
+    host still holds after the wait ended (relayCarried: carried on before it could be withdrawn, or the host
+    unreachable; the third verdict)."""
     why = str((nd or {}).get("blockWhy") or "")
-    ref = str((nd or {}).get("relayRefusal") or "").strip()
-    return "%s (%s)" % (why, ref) if ref else why
+    notes = [s for s in (str((nd or {}).get(k) or "").strip() for k in ("relayRefusal", "relayCarried")) if s]
+    return "%s (%s)" % (why, "; ".join(notes)) if notes else why
 
 
 def _distill_session(fsid, path, now):

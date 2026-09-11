@@ -3128,6 +3128,7 @@ def _relay_settle(nd, rw, now, key, **more):
     nd.pop("relayWanted", None)
     if key == "relayed":
         nd.pop("relayRefusal", None)                       # a later relay on the node succeeded: the old refusal's note goes
+        nd.pop("relayCarried", None)                       #   and so does the note on a stale question a far host still held
 
 
 def _relay_revert(store, nd, rw, err, now, ev_t=None):
@@ -3160,14 +3161,37 @@ def _relay_ended_since(sid, nid, t):
                and int(jd._wait_end_ev(e) or 0) >= int(t or 0) for e in fresh.get("log") or [])
 
 
+def _relay_carried_note(r, how):
+    """The note a node carries when a far host still holds a relayed question after its wait ended: who it was for,
+    where it sits, why it stands. Read by jd._owed_why (the brief's owed why), _brief_with_relay_note (the card and
+    the modal) and dropped when a later relay on the node reaches the peer (_relay_settle)."""
+    peer = str(r.get("peer") or "")
+    return "a question to %s is still parked on %s: %s" % (_name_of(peer) or peer[:8] or "the peer",
+                                                          str(r.get("pendingHost") or "a far host"), how)
+
+
+def _brief_with_relay_note(nd):
+    """The node's decision brief as the card and the modal show it, with the kernel's note on a question a far host
+    still holds after the wait ended (relayCarried) as a closing line. The brief was distilled when the block was
+    filed and the recall's outcome comes ticks later, so the note rides beside it at read time and vanishes with it."""
+    brief = (nd or {}).get("blockSummary")
+    note = str((nd or {}).get("relayCarried") or "").strip()
+    if not note:
+        return brief
+    return ("%s\n\n%s" % (str(brief).rstrip(), note)) if brief else note
+
+
 def _relay_recall_sweep(sid, nd, now):
     """Recall every relayed question the node owes a recall for (relayRecall: markers retired by the judge after they
     were handed to a far host). A recall the bus answered (withdrawn, or carried and so beyond withdrawal) is done and
-    remembered (relayRecalled); one the bus could not be asked for stays owed for the next tick. Returns True when the
-    node changed."""
+    remembered (relayRecalled); one the bus could not be asked for stays owed for the next tick. Returns (changed,
+    when the earliest hold ends) on every path, 0 for no hold. A question the far host carried on before it could be
+    withdrawn, or one the host could not be reached to withdraw for RELAY_RECALL_TRIES tries, leaves a note on the
+    node (relayCarried) that the brief's owed why, the card and the modal show beside the block: before, only stderr
+    said a far host still held a question after its wait ended (the third verdict)."""
     owed = [r for r in (nd.get("relayRecall") or []) if isinstance(r, dict)]
     if not owed:
-        return False
+        return False, 0
     keep, done, changed = [], list(nd.get("relayRecalled") or []), False
     next_at = 0                                            # when the earliest hold ends: the tick looks again then
     for r in owed:
@@ -3189,11 +3213,14 @@ def _relay_recall_sweep(sid, nd, now):
             if r["attempts"] == RELAY_RECALL_TRIES:
                 sys.stderr.write("relay recall (%s, %s): %d tries unanswered; asked again every %d s from here\n"
                                  % (sid[:8], str(r.get("pendingMid") or "")[:12], RELAY_RECALL_TRIES, RELAY_UNKNOWN_HOLD * RELAY_RECALL_BACKOFF))
+                nd["relayCarried"] = _relay_carried_note(r, "the host could not be reached to withdraw it")
             keep.append(r)
             changed = True
             continue
         done.append({"mid": str(r.get("pendingMid") or ""), "t": int(now),
                      "outcome": "withdrawn" if got == "withdrawn" else "carried: could not be withdrawn"})
+        if got != "withdrawn":
+            nd["relayCarried"] = _relay_carried_note(r, "it went on before it could be withdrawn")
         jd._relay_mark_settled(nd, r.get("id") or "")
         changed = True
     if keep:
@@ -3216,8 +3243,9 @@ def _relay_entry(store, sid, f, e, rev, now, alive_ids=None):
     marker = str(e.get("marker") or "")
     nd = store["nodes"].get(nid)
     changed, recall_next = False, 0
-    if isinstance(nd, dict) and nd.get("relayRecall"):
-        changed, recall_next = _relay_recall_sweep(sid, nd, now)
+    if isinstance(nd, dict) and isinstance(nd.get("relayRecall"), list) and nd["relayRecall"]:
+        got = _relay_recall_sweep(sid, nd, now)          # (changed, when the earliest hold ends) on every path; a
+        changed, recall_next = got if isinstance(got, tuple) and len(got) == 2 else (bool(got), 0)   # bare flag tolerated
     if marker == "recall":                                 # the node's recall entry (its own file beside the marker's)
         owed = isinstance(nd, dict) and bool(nd.get("relayRecall"))
         return 0, changed, not owed, (False if changed else (recall_next or True))
@@ -3331,14 +3359,17 @@ def _relay_entry(store, sid, f, e, rev, now, alive_ids=None):
 def _relay_spend(f, e):
     """Unlink the entry file `f` only when it still holds the entry `e` that was read: the judge's flush renames a newer
     marker's entry over the same path, and an unlink after that read would take the new wait's entry with the old one
-    (the manager's sixth review). A file that changed stays for the next tick."""
+    (the manager's sixth review). The comparison is the entry's marker, node AND its own token: a recall entry's
+    marker is the constant "recall", so the judge's fresh recall entry (a second far-host marker retired while the
+    tick withdrew the first) read as the one just spent and was unlinked, leaving the store owing a recall no tick
+    asked for until a boot (the third verdict). A file that changed in any of the three stays for the next tick."""
     try:
         cur = json.loads(f.read_text())
     except FileNotFoundError:
         return
     except Exception:
         cur = None
-    if isinstance(cur, dict) and (str(cur.get("marker") or ""), str(cur.get("nid") or "")) != (str(e.get("marker") or ""), str(e.get("nid") or "")):
+    if isinstance(cur, dict) and any(str(cur.get(k) or "") != str(e.get(k) or "") for k in ("marker", "nid", "token")):
         return
     f.unlink(missing_ok=True)
 
@@ -35703,7 +35734,7 @@ def build_feed(now, live_map=None):
                         "anchorUuid": _wa,
                         "promptAnchorUuid": _pa,
                         "summary": nd.get("summary"),                   # distiller's key takeaway — shown in the MODAL only — the user 2026-06-17
-                        "blockSummary": nd.get("blockSummary"),         # block-distiller's DECISION BRIEF (MODAL); null until produced — the user 2026-06-18
+                        "blockSummary": _brief_with_relay_note(nd),     # block-distiller's DECISION BRIEF (MODAL); null until produced — the user 2026-06-18; a far host's parked question noted under it
                         "followupPending": nd.get("followupPending"),   # per-node "Followed up" chip in the modal tree (business 2026-06-17)
                         # the per-item story (MODAL, non-done only): newest block/unblock/verdict rows with
                         # anchors, so an open sub answers 'is this still active?' in place (the user 2026-07-20)
@@ -36251,7 +36282,7 @@ def build_feed(now, live_map=None):
                               "tasks": _awaiting_task_descs(fsid, s["path"])} if col == "awaiting" else None),
                 "summary": nodes[nid].get("summary"),    # the distiller's key takeaway for a completed goal (modal) — the user 2026-06-17
                 "distillState": distill_state,   # "completed" | "blocked" | null — the GENUINE state the distiller line keys on, so the brief/takeaway doesn't flicker off when recheck/rejudging drops `column` to working (the user 2026-07-21)
-                "blockSummary": nodes[nid].get("blockSummary"),    # the block-distiller's decision brief for a blocked goal (modal); null until produced — the user 2026-06-18
+                "blockSummary": _brief_with_relay_note(nodes[nid]),   # the block-distiller's decision brief for a blocked goal (modal); null until produced — the user 2026-06-18; a far host's parked question noted under it
                 "briefParts": nodes[nid].get("briefParts") or None,   # MULTI-item brief: [{id, since}] one per paragraph IN ORDER (judge briefParts) → per-paragraph "Nm ago" stamps; null for single-item briefs, whose stamp is the card header's age (the user 2026-07-24)
                 "summaryParts": nodes[nid].get("summaryParts") or None,
                 # the user FOLLOWED UP after the takeaway they read (followupAt postdates what the

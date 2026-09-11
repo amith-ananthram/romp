@@ -247,7 +247,13 @@ pending relay whose wait ended another way is withdrawn from the far host's
 outbox, and one the judge retired while it was parked is recalled the same
 way (the recall rides its own queue entry beside the marker's, the boot pass
 re-queues a node that owes one, and a recall nobody answers is asked once per
-hold for a while and then once per half hour, said both times); a parked
+hold for a while and then once per half hour, said both times; every queue
+entry carries a token of its own that the spend's re-read compares, so a
+fresh entry flushed over the path during a pass is never taken for the spent
+one; a question the far host carried on before it could be withdrawn, or one
+the host could not be reached to withdraw, leaves a note on the node that the
+brief, the card and the modal show beside the block until a later relay
+reaches the peer); a parked
 question completes only on the far
 host's delivered row, never on a later message; a refused relay's note reaches
 the card's brief beside the question it could not carry; a dead worker's block is not relayed; each record lands

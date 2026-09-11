@@ -1699,6 +1699,89 @@ class SaverFlushesItsOwn(_RelayFixture):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(km._relay_tick(NOW + 71), 1, "M3's question goes out on the next tick, no boot needed")
 
+    def test_a_recall_entry_flushed_during_the_ticks_pass_survives_the_spend(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "first question", T0 + 400)
+        self._save(st)
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "px-1", "parked": "TESTHOST"})
+        self.assertEqual(km._relay_tick(NOW), 0)           # M1 handed to the far host
+        st = jd.load_goals(WORKER)
+        jd.record_verdict(st, st["nodes"][step], "romp", "awaiting", NOW + 5, why="", lift=True, end_ev=NOW + 5)
+        self._close(st, step, "second question", NOW + 60)   # M1 retired (px-1 owed), M2 minted
+        self._save(st)
+        km._bus_recall_relay = lambda sid, mid: "unknown"  # px-1's recall held
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "px-2", "parked": "TESTHOST"})
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(km._relay_tick(NOW + 70), 0)   # M2 handed to the far host too (pending px-2)
+        jd._relay_entry_path(WORKER, step).unlink()        # M2's entry lost to a failed write (the boot pass would re-queue it): the recall entry is alone in the queue
+        asked = []
+        def recall_while_judge_retires_m2(sid, mid):       # WHILE the tick withdraws px-1, the judge retires M2 (px-2 owed) and flushes the recall entry over the same path
+            asked.append(mid)
+            st3 = jd.load_goals(WORKER)
+            jd.record_verdict(st3, st3["nodes"][step], "romp", "awaiting", NOW + 71, why="", lift=True, end_ev=NOW + 71)
+            self._close(st3, step, "third question", NOW + 72)
+            jd.save_goals(WORKER, st3)
+            return "withdrawn"
+        km._bus_recall_relay = recall_while_judge_retires_m2
+        with contextlib.redirect_stderr(io.StringIO()):
+            km._relay_tick(NOW + 70 + km.RELAY_UNKNOWN_HOLD)
+        self.assertEqual(asked, ["px-1"])
+        nd = jd.load_goals(WORKER)["nodes"][step]
+        self.assertEqual([r["pendingMid"] for r in nd["relayRecall"]], ["px-2"], "the store owes px-2 (the tick's save folded it in)")
+        self.assertTrue(jd._relay_recall_entry_path(WORKER, step).exists(), "the judge's fresh recall entry survived the tick's spend: its token moved")
+        asked.clear()
+        km._bus_recall_relay = lambda sid, mid: asked.append(mid) or "withdrawn"
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "to": payload["to"]})
+        with contextlib.redirect_stderr(io.StringIO()):
+            km._relay_tick(NOW + 71 + km.RELAY_UNKNOWN_HOLD)
+        self.assertEqual(asked, ["px-2"], "the next tick asks for px-2, no boot needed")
+        self.assertEqual(self._queue(), [], "both entries spent once done")
+
+    def test_a_recall_list_holding_no_dict_never_raises_in_the_tick(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "first question", T0 + 400)
+        self._save(st)
+        st = jd.load_goals(WORKER)
+        st["nodes"][step]["relayRecall"] = ["not a recall row"]   # a hand-edited or corrupted store, or a future writer's shape
+        jd._relay_write_entry(WORKER, step, "recall", st.get("rev") or 0)
+        (jd.GOALDIR / (WORKER + ".json")).write_text(json.dumps(st))   # written past the merge, which would drop the junk
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "to": payload["to"]})
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(km._relay_tick(NOW), 1, "the question goes out; the junk list is skipped, never raised on")
+        self.assertNotIn("Traceback", err.getvalue())
+
+    def test_a_question_a_far_host_still_holds_is_noted_beside_the_block(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "first question", T0 + 400)
+        self._save(st)
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "px-car-1", "parked": "TESTHOST"})
+        self.assertEqual(km._relay_tick(NOW), 0)
+        st = jd.load_goals(WORKER)
+        jd.record_verdict(st, st["nodes"][step], "romp", "awaiting", NOW + 5, why="", lift=True, end_ev=NOW + 5)
+        self._close(st, step, "still stuck", NOW + 60)     # M1 retired while parked (a recall owed), M2 minted
+        self._save(st)
+        km._bus_recall_relay = lambda sid, mid: "carried"  # the far host carried it on before it could be withdrawn
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "px-car-2", "parked": "TESTHOST"})
+        with contextlib.redirect_stderr(io.StringIO()):
+            km._relay_tick(NOW + 70)
+        nd = jd.load_goals(WORKER)["nodes"][step]
+        self.assertIn("still parked on TESTHOST", nd["relayCarried"])
+        self.assertIn("before it could be withdrawn", nd["relayCarried"])
+        self.assertTrue(jd._owed_why(nd).endswith("(%s)" % nd["relayCarried"]), "the brief's owed why carries the note in brackets")
+        nd["blockSummary"] = "Decide the retry policy."
+        self.assertEqual(km._brief_with_relay_note(nd), "Decide the retry policy.\n\n" + nd["relayCarried"], "the card and the modal show it under the brief")
+        self.assertEqual(km._brief_with_relay_note({"relayCarried": nd["relayCarried"]}), nd["relayCarried"], "and alone before the brief is distilled")
+        self.assertIsNone(km._brief_with_relay_note({}), "no note, no brief: null as before")
+        st = jd.load_goals(WORKER)                         # a later relay that reaches the peer drops the note
+        jd.record_verdict(st, st["nodes"][step], "romp", "awaiting", NOW + 75, why="", lift=True, end_ev=NOW + 75)
+        self._close(st, step, "a fresh question", NOW + 80)
+        self._save(st)
+        km._bus_recall_relay = lambda sid, mid: "withdrawn"
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "to": payload["to"]})
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(km._relay_tick(NOW + 90), 1)
+        self.assertNotIn("relayCarried", jd.load_goals(WORKER)["nodes"][step])
+
     def test_an_unanswerable_recall_is_said_once_and_backs_off(self):
         st, top, step = self.store(delegated=True)
         self._close(st, step, "first question", T0 + 400)
@@ -1719,6 +1802,7 @@ class SaverFlushesItsOwn(_RelayFixture):
         self.assertEqual(len(calls), km.RELAY_RECALL_TRIES, "one ask per hold up to the tries")
         self.assertEqual(err.getvalue().count("could not be asked"), 1, "said once")
         self.assertEqual(err.getvalue().count("tries unanswered"), 1, "the back-off said once")
+        self.assertIn("could not be reached to withdraw it", jd.load_goals(WORKER)["nodes"][step]["relayCarried"], "the eighth try leaves the note the brief and the card show")
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(km._relay_tick(t + km.RELAY_UNKNOWN_HOLD), 0)
         self.assertEqual(len(calls), km.RELAY_RECALL_TRIES, "inside the stretched hold: not asked")
