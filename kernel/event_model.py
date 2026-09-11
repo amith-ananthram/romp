@@ -782,7 +782,34 @@ def _say_once(line):
         pass
 
 
-_CKPT_FOLD_CAP = 64 * 1024        # bytes of encoded state a fold may put in a checkpoint. A state that grows with its file (the postal
+def _machine_memory_bytes(meminfo_text=None):
+    """MemTotal from /proc/meminfo (or the text given) in bytes; 0 when unreadable (macOS, a container without procfs).
+    The ceilings below are fractions of it (the user's direction, 2026-09-11: romp uses the machine's memory; every cache
+    is one shared pool sized to the machine, never a small literal that sits below the working set and thrashes)."""
+    try:
+        text = meminfo_text if meminfo_text is not None else open("/proc/meminfo", encoding="utf-8").read()
+        for line in text.splitlines():
+            if line.startswith("MemTotal:"):
+                return int(line.split()[1]) * 1024
+    except Exception:
+        pass
+    return 0
+
+
+def _env_or(name, default, scale=1):
+    """An integer knob from the environment (scaled), else the derived default."""
+    try:
+        v = os.environ.get(name)
+        return int(float(v) * scale) if v else default
+    except (TypeError, ValueError):
+        return default
+
+
+# 8 MiB, was 64 KB (2026-09-11, the day the checkpoints shipped): 31 leaves' bgAll states sat over 64 KB and every boot
+# cold-refolded them whole, 1.74 GB read in the first pusher cycle (65 s of tick jobs); a document of a few MB reads in
+# milliseconds. ROMP_CKPT_FOLD_CAP_KB sets it outright.
+_CKPT_FOLD_CAP = _env_or("ROMP_CKPT_FOLD_CAP_KB", 8 * 1024 * 1024, 1024)
+#                                   bytes of encoded state a fold may put in a checkpoint. A state that grows with its file (the postal
 #                                   log fold's map of every sent row, the state intervals' list of every transition, the every-task
 #                                   background view on a long transcript) would make the document a second copy of the file: reading
 #                                   it at boot costs what the checkpoint exists to save (measured 2026-09-11: 11 MB of documents in a
@@ -4050,7 +4077,11 @@ def _asm_fold(entry, delta, leaf_recs, leaf_key, leaf_stem, rompuuid, postal_ind
 # the next settle writes a new document with the new cut.
 _ASM_CKPT_V = 4                       # 2: atom rows carry [offset, len], nt for every atom; 3: the carry holds skill_loads (T333);
 #                                       4: a `turns` section over the pre-cut rows (T323 stage 4c: the lazy index)
-_MAT_CAP = 20000                      # materialized pre-cut atoms resident across every session (the lazy index's LRU)
+# Materialized pre-cut atoms resident across every session (the lazy index's LRU): MemTotal / 32 KiB, never under 500,000
+# (3.9 million on a 118 GiB machine); ROMP_ASM_INDEX_CAP sets it outright. At 20,000 (2026-09-11, the day the index
+# shipped) 50 sessions' 4,080 restored turns materialized 1.2 million atoms and evicted 1.19 million of them in 150 s,
+# every chat build cold at 5.6 s: a ceiling under the working set is a thrash, not a saving.
+_MAT_CAP = _env_or("ROMP_ASM_INDEX_CAP", max(500_000, _machine_memory_bytes() // (32 * 1024)))
 _MAT_LRU = collections.OrderedDict()  # (id(LazyAtoms), row) → (LazyAtoms, row): eviction drops the memo, never a field in place
 _MAT_LOCK = threading.Lock()
 _ASM_INDEX_STATS = {"materialized": 0, "materializedBy": {}, "resident": 0, "evictions": 0, "restoredTurns": 0, "rowDecodes": 0}
@@ -4340,7 +4371,9 @@ _ASM_CKPT_SAID = set()             # (path, reason) said once per process
 _LAZY_FILES = {}                   # rompuuid -> {fsid: path}: where hydrate finds a lazy atom's record
 _HYDRATED = {}                     # uuid -> the body fields read; dict order = LRU
 _HYDRATED_BYTES = [0]
-_HYDRATED_CAP = 64 * 1024 * 1024   # the hydrated-body memo's byte cap (a judge pass re-reading one large body every cycle
+_HYDRATED_CAP = _env_or("ROMP_HYDRATED_CAP_MB", max(1024 ** 3, _machine_memory_bytes() // 32), 1024 * 1024)
+#                                    the hydrated-body memo's byte cap: MemTotal / 32, never under 1 GiB (3.7 GiB on a 118 GiB
+#                                    machine; 64 MB hydrated 3.1 GB of bodies in 150 s on 2026-09-11) (a judge pass re-reading one large body every cycle
 #                                    shows in hydratedBytes; the memo keeps the common case at one read)
 _LAZY_KINDS = ("a", "u", "c", "o", "k", "b")   # atom kinds whose message is lazy; boundary and refusal atoms carry no message
 
