@@ -1625,6 +1625,92 @@ class LaunchErrorNames(unittest.TestCase):
             self.assertIn("webby", open(name_file).read())
 
 
+class RegistryNamesHeal(unittest.TestCase):
+    """spawn writes the durable registry row, then names/<sid>. A kernel death between the two left a
+    LIVE row with no shared identity file: the next boot rebuilt the session from the registry but
+    republished nothing, so every names/-derived surface (sender name and colour, cwd, the duplicate-
+    name claim) was blind to it, and the one heal a user could reach, a rename, wrote an empty colour
+    although the registry knew it (2026-09-11). All data synthetic per CLAUDE.md."""
+
+    def _crash_between_row_and_publish(self):
+        be, fake, tmp = build()
+        sid = be.spawn("web", "/TESTDIR", "#336699", "#ffffff")
+        nf = Path(tmp) / "names" / sid
+        nf.unlink()                            # the crash window: the row landed, the publish never ran
+        return be, fake, tmp, sid, nf
+
+    def test_a_live_row_missing_its_names_entry_is_republished_at_load(self):
+        be, fake, tmp, sid, nf = self._crash_between_row_and_publish()
+        logs = []
+        be2 = cb.CodexBackend(tmp, client_factory=lambda: fake, log=logs.append)
+        self.assertTrue(be2.owns(sid), "the row is live in the registry")
+        self.assertTrue(nf.is_file(), "the next boot republishes the identity file from the registry")
+        parts = nf.read_text().rstrip("\n").split("\t")
+        self.assertEqual(parts[:3], ["web", "/TESTDIR", "#336699"],
+                         "name, cwd and colour come from the registry, the durable source")
+        self.assertEqual(sorted(p.name for p in nf.parent.iterdir()), [sid], "no staging file left behind")
+        self.assertTrue(any(sid in m and "missing at load" in m for m in logs),
+                        "the heal is loud: the log names the sid and the state it repaired")
+
+    def test_a_failed_republish_at_load_leaves_the_boot_alive_and_names_the_unnamed_state(self):
+        # the heal's failure branch: the boot must not die over an identity file, and the log must
+        # NAME the state it leaves — a live row with no published name is the duplicate-name hole.
+        # The REAL writer runs under _disk_full, so the publish (os.replace onto names/<sid>) fails
+        # with ENOSPC exactly as it would on a full disk
+        be, fake, tmp, sid, nf = self._crash_between_row_and_publish()
+        logs = []
+        with _disk_full(nf):
+            be2 = cb.CodexBackend(tmp, client_factory=lambda: fake, log=logs.append)
+        self.assertTrue(be2.owns(sid), "the boot survived the failed write and the row is still live")
+        self.assertFalse(nf.exists(), "a failed publish creates nothing")
+        self.assertEqual(sorted(p.name for p in nf.parent.iterdir()), [], "no staging file left behind")
+        said = [m for m in logs if sid in m and "could not be republished at load" in m]
+        self.assertEqual(len(said), 1, logs)
+        self.assertIn("[Errno 28]", said[0], "the log names the errno")
+        self.assertIn("UNNAMED", said[0], "the log names the state the session is left in")
+
+    def test_a_row_whose_names_entry_exists_is_left_untouched_at_load(self):
+        # green on origin/main as well (it wrote nothing at load): the pin that the heal is for the
+        # MISSING file only — the names producers watch the mtime, and a kernel-side recolour lives
+        # in the file alone, so a rewrite from the registry would both flap and revert it
+        be, fake, tmp = build()
+        sid = be.spawn("web", "/TESTDIR", "#336699", "#ffffff")
+        nf = Path(tmp) / "names" / sid
+        nf.write_text("web\t/TESTDIR\t#abcdef\t#000000\n")   # a kernel-side recolour: names/ only
+        before = (nf.read_bytes(), nf.stat().st_mtime_ns)
+        logs = []
+        cb.CodexBackend(tmp, client_factory=lambda: fake, log=logs.append)
+        self.assertEqual((nf.read_bytes(), nf.stat().st_mtime_ns), before,
+                         "byte-identical and no mtime bump: nothing was missing, so nothing was written")
+        self.assertEqual([m for m in logs if "names/" in m], [])
+
+    def test_a_dead_row_missing_its_names_entry_is_not_republished(self):
+        # green on origin/main as well: a dead row claims no name slot — republishing it would
+        # hold the name against the create it no longer owns
+        be, fake, tmp, sid, nf = self._crash_between_row_and_publish()
+        self.assertTrue(be.kill(sid))
+        cb.CodexBackend(tmp, client_factory=lambda: fake)
+        self.assertFalse(nf.exists(), "a dead row claims no name slot")
+
+    def test_the_rename_heal_carries_the_registry_colour(self):
+        be, fake, tmp, sid, nf = self._crash_between_row_and_publish()
+        self.assertTrue(be.rename(sid, "api"))
+        parts = nf.read_text().rstrip("\n").split("\t")
+        self.assertEqual(parts[:3], ["api", "/TESTDIR", "#336699"],
+                         "the healed file carries the colour the registry knows, not an empty one")
+
+    def test_a_recolour_in_the_names_file_outranks_the_registry_colour(self):
+        # green on origin/main as well: the pin for the ORDER of the fallback (the file first) — a
+        # kernel-side recolour (_set_session_color) writes names/ only and never updates the
+        # registry's colour, so a rename must keep the file's, not revert to spawn's
+        be, fake, tmp = build()
+        sid = be.spawn("web", "/TESTDIR", "#336699", "#ffffff")
+        nf = Path(tmp) / "names" / sid
+        nf.write_text("web\t/TESTDIR\t#abcdef\t#000000\n")
+        self.assertTrue(be.rename(sid, "api"))
+        self.assertEqual(nf.read_text(), "api\t/TESTDIR\t#abcdef\t#000000\n")
+
+
 class RaisingRegistryTransactions(unittest.TestCase):
     """The r28 verification, executed on the real backend: every durable-write failure must
     publish NOTHING — no moved names file, no in-memory lifecycle flip, no phantom row."""
