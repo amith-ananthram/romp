@@ -9092,6 +9092,18 @@ def _prime_leaf_folds(leaf):
     return primed
 
 
+def _stored_tree(path, sid):
+    """The parse store's tree for a session's leaf when it holds one (the kernel's display parse under its own human flag,
+    else the judges'), never a parse of its own: the assembly writer takes it for the document's turns section (T323
+    stage 4c), and a settle over a session no build has parsed writes the atoms-only form rather than read the leaf whole."""
+    try:
+        cut = jd._pending_cut(sid)
+        hit = jd._parse_slot(sid, cut, path, _display_sdk_human(sid)) or jd._parse_slot(sid, cut, path, None)
+    except Exception:
+        return None
+    return hit[1] if hit else None
+
+
 def _persist_checkpoints(now):
     """Write the fold checkpoints whose files belong to a session with NEW settle evidence: its turn-end key (the
     Stop hook's lastStopAt, else a stopped states transition) or its states log's stat moved since the last write for
@@ -9113,9 +9125,10 @@ def _persist_checkpoints(now):
         if mine:
             written += em.checkpoint_write_dirty(sorted(mine))
         try:                                   # the assembly document for the leaf (T323 stage 4a): from a whole entry
-            if em.asm_checkpoint_write(leaf, sid, _display_sdk_human(sid), tree=_parse(leaf, sid, now)):   # with a compaction
-                written += 1                   #  boundary, else a counted skip; the store's live tree gives the document its
-        #                                          turns section (T323 stage 4c: a restore builds the turns without an atom)
+            if em.asm_checkpoint_write(leaf, sid, _display_sdk_human(sid), tree=_stored_tree(leaf, sid)):   # with a compaction
+                written += 1                   #  boundary, else a counted skip; the store's tree, when it holds one, gives the
+        #                                          document its turns section (T323 stage 4c: a restore builds the turns without an
+        #                                          atom); never a parse of its own (the settle reads no leaf whole)
         except Exception:
             sys.stderr.write("assembly checkpoint: %s\n" % traceback.format_exc())
         _CKPT_SETTLE_SEEN[sid] = key
@@ -56154,9 +56167,9 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
     try:                                  # the assembly documents of every session's leaf (T323 stage 4a): a whole entry
         _asm_t0 = time.monotonic()        # with a boundary writes, the rest are counted skips; bounded by the drain. The
         for _s in _drain_sessions:        # store's tree gives the turns section (stage 4c) while a 2 s budget holds; past it
-            _tree = _parse(_s["path"], _s["sid"], int(time.time())) if time.monotonic() - _asm_t0 < 2.0 else None   # a turnless
-            em.asm_checkpoint_write(_s["path"], _s["sid"], _display_sdk_human(_s["sid"]), tree=_tree)   # document, rewritten
-    except Exception:                     #  with its turns at the next settle after the boot
+            _tree = _stored_tree(_s["path"], _s["sid"]) if time.monotonic() - _asm_t0 < 2.0 else None   # a turnless document is
+            em.asm_checkpoint_write(_s["path"], _s["sid"], _display_sdk_human(_s["sid"]), tree=_tree)   # rewritten with its turns
+    except Exception:                     #  at the next settle after the boot
         pass
     try:
         if be is not None and hasattr(be, "drain"):

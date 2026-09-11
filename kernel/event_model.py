@@ -3975,7 +3975,7 @@ class LazyIndex:
             raise LazyIndexError("session %s row %d: %s" % (self.rompuuid[:8], k, e)) from e
         if "m" in row:                                    # a synthesized atom (idle, a salvaged reply): its message inline
             a = dict(row.get("s") or {})
-            a["message"] = row["m"]
+            a.update(message=row["m"])                    # a WRITE of the synthesized atom's message (no body read: the audit's regex)
             return a
         a = _restore_prefix_atoms([row], self.rompuuid, self.records, self.fsids)[0]
         a.pop("_seq", None)                               # the read-order tiebreak: the section fixed the order (parse_session pops it too)
