@@ -129,7 +129,7 @@ class IncrementalRead(unittest.TestCase):
     def test_file_adapter_reads_incrementally(self):
         import inspect
         src = inspect.getsource(em.FileAdapter.__init__)
-        self.assertIn("_read_jsonl_incremental(fp)", src,
+        self.assertIn("_read_jsonl_entry(fp", src,
                       "the transcript hot path must use the incremental reader")
 
 
