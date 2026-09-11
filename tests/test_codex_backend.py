@@ -1865,6 +1865,82 @@ class RaisingRegistryTransactions(unittest.TestCase):
                 be.spawn("webby", "/tmp")
             self.assertEqual(len(be._sessions), 0)
 
+    def test_a_raising_registry_send_keeps_nothing_in_memory(self):
+        # send() was the one durable mutator without a rollback: the text stayed in the queue, its
+        # echo in the live atoms and busy() read True — a queued bubble on a busy session for a send
+        # whose caller was told it failed — with no worker kicked, so nothing ever drained it. The
+        # fault is the REAL one beneath the real writer (an unreadable registry.json), not a mock
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            fake = FakeClient()
+            be = cb.CodexBackend(td, client_factory=lambda: fake)
+            sid = be.spawn("web", "/TESTDIR")
+            self._corrupt(td)
+            with self.assertRaises(RuntimeError):
+                be.send(sid, "lost to an unreadable registry")
+            self.assertEqual(be.pending_queued(sid), [],
+                             "the entry never reached disk, so it leaves memory too")
+            self.assertEqual(be._session(sid).queue_ids, [], "and its id with it")
+            self.assertEqual(be.live_atoms(sid), [], "this send's echo goes with it")
+            self.assertFalse(be.busy(sid), "nothing is queued, so nothing reads as work to drive")
+
+    def test_a_raising_registry_send_takes_back_only_its_own_entry_and_echo(self):
+        # The take-back is scoped by the failed send's entry id and echo uuid, never by text or by a
+        # clear. An earlier SAME-text send is still queued (parked behind a backing-off worker) with
+        # its echo still awaiting the app-server's record: a clear would leave that earlier copy on
+        # disk but not in memory (the ACK-mismatch face this fix removes, reintroduced); a by-text
+        # take-back would remove the EARLIER copy's slot and echo and keep the failed send's own — the
+        # phantom back, and a real message gone from the chat. Same shape as the dead-path steer test
+        # (test_a_send_that_finds_the_session_dead_takes_back_only_its_own_echo): the earlier state is
+        # planted under the lock and expected to survive alone.
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            fake = FakeClient()
+            be = cb.CodexBackend(td, client_factory=lambda: fake)
+            sid = be.spawn("web", "/TESTDIR")
+            s = be._session(sid)
+            with s.lock:                           # an earlier same-text send, queued and echoed
+                s.queue.append("deploy the change")
+                s.queue_ids.append("q-11111111")
+                s.echoes.append({"text": "deploy the change", "t": 1000, "uuid": "echo-11111111"})
+            self._corrupt(td)
+            with self.assertRaises(RuntimeError):
+                be.send(sid, "deploy the change")
+            self.assertEqual(be.pending_queued(sid), ["deploy the change"],
+                             "the earlier copy stays queued: the take-back is no clear")
+            self.assertEqual(s.queue_ids, ["q-11111111"],
+                             "and under its own id: a by-text take-back would have removed this slot "
+                             "and kept the failed send's fresh id")
+            self.assertEqual([a["uuid"] for a in be.live_atoms(sid)], ["echo-11111111"],
+                             "the earlier send's echo survives; only the failed send's own is taken back")
+            self.assertTrue(be.busy(sid), "the earlier send still reads as work to drive")
+
+    def test_a_raising_registry_send_does_not_ride_the_next_turn(self):
+        # the second face of the same hole: the copy kept in memory rode the NEXT send's kick into
+        # that turn, so a user who retyped after freeing the disk had the agent read the instruction
+        # twice in one turn (and the ACK of both ids against a disk row holding one preserved the
+        # durable entry for a third delivery at the next restart)
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            fake = FakeClient()
+            be = cb.CodexBackend(td, client_factory=lambda: fake)
+            sid = be.spawn("web", "/TESTDIR")
+            reg = Path(td) / "codex" / "registry.json"
+            good = reg.read_bytes()
+            self._corrupt(td)
+            with self.assertRaises(RuntimeError):
+                be.send(sid, "deploy the change")
+            reg.write_bytes(good)                  # the registry is readable again: the user retypes
+            self.assertTrue(be.send(sid, "deploy the change"))
+            self.assertTrue(until(lambda: not be.busy(sid) and fake.called("turn_start")))
+            starts = fake.called("turn_start")
+            self.assertEqual(len(starts), 1)
+            self.assertEqual([i["text"] for i in starts[0][2]], ["deploy the change"],
+                             "the failed send is not delivered beside the retype")
+            rows = json.loads(reg.read_text())
+            self.assertEqual(registry_queue_entries(rows, sid), [],
+                             "one id appended, one id acked: the durable queue drains")
+
 
 class EnsureCodexSdk(unittest.TestCase):
     """ensure_codex_sdk adds the codexvenv's site-packages only when they were built for the interpreter
