@@ -533,6 +533,7 @@ class _PerfStats:
                 # T323 stage 3: the folds' checkpoints: restored, written, swept at boot, folds skipped as unencodable,
                 # fallbacks per reason (version, path, shrunk, guard, rewrite, corrupt) and the bytes the reader read
                 "checkpoints": em.checkpoint_stats(),
+                "recordCache": em.record_cache_stats(),   # the shared reader's byte budget and its evictions (2026-09-11)
                 # T323 stage 4a: the assembly documents: written, restored, fallbacks per reason, skips per reason (noEntry,
                 # restored, noBoundary, unsplittable, oversize, ...), hydrated bodies and bytes since boot
                 "asmCheckpoint": em.asm_checkpoint_stats(),
@@ -25301,7 +25302,7 @@ def _agent_launch_ids(agent_path):
     transcript half of _awaiting_nest's attribution: a background command whose tool_use id is in THIS
     file was launched by THIS agent. set() when unreadable."""
     try:
-        return em.fold_records(_AGENT_LAUNCH_IDS_CACHE, str(agent_path), _launch_ids_fresh, _launch_ids_step, ckpt="agentLaunchIds")
+        return em.fold_records(_AGENT_LAUNCH_IDS_CACHE, str(agent_path), _launch_ids_fresh, _launch_ids_step, ckpt="agentLaunchIds", drop_after="quiescent")
     except Exception:
         return set()
 
@@ -25315,7 +25316,7 @@ def _agent_steps(agent_path):
     either way); the running preview's clock (agentGist: calls/since/last) rides only while it runs."""
     _chat_dep_note_taskout(str(agent_path), _chat_stat_key(str(agent_path)))   # a growing agent file moves the key
     try:
-        st = em.fold_records(_AGENT_GIST_CACHE, str(agent_path), _gist_fresh, _gist_step, ckpt="agentGist")
+        st = em.fold_records(_AGENT_GIST_CACHE, str(agent_path), _gist_fresh, _gist_step, ckpt="agentGist", drop_after="quiescent")
     except Exception:
         return None
     if not st["since"]:
@@ -25357,7 +25358,7 @@ def _launch_step(state, o):
 
 
 def _agent_launch_state(path):
-    return em.fold_records(_AGENT_LAUNCH_CACHE, str(path), _launch_fresh, _launch_step, ckpt="agentLaunches")
+    return em.fold_records(_AGENT_LAUNCH_CACHE, str(path), _launch_fresh, _launch_step, ckpt="agentLaunches", drop_after="quiescent")
 
 
 def _agent_alive(row, agent_id, tm, spawned_at):
