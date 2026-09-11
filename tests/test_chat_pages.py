@@ -916,6 +916,17 @@ class Proto2Wire(Harness):
         # a window that holds NO part of the run (a far anchor) still detaches the client, kernel and page agreeing
         far = km._chat_history_reply(SID, {"type": "loadAround", "id": SID, "uuid": whole[2]["uuid"]}, NOW, base=c["echat"][SID])
         self.assertFalse(far["connected"]); self.assertTrue(far["_base"]["detached"])
+        # a re-attach whose run's NEWEST key left the list (a fork rewrote the tail) while its first still stands before the
+        # frame: the client's merge shares the remaining keys, so the kernel keeps the older first too (round 4)
+        c2, sent2 = _client()
+        c2["echat"][SID] = {"first": evs[0]["uuid"], "last": "gone-after-a-fork", "detached": False, "reattach": True}   # the first
+        km._send_chat_locked(c2, m, None, 0, False)                                                                   #  stands in the list
+        self.assertEqual(sent2[-1]["type"], "session"); self.assertEqual(c2["echat"][SID]["first"], evs[0]["uuid"])
+        self.assertNotEqual(sent2[-1]["firstUuid"], evs[0]["uuid"], "…before the frame's first")
+        c3, sent3 = _client()
+        c3["echat"][SID] = {"first": "gone-1", "last": "gone-2", "detached": False, "reattach": True}   # no key left: replaced
+        km._send_chat_locked(c3, m, None, 0, False)
+        self.assertEqual(c3["echat"][SID]["first"], sent3[-1]["firstUuid"])
         src = open(os.path.join(BIN, "romp-kernel")).read()
         self.assertIn('if base.pop("keepLast", False):', src, "the handler applies a loadOlder's first-edge advance")
 
@@ -930,11 +941,12 @@ class Proto2Wire(Harness):
         turns = km._parse(self.leaf, SID, NOW)["turns"]
         key = (SID, atom_base["first"], atom_base["last"])                # per (sid, edges), valid for one parse tree's identity
         hit = km._BASE_ALIVE_MEMO[key]
-        self.assertEqual(hit, (id(turns), True))
-        km._BASE_ALIVE_MEMO[key] = (id(turns), "memo")                   # a repeat with the same edges and parse reads the memo
+        ident = (id(turns), len(turns), turns[-1]["id"], turns[-1]["end"])
+        self.assertEqual(hit, (ident, True))
+        km._BASE_ALIVE_MEMO[key] = (ident, "memo")                       # a repeat with the same edges and parse reads the memo
         self.assertEqual(km._base_alive(SID, atom_base, NOW), "memo")
-        km._BASE_ALIVE_MEMO[key] = (-1, "stale")                         # another parse tree: re-read, never the stale verdict
-        self.assertIs(km._base_alive(SID, atom_base, NOW), True)
+        km._BASE_ALIVE_MEMO[key] = ((id(turns), len(turns) + 1, turns[-1]["id"], turns[-1]["end"]), "stale")   # the same address, another
+        self.assertIs(km._base_alive(SID, atom_base, NOW), True)                                              #  shape: re-read
         c, sent = _client()
         c["echat"][SID] = dict(note_base)
         km._send_chat_locked(c, m, None, len(m["events"]) - 1, False)

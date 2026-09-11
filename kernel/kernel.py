@@ -41053,16 +41053,19 @@ def _base_alive(sid, base, now=None):
     except Exception:
         return False
     key = (sid, base.get("first"), base.get("last"))
-    with _WIRE_MEMO_LOCK:                             # per (sid, edges), valid for one parse tree (its identity, re-read from
-        hit = _BASE_ALIVE_MEMO.get(key)               #  the store above on every call, never the tree itself): it runs on
-    if hit is not None and hit[0] == id(turns):       #  every push for every detached client under the client lock (round 2, 8)
+    # the tree's identity without holding it: its address AND its shape (a replacement parse allocated at the same address
+    # differs in length or in its last turn's id or end; round 4)
+    ident = (id(turns), len(turns), turns[-1].get("id") if turns else None, turns[-1].get("end") if turns else None)
+    with _WIRE_MEMO_LOCK:                             # per (sid, edges), valid for one parse tree (re-read from the store above
+        hit = _BASE_ALIVE_MEMO.get(key)               #  on every call, never held): it runs on every push for every detached
+    if hit is not None and hit[0] == ident:           #  client under the client lock (round 2, 8)
         return hit[1]
     # ATOM-keyed edges only (round 2, item 8): a note's key (orphan:<t>:<n>, retried:<t>:<n>, branch:<cut>) resolves by
     # time, to turn 0 on any newer transcript, so a run whose edge was a note read as alive after a /clear
     edges = [str(k) for k in key[1:] if k and ":" not in str(k)]
     alive = any(_turn_of_uuid(turns, e) is not None for e in edges)
     with _WIRE_MEMO_LOCK:
-        _BASE_ALIVE_MEMO[key] = (id(turns), alive)
+        _BASE_ALIVE_MEMO[key] = (ident, alive)
         while len(_BASE_ALIVE_MEMO) > _BASE_ALIVE_MAX:
             _BASE_ALIVE_MEMO.pop(next(iter(_BASE_ALIVE_MEMO)))
     return alive
@@ -41170,7 +41173,11 @@ def _send_chat_proto2(c, m, ms, change_from, led_changed, st, pc):
         # newest event left the list (a fork, a /clear) is replaced on the client, and the frame's first is the base's
         pos = _uuid_positions(evs, sid)
         pf, pl = pos.get(pc["first"]), pos.get(pc.get("last"))
-        if pl is not None and pl >= head_from and (pf is None or pf < head_from):
+        # the run shares a key with the frame when its newest event is inside the frame, or its first is (the frame's
+        # first is then the older), or its newest left the list while its first still stands before the frame (a fork
+        # rewrote the newest events: the run's remaining keys reach the frame, as the client's merge finds; round 4)
+        shared = (pl is not None and pl >= head_from) or (pf is not None and (pf >= head_from or pl is None))
+        if shared and (pf is None or pf < head_from):
             first = pc["first"]
     st[sid] = {"first": first, "last": _last_anchor(evs), "detached": False}
     return ms
