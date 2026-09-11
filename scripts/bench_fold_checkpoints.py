@@ -184,15 +184,15 @@ def draw(rows, out):
     newest = labels[-1]
     rs = sorted([r for r in rows if r["label"] == newest and not r.get("error")], key=lambda r: r["worldBytes"])
     classes = ["leaf", "postal", "checkpoint", "states", "agent"]
-    names = {"leaf": "leaf transcripts (the parse, stage 4)", "postal": "postal log (whole readers)", "states": "states logs",
-             "agent": "agent files", "checkpoint": "checkpoint documents (the fold states, chiefly the postal fold's)"}
+    names = {"leaf": "leaf transcripts (parse, stage 4)", "postal": "postal log (whole readers)", "states": "states logs",
+             "agent": "agent files", "checkpoint": "checkpoint documents"}
     for j, c in enumerate(classes):
         xs = [r["worldBytes"] / 1e6 for r in rs]
         ys = [r["second"]["byClass"][c] / 1e6 for r in rs]
         ax2.line(xs, ys, label=names[c], color=cols[(j + 2) % len(cols)], marker="o")
     ax2.clean(xlabel="Same worlds (MB)", ylabel="Bytes read at the restart on %s,\nper file class (MB)" % newest)
     ax2.set_xlim(0, None); ax2.set_ylim(0, None)
-    f.subplots_adjust(wspace=0.45)
+    f.subplots_adjust(wspace=0.6)
     f.text(0.5, -0.16, "One measurement per point. Bytes are counted at the reader, not the page cache, the checkpoint documents' own reads included.\n"
                        "A checkpointed file still costs its document, its guard bytes twice (up to 64 each) and everything appended since the checkpoint;\n"
                        "here nothing was appended between the two boots.",
