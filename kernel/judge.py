@@ -3196,6 +3196,7 @@ def parsed_session(fsid, files, now):
     if key is not None:
         if len(_PARSE_CACHE) > 256:        # bounded by fleet size; a wholesale clear on overflow is fine
             _PARSE_CACHE.clear()
+        _PARSE_MISSES[0] += 1                              # a cold parse (T323: /perf parses.judge)
         _PARSE_CACHE[fsid] = (key, session)
     if fr is not None:                     # pin under the frame the KEY went into (never a re-read _frame: a
         with _frame_lock:                  #  parse spanning a pass boundary must not land keyless in the next
@@ -7804,6 +7805,32 @@ def _discover_fingerprint():
     return tuple(fp)
 
 
+_PARSE_MISSES = [0]          # cold parses parsed_session ran this process (T323: /perf parses.judge)
+
+
+def parse_misses():
+    """How many cold event-model parses the judges' parsed_session ran in this process."""
+    return int(_PARSE_MISSES[0])
+
+
+def by_recency(fleet):
+    """discover()'s rows ordered by transcript mtime, newest first (T323 stage 1): a pass reaches the sessions
+    someone is using now before the ones that have sat for a day, so the first pass after a boot spends its
+    parses where they show. A stat failure sorts last; the input list is left as it was."""
+    def key(row):
+        try:
+            return -os.stat(str(row[1])).st_mtime
+        except (OSError, IndexError, TypeError):
+            return 0.0
+    return sorted(fleet, key=key)
+
+
+def yield_between_sessions():
+    """Let the pusher and the session threads run between two sessions of a pass (T323 stage 1): a whole-fleet
+    pass holds the interpreter for its parses; one zero sleep per session hands the lock over."""
+    time.sleep(0)
+
+
 def discover(now, window=None, forks=True):
     """[(fsid, path, anchor_sid, name)] for every transcript of a romp session touched within `window`
     seconds (default WINDOW, 48h) —
@@ -7956,10 +7983,11 @@ def run_index(now=None, budget=BUDGET, fairness=FAIRNESS, concurrency=None, verb
 def _run_index(now=None, budget=BUDGET, fairness=FAIRNESS, concurrency=None, verbose=False):
     if now is None:
         now = int(time.time())
-    fleet = discover(now)
+    fleet = by_recency(discover(now))          # newest transcripts first (T323 stage 1)
     # ── captioner: one entry per undone caption task (a model call), newest-first ──
     pending = []
     for fsid, path, anchor, name in fleet:
+        yield_between_sessions()
         done = captioned_ids(fsid)
         live_n = _live_natoms(fsid)                       # the open segment's last live-caption sizes (cadence gate)
         for task in tasks_for(fsid, str(path), [str(path)], now):
