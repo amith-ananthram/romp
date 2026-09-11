@@ -152,10 +152,12 @@ class SpendModalServed(unittest.TestCase):
         self.assertEqual(o["out"]["backdrop"], "rgba(0, 0, 0, 0.55)", "the panel rule's backdrop")
         self.assertEqual(o["out"]["head"], "API spend · 2 machines", "the header names the machines when several contribute (review find)")
         rows = o["out"]["rows"]
-        # T247c: two hosts contribute, so every row names its host in the tab strip's host-prefix voice
+        # T247c: two hosts contribute, so every row names its host in the tab strip's host-prefix voice. T353: the
+        # list follows the chart's range, seven days by hour at open, and sorts by the spend IN that range: web
+        # (an hourly dollar over the ledger's 60 hours), then api, then the peer's worker
         self.assertTrue(rows[0].startswith("TESTHOST:web"), rows[0])
-        self.assertTrue(rows[1].startswith("PEERHOST:worker"), rows[1])
-        self.assertTrue(rows[2].startswith("TESTHOST:api"), rows[2])
+        self.assertTrue(rows[1].startswith("TESTHOST:api"), rows[1])
+        self.assertTrue(rows[2].startswith("PEERHOST:worker"), rows[2])
         self.assertTrue(any("OLDHOST" in n and "older build" in n for n in o["out"]["notes"]), o["out"]["notes"])
         self.assertFalse(any("this machine only" in n for n in o["out"]["notes"]))
         self.assertTrue(any("aligned by clock time" in n for n in o["out"]["notes"]), "hosts in different zones: the timezone rule is stated")
@@ -164,14 +166,18 @@ class SpendModalServed(unittest.TestCase):
         self.assertTrue(o["out"]["chartFirst"], "the chart section precedes the session list")
         self.assertEqual(o["out"]["legendNodes"], 0, "no legend")
         self.assertEqual(o["out"]["swatches"], 0, "no swatch in a session row")
-        self.assertEqual(len(rows), 3 + 20 + 1 + 1, "every session across both hosts, plus the unattributed row")
+        # T353: the seven days shown carry the three hourly-ledger sessions, the peer's worker and the unattributed
+        # hour; the twenty filler sessions spend by the day only, so they appear once the 90-day range is shown
+        self.assertEqual(len(rows), 5, "the sessions with spend in the range shown: " + " | ".join(rows))
+        self.assertEqual(len(o["days"]["rows"]), 3 + 20 + 1 + 1, "the 90-day range lists every session across both hosts, plus the unattributed row")
         self.assertEqual(o["out"]["title"]["color"], "rgb(30, 161, 235)", "web's title wears its identity color")
         self.assertEqual(o["out"]["title"]["weight"], "600")
         self.assertEqual(o["out"]["title"]["prefix"], "TESTHOST:")
-        self.assertTrue(o["out"]["pane"]["scrolls"], o["out"]["pane"])
+        self.assertTrue(o["days"]["pane"]["scrolls"], "the full list scrolls in its pane (T247e): " + str(o["days"]["pane"]))
         self.assertEqual(o["out"]["pane"]["sticky"], "sticky")
         self.assertEqual(o["out"]["pane"]["thOpacity"], "1", "the sticky header occludes: muted by color, not opacity (review find)")
         self.assertFalse(o["out"]["pane"]["panelScrolls"], "the card itself does not scroll at 820px: the pane takes the room under the chart (review find)")
+        self.assertFalse(o["days"]["pane"]["panelScrolls"], "nor with the full list: the pane scrolls, not the card")
         # T247f: "your order" — the strip's order (api before web from session-order.json, then the peer's own
         # order), unknown sessions trailing by spend; the chart's bottom stack follows; a viewer arrangement
         # (the strip's localStorage key) reorders both; the choice persists with the other toggles
@@ -190,8 +196,10 @@ class SpendModalServed(unittest.TestCase):
         self.assertTrue(mg["rows"][0].startswith("team · 2 sessions"), mg["rows"][:3])
         self.assertTrue(mg["rows"][1].startswith("ops · 2 sessions"), mg["rows"][:3])
         self.assertFalse(any(r.startswith("TESTHOST:web") or r.startswith("TESTHOST:api") or r.startswith("PEERHOST:worker") for r in mg["rows"]), "tagged sessions merge away")
-        self.assertIn("$1200", mg["rows"][0].replace(",", ""), "team = web 960 + api 240")
-        self.assertIn("$540", mg["rows"][1].replace(",", ""), "ops = api 240 + worker 300")
+        # the merged rows are read in the 90-day range (the driver left it there), where the fixture's whole ledger
+        # lies: the sums over that range are the ledger's totals (T353: the list follows the chart's range)
+        self.assertIn("$1200", mg["rows"][0].replace(",", ""), "team = web 960 + api 240: " + mg["rows"][0])
+        self.assertIn("$540", mg["rows"][1].replace(",", ""), "ops = api 240 + worker 300: " + mg["rows"][1])
         self.assertEqual(mg["tagColor"], "rgb(194, 65, 12)", "the tag row wears the tag store's color")
         self.assertEqual((mg["tagBorder"], mg["tagWeight"]), ("rgb(194, 65, 12)", "400"), "…as the one tag chip: its colour on a thin border, never bold (T321)")
         self.assertTrue(any("1 session carries several tags" in n for n in mg["notes"]), mg["notes"])
