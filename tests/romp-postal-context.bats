@@ -12,6 +12,9 @@
 # registry's lastSid for it (the conversation a resume continued). Every process a session's
 # Bash tool runs inherits ROMP_SID, so a `claude -p` a session spawned used to pass the first
 # gate and take this pointer as its own; its id is in neither place, and the hook stays silent.
+# The start's source changes one thing only: an EMPTY lastSid (the reg as SdkBackend.spawn mints it,
+# before the CLI's init has flipped the field) passes a `startup` and nothing else, so a child that
+# auto-compacted mid-run and came back as a `compact` start with its own id gets nothing either.
 
 setup() {
     TEST_DIR="$(mktemp -d)"
@@ -27,7 +30,7 @@ setup() {
     unset ROMP_SID CLAUDE_CODE_SESSION_ID
     SID="11111111-2222-3333-4444-555555555555"     # the romp sid: ROMP_SID, and a fresh spawn's CLI id
     FSID="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"    # the conversation the reg's lastSid names (a resume)
-    OTHER="99999999-8888-7777-6666-555555555555"   # an id in neither place: a child the session ran, or a rotation the reg has not recorded
+    OTHER="99999999-8888-7777-6666-555555555555"   # an id in neither place: a child the session ran (its first start, or its compaction mid-run)
     HOOK="$(cd "$(dirname "$BATS_TEST_FILENAME")/../hooks" && pwd)/romp-postal-context.sh"
 }
 
@@ -84,20 +87,40 @@ run_hook() { run bash -c 'printf "%s" "$1" | "$2"' _ "$1" "$HOOK"; }
     [ -z "$output" ]
 }
 
-@test "an empty lastSid lets an unrecorded id through: the init has not reached the kernel yet" {
+@test "an empty lastSid lets an unrecorded id through at startup only: the init has not reached the kernel yet" {
+    # SdkBackend.spawn mints the reg with lastSid "" and the init's flip fills it, so only a first start can
+    # read an empty one; by any later source the field holds an id, and the payload's id must be it
     write_reg ""
-    ROMP_SID="$SID" run_hook "$(payload "$FSID" resume)"
+    ROMP_SID="$SID" run_hook "$(payload "$FSID" startup)"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"additionalContext"'* ]]
+    ROMP_SID="$SID" run_hook "$(payload "$FSID" compact)"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "a compaction or a /clear with an id the reg does not hold gets nothing: the source alone is no pass" {
+    # a `claude -p` the session's Bash tool ran auto-compacts mid-run and starts again as a `compact` with its
+    # own id; the previous cut let clear and compact through without reading the reg, and the child took the pointer
+    write_reg "$FSID"
+    ROMP_SID="$SID" run_hook "$(payload "$OTHER" compact)"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    ROMP_SID="$SID" run_hook "$(payload "$OTHER" clear)"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "a compaction keeps the CLI's id, so a compact start on the reg's lastSid passes" {
+    write_reg "$FSID"
+    ROMP_SID="$SID" run_hook "$(payload "$FSID" compact)"
     [ "$status" -eq 0 ]
     [[ "$output" == *'"additionalContext"'* ]]
 }
 
-@test "a /clear or a compaction passes while the reg still holds the previous id" {
-    # a live CLI rotates its id on /clear ahead of the kernel's lastSid write; neither is a child's first start
+@test "a /clear start on the romp sid passes" {
     write_reg "$FSID"
-    ROMP_SID="$SID" run_hook "$(payload "$OTHER" clear)"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *'"additionalContext"'* ]]
-    ROMP_SID="$SID" run_hook "$(payload "$OTHER" compact)"
+    ROMP_SID="$SID" run_hook "$(payload "$SID" clear)"
     [ "$status" -eq 0 ]
     [[ "$output" == *'"additionalContext"'* ]]
 }

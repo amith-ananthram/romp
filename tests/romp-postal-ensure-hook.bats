@@ -6,7 +6,10 @@
 # naming the session ROMP_SID names: the romp sid itself (a fresh spawn or a born fork, whose CLI the
 # kernel pins to the sid) or the SDK registry's lastSid for it (a resumed conversation). Every process
 # a session's Bash tool runs inherits ROMP_SID, so a `claude -p` a session spawned used to ensure the
-# bus as if it were the session; its id is in neither place, and the hook starts nothing for it. These
+# bus as if it were the session; its id is in neither place, and the hook starts nothing for it. The
+# start's source changes one thing only: an EMPTY lastSid (the reg as SdkBackend.spawn mints it, before
+# the CLI's init has flipped the field) passes a `startup` and nothing else, so a child that
+# auto-compacted mid-run and came back as a `compact` start with its own id starts nothing either. These
 # tests drive the real hook with a stub romp-postal-service beside it (the hook resolves ../bin from
 # its own real path) and read what the stub was asked.
 
@@ -33,7 +36,7 @@ STUB
     chmod +x "$TEST_DIR/bin/romp-postal-service"
     SID="11111111-2222-3333-4444-555555555555"     # the romp sid: ROMP_SID, and a fresh spawn's CLI id
     FSID="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"    # the conversation the reg's lastSid names (a resume)
-    OTHER="99999999-8888-7777-6666-555555555555"   # an id in neither place: a child the session ran, or a rotation the reg has not recorded
+    OTHER="99999999-8888-7777-6666-555555555555"   # an id in neither place: a child the session ran (its first start, or its compaction mid-run)
 }
 
 teardown() { rm -rf "$TEST_DIR"; }
@@ -74,9 +77,39 @@ run_hook() { run bash -c 'printf "%s" "$1" | "$2"' _ "$1" "$HOOK"; }
     [ ! -f "$CALL_LOG" ]
 }
 
-@test "a /clear rotation still ensures while the reg holds the previous id" {
+@test "a compaction or a /clear with an id the reg does not hold starts nothing: the source alone is no pass" {
+    # a `claude -p` the session's Bash tool ran auto-compacts mid-run and starts again as a `compact` with its
+    # own id; the previous cut let clear and compact through without reading the reg, and the child ensured the bus
     write_reg "$FSID"
+    ROMP_SID="$SID" run_hook "$(payload "$OTHER" compact)"
+    [ "$status" -eq 0 ]
+    [ ! -f "$CALL_LOG" ]
     ROMP_SID="$SID" run_hook "$(payload "$OTHER" clear)"
+    [ "$status" -eq 0 ]
+    [ ! -f "$CALL_LOG" ]
+}
+
+@test "a compact start on the reg's lastSid ensures: a compaction keeps the CLI's id" {
+    write_reg "$FSID"
+    ROMP_SID="$SID" run_hook "$(payload "$FSID" compact)"
+    [ "$status" -eq 0 ]
+    grep -qx 'ensure' "$CALL_LOG"
+}
+
+@test "a /clear start on the romp sid ensures" {
+    write_reg "$FSID"
+    ROMP_SID="$SID" run_hook "$(payload "$SID" clear)"
+    [ "$status" -eq 0 ]
+    grep -qx 'ensure' "$CALL_LOG"
+}
+
+@test "an empty lastSid lets an unrecorded id ensure at startup only" {
+    # the reg as SdkBackend.spawn mints it, before the init's flip fills lastSid: only a first start reads it empty
+    write_reg ""
+    ROMP_SID="$SID" run_hook "$(payload "$FSID" compact)"
+    [ "$status" -eq 0 ]
+    [ ! -f "$CALL_LOG" ]
+    ROMP_SID="$SID" run_hook "$(payload "$FSID" startup)"
     [ "$status" -eq 0 ]
     grep -qx 'ensure' "$CALL_LOG"
 }

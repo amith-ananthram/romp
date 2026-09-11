@@ -10545,7 +10545,14 @@ def _dead_wait_corroborated(sid, stats=None):
     line names the sid inline."""
     sid = str(sid)
     reg = jd.SDKDIR / (sid + ".json")
-    if reg.exists():
+    present = _sdk_reg_exists(sid)
+    if present is None:
+        if stats is not None:
+            stats["sdk"] = stats.get("sdk", 0) + 1
+        else:
+            sys.stderr.write("dead-wait: the SDK registry directory cannot be read for %s — standing down this cycle\n" % sid)
+        return None                              # the check itself failed (an unlistable sdk/)
+    if present:
         try:
             return not bool(json.loads(reg.read_text()).get("alive"))
         except Exception:
@@ -15914,6 +15921,7 @@ def _drive(msg, client):
         # the backend echoes the send for itself.
         if _send_or_park(be, sid, body, qid=_client_qid(msg, sid, be)) is None:
             client["send"](json.dumps({"type": "warn", "text": "the follow-up was not delivered: no running backend owns this session"}))
+            return True                                   # consumed, refused: no cue, no reopen, no note
         if iid:                                           # optimistic: reopen the card NOW, before the judge pass
             _predict_working("followup", ids=[iid])       # instant cue to every feed view (chat-typed citation
             #                                               follow-ups included) — the reopen below is what the
@@ -16702,7 +16710,17 @@ _LIVE_READ_FAILS = {"count": 0, "last": {}}   # the liveness stand-down's tally:
 _LIVE_LAST_ROWS = {}                           # backend name -> the rows its last SUCCESSFUL read produced
 
 
-def _sdk_records_blind():
+def _sdk_reg_exists(sid):
+    """True / False for the SDK reg file's presence; None when the check itself cannot be made (an
+    unlistable sdk/ makes Path.exists RAISE EACCES rather than answer), which every death writer reads
+    as blindness, never as absence."""
+    try:
+        return (jd.SDKDIR / (str(sid) + ".json")).exists()
+    except OSError:
+        return None
+
+
+def _sdk_records_blind(rows=None):
     """True when the SDK backend's registry directory cannot be read right now while something says SDK
     sessions exist. sdk_backend.list_regs answers [] for a MISSING sdk/ directory by design (a fresh state
     root before the first write) and serves its cache on a listing fault, so a registry renamed aside,
@@ -16710,16 +16728,34 @@ def _sdk_records_blind():
     exact collapse decisions (b) and (d) of the tmux backend's removal promise to stand down on. The
     kernel therefore checks the directory ITSELF (never the SDK module, which stays untouched): blind when
     sdk/ is missing, not a directory, or cannot be listed, AND either the last successful SDK read had
-    rows (_LIVE_LAST_ROWS) or names/ holds an entry no Codex record explains. A fresh install with no
-    sdk/ and no such names is genuine emptiness, not blindness."""
+    rows (_LIVE_LAST_ROWS) or names/ holds an entry no Codex record explains; and blind when the
+    directory reads but a sid the previous read listed live has its names entry and NO reg (the directory
+    was re-created around a moved one). `rows` is the read just taken, when the caller has one. The boot
+    pass creates sdk/ (_death_boot_pass), so a missing directory after boot is the only missing that
+    means blind; a fresh install with no sdk/ and no such names is genuine emptiness, not blindness."""
     d = jd.SDKDIR
+    listable = False
     try:
         if d.is_dir():
             os.listdir(d)
-            return False
+            listable = True
     except OSError:
         pass                                         # unreadable: blind if anything below says sessions exist
-    if _LIVE_LAST_ROWS.get("sdk"):
+    prev = _LIVE_LAST_ROWS.get("sdk") or {}
+    if listable:
+        # The directory is back but may be a NEW one: after sdk/ vanished under a running kernel the SDK
+        # backend's next routine reg write (a lastSid flip, a model note) re-creates it with one gutted reg,
+        # and the other sessions' regs went with the moved directory. A reg the SDK backend never unlinks
+        # (a real end leaves alive:False, or a gone marker) cannot be MISSING for a sid the previous read
+        # listed live while its names entry stands: that is the collapse, not a departure.
+        for sid in prev:
+            if rows is not None and sid in rows:
+                continue
+            present = _sdk_reg_exists(sid)
+            if present is None or (present is False and (jd.NAMES / sid).is_file()):
+                return True
+        return False
+    if prev:
         return True
     try:
         names = [f.name for f in jd.NAMES.iterdir()]
@@ -16754,10 +16790,11 @@ def _backend_rows(name, be):
         rows = be.live_sessions()
     except Exception:
         return _live_stand_down(name, (traceback.format_exc().strip().splitlines() or ["?"])[-1])
-    if name == "sdk" and not rows and _sdk_records_blind():
+    if name == "sdk" and _sdk_records_blind(rows):
         # the SDK module answers {} for a missing or unlistable registry directory (its own contract for a
-        # fresh root); with sessions on record that is a read that FAILED, not a world with no session
-        return _live_stand_down(name, "the registry directory %s is missing or cannot be read" % jd.SDKDIR)
+        # fresh root), and a directory re-created around a moved one lists without the other sessions' regs;
+        # with sessions on record that is a read that FAILED, not a world with no session
+        return _live_stand_down(name, "the registry directory %s is missing, cannot be read, or lost its regs" % jd.SDKDIR)
     _LIVE_LAST_ROWS[name] = rows
     _LIVE_READ_FAILS["last"].pop(name, None)
     return rows
@@ -22539,11 +22576,12 @@ def _death_sweep_tick(now, live_map):
     sdk_blind = _sdk_records_blind()
     stood = stood_sdk = 0
     for sid in prev - cur:
-        if (jd.SDKDIR / (sid + ".json")).exists():
+        present = _sdk_reg_exists(sid)
+        if present:
             continue                                 # an SDK death is the kill gesture's to stamp
         if not _death_stamp_due(sid):
             continue
-        if sdk_blind:
+        if sdk_blind or present is None:
             stood_sdk += 1                           # its reg may sit behind the unreadable directory: stand down
             continue
         if blind:
@@ -22570,6 +22608,10 @@ def _death_boot_pass(now=None):
     directory), every reg-less sid is skipped, loudly: a session the kernel merely cannot see must not be
     stamped over."""
     now = int(now or time.time())
+    try:
+        jd.SDKDIR.mkdir(parents=True, exist_ok=True)   # the kernel owns the directory's existence: from here on
+    except OSError:                                    # a MISSING sdk/ is a vanished one, never a fresh root's
+        pass                                           # (the blindness guard below reads the failure)
     if not jd.NAMES.is_dir():
         return
     cx = _codex()
@@ -22583,7 +22625,10 @@ def _death_boot_pass(now=None):
     for f in sorted(jd.NAMES.iterdir()):
         sid = f.name
         reg = jd.SDKDIR / (sid + ".json")
-        if reg.exists():
+        present = _sdk_reg_exists(sid)
+        if present is None:
+            continue                                 # the check itself failed (an unlistable sdk/): stand down
+        if present:
             try:
                 if bool(json.loads(reg.read_text()).get("alive")):
                     continue                         # revivable/crash-looped: the resume contract owns it
@@ -22591,7 +22636,7 @@ def _death_boot_pass(now=None):
                 continue                             # unreadable reg: stand down (re-asked next boot)
         else:
             if blind:
-                continue                             # the Codex registry cannot be read: stand down
+                continue                             # a registry cannot be read: stand down
             if cx is not None and cx._session(sid) is not None and cx.owns(sid):
                 continue                             # the Codex registry says alive
         if _record_death(sid, now, "boot"):
@@ -27666,7 +27711,7 @@ def _rewind_send(sid, user_uuid, text, now=None):
     injection is exactly the fragility the backend seam exists to avoid (the tmux backend never did)."""
     be = Sessions.backend_for(sid)
     if not hasattr(be, "rewind"):
-        return "editing past messages needs a Claude Code session — this one runs in a terminal (use Esc Esc there)"
+        return "editing past messages needs a Claude Code session — " + _not_claude_code_reason(be)
     if _ops_gate(sid):
         return "the session is busy — wait for the current turn to finish, then edit"
     now = now or time.time()
@@ -27711,7 +27756,7 @@ def _rewind_rollback(sid, user_uuid, now=None):
     error string for the warn toast, or None."""
     be = Sessions.backend_for(sid)
     if not hasattr(be, "rollback"):
-        return "deleting past messages needs a Claude Code session — this one runs in a terminal (use Esc Esc there)"
+        return "deleting past messages needs a Claude Code session — " + _not_claude_code_reason(be)
     # NO busy gate here (delete-while-busy, the user 2026-08-29): the backend decides — a bare
     # delete on an in-flight turn interrupts it and arms the rewind at the turn's actual end;
     # compacting and queued-strangers keep their honest refusals inside _arm_rewind.
@@ -29860,6 +29905,19 @@ def _route_meta_command(be, sid, text, client=None, floating=False, state=None):
     # ours to swallow: it stays the CLI's, verbatim, and the user sees the CLI's own error.
     if not value or len(value.split()) != 1:
         return False
+    is_meta = ((head == "/model" and _vouched_model(value)) or (head == "/effort" and value in _EFFORT_VALUES)
+               or (head == "/fast" and value in ("on", "off")))
+    if is_meta and be is _UNOWNED:
+        # a session no running backend owns takes no setting: refuse before any stamp (the switching dots
+        # on a dead lane) or park (an op the drain could never deliver, surviving restarts) — the same
+        # words the send routes use (review find, 2026-09-11)
+        why = "no running backend owns this session — the command was not delivered"
+        if state is not None:
+            state["refused"] = why
+        if client:
+            client["send"](json.dumps({"type": "warn", "text": why}))
+        sys.stderr.write("meta command %s for %s refused: no backend owns this session\n" % (head, sid))
+        return True
     if head == "/model" and _vouched_model(value):
         # the model setter has its OWN rule (an open turn fires it live only on a backend that declares
         # model_switches_live — none shipped does yet, so the SDK still parks; #923), so its verdict is
@@ -29877,6 +29935,12 @@ def _route_meta_command(be, sid, text, client=None, floating=False, state=None):
     if state is not None:
         state["queued"] = parked
     return True
+
+
+def _not_claude_code_reason(be):
+    """The tail of a refusal for an op only the Claude Code backend performs: which backend has the
+    session instead (Codex), or that none does (the unowned route)."""
+    return "this one runs in Codex" if (be is not None and be is _codex()) else "no running backend owns this one"
 
 
 def _vouched_model(value):
@@ -52094,6 +52158,10 @@ class Handler(BaseHTTPRequestHandler):
                 be = Sessions.backend_for(sid)
                 meta = {}
                 if _route_meta_command(be, sid, body["text"], state=meta):
+                    if meta.get("refused"):
+                        return self._send(200, json.dumps({"ok": False, "error":
+                            "no running backend owns %s — the command was not delivered" % (body.get("who") or sid)}),
+                                          "application/json")
                     queued = bool(meta.get("queued"))              # a parked /model, /effort or /fast says so too
                 else:
                     res = _send_or_park(be, sid, body["text"])
@@ -52101,7 +52169,7 @@ class Handler(BaseHTTPRequestHandler):
                         # the backend REFUSED the handover (a session no backend owns, a dead one): said, never
                         # answered ok — `romp send` prints this and exits non-zero (review find, 2026-09-11)
                         return self._send(200, json.dumps({"ok": False, "error":
-                            "no running backend owns %s — the message was not delivered" % (body.get("name") or sid)}),
+                            "no running backend owns %s — the message was not delivered" % (body.get("who") or sid)}),
                                           "application/json")
                     queued = bool(res)
                 # `queued` says which arm it took (the /compact route's shape): a sender that IS the

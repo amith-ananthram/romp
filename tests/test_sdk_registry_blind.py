@@ -167,14 +167,56 @@ class RegistryDirectoryGone(_Root):
             self.assertIsNone(km._dead_wait_corroborated(SID))
         self.assertIn("dead-wait: the SDK registry directory cannot be read for", self.err.getvalue())
 
-    def test_a_boot_with_names_but_no_registry_directory_stamps_nothing(self):
+    def test_a_boot_creates_the_registry_directory_and_names_only_sids_are_dead_history(self):
+        # a root whose sessions were all terminal ones, or a fresh root before its first SDK write: names on
+        # record, no sdk/ yet. The boot pass creates the directory (the kernel owns its existence from then
+        # on, so a missing sdk/ after boot is a vanished one), and the names-only sids stamp as dead history
+        # (decision f) with no stand-down and no failure counted.
         _name(SID); _name(SID2)
         km._LIVE_LAST_ROWS.clear()                   # a fresh process: no previous rows to go on
-        self.assertTrue(km._sdk_records_blind(), "names on record and no sdk/: blind, never dead history")
         with contextlib.redirect_stderr(self.err):
             km._death_boot_pass(NOW)
+        self.assertTrue(jd.SDKDIR.is_dir(), "the boot created sdk/")
+        self.assertIsNotNone(_marker(SID)); self.assertIsNotNone(_marker(SID2))
+        self.assertEqual(self.live(), {})
+        self.assertEqual(km._LIVE_READ_FAILS["count"], 0, "a legitimate steady state counts no failure")
+        self.assertNotIn("death-boot: the SDK registry directory cannot be read", self.err.getvalue())
+
+    def test_a_directory_recreated_around_the_moved_one_is_still_blind(self):
+        # after sdk/ vanishes, the SDK backend's next routine reg write re-creates it with one gutted reg
+        # (no alive field); the other sessions' regs went with the moved directory. The directory lists,
+        # so the existence check alone would read "not blind" and the sweep would stamp every other live
+        # session dead while its thread still runs.
+        rows = self._seed()
+        km._death_sweep_tick(NOW, rows)              # arms the set-diff trigger
+        os.rename(jd.SDKDIR, jd.SDKDIR.with_name("sdk.aside"))
+        jd.SDKDIR.mkdir()
+        (jd.SDKDIR / (SID + ".json")).write_text(json.dumps({"sid": SID, "lastSid": "abcd"}))
+        self.assertTrue(km._sdk_records_blind(), "a previously live sid with its names entry and no reg: the collapse")
+        self.assertEqual(self.live(), rows, "the previous rows are served")
+        self.assertEqual(km._LIVE_READ_FAILS["count"], 1)
+        with contextlib.redirect_stderr(self.err):
+            km._death_sweep_tick(NOW + 1, {})
         self.assertIsNone(_marker(SID)); self.assertIsNone(_marker(SID2))
-        self.assertIn("death-boot: the SDK registry directory cannot be read", self.err.getvalue())
+        self.assertIsNone(km._dead_wait_corroborated(SID2))
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads an unreadable directory")
+    def test_the_boot_pass_and_the_sweep_stand_down_on_an_unlistable_directory_without_raising(self):
+        rows = self._seed()
+        km._death_sweep_tick(NOW, rows)
+        os.chmod(jd.SDKDIR, 0)
+        try:
+            with contextlib.redirect_stderr(self.err):
+                km._death_boot_pass(NOW)             # no raise: the guard is consulted before any per-sid read
+                km._death_sweep_tick(NOW + 1, {})
+                stats = {}
+                self.assertIsNone(km._dead_wait_corroborated(SID, stats=stats))
+            self.assertIsNone(_marker(SID)); self.assertIsNone(_marker(SID2))
+            self.assertEqual(stats, {"sdk": 1})
+            self.assertIn("death-boot: the SDK registry directory cannot be read", self.err.getvalue())
+            self.assertIn("death-sweep: the SDK registry directory cannot be read", self.err.getvalue())
+        finally:
+            os.chmod(jd.SDKDIR, stat.S_IRWXU)
 
     @unittest.skipIf(os.geteuid() == 0, "root reads an unreadable directory")
     def test_an_unlistable_registry_directory_is_blind_too(self):
@@ -219,6 +261,74 @@ class UnownedSendRefuses(_Root):
         self.assertIn("not delivered", warns[0]["text"])
 
 
+class MetaCommandRefused(_Root):
+    """A /model, /effort or /fast to a sid no backend owns is refused before any stamp or park (review find):
+    the meta-command arm runs ahead of the send refusal on both routes."""
+
+    def setUp(self):
+        super().setUp()
+        self._saved2 = (km.Sessions.__dict__["backend_for"], km._push_soon, km._name_of, dict(km._pending_ops),
+                       dict(km._model_switch_pending))
+        km.Sessions.backend_for = staticmethod(lambda sid: km._UNOWNED)
+        km._push_soon = lambda *a, **k: None
+        km._name_of = lambda sid: "web" if sid == SID else None
+        km._pending_ops.clear(); km._model_switch_pending.clear()
+
+    def tearDown(self):
+        km.Sessions.backend_for, km._push_soon, km._name_of, ops, pend = self._saved2
+        km._pending_ops.clear(); km._pending_ops.update(ops)
+        km._model_switch_pending.clear(); km._model_switch_pending.update(pend)
+        super().tearDown()
+
+    def _drive(self, msg):
+        sent = []
+        client = {"send": lambda s: sent.append(json.loads(s)), "wid": "", "cid": "c1"}
+        with contextlib.redirect_stderr(self.err):
+            km._drive(msg, client)
+        return [m for m in sent if m.get("type") == "warn"]
+
+    def test_the_ws_send_op_refuses_each_meta_command_without_a_stamp_or_a_park(self):
+        for text in ("/model opus", "/effort high", "/fast on"):
+            warns = self._drive({"type": "sendMessage", "id": SID, "text": text})
+            self.assertTrue(warns and "not delivered" in warns[0]["text"], (text, warns))
+        self.assertEqual(km._pending_ops, {}, "nothing parked")
+        self.assertNotIn(SID, km._model_switch_pending, "no switching dots on a dead lane")
+
+    def test_the_lane_menus_command_op_refuses_the_same_way(self):
+        saved = km._sid_of
+        km._sid_of = lambda who: SID if who == "web" else who      # the lane menu keys its ops by session NAME
+        try:
+            warns = self._drive({"type": "sendCommand", "name": "web", "cmd": "/effort high"})
+        finally:
+            km._sid_of = saved
+        self.assertTrue(warns and "not delivered" in warns[0]["text"], warns)
+        self.assertEqual(km._pending_ops, {})
+
+
+class FollowUpRefused(_Root):
+    def test_a_refused_follow_up_moves_nothing(self):
+        sent, predicted, reopened = [], [], []
+        client = {"send": lambda s: sent.append(json.loads(s)), "wid": "", "cid": "c1"}
+        saved = (km.Sessions.__dict__["backend_for"], km._push_soon, km._name_of, km._predict_working,
+                 jd.optimistic_followup, km._mark_views_dirty)
+        km.Sessions.backend_for = staticmethod(lambda sid: km._UNOWNED)
+        km._push_soon = lambda *a, **k: None
+        km._name_of = lambda sid: "web" if sid == SID else None
+        km._predict_working = lambda *a, **k: predicted.append(a)
+        jd.optimistic_followup = lambda *a, **k: reopened.append(a) or True
+        km._mark_views_dirty = lambda *a, **k: None
+        try:
+            with contextlib.redirect_stderr(self.err):
+                km._drive({"type": "askFollowUp", "itemId": SID + ":g1", "text": "go on"}, client)
+        finally:
+            (km.Sessions.backend_for, km._push_soon, km._name_of, km._predict_working,
+             jd.optimistic_followup, km._mark_views_dirty) = saved
+        warns = [m for m in sent if m.get("type") == "warn"]
+        self.assertTrue(warns and "not delivered" in warns[0]["text"], sent)
+        self.assertEqual(predicted, [], "no card moves to Working on a refusal")
+        self.assertEqual(reopened, [], "no reopen event is written on a refusal")
+
+
 class SendRouteRefuses(_Root):
     @classmethod
     def setUpClass(cls):
@@ -255,6 +365,27 @@ class SendRouteRefuses(_Root):
         self.assertIs(resp.get("ok"), False, resp)
         self.assertIn("not delivered", resp.get("error", ""))
         self.assertNotIn("queued", resp)
+
+    def test_post_send_refuses_each_meta_command_by_sid_and_by_name(self):
+        _name(SID)
+        saved = (km.Sessions.__dict__["backend_for"], dict(km._pending_ops), dict(km._model_switch_pending))
+        km.Sessions.backend_for = staticmethod(lambda sid: km._UNOWNED)
+        km._pending_ops.clear(); km._model_switch_pending.clear()
+        try:
+            with contextlib.redirect_stderr(self.err):
+                for text in ("/model opus", "/effort high", "/fast on"):
+                    code, resp = self._post("/send", {"id": SID, "text": text})
+                    self.assertEqual((code, resp.get("ok")), (200, False), (text, resp))
+                    self.assertIn("the command was not delivered", resp["error"])
+                code, resp = self._post("/send", {"name": "ghost", "text": "/model opus"})   # a name no live session answers to
+            self.assertEqual((code, resp.get("ok")), (200, False), resp)
+            self.assertIn("ghost", resp["error"])
+            self.assertEqual(km._pending_ops, {}, "nothing parked for the dead lane")
+            self.assertEqual(km._model_switch_pending, {}, "no switching dots stamped")
+        finally:
+            km.Sessions.backend_for, ops, pend = saved
+            km._pending_ops.clear(); km._pending_ops.update(ops)
+            km._model_switch_pending.clear(); km._model_switch_pending.update(pend)
 
 
 if __name__ == "__main__":
