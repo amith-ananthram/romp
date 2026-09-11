@@ -5970,6 +5970,12 @@ function renderTabs() {
   const mslotEl = document.getElementById("mtag-slot");
   if (stripSig === tabStripSig && !(mslotEl && !mslotEl.firstChild)) { stripAftermath(visibleIds, ids); return; }
   tabStripSig = stripSig;
+  // the strip is about to be REBUILT: the hover tip belongs to a tab node this rebuild discards, and its mouseleave
+  // (the tip's only closer) never fires on a discarded node, so a tip shown for the tab the user just clicked stood
+  // stranded over the page until another tab was hovered and left (T327, found by the tag-overview served lab on
+  // 2026-09-10: its screenshots caught the tip after every pick). The rebuild is the event: hide it here, once, before
+  // the nodes go.
+  hideTabTip();
   // Preserve TAB-MODE keyboard focus across the rebuild (the user 2026-06-29). renderTabs runs on EVERY kernel
   // push (0.5–3s), and replaceChildren() destroys the focused tab — dropping focus out of the strip (often out
   // of the chat iframe entirely), which silently killed ←/→/Enter nav after a send or any push: you were left

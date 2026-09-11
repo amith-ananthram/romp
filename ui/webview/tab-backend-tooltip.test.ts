@@ -20,6 +20,11 @@ test("the tab tooltip is a custom DOM tooltip shown on hover, not a native title
   // the tab node can outlive a frame that replaced the session object it was built from
   assert.match(RENDER, /tab\.addEventListener\("mouseenter", \(\) => showTabTip\(tab, sessions\.get\(id\) \?\? s\)\)/);
   assert.match(RENDER, /tab\.addEventListener\("mouseleave", hideTabTip\)/);
+  // T327: a strip REBUILD discards the hovered tab's node, and a discarded node never fires the mouseleave that closes
+  // the tip, so renderTabs hides it the moment it commits to rebuilding (after the unchanged-strip skip, before the nodes go)
+  const tabs = RENDER.slice(RENDER.indexOf("function renderTabs() {"), RENDER.indexOf("function stripAftermath("));
+  assert.match(tabs, /tabStripSig = stripSig;\s*\n(\s*\/\/[^\n]*\n)*\s*hideTabTip\(\);/, "the rebuild is the event that hides the tip");
+  assert.doesNotMatch(tabs.slice(0, tabs.indexOf("tabStripSig = stripSig;")), /hideTabTip\(\)/, "…not the unchanged-strip skip above it, which keeps the hovered node and its tip");
   assert.doesNotMatch(RENDER, /tab\.title = s\.name \+ " · " \+ beLabel/);
 });
 
