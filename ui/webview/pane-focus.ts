@@ -46,8 +46,10 @@ export function emptyStateParts(v: Vanished | null, hasTabs: boolean): EmptyStat
     : v.why === "awaited" ? (v.dialing ? " is not listed yet; its host is reconnecting… It comes back here when the host does."
                                        : " is not listed yet. It comes back here when its host does.")
     : v.why === "gone" ? " is no longer on the strip. Pick a tab."
-    : v.why === "hidden" ? " is not shown by this tab view. Pick a tab, or change the view."
     : " ended.";
+  // the #only= filter hid the tab: a NAME-FREE line (the frame's purpose is a clean recording, and the pick
+  // instruction is said once): the manager's call, 2026-09-11
+  if (v.why === "hidden") return { head: "This tab view shows no session. Change the view, or pick a tab.", name: null, tail: "" };
   // an EMPTY strip invites no pick (the review's low): the session named is all there is to say
   return { head: hasTabs ? "No session selected. Pick a tab to start. " : "No sessions yet. ", name: v.name, tail };
 }

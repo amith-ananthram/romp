@@ -67,7 +67,8 @@ test("the timeline's standalone helper splits the tag the same way", () => {
 
 test("chat tabs filter by the #only tag", () => {
   assert.match(RENDER, /import \{ onlyTag, matchesOnly \} from "\.\/only-filter";/);
-  assert.match(RENDER, /const visibleIds = only \? inViewIds\.filter\(\(id\) => matchesOnly\(nameOf\(id\), only\)\) : inViewIds;/);
+  assert.match(RENDER, /const visibleIds = ids\.filter\(\(id\) => stripShows\(id, only\)\);/, "the #only= filter rides the one predicate the deferred checks read too (stripShows: tabInView, then matchesOnly over the hash)");
+  assert.match(RENDER, /return !only \|\| matchesOnly\(sessions\.get\(id\)\?\.name \?\? tabMeta\.get\(id\)\?\.name \?\? "", only\);/);
   // the filtered ids are what the strip plan renders (tab-groups.ts planStrip, since tab groups 2026-09-04)
   assert.match(RENDER, /const plan = planStrip\(visibleIds,/);
 });

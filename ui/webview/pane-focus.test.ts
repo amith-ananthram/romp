@@ -35,7 +35,7 @@ test("emptyStateParts: the body names the session that vanished and why; reconne
                    { head: "No session selected. Pick a tab to start. ", name: "web", tail: " is not listed yet. It comes back here when its host does." });
   assert.deepEqual(emptyStateParts({ name: "web", why: "awaited", dialing: true }, true).tail, " is not listed yet; its host is reconnecting… It comes back here when the host does.");
   assert.deepEqual(emptyStateParts({ name: "web", why: "gone", dialing: false }, true).tail, " is no longer on the strip. Pick a tab.");
-  assert.deepEqual(emptyStateParts({ name: "web", why: "hidden", dialing: false }, true).tail, " is not shown by this tab view. Pick a tab, or change the view.");
+  assert.deepEqual(emptyStateParts({ name: "web", why: "hidden", dialing: false }, true), { head: "This tab view shows no session. Change the view, or pick a tab.", name: null, tail: "" }, "name-free: a clean recording frame, the pick said once");
   assert.deepEqual(emptyStateParts({ name: "web", why: "awaited", dialing: false }, false).head, "No sessions yet. ", "an empty strip invites no pick");
   for (const p of [emptyStateParts({ name: "web", why: "hostDrop", dialing: true }, true), emptyStateParts(null, true)]) {
     assert.doesNotMatch(p.head + p.tail, /\b(card|board|goal|column|nudge)\b/, "no romp nouns in the body's line");
@@ -81,8 +81,10 @@ test("the wiring: the dismiss branch, the unfocused body, the composer, the rest
   // applied on top of tabInView and is no peek input, so an only-filtered active tab goes UNFOCUSED here, never
   // re-pointed; the fire-time check reads the same predicate visibleIds is built from (stripShows)
   assert.match(fn("renderTabs"), /if \(activeId && ids\.includes\(activeId\) && !visibleIds\.includes\(activeId\)\) \{\s*\n\s*const hid = activeId;\s*\n\s*setTimeout\(\(\) => \{ if \(activeId === hid && !stripShows\(hid\)\) unfocusHiddenByView\(hid\); \}, 0\);/);
-  assert.match(fn("renderTabs"), /if \(!activeId && vanishedId && vanishedWhy === "hidden" && visibleIds\.includes\(vanishedId\)\)[\s\S]{0,200}?if \(!activeId && vanishedId === back && stripShows\(back\)\) setActive\(back\);/, "…and comes back when the filter shows it again");
-  assert.match(fn("stripShows"), /if \(!tabInView\(id\)\) return false;\s*\n\s*const only = onlyTag\(\);\s*\n\s*return !only \|\| matchesOnly\(sessions\.get\(id\)\?\.name \?\? tabMeta\.get\(id\)\?\.name \?\? "", only\);/, "the one predicate");
+  assert.match(fn("renderTabs"), /if \(!activeId && vanishedId && vanishedWhy === "hidden" && visibleIds\.includes\(vanishedId\)\)[\s\S]{0,240}?if \(!activeId && vanishedId === back && vanishedWhy === "hidden" && stripShows\(back\)\) setActive\(back\);/, "…and comes back when the filter shows it again, the reason re-read at fire time");
+  assert.match(fn("stripShows"), /function stripShows\(id: string, only: string \| null = onlyTag\(\)\): boolean \{\s*\n\s*if \(!tabInView\(id\)\) return false;\s*\n\s*return !only \|\| matchesOnly\(sessions\.get\(id\)\?\.name \?\? tabMeta\.get\(id\)\?\.name \?\? "", only\);/, "the one predicate");
+  assert.match(fn("renderTabs"), /const visibleIds = ids\.filter\(\(id\) => stripShows\(id, only\)\);/, "visibleIds is built from it: no second copy");
+  assert.match(RENDER, /window\.addEventListener\("hashchange", \(\) => renderTabs\(\)\);/, "a live edit of the #only= hash repaints at once");
   assert.doesNotMatch(RENDER, /visibleIds\.includes\(activeId\) && visibleIds\.length/, "no first-visible-tab RE-POINT");
   assert.match(fn("unfocusHiddenByView"), /activeId = null; vanishedId = id; vanishedWhy = "hidden";/);
   assert.match(fn("assertPeekFor"), /const next = chatVisible\(id\) \? null : id;/, "the peek rule, over the views blob alone");

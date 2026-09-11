@@ -324,7 +324,7 @@ class ServedUnfocusedPane(unittest.TestCase):
         self.assertIsNone(of["active"], "no tab active under the filter: %r" % of); self.assertNotIn(SID_A, of["tabs"]); self.assertIn(SID_B, of["tabs"])
         self.assertEqual(of["visibleTurns"], 0, "the filtered session's transcript is NOT on screen (the demo leak): %r" % of)
         self.assertIsNotNone(of["empty"]); self.assertEqual(of["empty"]["vanished"], SID_A)
-        self.assertIn("web", of["empty"]["text"]); self.assertIn("is not shown by this tab view", of["empty"]["text"])
+        self.assertEqual(of["empty"]["text"], "This tab view shows no session. Change the view, or pick a tab.", "name-free: a clean recording frame")
         self.assertTrue(of["composerDisabled"])
 
 

@@ -6265,9 +6265,9 @@ function renderTabs() {
   const only = onlyTag();
   const nameOf = (id: string) => sessions.get(id)?.name ?? tabMeta.get(id)?.name ?? "";
   // the session VIEWS filter composes here too (the user 2026-08-18): a view-hidden session keeps
-  // its state, drafts and cached transcript — it just loses its tab until revealed
-  const inViewIds = ids.filter(tabInView);
-  const visibleIds = only ? inViewIds.filter((id) => matchesOnly(nameOf(id), only)) : inViewIds;
+  // its state, drafts and cached transcript — it just loses its tab until revealed. ONE predicate (stripShows) builds
+  // this list and answers the deferred checks below, so the two can never disagree (the review's low)
+  const visibleIds = ids.filter((id) => stripShows(id, only));
   // ...and it must govern the CHAT BODY too, not just the bar (the user 2026-07-16). Hiding a
   // non-matching TAB while its transcript keeps rendering leaks precisely what the filter exists to
   // hide: a real session's chat sitting on screen under `#only=api,tests,web`, statusline and all —
@@ -6284,7 +6284,7 @@ function renderTabs() {
   }
   if (!activeId && vanishedId && vanishedWhy === "hidden" && visibleIds.includes(vanishedId)) {
     const back = vanishedId;
-    setTimeout(() => { if (!activeId && vanishedId === back && stripShows(back)) setActive(back); }, 0);
+    setTimeout(() => { if (!activeId && vanishedId === back && vanishedWhy === "hidden" && stripShows(back)) setActive(back); }, 0);   // the reason re-read too: a teardown queued in between must not be undone
   }
   // TAB SECTIONS (the user 2026-09-04): groups are tags. With sectioning on (per browser — the
   // tag-lens menu's "Group tabs by tag") and some tag holding a visible tab, the strip renders one
@@ -7193,6 +7193,9 @@ window.addEventListener("romp-hosts", () => { renderTabs(); syncComposerPh(); })
 // a dial attempt to a remote host began or ended (federation.ts dialEvent): the host-down foot's swirl
 // spins while one is in flight, as of the last /tunnels poll, so it repaints on this event and on nothing else
 window.addEventListener("romp:hostDial", () => { syncHostOfflineFoot(); repaintEmptyStateIfUnfocused(); });   // the unfocused body's "reconnecting" follows the dial state too (T357)
+// the `#only=` filter is the location hash, so a LIVE edit of the hash repaints the strip at once: the hidden tab's
+// unfocus and its return both run off this repaint, not off the next kernel frame (T357 later lows)
+window.addEventListener("hashchange", () => renderTabs());
 window.addEventListener("mousedown", (e) => { if (ctxMenuEl && !ctxMenuEl.contains(e.target as Node)) dismissTabMenu(); }, true);
 // an Escape that closed the menu says so on the event (preventDefault), so the section view's own Escape
 // (installSnapshotEscape, armed at this same capture phase, later in the listener order) yields to it
@@ -11958,12 +11961,12 @@ function fillSnapshotRow(btn: HTMLElement, r: SnapRow, now: number): void {
 // the strip dresses it (host prefix, identity colour), "reconnecting" when its host is dialing; or the plain invitation.
 /** Does the strip show `id` right now: in the tab view (a peek counts) AND matching the `#only=` filter — the one
  *  predicate renderTabs's visibleIds is built from, read again at fire time so a deferred check judges the strip as
- *  it is, not as it was scheduled. */
-function stripShows(id: string): boolean {
+ *  it is, not as it was scheduled. `only` may be passed by a caller that read the hash once for many ids. */
+function stripShows(id: string, only: string | null = onlyTag()): boolean {
   if (!tabInView(id)) return false;
-  const only = onlyTag();
   return !only || matchesOnly(sessions.get(id)?.name ?? tabMeta.get(id)?.name ?? "", only);
 }
+
 // The strip's #only= filter stopped showing the active tab (T357, the review's probe: web persisted, `#only=api`, a
 // reload): the same rule as a dismissal — the pane goes UNFOCUSED naming the session the filter hides, its transcript
 // leaves the screen, and it never re-points itself at another session. renderTabs restores it when the filter shows
