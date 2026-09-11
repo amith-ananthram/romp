@@ -482,6 +482,23 @@ class RelayEndToEnd(_RelayFixture):
         self.assertEqual(nd["relayDone"]["outcome"], "refused", "the removal is a record the merge honours")
         self.assertEqual(self._queue(), [])
 
+    def test_a_later_relay_on_the_node_clears_the_refusals_note(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        self._save(st)
+        fake = km._bus_send_relay
+        km._bus_send_relay = lambda payload: (False, "bus /send 404: no live recipient", True, {})
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(km._relay_tick(NOW), 0)
+        st = jd.load_goals(WORKER)
+        self.assertIn("relayRefusal", st["nodes"][step])
+        jd.record_verdict(st, st["nodes"][step], "romp", "unblock", NOW + 5)          # the block lifts (the manager is live again)...
+        self._close(st, step, "a new question", NOW + 60)                              # ...and the next block relays
+        self._save(st)
+        km._bus_send_relay = fake
+        self.assertEqual(km._relay_tick(NOW + 70), 1)
+        self.assertNotIn("relayRefusal", jd.load_goals(WORKER)["nodes"][step], "the old note is gone with the new relay")
+
     def test_a_wait_that_ended_before_the_tick_is_never_relayed(self):
         st, top, step = self.store(delegated=True)
         self._close(st, step, "cannot move further without you", T0 + 400)
@@ -846,6 +863,23 @@ class RelayEdges(_RelayFixture):
         self.assertEqual(len(calls), 1)
         self.assertEqual(len(self.sent), 1)
 
+    def test_a_judges_save_inside_the_hold_keeps_the_hold(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        self._save(st)
+        holder = jd.load_goals(WORKER)                     # a judge pass loads before the tick...
+        calls = []
+        km._bus_send_relay = lambda payload: calls.append(payload) or (False, "timed out", False, {"unknown": True})
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(km._relay_tick(NOW), 0)     # ...the bus stalls: the marker carries the hold...
+        holder["nodes"][top]["text"] = "Ship the exporter (renamed)"
+        self._save(holder)                                 # ...and the judge saves inside the hold
+        rw = jd.load_goals(WORKER)["nodes"][step]["relayWanted"]
+        self.assertEqual((rw["unknownAt"], rw["attempts"]), (NOW, 1), "the merge carried the tick's fields")
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(km._relay_tick(NOW + 2), 0)
+        self.assertEqual(len(calls), 1, "the stalled bus is not asked again")
+
     def test_a_stalled_bus_that_never_wrote_is_asked_again_after_the_hold(self):
         st, top, step = self.store(delegated=True)
         self._close(st, step, "cannot move further without you", T0 + 400)
@@ -859,6 +893,16 @@ class RelayEdges(_RelayFixture):
             self.assertEqual(km._relay_tick(NOW + km.RELAY_UNKNOWN_HOLD), 0)
         self.assertEqual(len(calls), 2, "the hold passed with no row: asked again")
         self.assertEqual(jd.load_goals(WORKER)["nodes"][step]["relayWanted"]["attempts"], 2)
+
+    def test_a_far_route_duplicate_answer_is_pending_on_the_named_host(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "cannot move further without you", T0 + 400)
+        self._save(st)
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "px-dup-1", "duplicate": True, "host": "TESTHOST",
+                                                                "note": "already relayed to TESTHOST"})
+        self.assertEqual(km._relay_tick(NOW), 0)
+        rw = jd.load_goals(WORKER)["nodes"][step]["relayWanted"]
+        self.assertEqual((rw["pendingMid"], rw["pendingHost"]), ("px-dup-1", "TESTHOST"), "a later bounce names the host")
 
     def test_a_relay_leg_send_with_a_lost_answer_is_adopted_as_pending(self):
         st, top, step = self.store(delegated=True)
@@ -1019,6 +1063,8 @@ class RelayEdges(_RelayFixture):
         self.assertEqual(len(self._queue()), 1, "the bus could not be asked: kept")
         self.assertIn("relayWanted", jd.load_goals(WORKER)["nodes"][step])
         self.assertEqual(km._relay_tick(NOW + 11), 0)
+        self.assertEqual(len(answers), 1, "held: not asked again inside the hold")
+        self.assertEqual(km._relay_tick(NOW + 10 + km.RELAY_UNKNOWN_HOLD), 0)
         self.assertEqual(self._queue(), [])
         self.assertEqual(jd.load_goals(WORKER)["nodes"][step]["relayDone"]["recall"], "carried: could not be withdrawn")
 
@@ -1311,6 +1357,29 @@ class MergeCarriesTheRelay(_Peer):
         jd._rebase_onto_disk(WORKER, mem2)
         self.assertEqual(mem2["nodes"][step]["relayWanted"]["pendingMid"], "px-1", "the kernel's own copy keeps it")
 
+    def test_the_ticks_fields_on_a_same_id_marker_are_carried_whole(self):
+        st, top, step = self.store(delegated=True)
+        mem = json.loads(json.dumps(st)); disk = json.loads(json.dumps(st))
+        mem["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "q", "t": T0 + 400, "id": "mk-a", "attempts": 1, "unknownAt": NOW}
+        disk["nodes"][step]["relayWanted"] = {"peer": MANAGER, "why": "q", "t": T0 + 400, "id": "mk-a", "attempts": 2,
+                                              "unknownAt": NOW + 40, "pendingMid": "px-1", "pendingAt": NOW + 41, "pendingHost": "TESTHOST"}
+        (jd.GOALDIR / (WORKER + ".json")).write_text(json.dumps(disk))
+        jd._rebase_onto_disk(WORKER, mem)
+        rw = mem["nodes"][step]["relayWanted"]
+        self.assertEqual({k: rw[k] for k in jd.RELAY_TICK_KEYS},
+                         {"pendingMid": "px-1", "pendingAt": NOW + 41, "pendingHost": "TESTHOST", "unknownAt": NOW + 40, "attempts": 2})
+        self.assertEqual(jd.RELAY_TICK_KEYS, ("pendingMid", "pendingAt", "pendingHost", "unknownAt", "attempts"), "named once")
+
+    def test_a_recall_done_on_the_disk_filters_the_holders_owed_list_though_the_disk_owes_none(self):
+        st, top, step = self.store(delegated=True)
+        mem = json.loads(json.dumps(st)); disk = json.loads(json.dumps(st))
+        mem["nodes"][step]["relayRecall"] = [{"id": "mk-a", "peer": MANAGER, "pendingMid": "px-1"}]
+        disk["nodes"][step]["relayRecalled"] = [{"mid": "px-1", "outcome": "withdrawn", "t": NOW}]   # the sweep's save: done, none owed
+        (jd.GOALDIR / (WORKER + ".json")).write_text(json.dumps(disk))
+        jd._rebase_onto_disk(WORKER, mem)
+        self.assertNotIn("relayRecall", mem["nodes"][step], "a recall done on the disk is not re-owed by a stale holder")
+        self.assertEqual([d["mid"] for d in mem["nodes"][step]["relayRecalled"]], ["px-1"])
+
     def test_a_settled_marker_is_popped_before_the_disks_live_marker_is_adopted(self):
         st, top, step = self.store(delegated=True)
         mem = json.loads(json.dumps(st)); disk = json.loads(json.dumps(st))
@@ -1527,7 +1596,7 @@ class SaverFlushesItsOwn(_RelayFixture):
         self.assertEqual(recalls, ["px-ret-1"], "and the stale one is withdrawn from the far host's outbox")
         nd = jd.load_goals(WORKER)["nodes"][step]
         self.assertNotIn("relayRecall", nd)
-        self.assertEqual(nd["relayRecalled"], ["px-ret-1"])
+        self.assertEqual([(d["mid"], d["outcome"]) for d in nd["relayRecalled"]], [("px-ret-1", "withdrawn")])
 
     def test_a_retired_marker_on_the_users_block_is_recalled_too(self):
         st, top, step = self.store(delegated=True)
@@ -1548,6 +1617,29 @@ class SaverFlushesItsOwn(_RelayFixture):
         self.assertEqual(km._relay_tick(NOW + 70), 0)
         self.assertEqual(recalls, ["px-ret-2"])
         self.assertEqual(self._queue(), [], "the recall entry is spent")
+        nd = jd.load_goals(WORKER)["nodes"][step]
+        self.assertEqual([(d["mid"], d["outcome"]) for d in nd["relayRecalled"]],
+                         [("px-ret-2", "carried: could not be withdrawn")], "a carried recall says so: the stale question reached the manager")
+
+    def test_an_unknown_recall_owed_is_held_like_a_send(self):
+        st, top, step = self.store(delegated=True)
+        self._close(st, step, "first question", T0 + 400)
+        self._save(st)
+        km._bus_send_relay = lambda payload: (True, "", False, {"ok": True, "id": "px-ret-3", "parked": "TESTHOST"})
+        self.assertEqual(km._relay_tick(NOW), 0)
+        st = jd.load_goals(WORKER)
+        jd.record_verdict(st, st["nodes"][top], "user", "reopen", NOW + 5, msg=True)
+        self._close(st, step, "still stuck", NOW + 60)
+        self._save(st)
+        calls = []
+        km._bus_recall_relay = lambda sid, mid: calls.append(mid) or "unknown"
+        self.assertEqual(km._relay_tick(NOW + 70), 0)
+        self.assertEqual(km._relay_tick(NOW + 71), 0)
+        self.assertEqual(km._relay_tick(NOW + 70 + km.RELAY_UNKNOWN_HOLD - 1), 0)
+        self.assertEqual(len(calls), 1, "a hung bus is asked once per hold, not once per tick")
+        self.assertEqual(km._relay_tick(NOW + 70 + km.RELAY_UNKNOWN_HOLD), 0)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(self._queue()), 1, "still owed")
 
     def test_a_failed_publish_keeps_the_pending_list_for_the_retry(self):
         st, top, step = self.store(delegated=True)
@@ -1596,6 +1688,30 @@ class FarHostRelayMark(unittest.TestCase):
         self.assertTrue(obj.get("id") and "to" not in obj and not obj.get("parked"), "the relay leg's answer: an id, no to")
         self.assertEqual(len(parked), 1)
         self.assertEqual((parked[0][0], parked[0][1]["relayed"], parked[0][1]["kind"]), ("TESTHOST", True, "question"))
+
+    def test_the_far_route_duplicate_answer_names_the_host(self):
+        ps = self._postal()
+        saved = (ps.resolve_recipient, ps.outbox_put, dict(ps.PEERS))
+        ps.resolve_recipient = lambda to, frm_id="": {"kind": "relay", "host": "TESTHOST", "agent": {"name": "web", "id": MANAGER}}
+        ps.outbox_put = lambda host, msg: True
+        ps.PEERS["TESTHOST"] = {"up": True}
+        try:
+            def post():
+                h = object.__new__(ps.Handler)
+                raw = json.dumps({"to": "web", "from": "api", "from_id": WORKER, "kind": "question", "relayed": True,
+                                  "relayMarker": "1781296800-11111111-g9", "body": "api cannot move further: far?"}).encode()
+                h.path = "/send"; h.headers = {"Content-Length": str(len(raw)), "X-Romp-Token": ps.SERVE_TOKEN}; h.rfile = io.BytesIO(raw)
+                out = []; h._send = lambda obj, code=200: out.append((obj, code))
+                h.do_POST()
+                return out[0]
+            first, c1 = post()
+            second, c2 = post()
+        finally:
+            ps.resolve_recipient, ps.outbox_put = saved[0], saved[1]
+            ps.PEERS.clear(); ps.PEERS.update(saved[2])
+        self.assertEqual((c1, c2), (200, 200))
+        self.assertEqual((second.get("duplicate"), second.get("id"), second.get("host"), "to" in second),
+                         (True, first["id"], "TESTHOST", False), "the far-route duplicate: the id, the host, no to")
 
     def test_the_far_side_delivers_a_relayed_question_marked(self):
         ps = self._postal()
@@ -1675,7 +1791,8 @@ class FarHostRelayMark(unittest.TestCase):
             self.assertIn("X-Relay-Marker: 1781296800-11111111-g2\n", text, "the header, for the rowless rebuild")
             obj2, code2 = post("1781296800-11111111-g2")   # the kernel asks again after a stalled answer
             self.assertEqual(code2, 200, obj2)
-            self.assertEqual((obj2.get("duplicate"), obj2.get("id")), (True, row["id"]), "the bus answers the send it holds")
+            self.assertEqual((obj2.get("duplicate"), obj2.get("id"), obj2.get("to")), (True, row["id"], MANAGER),
+                             "the bus answers the send it holds, a local one with `to`")
             self.assertEqual(len([r for r in [json.loads(l) for l in (ps.TLDIR / "messages.jsonl").read_text().splitlines()]
                                   if r.get("relayMarker") == "1781296800-11111111-g2"]), 1, "one row, one message")
             # the rowless rebuild recovers the marker from the header

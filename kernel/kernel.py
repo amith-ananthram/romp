@@ -3011,7 +3011,7 @@ ROMP_VOICE_WORDS = ("romp", "card", "board", "goal", "cleared", "dismissal", "st
 #   the vocabulary an injected body must never speak to a session (CLAUDE.md, "Messages we inject into a session");
 #   tests/test_injected_voice.py's list of the same words, with the why of each, is pinned to this one
 RELAY_GENERIC_BODY = "%s cannot move further on this and needs your call."
-RELAY_UNKNOWN_HOLD = 30        # seconds a send with an unknown outcome is not repeated (the bus's own timeout, twice)
+RELAY_UNKNOWN_HOLD = 30        # seconds a send or a recall with an unknown outcome is not repeated (the bus's own timeout, twice)
 _ROMP_VOICE_RES = [re.compile(r"\b%s(?:s|es|ed|ing)?\b" % re.escape(w).replace(r"\ ", r"[ -]")) for w in ROMP_VOICE_WORDS]
 
 
@@ -3124,6 +3124,8 @@ def _relay_settle(nd, rw, now, key, **more):
     nd[key] = _relay_record(rw, now, **more)
     jd._relay_mark_settled(nd, rw.get("id") or "")
     nd.pop("relayWanted", None)
+    if key == "relayed":
+        nd.pop("relayRefusal", None)                       # a later relay on the node succeeded: the old refusal's note goes
 
 
 def _relay_revert(store, nd, rw, err, now, ev_t=None):
@@ -3164,20 +3166,27 @@ def _relay_recall_sweep(sid, nd, now):
     owed = [r for r in (nd.get("relayRecall") or []) if isinstance(r, dict)]
     if not owed:
         return False
-    keep, done = [], [x for x in (nd.get("relayRecalled") or []) if isinstance(x, str)]
+    keep, done, changed = [], list(nd.get("relayRecalled") or []), False
     for r in owed:
+        if r.get("unknownAt") and int(now) - int(r["unknownAt"]) < RELAY_UNKNOWN_HOLD:
+            keep.append(r)                                 # the bus could not be asked a moment ago: held, not hammered
+            continue
         got = _bus_recall_relay(sid, r.get("pendingMid"))
         if got == "unknown":
+            r["unknownAt"] = int(now)
             keep.append(r)
+            changed = True
             continue
-        done.append(str(r.get("pendingMid") or ""))
+        done.append({"mid": str(r.get("pendingMid") or ""), "t": int(now),
+                     "outcome": "withdrawn" if got == "withdrawn" else "carried: could not be withdrawn"})
         jd._relay_mark_settled(nd, r.get("id") or "")
+        changed = True
     if keep:
         nd["relayRecall"] = keep
     else:
         nd.pop("relayRecall", None)
     nd["relayRecalled"] = done[-jd.RELAY_SETTLED_CAP:]
-    return len(keep) != len(owed)
+    return changed
 
 
 def _relay_entry(store, sid, f, e, rev, now, alive_ids=None):
@@ -3242,9 +3251,12 @@ def _relay_entry(store, sid, f, e, rev, now, alive_ids=None):
             _RELAY_SAID.discard(said)
             return 0, True, True, False
         if not standing:                                   # the wait ended another way: the parked question is withdrawn
+            if rw.get("recallUnknownAt") and int(now) - int(rw["recallUnknownAt"]) < RELAY_UNKNOWN_HOLD:
+                return 0, changed, False, False            # the bus could not be asked a moment ago: held, not hammered
             got = _bus_recall_relay(sid, rw["pendingMid"])  #   so the far host never delivers a stale one
             if got == "unknown":
-                return 0, changed, False, False            # the bus could not be asked: the entry stays, asked again
+                rw["recallUnknownAt"] = int(now)
+                return 0, True, False, False               # the bus could not be asked: the entry stays, asked again later
             _relay_settle(nd, rw, now, "relayDone", outcome="stood-down",
                           recall=("withdrawn" if got == "withdrawn" else "carried: could not be withdrawn"))
             _RELAY_SAID.discard(said)
@@ -3268,7 +3280,7 @@ def _relay_entry(store, sid, f, e, rev, now, alive_ids=None):
     if ok and (resp.get("parked") or ("to" not in resp and resp.get("id"))):
         rw["pendingMid"] = str(resp.get("id") or "")       # the relay leg answered (parked, or in flight to a host that
         rw["pendingAt"] = int(now)                         #   is up): the sent row is there, and the relay completes only
-        rw["pendingHost"] = str(resp.get("parked") or "")  #   when the far host's delivered row names it; a bounce
+        rw["pendingHost"] = str(resp.get("parked") or resp.get("host") or "")   # when the far host's delivered row names
         return 0, True, False, False                       #   reverts it (a local send answers `to`)
     if ok:
         _relay_settle(nd, rw, now, "relayed", mid=str(resp.get("id") or ""))

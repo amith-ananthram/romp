@@ -4565,16 +4565,21 @@ def _rebase_onto_disk(fsid, store):
             mnd["relaySettled"] = (ms + [x for x in dnd["relaySettled"]           #   remembers, so a holder stale
                                          if isinstance(x, str) and x not in ms])[-RELAY_SETTLED_CAP:]   # across two relays
         #                                                                                never re-mints the first)
-        if isinstance(dnd.get("relayRecalled"), list):   # the recalls done: the union
-            ms = [x for x in (mnd.get("relayRecalled") or []) if isinstance(x, str)]
-            mnd["relayRecalled"] = (ms + [x for x in dnd["relayRecalled"] if isinstance(x, str) and x not in ms])[-RELAY_SETTLED_CAP:]
-        if isinstance(dnd.get("relayRecall"), list):     # the recalls owed: the union, minus the ones done on either side
-            done = set(mnd.get("relayRecalled") or [])
+        if isinstance(dnd.get("relayRecalled"), list):   # the recalls done ({mid, outcome, t}): the union, by mid
+            have = _relay_recalled_mids(mnd.get("relayRecalled"))
+            mnd["relayRecalled"] = ([x for x in (mnd.get("relayRecalled") or [])]
+                                    + [x for x in dnd["relayRecalled"] if _relay_recalled_mid(x) not in have])[-RELAY_SETTLED_CAP:]
+        if isinstance(mnd.get("relayRecall"), list) or isinstance(dnd.get("relayRecall"), list):
+            done = _relay_recalled_mids(mnd.get("relayRecalled"))   # the recalls owed: the union, minus the ones done on
             mine = {str(r.get("pendingMid") or ""): r for r in (mnd.get("relayRecall") or []) if isinstance(r, dict)}
-            for r in dnd["relayRecall"]:
-                if isinstance(r, dict) and str(r.get("pendingMid") or "") not in mine:
-                    mine[str(r.get("pendingMid") or "")] = r
-            mnd["relayRecall"] = [r for r in mine.values() if str(r.get("pendingMid") or "") not in done][-RELAY_SETTLED_CAP:]
+            for r in (dnd.get("relayRecall") if isinstance(dnd.get("relayRecall"), list) else []):   #   either side, whether
+                if isinstance(r, dict) and str(r.get("pendingMid") or "") not in mine:           #   or not the disk still
+                    mine[str(r.get("pendingMid") or "")] = r                                     #   owes any
+            owed = [r for r in mine.values() if str(r.get("pendingMid") or "") not in done][-RELAY_SETTLED_CAP:]
+            if owed:
+                mnd["relayRecall"] = owed
+            else:
+                mnd.pop("relayRecall", None)
         if isinstance(mnd.get("relayWanted"), dict) and _relay_settled(mnd, mnd["relayWanted"]):
             mnd.pop("relayWanted", None)               # ours is settled: popped FIRST, so the disk's live marker is adopted
         d_rw, m_rw = dnd.get("relayWanted"), mnd.get("relayWanted")
@@ -4582,9 +4587,9 @@ def _rebase_onto_disk(fsid, store):
             if not isinstance(m_rw, dict):
                 mnd["relayWanted"] = d_rw                  # the other writer's live marker
             elif d_rw.get("id") == m_rw.get("id"):
-                for k in ("pendingMid", "pendingAt", "pendingHost"):   # the SAME marker on both sides: the kernel's pending
-                    if k in d_rw and k not in m_rw:        #   stamp (a relay handed to a far host) is a fact a marker only
-                        m_rw[k] = d_rw[k]                  #   gains; a stale copy without it would send the question again
+                _relay_carry_tick_keys(m_rw, d_rw)         # the SAME marker on both sides: the kernel's fields on it (the
+                                                           #   pending stamp, the hold after a stalled bus) are facts a stale
+                                                           #   copy without them would undo, and the question would go again
             elif d_rw.get("pendingMid") or not m_rw.get("pendingMid"):
                 mnd["relayWanted"] = d_rw                  # two holders minted a marker for one wait: the one already handed
                                                            #   to a far host wins, else the published one (its entry is
@@ -12965,6 +12970,29 @@ def _relay_retire_marker(store, nd):
 
 
 RELAY_SETTLED_CAP = 8        # settled marker ids a node remembers (relaySettled), newest last
+RELAY_TICK_KEYS = ("pendingMid", "pendingAt", "pendingHost", "unknownAt", "attempts")   # the kernel's tick owns these
+#                                                                                        on a marker; the judge never writes them
+
+
+def _relay_recalled_mid(x):
+    """The message id a done-recall record names (a dict since the seventh review; a bare id before)."""
+    return str(x.get("mid") or "") if isinstance(x, dict) else str(x)
+
+
+def _relay_recalled_mids(lst):
+    return {_relay_recalled_mid(x) for x in (lst or [])}
+
+
+def _relay_carry_tick_keys(mine, theirs):
+    """Carry the tick-owned fields of the same marker from `theirs` onto `mine` (the store merge, in whichever process
+    runs it): a field absent here is taken, and a counter or a clock (attempts, unknownAt) takes the newer value, so a
+    judge's copy loaded before the tick wrote them never drops the pending stamp or the hold after a stalled bus, and
+    the kernel's own copy never loses its own (the manager's seventh review)."""
+    for k in RELAY_TICK_KEYS:
+        if k not in theirs:
+            continue
+        if k not in mine or (k in ("attempts", "unknownAt") and int(theirs.get(k) or 0) > int(mine.get(k) or 0)):
+            mine[k] = theirs[k]
 
 
 def _relay_mark_settled(nd, marker):

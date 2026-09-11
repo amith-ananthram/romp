@@ -2372,7 +2372,7 @@ class Handler(BaseHTTPRequestHandler):
                 if prior is not None:                  # the same relayed question was sent already (a stalled answer had
                     to_prior = str(prior.get("to_id") or "")   # the kernel ask again): answer THAT send, deliver nothing
                     if to_prior.startswith("peer:"):
-                        return self._send({"ok": True, "id": prior.get("id"), "duplicate": True,
+                        return self._send({"ok": True, "id": prior.get("id"), "duplicate": True, "host": to_prior[5:],
                                            "note": "already relayed to %s" % to_prior[5:]})
                     return self._send({"ok": True, "to": to, "id": prior.get("id"), "duplicate": True})
             #   (the user 2026-08-24): only a delegate can be tracked; wire metadata only — nothing
