@@ -30101,7 +30101,20 @@ def _route_meta_command(be, sid, text, client=None, floating=False, state=None):
     # ours to swallow: it stays the CLI's, verbatim, and the user sees the CLI's own error.
     if not value or len(value.split()) != 1:
         return False
-    is_meta = ((head == "/model" and _vouched_model(value)) or (head == "/effort" and value in _EFFORT_VALUES)
+    # A Codex session's model vocabulary is its engine's (gpt-…), which the catalog behind _vouched_model
+    # never carries, so such a pick is vouched by the owning backend's own acceptance rule instead
+    # (CodexBackend.set_model refuses every other value). Before this the lane menu's "/model gpt-…" was no
+    # meta command at all and fell through to _send_or_park, so the Codex agent read the pick as a literal
+    # prompt (idle: sent; working: parked as a command chip that fired alone) while the chat statusline's
+    # setModel op landed the same pick — the two surfaces disagreed on one gesture (review find, 2026-09-11).
+    # The unowned route is vouched for the same shape: a DEAD Codex session still reports its backend (the
+    # lane reads the durable row, _session_backend), so its menu still offers gpt-… while backend_for says
+    # _UNOWNED (CodexBackend.owns is False once dead) — and the refusal arm below is the one place the client
+    # hears that the pick went nowhere; _UNOWNED.send refuses on stderr alone (review find, 2026-09-11).
+    model_pick = head == "/model" and (_vouched_model(value)
+                                        or (value.startswith("gpt") and be is not None
+                                            and (be is _UNOWNED or be is _codex())))
+    is_meta = (model_pick or (head == "/effort" and value in _EFFORT_VALUES)
                or (head == "/fast" and value in ("on", "off")))
     if is_meta and be is _UNOWNED:
         # a session no running backend owns takes no setting: refuse before any stamp (the switching dots
@@ -30114,7 +30127,7 @@ def _route_meta_command(be, sid, text, client=None, floating=False, state=None):
             client["send"](json.dumps({"type": "warn", "text": why}))
         sys.stderr.write("meta command %s for %s refused: no backend owns this session\n" % (head, sid))
         return True
-    if head == "/model" and _vouched_model(value):
+    if model_pick:
         # the model setter has its OWN rule (an open turn fires it live only on a backend that declares
         # model_switches_live — none shipped does yet, so the SDK still parks; #923), so its verdict is
         # read, not inferred from _ops_gate, which would say `queued` for a pick that had already applied

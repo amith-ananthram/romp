@@ -9,6 +9,7 @@ anything else → the unowned route, whose every op refuses — plus the live-se
 """
 import contextlib
 import io
+import json
 import os
 import unittest
 from romp_load import load_source
@@ -161,6 +162,61 @@ class KernelWiring(unittest.TestCase):
         finally:
             km._codex, km._name_of = saved, saved_name
             km._model_switch_pending.pop("sid-codex", None)       # the pick's switching-dots stamp — don't leak it
+
+    def test_a_codex_model_pick_in_its_own_vocabulary_takes_the_setter_on_both_surfaces(self):
+        # The VALUE is vouched by the owning backend's vocabulary, not only by the kernel's catalog: a gpt-… id
+        # is the one value CodexBackend.set_model accepts, and no Claude table can vouch it. Before this, the
+        # timeline lane's pick (the sendCommand arm, keyed by session NAME) and the same text typed into the
+        # composer were no meta command at all: they fell through to _send_or_park and the Codex agent read the
+        # pick as a literal prompt, while the chat statusline's setModel op landed it (review find, 2026-09-11).
+        # The vouch is the OWNING backend's: the same text on an SDK sid stays the CLI's, verbatim.
+        cx = FakeBackend(); cx._owned = {"sid-codex"}
+        saved, saved_name, saved_sid_of = km._codex, km._name_of, km._sid_of
+        km._codex = lambda: cx
+        km._name_of = lambda sid: "web"
+        km._sid_of = lambda who: "sid-codex" if who == "web" else who   # the lane menu keys its ops by session NAME
+        try:
+            self.assertTrue(self._route({"type": "sendCommand", "name": "web", "cmd": "/model gpt-5-test"}))
+            self.assertTrue(self._route({"type": "sendMessage", "id": "sid-codex", "text": "/model gpt-5-test"}))
+            self.assertEqual([c for c in cx.calls if c[0] == "send"], [], "neither reaches the agent as text")
+            self.assertEqual([c for c in cx.calls if c[0] == "set_model"],
+                             [("set_model", "sid-codex", "gpt-5-test")] * 2, "the lane and the composer both reach the setter")
+            self.assertTrue(self._route({"type": "sendMessage", "id": "sid-sdk", "text": "/model gpt-5-test"}))
+            self.assertEqual(self.be.calls, [("send", "sid-sdk", "/model gpt-5-test")],
+                             "an SDK session's gpt-… is not its vocabulary: the CLI answers it, as before")
+        finally:
+            km._codex, km._name_of, km._sid_of = saved, saved_name, saved_sid_of
+            km._model_switch_pending.pop("sid-codex", None)       # the pick's switching-dots stamp — don't leak it
+
+    def test_a_dead_codex_lanes_model_pick_is_refused_to_the_client_not_on_stderr_alone(self):
+        # A DEAD Codex session still reports backend 'codex' (_session_backend reads the durable registry row), so
+        # its timeline lane still offers the gpt-… choices — and a pick sends "/model gpt-…" for a sid no backend
+        # owns (CodexBackend.owns says False once dead; backend_for answers _UNOWNED). That pick is vouched for the
+        # unowned route too, so it reaches the route's refusal arm like a dead SDK lane's "/model opus": the client
+        # is warned and nothing is stamped. Before this the gpt-… vouch asked only the live Codex backend, the route
+        # answered False, and the sendCommand arm handed the text to _UNOWNED.send, whose refusal is a stderr line
+        # the client never hears (review find, 2026-09-11).
+        cx = FakeBackend(); cx._owned = set()                      # the Codex backend is up; this session of its own is dead
+        saved, saved_name, saved_sid_of = km._codex, km._name_of, km._sid_of
+        km._codex = lambda: cx
+        km._name_of = lambda sid: "web"
+        km._sid_of = lambda who: "sid-unowned" if who == "web" else who
+        heard = []
+        try:
+            self.assertIs(km.Sessions.backend_for("sid-unowned"), km._UNOWNED)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertTrue(km._drive({"type": "sendCommand", "name": "web", "cmd": "/model gpt-5-test"},
+                                          {"send": heard.append}))
+            warns = [json.loads(m) for m in heard if json.loads(m).get("type") == "warn"]
+            self.assertEqual(len(warns), 1, "the client hears the refusal once: %r" % (heard,))
+            self.assertIn("no running backend owns this session", warns[0]["text"])
+            self.assertNotIn("sid-unowned", km._model_switch_pending, "refused before any switching-dots stamp")
+            self.assertEqual(cx.calls, [], "a dead session's backend is not asked to set or send anything")
+            self.assertEqual(self.be.calls, [], "the SDK backend was untouched")
+        finally:
+            km._codex, km._name_of, km._sid_of = saved, saved_name, saved_sid_of
+            km._model_switch_pending.pop("sid-unowned", None)
 
     def test_ui_op_falls_through_even_for_sdk_sid(self):
         # closeTab/openSession are backend-agnostic UI ops → never intercepted
