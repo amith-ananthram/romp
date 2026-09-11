@@ -43,7 +43,9 @@ load_source = _ls_mod.load_source
 sh = sys.modules.get("romp_session_host") or load_source("romp_session_host", _HERE / "session_host.py")
 
 # ── settings (bare value files under the state directory, like tmux-backend) ─────────────────────
-SESSION_HOSTS_SETTING = "session-hosts"            # "on" | "off" (default off)
+SESSION_HOSTS_SETTING = "session-hosts"            # the toggle: "off" (or 0 / false / no) turns hosts off on this
+                                                   # machine; "on", or no file at all, leaves them on (on by default
+                                                   # since T348, the user 2026-09-11; off by default before)
 SESSION_HOST_GRACE_SETTING = "session-host-grace"  # seconds an unattached idle CLI lives (default 900)
 HOST_SCOPE_PREFIX = "romp-host-"
 _HOST_SCOPE_RE = re.compile(r"romp-host-([0-9a-fA-F]{1,8})-(\d+)\.scope\Z")
@@ -61,8 +63,10 @@ def _setting(state_dir, name: str, default: str) -> str:
 
 
 def session_hosts_on(state_dir) -> bool:
-    """Whether NEW sessions start through a host. Read at each connect, so a flip needs no restart."""
-    return _setting(state_dir, SESSION_HOSTS_SETTING, "off").lower() in ("on", "1", "true", "yes")
+    """Whether NEW sessions start through a host: on unless the setting file says otherwise (a machine with no file
+    is on; a file saying off, 0, false or no is the toggle; an empty file is the default). Read at each connect, so a
+    flip needs no restart: a plain-child session becomes hosted at its next respawn, a new one at once."""
+    return _setting(state_dir, SESSION_HOSTS_SETTING, "on").lower() in ("on", "1", "true", "yes")
 
 
 def session_host_grace_s(state_dir) -> float:

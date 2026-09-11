@@ -8,6 +8,7 @@ frame protocol), synthetic ids, no real CLI. Tests needing the SDK skip without 
 """
 import asyncio
 import importlib.util
+import inspect
 import json
 import os
 import re
@@ -40,13 +41,43 @@ SID = "11111111-2222-3333-4444-0000000000b1"
 
 
 class Settings(unittest.TestCase):
-    def test_hosts_default_off_and_the_grace_default(self):
+    def test_hosts_default_on_and_the_file_is_the_toggle(self):
+        """T348 (the user 2026-09-11): hosts are on for everyone on this version; the file turns them off per machine."""
         d = tempfile.mkdtemp()
-        self.assertFalse(ht.session_hosts_on(d))
+        self.assertTrue(ht.session_hosts_on(d), "a machine with no file is on")
+        for word in ("off", "0", "false", "no", " Off\n", "OFF"):
+            Path(d, "session-hosts").write_text(word)
+            self.assertFalse(ht.session_hosts_on(d), "the toggle: a file saying %r is off" % word)
+        for word in ("on", "1", "true", "yes", "On\n"):
+            Path(d, "session-hosts").write_text(word)
+            self.assertTrue(ht.session_hosts_on(d), "a file saying %r stays on" % word)
+        Path(d, "session-hosts").write_text("")
+        self.assertTrue(ht.session_hosts_on(d), "an empty file is the default: on")
+        Path(d, "session-hosts").write_text("maybe")
+        self.assertFalse(ht.session_hosts_on(d), "a word that is not one of the on words is off, as before")
+        self.assertIn('return _setting(state_dir, SESSION_HOSTS_SETTING, "on")', inspect.getsource(ht.session_hosts_on), "the default is the literal on")
+
+    def test_the_default_is_stated_where_the_reader_and_the_docs_speak_of_it(self):
+        """Every place that states the default says on (T348): the reader's comment, the backend's log line for the
+        off branch, and the reference's paragraph on session hosts."""
+        src = open(os.path.join(ROOT, "kernel", "host_transport.py")).read()
+        self.assertIn("on by default\n" + " " * 51 + "# since T348", src, "the setting's comment names the default and its origin")
+        bsrc = open(os.path.join(ROOT, "kernel", "sdk_backend.py")).read()
+        self.assertIn('self._log("host (%s): the session-hosts file says off; running the CLI as a kernel child" % sess.name)', bsrc,
+                      "the off branch names the toggle's state honestly: the file says off")
+        self.assertNotIn("session-hosts is off;", bsrc, "the old line, which read as the default, is gone")
+        doc = open(os.path.join(ROOT, "docs", "reference.md")).read()
+        i = doc.index("A session can outlive the kernel that started it.")
+        para = doc[i:i + 900]
+        self.assertIn("By default, on every machine\non this version, a new session's CLI runs under a small per-session host", para)
+        self.assertIn("write `off` to it to run a machine's sessions as plain kernel\nchildren again", para)
+        self.assertNotIn("off\nby default", para, "the reference no longer says off by default")
+        self.assertNotIn("the devbox opts in first", para, "the rollout wording went with the opt-in")
+
+    def test_the_grace_default_and_its_file(self):
+        d = tempfile.mkdtemp()
         self.assertEqual(ht.session_host_grace_s(d), sh.UNATTACHED_GRACE_DEFAULT_S)
-        Path(d, "session-hosts").write_text("on\n")
         Path(d, "session-host-grace").write_text("120")
-        self.assertTrue(ht.session_hosts_on(d))
         self.assertEqual(ht.session_host_grace_s(d), 120.0)
         Path(d, "session-host-grace").write_text("junk")
         self.assertEqual(ht.session_host_grace_s(d), sh.UNATTACHED_GRACE_DEFAULT_S, "junk falls back, loudly enough by being the default")
@@ -858,7 +889,9 @@ class Pins(unittest.TestCase):
 
     def test_a_backend_with_hosts_off_touches_no_host_code_at_construction(self):
         d = tempfile.mkdtemp(); be = sb.SdkBackend(d, "/bin/true", lambda *a, **k: None)
-        self.assertFalse(be.session_hosts_on())
+        self.assertTrue(be.session_hosts_on(), "on by default (T348)")
+        Path(d, "session-hosts").write_text("off")
+        self.assertFalse(be.session_hosts_on(), "the file is the toggle, read on each ask")
 
     def test_host_log_rows_are_filed_once_per_line(self):
         d = tempfile.mkdtemp(); logs = []

@@ -9321,10 +9321,11 @@ class SdkBackend:
             # for; no host.died row: nothing died), then clear the directory.
             await self._host_orphan_recover(sess, opts, None, msg_classes, died=False)
         if state == "none" and not self.session_hosts_on():
-            # the kill switch: with the setting off nothing SPAWNS a host, whatever happened to the last one;
-            # the session runs the plain SDK subprocess and the connect loop's finally closes a kernel lease
+            # the kill switch: with the setting file saying off nothing SPAWNS a host, whatever happened to the last
+            # one; the session runs the plain SDK subprocess and the connect loop's finally closes a kernel lease.
+            # Hosts are on by default (T348), so this branch runs only when the file on this machine says off.
             sess._host_intent = False
-            self._log("host (%s): session-hosts is off; running the CLI as a kernel child" % sess.name)
+            self._log("host (%s): the session-hosts file says off; running the CLI as a kernel child" % sess.name)
             return None
         if state == "attach":
             sess._host_is_attach = True

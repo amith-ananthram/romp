@@ -1058,11 +1058,15 @@ restart monitors read. Two CLIs on one conversation is the boot sweep's own row
 there. The CLI takes no lock on a transcript it resumes, so the one writer per
 conversation is entirely the lease's to keep.
 
-A session can outlive the kernel that started it. With the `session-hosts`
-setting on (a bare value file under the state directory, `on` or `off`, off
-by default; the devbox opts in first), a new session's CLI runs under a small
-per-session host process, `bin/romp-session-host`, instead of as the kernel's
-child. The host spawns the CLI from a spawn specification the kernel writes
+A session can outlive the kernel that started it. By default, on every machine
+on this version, a new session's CLI runs under a small per-session host
+process, `bin/romp-session-host`, instead of as the kernel's child. The
+`session-hosts` setting is the toggle: a bare value file under the state
+directory; write `off` to it to run a machine's sessions as plain kernel
+children again (`on`, or no file at all, leaves hosts on). It is read at each
+connect, so a flip needs no restart: a session already running as a plain
+child becomes hosted at its next respawn (one more cut, at the next kernel
+restart), a new session at once. The host spawns the CLI from a spawn specification the kernel writes
 (`hosts/<sid>/spawn.json`, the plain fields of the SDK's options, at mode 0600
 in a 0700 directory, since it carries the environment overlay), through the
 SDK's own subprocess transport, so the command line and the environment are
