@@ -5512,17 +5512,18 @@ class SdkSession:
         return old
 
     def _adopt_queue_mirror(self, reg: dict) -> None:
-        """Take the registry mirror's queue as this session's, when it holds more than the seed did (a text
-        queued behind a stand-down between the constructor's reg read and the insert into the backend's
-        sessions): texts and their identities from reg['queue'] + reg['queueMeta'], the seed's own reading."""
+        """Take the registry mirror's queue as this session's, WHOLESALE, when it differs from the seed: texts
+        and their identities from reg['queue'] + reg['queueMeta'], the seed's own reading. Called by _ensure
+        right after the insert, before anything in memory has enqueued, so the mirror is the authority at that
+        moment whatever moved it between the constructor's reg read and the insert: an automatic message queued
+        behind a stand-down (an append) or the boot reconcile's resume nudge and death notices (a prepend; the
+        commit-17 review's second item, which an append-only adoption dropped)."""
         texts = [t for t in (reg.get("queue") or []) if isinstance(t, str) and t]
         with self._lock:
-            if len(texts) <= len(self._pending) or texts[:len(self._pending)] != list(self._pending):
+            if texts == list(self._pending):
                 return
-            metas = queue_meta_from_reg(reg)
-            for t, m in zip(texts[len(self._pending):], metas[len(self._pending):]):
-                self._pending.append(t)
-                self._pending_meta.append(m)
+            self._pending = texts
+            self._pending_meta = queue_meta_from_reg(reg)
 
     def _persist_queue(self):
         """Mirror _pending to the registry (reg['queue']) so queued turns survive a kernel death —
@@ -11671,10 +11672,13 @@ class SdkBackend:
             s = SdkSession(self, reg)
             s.on_boot_settled = on_boot_settled
             self.sessions[sid] = s
-            # the queue mirror can grow between the reg read above and this insert (an automatic message queued
-            # behind a stand-down takes _reg_lock alone and sees no session yet; the commit-15 review's third
-            # item): re-seed from a fresh read under _reg_lock now that the insert is visible, so the mirror and
-            # the live list cannot diverge and the next _persist_queue erases nothing
+            # the queue mirror can move between the reg read above and this insert: an automatic message queued
+            # behind a stand-down (an append, under _reg_lock alone, seeing no session yet; the commit-15 review's
+            # third item) or the boot reconcile's notices (a prepend). Nothing in memory has enqueued yet (the
+            # caller's enqueue follows this return), so the mirror is adopted whole from a fresh read under
+            # _reg_lock now that the insert is visible: a later _persist_queue then writes back what the mirror
+            # held plus what memory adds. (An enqueue that races the window between this read and the caller's is
+            # the ordinary live path: it lands in memory and the next persist carries it.)
             adopt = getattr(s, "_adopt_queue_mirror", None)    # a test stand-in for SdkSession may carry no queue
             if adopt is not None:
                 with self._reg_lock:
@@ -12581,12 +12585,6 @@ class SdkBackend:
         lease = read_lease(self.state_dir, sid)
         if ht.host_lease_state(lease, time.time()) != "attach":
             return False
-        with self._lock:
-            threads = self.__dict__.setdefault("_end_threads", {})
-            prev = threads.get(sid)
-            if prev is not None and prev.is_alive():
-                self._log("host (%s): an end through the lease is already under way" % sid[:8])
-                return True                     # one end thread per sid: a second End click starts no second socket
         sock = ht.host_sock(self.state_dir, sid)
         ident = self._kernel_identity()
         async def go():
@@ -12612,12 +12610,21 @@ class SdkBackend:
                 asyncio.run(go())
             except Exception as e:
                 self._log("host (%s): end by lease thread failed: %s" % (sid[:8], e))
-        self._log("host (%s): kill with no session object; ending the live host (pid %s) through its lease"
-                  % (sid[:8], ((lease or {}).get("holder") or {}).get("pid")))
-        th = threading.Thread(target=run, name="romp-end-host-" + sid[:8], daemon=True)
         with self._lock:
-            self.__dict__.setdefault("_end_threads", {})[sid] = th
-        th.start()
+            # check, create, register and START under one acquisition: a check-then-register with the lock released
+            # between let two Ends for one sid (the dashboard's and `romp end`) open two sockets, and the host's
+            # `busy` to the second landed as a false failure row (the commit-17 review's first item); an unstarted
+            # thread's is_alive() is False, so the start is inside the lock too
+            threads = self.__dict__.setdefault("_end_threads", {})
+            prev = threads.get(sid)
+            if prev is not None and prev.is_alive():
+                self._log("host (%s): an end through the lease is already under way" % sid[:8])
+                return True                     # one end thread per sid: a second End click starts no second socket
+            self._log("host (%s): kill with no session object; ending the live host (pid %s) through its lease"
+                      % (sid[:8], ((lease or {}).get("holder") or {}).get("pid")))
+            th = threading.Thread(target=run, name="romp-end-host-" + sid[:8], daemon=True)
+            threads[sid] = th
+            th.start()
         return True
 
     def running_sids(self) -> list:
