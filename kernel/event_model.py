@@ -648,7 +648,33 @@ _JSONL_CACHE_MAX = 1024           # bounds MEMORY only (384 → 1024 on 2026-09-
 # recently used entries go first, one at a time, under the same LRU order the count uses, so a hot leaf survives a
 # cold flood of subagent files exactly as before. A single entry larger than the whole budget still inserts: a leaf is
 # never refused, the budget then holds that one entry. Counters under /perf recordCache.
-_JSONL_CACHE_BUDGET_BYTES = int(float(os.environ.get("ROMP_RECORD_CACHE_BUDGET_MB", "1024")) * 1024 * 1024)
+# The default is a QUARTER of the machine's memory, never under 4 GiB (2026-09-11, the day the budget shipped at 1 GiB):
+# the working set of a devbox running 50 sessions is their live leaves, read by every build in every pusher cycle, and
+# a budget below it does not save memory, it thrashes: 18 entries filled the 1 GiB, every build re-read whole
+# transcripts (14.9 GB read in the first 3.5 minutes, 724 evictions, one pusher cycle of 132 s, chat builds of 3 s
+# each), and glibc's arenas kept the churn, 14 GB resident over a 1 GiB cache. What is not needed until looked at
+# (subagent transcripts) leaves through drop_after="quiescent" folds instead; the budget is the backstop, not the
+# mechanism. ROMP_RECORD_CACHE_BUDGET_MB still sets it outright.
+RECORD_CACHE_BUDGET_FLOOR_BYTES = 4 * 1024 ** 3
+RECORD_CACHE_BUDGET_FRACTION = 0.25
+
+
+def _record_cache_default_budget_bytes(meminfo_text=None):
+    """A quarter of MemTotal (from /proc/meminfo, or the text given), floored at 4 GiB; the floor alone when the file
+    is unreadable (macOS, a container without procfs)."""
+    try:
+        text = meminfo_text if meminfo_text is not None else open("/proc/meminfo", encoding="utf-8").read()
+        for line in text.splitlines():
+            if line.startswith("MemTotal:"):
+                kb = int(line.split()[1])
+                return max(RECORD_CACHE_BUDGET_FLOOR_BYTES, int(kb * 1024 * RECORD_CACHE_BUDGET_FRACTION))
+    except Exception:
+        pass
+    return RECORD_CACHE_BUDGET_FLOOR_BYTES
+
+
+_JSONL_CACHE_BUDGET_BYTES = (int(float(os.environ["ROMP_RECORD_CACHE_BUDGET_MB"]) * 1024 * 1024)
+                             if os.environ.get("ROMP_RECORD_CACHE_BUDGET_MB") else _record_cache_default_budget_bytes())
 _JSONL_CACHE_BYTES = [0]          # the sum of every held entry's weight, kept in step with _JSONL_CACHE under its lock
 _RECORD_CACHE_STATS = {"inserts": 0, "evictions": 0, "evictedBytes": 0, "budgetEvictions": 0, "dropped": 0, "droppedBytes": 0}
 _DROP_AFTER_QUIESCENT_S = float(os.environ.get("ROMP_RECORD_CACHE_DROP_QUIESCENT_S", "120"))   # a file this long unchanged
@@ -1083,10 +1109,16 @@ def checkpoint_dirty():
         return sorted(_FOLD_DIRTY)
 
 
-def checkpoint_write_dirty(paths=None):
-    """Write the checkpoints of `paths` (default: every dirty path); returns how many were written."""
+def checkpoint_write_dirty(paths=None, budget_s=None):
+    """Write the checkpoints of `paths` (default: every dirty path); returns how many were written. `budget_s`
+    bounds the pass (the exit path, 2026-09-11: an unbounded write over a kernel life's dirty files outran the
+    manager's 5 s grace and the SIGKILL lost the cut row): the first file always writes, the pass stops once the
+    budget has passed, and what is left stays dirty for the next writer."""
     n = 0
+    t0 = time.monotonic()
     for p in (checkpoint_dirty() if paths is None else [str(p) for p in paths]):
+        if budget_s is not None and n and time.monotonic() - t0 > budget_s:
+            break
         if checkpoint_write(p):
             n += 1
     return n

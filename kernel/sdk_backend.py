@@ -9049,6 +9049,7 @@ class SdkBackend:
         #                                           heard the same notifications twice (2026-08-18 review)
         self._boot_phase = boot_phase            # the kernel's boot-milestone hook (censusDone, attachDone), or None
         self._boot_attach_pending = 0            # boot attaches whose hello (or death) has not landed yet
+        self._boot_attach_unsettled = set()      # their sids, for the boot row when the backstop writes it
         self._boot_attach_lock = threading.Lock()
         self._attach_sem = threading.Semaphore(BOOT_ATTACH_CONCURRENCY)   # boot re-attaches: socket connects, not launches
         self._spawn_sem = threading.Semaphore(BOOT_RESUME_CONCURRENCY)   # the ONE machine-wide spawn-stagger
@@ -9987,7 +9988,7 @@ class SdkBackend:
                 if not slot:
                     self._log("boot reconcile: resume slot backstop expired (a CLI is wedged "
                               "pre-init?) — continuing the sweep anyway")
-                settled = (self._boot_attach_settled(sem.release if slot else None) if attach
+                settled = (self._boot_attach_settled(sem.release if slot else None, sid) if attach
                            else (sem.release if slot else None))
                 try:   # same per-session isolation as above: one bad spawn must not strand the rest
                     if self._ensure(sid, on_boot_settled=settled) is None and attach:
@@ -10024,15 +10025,18 @@ class SdkBackend:
         if done:
             self._boot_milestone("attachDone")
 
-    def _boot_attach_settled(self, release):
+    def _boot_attach_settled(self, release, sid=None):
         """The on_boot_settled callback for one boot re-attach: frees its attach slot and counts the attach down;
         fires exactly once (the session fires it at hello or at its thread's death, and the reconcile fires it
         for a session it never started)."""
         fired = []
+        if sid is not None:
+            getattr(self, "_boot_attach_unsettled", set()).add(sid)
         def settled():
             if fired:
                 return
             fired.append(1)
+            getattr(self, "_boot_attach_unsettled", set()).discard(sid)
             if release:
                 try:
                     release()
