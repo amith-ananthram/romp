@@ -887,7 +887,7 @@ class Capability(_Wire):
                         "after a reconnect, which must stay the resync frame itself")
         self.assertNotIn("tabOrder", types, "no strip from the handler itself: the connect push is the one source")
         caps = next(m for m in self.sent if m["type"] == "caps")
-        self.assertEqual(caps, {"type": "caps", "caps": ["tagEdit"], "viewsSeq": None},
+        self.assertEqual(caps, {"type": "caps", "caps": ["tagEdit", "chatProto2"], "viewsSeq": None},
                          "no store exists yet: the stubbed push carried no seq and the store has none; viewsSeq is null, "
                          "the key always present")
         # a RE-SENT ready (the shim, on a reconnected socket) gets the caps again — the event a page

@@ -65,7 +65,7 @@ test("a hover on a turn that is RESIDENT but outside the render window lands on 
 test("applyGlow records which uuids lit a row and hands the rest to the strip, for the active view only", () => {
   // the lit set is filled inside the ONE query that adds .ext-glow, so a uuid with no rendered row can never glow
   assert.match(RENDER, /const lit = new Set<string>\(\);\s*v\.el\.querySelectorAll<HTMLElement>\("\.turn\[data-uuid\]"\)\.forEach\(\(n\) => \{\s*const u = n\.dataset\.uuid \|\| "";\s*if \(uset\.has\(u\)\) \{ n\.classList\.add\("ext-glow"\); lit\.add\(u\); \}/);
-  assert.match(RENDER, /if \(g\.sid === activeId\) \{\s*const s = liveSession\(g\.sid\);\s*glowHistory = historyMarks\(g\.uuids \|\| \[\], g\.idx, lit, s\?\.headFrom \?\? 0\);/);
+  assert.match(RENDER, /if \(g\.sid === activeId\) \{\s*const s = liveSession\(g\.sid\);\s*(?:\/\/[^\n]*\n\s*)*glowHistory = historyMarks\(g\.uuids \|\| \[\], g\.idx, lit, s\?\.proto === 2 \? 0 : \(s\?\.headFrom \?\? 0\)\);/);   // proto 2: no index into the unloaded prefix, no marks (T323 stage 4b)
   assert.match(RENDER, /glowHistory = \[\]; glowUnits = \[\];\s*const midSet = new Set\(mids\);/, "a fresh hover (or a clear) starts with no history marks and no spacer units");
   assert.match(RENDER, /import \{ historyMarks, historyBands, windowSpans, HIST_H, HIST_GAP \} from "\.\/glow-history";/);
 });

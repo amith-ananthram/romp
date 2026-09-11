@@ -66,6 +66,7 @@ def _write_doc(path, d):
 def _strip(tree):
     """A tree as JSON compares it: lazy scalars dropped once hydrated (the whole parse never carries them)."""
     t = json.loads(json.dumps(tree, default=lambda o: "<unserializable>"))
+    t.pop("cutTurn", None)                                  # where the lazy atoms ended: a restored tree's own fact (stage 4b)
     for turn in t["turns"]:
         for a in turn["atoms"]:
             a.pop("lazy", None)

@@ -2,8 +2,8 @@
 """The kernel's side of the per-session host (stage 4 of #1317, T315; kernel/session_host.py is the host,
 the T315 design note is the design): a Transport the SDK client drives over the host's Unix socket, the
 same class over an orphan journal file (one consumer path for live attach and for replay after a host
-death), the spawn specification the kernel writes for a host, the settings that turn hosts on, and the
-host-lease classification the backend attaches by.
+death), the spawn specification the kernel writes for a host, the settings (the session-hosts toggle, on by
+default, and the host grace), and the host-lease classification the backend attaches by.
 
 The SDK's `Transport` is documented as unstable; `HostTransport` implements its six methods (connect,
 write, read_messages, close, is_ready, end_input) and a test pins the set against the abstract class.
@@ -43,7 +43,9 @@ load_source = _ls_mod.load_source
 sh = sys.modules.get("romp_session_host") or load_source("romp_session_host", _HERE / "session_host.py")
 
 # ── settings (bare value files under the state directory, like tmux-backend) ─────────────────────
-SESSION_HOSTS_SETTING = "session-hosts"            # "on" | "off" (default off)
+SESSION_HOSTS_SETTING = "session-hosts"            # the toggle: "off" (or 0 / false / no) turns hosts off on this
+                                                   # machine; "on", or no file at all, leaves them on (on by default
+                                                   # since T348, the user 2026-09-11; off by default before)
 SESSION_HOST_GRACE_SETTING = "session-host-grace"  # seconds an unattached idle CLI lives (default 900)
 HOST_SCOPE_PREFIX = "romp-host-"
 _HOST_SCOPE_RE = re.compile(r"romp-host-([0-9a-fA-F]{1,8})-(\d+)\.scope\Z")
@@ -60,9 +62,22 @@ def _setting(state_dir, name: str, default: str) -> str:
     return v or default
 
 
+SESSION_HOSTS_ON_WORDS = ("on", "1", "true", "yes")
+
+
+def session_hosts_read(state_dir) -> "tuple[bool, str]":
+    """ONE read of the setting: (on, value). `value` is the file's stripped text, "" with no file. On unless the file
+    says otherwise: a machine with no file is on; an empty file (or one holding only whitespace) is the default, on; a
+    file saying off, 0, false or no is the toggle; any other word reads as off too. A caller that decides and then logs
+    reads once through this, so the decision and the value it names agree (a flip between two reads cannot contradict)."""
+    value = _setting(state_dir, SESSION_HOSTS_SETTING, "")
+    return (True if not value else value.lower() in SESSION_HOSTS_ON_WORDS), value
+
+
 def session_hosts_on(state_dir) -> bool:
-    """Whether NEW sessions start through a host. Read at each connect, so a flip needs no restart."""
-    return _setting(state_dir, SESSION_HOSTS_SETTING, "off").lower() in ("on", "1", "true", "yes")
+    """Whether NEW sessions start through a host (session_hosts_read's verdict). Read at each connect, so a flip needs no
+    restart: a plain-child session becomes hosted at its next respawn, a new one at once."""
+    return session_hosts_read(state_dir)[0]
 
 
 def session_host_grace_s(state_dir) -> float:

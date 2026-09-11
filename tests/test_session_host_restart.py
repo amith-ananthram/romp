@@ -8,7 +8,8 @@ SIGTERM five seconds in (the manager's restart: a drain that now DETACHES); a se
 state directory, attaches to the live host, and the turn finishes under it: the session settles waiting, the
 old kernel's restart-cuts row has an empty cutTurns, the CLI is the same process throughout (one writer), no
 continuation notice was queued, and a host.attached row with boot true is on the ledger. A second run with
-the setting OFF pins today's behaviour (the turn is cut, a notice is queued, a new CLI pid), so the test proves
+the setting OFF (a toggled-off machine, since hosts are on by default) pins the plain child's behaviour (the turn is
+cut, a notice is queued, a new CLI pid), so the test proves
 the difference, not a constant.
 
 Hermetic: a temp state root and Claude config dir, the fake CLI as ROMP_CLAUDE_BIN, no scopes, the SDK venv
@@ -208,7 +209,7 @@ class ServedRestart(unittest.TestCase):
 
     def test_control_with_hosts_off_the_restart_cuts_the_turn(self):
         lease1, cut, queued = self._run(hosts_on=False)
-        self.assertEqual([c["sid"] for c in cut["cutTurns"]], [self.sid], "today's behaviour: the turn is cut")
+        self.assertEqual([c["sid"] for c in cut["cutTurns"]], [self.sid], "the toggled-off machine: the turn is cut")
         # the continuation notice reached the CLI (the fake logs every stdin line): a user message naming the restart
         fed = [json.loads(l) for l in Path(self.fake_log).read_text().splitlines() if l.strip()]
         users = [m for m in fed if m.get("type") == "user"]

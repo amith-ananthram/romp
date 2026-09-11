@@ -61,7 +61,11 @@ CLI, TOOL, LOOP, BYSTANDER, MANAGER, KERNEL, TERMINAL, LIVE = (P + 42, P + 50, P
 
 
 def _backend(d=None):
-    return sb.SdkBackend(d or tempfile.mkdtemp(), "/bin/true", lambda *a, **k: None)
+    d = d or tempfile.mkdtemp()
+    # hosts OFF in this bare state dir (T348: on by default): the real _boot_reconcile below starts the sessions it
+    # classes as cut, and with no file it would spawn a real bin/romp-session-host for each on a box with the SDK
+    Path(d, "session-hosts").write_text("off")
+    return sb.SdkBackend(d, "/bin/true", lambda *a, **k: None)
 
 
 class _Sess:
