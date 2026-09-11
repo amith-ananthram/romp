@@ -129,6 +129,11 @@ os.environ["GIT_AUTHOR_EMAIL"] = os.environ["GIT_COMMITTER_EMAIL"] = "tests@exam
 
 os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp(prefix="romp-tests-state-")   # inside the root; the hook records it
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel exports this to its sessions; it outranks the XDG floor
+# the postal bus port likewise (2026-09-11): a machine whose bus runs on a named port hands ROMP_POSTAL_PORT to every
+# session's shell, and a test run from one would carry the machine's name into every lab and in-process kernel; the
+# bus refuses its fixed port under a test unless the port is the run's own, which the marker beside a port says
+os.environ.pop("ROMP_POSTAL_PORT", None)
+os.environ["ROMP_POSTAL_HERMETIC"] = "1"
 # No test spawns a per-session HOST by omission (2026-09-11, T348): hosts are on by default now, so a backend built over
 # a state dir with no `session-hosts` file starts a real bin/romp-session-host for any session it connects. The root the
 # runner floors carries the toggle set to off from the start, re-asserted per test below (a test that deletes or rewrites
@@ -148,11 +153,6 @@ def _floor_session_hosts_off():
 
 
 _floor_session_hosts_off()
-# the postal bus port likewise (2026-09-11): a machine whose bus runs on a named port hands ROMP_POSTAL_PORT to every
-# session's shell, and a test run from one would carry the machine's name into every lab and in-process kernel; the
-# bus refuses its fixed port under a test unless the port is the run's own, which the marker beside a port says
-os.environ.pop("ROMP_POSTAL_PORT", None)
-os.environ["ROMP_POSTAL_HERMETIC"] = "1"
 
 # No test may resolve the REAL ~/.claude (2026-09-08): the judge module and the event model compute
 # their projects root at IMPORT from CLAUDE_CONFIG_DIR (default ~/.claude), the kernel and the SDK
