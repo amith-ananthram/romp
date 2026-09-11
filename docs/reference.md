@@ -2281,6 +2281,18 @@ the same note) is not the delivery either: that cut is named by the note,
 the self-bounce's `refresh` note, is the delivery: the cut row names the
 request and consumes it.
 
+The automatic converge spaces itself: after a deploy restart lands on a box
+(its own converge, a peer's push, a clicked Update), the next automatic
+converge waits 25 minutes, so a batch of merges costs one restart, and it
+stands down while a quiet deploy is parked for the code already on disk. Both
+waits exist to spare in-flight turns from the restart's cut, so neither applies
+to a restart that would cut none: when every working session runs under a host
+(the default), the converge proceeds at once. Every pass in which main has
+moved and the box does not converge says why on the kernel's log, each time it
+holds: the cool-down's remaining seconds and the turns a restart would cut, the
+parked quiet deploy, or that main could not be read (`git ls-remote` at the
+release remote failed or timed out).
+
 When no row qualifies, the kernel writes a row with action `signal`: the signal
 name, its pid and its parent's pid, the manager pid it was started with,
 whether a manager restart was pending, `managerRequested: false`, and

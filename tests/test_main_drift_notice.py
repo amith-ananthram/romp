@@ -323,9 +323,10 @@ class DriftWiring(unittest.TestCase):
                                          "reason": "from TESTHOST to f3dc387a", "when": "quiet"}) + "\n")
             out = check()
             self.assertEqual(ran, [], "a quiet deploy for this very code is parked: the converge stands down")
-            self.assertIn("already parked as a quiet deploy", out, "one line says why nothing happened")
+            self.assertIn("f3dc387a is parked as a quiet deploy; leaving it to the quiet window", out, "one line says why nothing happened")
             self.assertEqual(km._MAIN_DRIFT[1], "", "the sha is not marked acted on — the next pass re-evaluates")
-            self.assertNotIn("already parked", check(), "…but says it once per sha, not once per pass")
+            self.assertIn("is parked as a quiet deploy; leaving it to the quiet window", check(),
+                          "…and says it on EVERY pass (T352: a silent hold read as a dead thread), no longer once per sha")
             self.assertEqual(ran, [])
             # the 08:42Z shape: origin reads ahead of the checkout too (a stale fetch, or a merge
             # that landed meanwhile) — the parked restart still delivers the code on disk first;
@@ -518,6 +519,126 @@ class DriftWiring(unittest.TestCase):
         self.assertIn('kind = "pull" if d0 else ("restart" if d1 else "")', src,
                       "no version or kind is ever taken from the client")
         self.assertIn('"target": d0 or d1', src, "the click converges onto the commit the banner named")
+
+
+
+class ConvergeWaitsSpareOnlyCuts(unittest.TestCase):
+    """T352 (the manager's find, 2026-09-11): a merged fix waited 23 minutes behind the auto-converge cool-down on a box
+    where every session was hosted, and the hold wrote nothing to the journal. The two waits (the cool-down, the parked
+    quiet deploy) exist to spare in-flight turns, so a restart that would cut none skips them; every pass that holds,
+    stands down, or cannot read main says so on the kernel's log, each time."""
+
+    def setUp(self):
+        import io
+        self.saved = (km._update_mode, km._origin_main_sha, km._checkout_sha, km._kernel_sha, km._run_main_update,
+                      km._deploy_would_cut, km._parked_quiet_deploy, km._kernel_code_changed,
+                      km._LAST_AUTO_CONVERGE[0], km._MAIN_DRIFT[0], km._MAIN_DRIFT[1], km._QUIET_PARKED_LOGGED[0])
+        self.ran = []
+        km._update_mode = lambda: "auto"
+        km._checkout_sha = lambda: "aaa"
+        km._kernel_sha = lambda: "aaa"
+        km._origin_main_sha = lambda: "bbb"
+        km._run_main_update = lambda kind, immediate=False, target="": self.ran.append(kind)
+        km._parked_quiet_deploy = lambda checkout, now=None: 0
+        km._kernel_code_changed = lambda running, target: True
+        km._MAIN_DRIFT[0] = km._MAIN_DRIFT[1] = ""
+        km._QUIET_PARKED_LOGGED[0] = ""
+        km._LAST_AUTO_CONVERGE[0] = 0.0
+        self.err = io.StringIO()
+
+    def tearDown(self):
+        (km._update_mode, km._origin_main_sha, km._checkout_sha, km._kernel_sha, km._run_main_update,
+         km._deploy_would_cut, km._parked_quiet_deploy, km._kernel_code_changed) = self.saved[:8]
+        km._LAST_AUTO_CONVERGE[0], km._MAIN_DRIFT[0], km._MAIN_DRIFT[1], km._QUIET_PARKED_LOGGED[0] = self.saved[8:]
+        if km.RESTART_CUTS_FILE.exists():
+            km.RESTART_CUTS_FILE.unlink()
+
+    def _pass(self):
+        import contextlib
+        with contextlib.redirect_stderr(self.err):
+            km._main_drift_check()
+
+    def _lines(self):
+        return [l for l in self.err.getvalue().splitlines() if l.startswith("romp-kernel: converge: ")]
+
+    def _deploy_landed(self, ago):
+        import json, time
+        km.RESTART_CUTS_FILE.write_text(json.dumps({"t": int(time.time() - ago), "reason": "p2p-update: from X to Y",
+                                                    "cutTurns": []}) + "\n")
+
+    def test_a_held_converge_says_so_every_pass_and_names_the_turns_it_spares(self):
+        self._deploy_landed(300)
+        km._deploy_would_cut = lambda: [{"sid": "1" * 36, "name": "web"}, {"sid": "2" * 36, "name": "api"}]
+        self._pass(); self._pass()
+        self.assertEqual(self.ran, [], "inside the cool-down with turns to spare: no restart")
+        lines = self._lines()
+        self.assertEqual(len(lines), 2, "one line per held pass, never once per sha: %r" % lines)
+        for l in lines:
+            self.assertIn("main is at bbb (the checkout aaa, this box runs aaa): holding ", l)
+            self.assertRegex(l, r"holding \d+ s more of the 25 min cool-down since the deploy restart at \d\d:\d\d:\d\dZ")
+            self.assertIn("; a restart now would cut 2 turns: web, api", l)
+        self.assertEqual(km._MAIN_DRIFT[0], "", "the deferred sha stays unoffered: the first pass past the window takes the latest")
+
+    def test_a_converge_that_would_cut_nothing_skips_the_cool_down_and_says_why(self):
+        self._deploy_landed(300)
+        km._deploy_would_cut = lambda: []                 # every working session hosted: a restart cuts nothing
+        self._pass()
+        self.assertEqual(self.ran, ["pull"], "nothing to spare: the converge proceeds inside the cool-down")
+        lines = self._lines()
+        self.assertEqual(len(lines), 1, lines)
+        self.assertRegex(lines[0], r"^romp-kernel: converge: main is at bbb \(this box runs aaa\): \d+ s of the 25 min cool-down since the deploy restart at \d\d:\d\d:\d\dZ remain, but a restart now would cut no turn: converging now$")
+
+    def test_an_unknown_cut_set_keeps_the_hold(self):
+        self._deploy_landed(300)
+        km._deploy_would_cut = lambda: None               # no backend yet: unknown is not "none"
+        self._pass()
+        self.assertEqual(self.ran, [], "unknown keeps both waits, as before")
+        self.assertIn("; what a restart would cut is unknown (no backend yet)", self._lines()[0])
+
+    def test_an_unreadable_main_says_so_every_pass(self):
+        km._origin_main_sha = lambda: ""                  # git ls-remote failed or timed out
+        km._deploy_would_cut = lambda: []
+        self._pass(); self._pass()
+        self.assertEqual(self.ran, [])
+        lines = self._lines()
+        self.assertEqual(len(lines), 2, lines)
+        for l in lines:
+            self.assertIn("no verdict this pass: main at ", l)
+            self.assertIn("(git ls-remote failed or timed out) could not be read; main ?, checkout aaa, running aaa; again in 300 s", l)
+
+    def test_a_parked_quiet_deploy_stands_down_every_pass_unless_nothing_would_be_cut(self):
+        km._checkout_sha = lambda: "bbb"                  # the checkout is ahead of the kernel: a restart is owed…
+        km._origin_main_sha = lambda: "bbb"
+        km._parked_quiet_deploy = lambda checkout, now=None: 1   # …and a quiet deploy is parked for it
+        km._deploy_would_cut = lambda: [{"sid": "1" * 36, "name": "web"}]
+        self._pass(); self._pass()
+        self.assertEqual(self.ran, [], "with a turn to spare the parked quiet deploy stands the check down")
+        lines = self._lines()
+        self.assertEqual(len(lines), 2, "said on every pass, not once per sha: %r" % lines)
+        for l in lines:
+            self.assertEqual(l, "romp-kernel: converge: bbb is parked as a quiet deploy; leaving it to the quiet window; a restart now would cut 1 turn: web")
+        km._deploy_would_cut = lambda: []
+        self._pass()
+        self.assertEqual(self.ran, ["restart"], "nothing to spare: the converge does not wait for the window")
+        self.assertEqual(self._lines()[-1], "romp-kernel: converge: bbb is parked as a quiet deploy, but a restart now would cut no turn: converging without waiting for the window")
+
+    def test_the_backend_answers_would_cut_with_the_drains_own_predicate(self):
+        import sys, tempfile, types
+        sbm = sys.modules.get("romp_sdk_backend") or load_source("romp_sdk_backend", os.path.join(os.path.dirname(HERE), "kernel", "sdk_backend.py"))
+        be = sbm.SdkBackend(tempfile.mkdtemp(), "/bin/true", lambda *a, **k: None)
+        mk = lambda sid, name, inflight, host=None, intent=False: types.SimpleNamespace(sid=sid, name=name, inflight=inflight, _host=host, _host_intent=intent)
+        be.sessions = {"a": mk("a" * 36, "plain-busy", True), "b": mk("b" * 36, "plain-idle", False),
+                       "c": mk("c" * 36, "hosted-busy", True, host=object()), "d": mk("d" * 36, "attaching-busy", True, intent=True)}
+        self.assertEqual(be.would_cut(), [{"sid": "a" * 36, "name": "plain-busy"}], "only a plain child with a turn in flight is a cut")
+        be.sessions = {"c": mk("c" * 36, "hosted-busy", True, host=object())}
+        self.assertEqual(be.would_cut(), [], "every working session hosted: a restart cuts nothing")
+        self.assertEqual(km._deploy_would_cut(), None, "no backend in this process: unknown")
+        saved = km._sdk_backend
+        km._sdk_backend = be
+        try:
+            self.assertEqual(km._deploy_would_cut(), [])
+        finally:
+            km._sdk_backend = saved
 
 
 if __name__ == "__main__":

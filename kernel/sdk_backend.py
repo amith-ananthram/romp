@@ -10170,6 +10170,21 @@ class SdkBackend:
                 #                                     reconnect, raise — frees the sid for the next
                 #                                     parse's acceptance
 
+    @staticmethod
+    def cut_list(sessions) -> list:
+        """The turns a restart would CUT among `sessions`: every session with an in-flight turn that no host holds
+        (T315: a session under a host, or mid-attach by intent, is detached, never cut; T143: `ended` is not a filter,
+        a mid-shutdown session with a live turn is a cut too). The drain's ledger row and the deploy gates read this
+        one predicate (T352), so "would a restart now cut anything" is answered exactly as the drain would record."""
+        return [{"sid": s.sid, "name": s.name} for s in sessions
+                if s.inflight and getattr(s, "_host", None) is None and not getattr(s, "_host_intent", False)]
+
+    def would_cut(self) -> list:
+        """The turns a restart NOW would cut (cut_list over the live sessions): the converge gates' input (T352)."""
+        with self._lock:
+            sessions = list(self.sessions.values())
+        return self.cut_list(sessions)
+
     def drain(self, timeout: float = 2.0, kill=os.kill) -> dict:
         """Graceful-shutdown drain (the kernel's SIGTERM handler): stop every running session cleanly
         within `timeout` — interrupt any in-flight turn and close the SDK clients so the claude
@@ -10201,8 +10216,7 @@ class SdkBackend:
                 s.detached = True                       # by intent too: a session mid-attach must not be ended
                 if s._host is not None:
                     s._host.detach_mode = True
-        cut = [{"sid": s.sid, "name": s.name} for s in sessions
-               if s.inflight and getattr(s, "_host", None) is None and not getattr(s, "_host_intent", False)]
+        cut = self.cut_list(sessions)
         inflight = len(cut)
         for s in sessions:
             try:
