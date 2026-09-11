@@ -17022,8 +17022,9 @@ function markMentions(root: HTMLElement): void {
 // chip word counts, a run of letters inside a chip does not and copies as rendered. Every range is read (a
 // multi-select holds several and sel.toString() concatenates them). A selection with no whole chip is left
 // to the browser in both flavours, including a copy inside the composer (the document's selection holds no
-// chip then). The rich flavour is the ranges' own markup with each chip's hover title (live status text) and
-// data attributes dropped, so a paste keeps the chip's class and text and nothing about the session behind it.
+// chip then). The rich flavour is the ranges' own markup with each chip's hover titles (live status text, on the
+// chip and on a down host's prefix) and data attributes dropped, so a paste keeps the chip's class and text and
+// nothing about the session behind it.
 // The Comment/Quote seed (transcriptSelection) keeps reading the rendered text: a thread's quoted passage
 // anchors on what the transcript shows.
 function mentionCopyText(sel: Selection): { text: string; html: string } | null {
@@ -17050,7 +17051,9 @@ function mentionCopyText(sel: Selection): { text: string; html: string } | null 
   try {
     const scratch = document.createElement("div");
     for (let i = 0; i < sel.rangeCount; i++) scratch.appendChild(sel.getRangeAt(i).cloneContents());
-    for (const c of Array.from(scratch.querySelectorAll<HTMLElement>(".mention-chip"))) {   // class and text travel; the hover title and the ids do not
+    // class and text travel; the hover titles and the ids do not: the chip's own, and the reconnect note a down
+    // host's prefix span wears (hostNameNodes sets it), so the chip's descendants are stripped with it
+    for (const c of Array.from(scratch.querySelectorAll<HTMLElement>(".mention-chip, .mention-chip *"))) {
       c.removeAttribute("title");
       for (const k of Object.keys(c.dataset)) delete c.dataset[k];
     }
