@@ -546,6 +546,7 @@ class ConvergeWaitsSpareOnlyCuts(unittest.TestCase):
         km._MAIN_DRIFT[0] = km._MAIN_DRIFT[1] = ""
         km._QUIET_PARKED_LOGGED[0] = ""
         km._LAST_AUTO_CONVERGE[0] = 0.0
+        km._CONVERGE_CRASH_T[0] = 0.0
         self.err = io.StringIO()
 
     def tearDown(self):
@@ -674,8 +675,52 @@ class ConvergeWaitsSpareOnlyCuts(unittest.TestCase):
             self._pass()
         self.assertEqual(km._MAIN_DRIFT[0], "", "the latch is reset on the way out, so the next pass judges afresh")
         km._deploy_would_cut = lambda: []
+        km._CONVERGE_CRASH_T[0] = 0.0                    # the crash hold is its own test below
         self._pass()
         self.assertEqual(self.ran, ["pull"])
+
+    def test_a_crash_in_the_converge_leg_holds_one_cool_down_before_the_retry(self):
+        # the round-three review's low a: the spares branch waived the cool-down the crash had just stamped, so a
+        # crashing leg retried every pass on a hosted box
+        def boom():
+            raise RuntimeError("boom")
+        km._deploy_would_cut = boom
+        with self.assertRaises(RuntimeError):
+            self._pass()
+        self.assertGreater(km._CONVERGE_CRASH_T[0], 0.0, "the crash is stamped")
+        km._deploy_would_cut = lambda: []                # a restart would cut nothing: the spares branch would converge
+        self._pass(); self._pass()
+        self.assertEqual(self.ran, [], "held: one cool-down after a crash, whatever a restart would cut")
+        held = [l for l in self._lines() if "the converge leg crashed" in l]
+        self.assertEqual(len(held), 2, "said on every held pass: %r" % self._lines())
+        self.assertIn("holding ", held[0]); self.assertIn(" s more of one cool-down before the retry", held[0])
+        self.assertEqual(km._MAIN_DRIFT[0], "", "no target latched while held")
+        km._CONVERGE_CRASH_T[0] = time.time() - km._CONVERGE_COOLDOWN_S - 1
+        self._pass()
+        self.assertEqual(self.ran, ["pull"], "the cool-down over, the retry converges")
+
+    def test_the_converge_leg_asks_git_again_for_the_running_sha_within_the_miss_bound(self):
+        # the round-three review's low b: the 30 s miss memo made the leg's own read (in _run_main_update) return None
+        # for a blip at the top of the same pass, so a main commit touching no kernel code took a full restart
+        import subprocess as _sp
+        real = self.saved[3]
+        saved, saved_miss = km._SHA, km._SHA_MISS_T[0]
+        calls = []
+        def run(argv, **kw):
+            calls.append(argv[-1])
+            return mock.Mock(returncode=0, stdout="" if argv[-1] == "--porcelain" else "abc1234\n")
+        try:
+            km._SHA = None
+            km._SHA_MISS_T[0] = time.time()              # git blipped a moment ago
+            with mock.patch.object(km.subprocess, "run", side_effect=run):
+                self.assertIsNone(real(), "within the bound the miss stands…")
+                self.assertEqual(calls, [])
+                self.assertEqual(real(reask=True), "abc1234", "…but the converge leg's read asks once more")
+            self.assertEqual(calls, ["HEAD", "--porcelain"])
+            self.assertIn("_kernel_code_changed(_kernel_sha(reask=True), pulled)", inspect.getsource(self.saved[4]),
+                          "the REAL _run_main_update (setUp stubs km's) asks once more")
+        finally:
+            km._SHA, km._SHA_MISS_T[0] = saved, saved_miss
 
     def test_a_parked_quiet_deploy_stands_down_every_pass_unless_nothing_would_be_cut(self):
         km._checkout_sha = lambda: "bbb"                  # the checkout is ahead of the kernel: a restart is owed…
@@ -805,7 +850,7 @@ class UiOnlyConverge(unittest.TestCase):
     def test_the_pull_path_carries_the_same_in_place_converge(self):
         src = inspect.getsource(km._run_main_update)
         self.assertIn("pulled = _checkout_sha()", src)
-        self.assertIn("not _kernel_code_changed(_kernel_sha(), pulled) and _in_place_converge(pulled)",
+        self.assertIn("not _kernel_code_changed(_kernel_sha(reask=True), pulled) and _in_place_converge(pulled)",
                       src, "verdict input and converge target are the SAME read — never raced")
         conv = inspect.getsource(km._in_place_converge)
         self.assertIn("_rebuild_dist()", conv)
