@@ -624,15 +624,33 @@ class Plan(unittest.TestCase):
         p3 = rp.plan(turns3, [at(10, 30)], DAY)
         self.assertEqual(p3["rows"], [], "the post-clear turn stands (the first cut zeroed it to max(0, 4.25 - 148.49 - 2))")
         self.assertEqual(len(p3["stoodDown"]), 1)
-        self.assertIn("4.2500 is at or below the attach-unknown row's 148.4878: a counter reset", p3["stoodDown"][0])
+        self.assertIn("4.2500 is at or below the previous row's 150.4878: a counter reset", p3["stoodDown"][0])
         self.assertIn("web 10:50:00: the lifetime rule stood down", p3["stoodDown"][0])
         self.assertIn("note: web 10:50:00: the lifetime rule stood down", rp.report(p3), "said in the report")
-        # the arithmetic contradicting itself (a cumulative above the row's, but the rows between exceed the difference)
+        # the guard is against the PREVIOUS row (the kernel's reset comparison), not the attach-unknown row: a cumulative
+        # above the attach-unknown row's but below the previous row's is a reset too, and stands
         turns4 = [turns[1], row(A, "web", at(10, 45), 20.0) | {"cumulativeUsd": 168.4878},
                   row(A, "web", at(10, 50), 160.0) | {"cumulativeUsd": 160.0}]
         p4 = rp.plan(turns4, [at(10, 30)], DAY)
         self.assertEqual(p4["rows"], [])
-        self.assertIn("less 1 row(s) between (20.0000) is not positive: the arithmetic contradicts itself", p4["stoodDown"][0])
+        self.assertIn("160.0000 is at or below the previous row's 168.4878: a counter reset", p4["stoodDown"][0])
+        # the unknown window can replay several records, each a row with usd 0 and a rising cumulative and no baseline
+        # (the review's third round): the previous row's cumulative is the baseline, never the first replayed one
+        turns6 = [turns[1], row(A, "web", at(10, 45), 0.0) | {"cumulativeUsd": 160.0, "redelivered": True},
+                  row(A, "web", at(10, 50), 170.0) | {"cumulativeUsd": 170.0}]
+        got6 = {c["t"]: (c["corrected"], c["reason"]) for c in rp.plan(turns6, [at(10, 30)], DAY)["rows"]}
+        self.assertEqual(sorted(got6), [at(10, 50)])
+        self.assertEqual(got6[at(10, 50)][0], 10.0, "the turn's own cost: 170 less the replay row's 160, not less the first replay's 148.49")
+        self.assertIn("less the previous row's cumulative 160.0000", got6[at(10, 50)][1])
+        # the multi-replay window, a live turn, then a post-clear first paid turn: it stands (the first cut reduced it to
+        # 3.50 less 0.80 less 1.00 with no note, since 3.50 is above the attach-unknown row's 0.80)
+        turns7 = [row(A, "web", at(10, 40), 0.0) | {"cumulativeUsd": 0.8, "spendBaseline": "attach-unknown", "redelivered": True},
+                  row(A, "web", at(10, 42), 0.0) | {"cumulativeUsd": 3.0, "redelivered": True},
+                  row(A, "web", at(10, 45), 1.0) | {"cumulativeUsd": 4.0},
+                  row(A, "web", at(10, 50), 3.5) | {"cumulativeUsd": 3.5}]
+        p7 = rp.plan(turns7, [at(10, 30)], DAY)
+        self.assertEqual(p7["rows"], [], "a genuine post-clear turn is never reduced")
+        self.assertIn("3.5000 is at or below the previous row's 4.0000: a counter reset", p7["stoodDown"][0])
         # a fresh or seeded baseline row between disarms the chain: the later usd == cumulative row is nobody's lifetime
         turns5 = [row(A, "web", at(10, 40), 0.0) | {"cumulativeUsd": 100.0, "spendBaseline": "attach-unknown", "redelivered": True},
                   row(A, "web", at(10, 45), 3.0) | {"cumulativeUsd": 103.0, "spendBaseline": "seeded"},

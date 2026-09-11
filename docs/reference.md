@@ -2742,15 +2742,16 @@ already shown. `--since` is the instant the per-session hosts came on: before
 it every restart killed the CLI, so nothing there is a step. Rows the fixed
 kernel writes (`cumulativeUsd`, `spendBaseline`) are never staircase steps; one
 rule of their own reaches them: a row whose kernel figure equals its cumulative,
-following the same session's `attach-unknown` row with only ordinary rows
-between, is the lifetime billed once more (the fix's first boot left the
-watermark at zero after a replayed first result) and is corrected to the
-cumulative less that row's cumulative less the rows between, stamped
-`repairRule` 5. The match requires the cumulative above the attach-unknown
-row's and a positive remainder: the first paid turn after a mid-life `/clear`
-is written with its dollars equal to its cumulative by design, a counter reset,
-and the rule stands down with a note (never a clamp); the chain disarms on the
-row it judged, on a reset and on a fresh or seeded baseline row.
+in a session whose `attach-unknown` row precedes it, is the lifetime billed
+once more (the fix's first boot left the watermark at zero after a replayed
+first result) and is corrected by the kernel's own arithmetic to the cumulative
+less the previous same-session row's cumulative (a replayed row with no dollars
+and a rising cumulative counts as that previous row), stamped `repairRule` 5.
+The guard is the kernel's reset comparison, the cumulative above the previous
+row's: the first paid turn after a mid-life `/clear` is written with its
+dollars equal to its cumulative by design, a counter reset, and the rule stands
+down with a note (never a clamp); the chain disarms on the row it judged, on a
+reset and on a fresh or seeded baseline row.
 
 It prints before and after per hour and per session and changes nothing unless
 `--apply` is given. A corrected row keeps the kernel's figure as `usdRecorded`,
