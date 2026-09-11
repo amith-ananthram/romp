@@ -9,6 +9,7 @@ import os
 import tempfile
 import unittest
 from unittest import mock
+import time
 from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -623,15 +624,58 @@ class ConvergeWaitsSpareOnlyCuts(unittest.TestCase):
             if len(calls) == 1:
                 raise _sp.TimeoutExpired(argv, 2)     # a busy boot: git did not answer in time
             return mock.Mock(returncode=0, stdout="" if argv[-1] == "--porcelain" else "abc1234\n")   # a clean tree
+        saved_miss = km._SHA_MISS_T[0]
         try:
             km._SHA = None
+            km._SHA_MISS_T[0] = 0.0
             with mock.patch.object(km.subprocess, "run", side_effect=run):
                 self.assertIsNone(real(), "the blip answers nothing…")
-                self.assertEqual(real(), "abc1234", "…and is not remembered: the next call asks git again")
+                self.assertIsNone(real(), "…and within the re-ask bound the miss stands without a git call (the round-two low: "
+                                          "/version and /sw.js call this per request)")
+                self.assertEqual(calls, ["HEAD"], "one git call so far")
+                km._SHA_MISS_T[0] = time.time() - km._SHA_REASK_S - 1     # the bound passed
+                self.assertEqual(real(), "abc1234", "…and is not remembered for the process's life: asked again after the bound")
                 self.assertEqual(real(), "abc1234", "a real answer is memoized")
             self.assertEqual(calls, ["HEAD", "HEAD", "--porcelain"])
         finally:
             km._SHA = saved
+            km._SHA_MISS_T[0] = saved_miss
+
+    def test_a_missing_running_sha_inside_the_cool_down_holds_says_so_and_the_next_pass_converges(self):
+        # the round-two review's MEDIUM: with the pass no longer returning early on an unreadable input, a None running
+        # sha (a 2 s rev-parse timeout on a busy box) inside the cool-down raised at running[:8] AFTER the latch took
+        # the target, and the hold's own reset never ran: every later pass returned at the latch, the commit never
+        # converged, in silence
+        self._deploy_landed(300)
+        km._kernel_sha = lambda: None
+        km._deploy_would_cut = lambda: [{"sid": "1" * 36, "name": "web"}]
+        self._pass()
+        self.assertEqual(self.ran, [], "inside the cool-down with a turn to spare: held")
+        self.assertIn("main is at bbb (the checkout aaa, this box runs ?): holding ", self._lines()[-1])
+        self.assertEqual(km._MAIN_DRIFT[0], "", "the hold's reset ran: no target latched")
+        km._kernel_sha = lambda: "aaa"
+        km.RESTART_CUTS_FILE.unlink()                    # the cool-down is over
+        self._pass()
+        self.assertEqual(self.ran, ["pull"], "the next pass converges")
+        # the spares branch with a None running sha says so too
+        self.ran.clear(); km._MAIN_DRIFT[0] = ""
+        self._deploy_landed(300)
+        km._kernel_sha = lambda: None
+        km._deploy_would_cut = lambda: []
+        self._pass()
+        self.assertEqual(self.ran, ["pull"], "a restart now would cut no turn: converging")
+        self.assertIn("main is at bbb (this box runs ?): ", self._lines()[-1])
+
+    def test_a_crash_in_the_hold_branches_never_leaves_a_target_latched(self):
+        def boom():
+            raise RuntimeError("boom")
+        km._deploy_would_cut = boom
+        with self.assertRaises(RuntimeError):
+            self._pass()
+        self.assertEqual(km._MAIN_DRIFT[0], "", "the latch is reset on the way out, so the next pass judges afresh")
+        km._deploy_would_cut = lambda: []
+        self._pass()
+        self.assertEqual(self.ran, ["pull"])
 
     def test_a_parked_quiet_deploy_stands_down_every_pass_unless_nothing_would_be_cut(self):
         km._checkout_sha = lambda: "bbb"                  # the checkout is ahead of the kernel: a restart is owed…
