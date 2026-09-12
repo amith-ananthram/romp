@@ -9898,8 +9898,11 @@ def _converge_checkpoints(now):
     no read), so one write carries all five. For another file a tail-only cursor is dropped so the write leaves it out and
     its next run reads the small file whole once. A document already carrying every fold that ran is never a candidate,
     so an idle session's document is written once and then left alone. Returns the documents written."""
-    just_written = set(_CKPT_JUST_WRITTEN); _CKPT_JUST_WRITTEN.clear()   # the settle's writes this cycle: one write per path per cycle
-    cands = [p for p in em.checkpoint_converge_candidates() if p not in just_written]
+    if CKPT_CONVERGE_MS <= 0 or not em.checkpoint_has_work():
+        _CKPT_JUST_WRITTEN.clear()
+        return 0                                           # off (ROMP_CKPT_CONVERGE_MS=0), or nothing dirty and nothing cold: a quiet
+    just_written = set(_CKPT_JUST_WRITTEN); _CKPT_JUST_WRITTEN.clear()   #  cycle costs the pass no lock and no stat (T361)
+    cands = [p for p in em.checkpoint_converge_candidates() if p not in just_written and not _converge_skipped(p)]
     if not cands:
         return 0
     em.converge_stat("passes")
@@ -9909,12 +9912,16 @@ def _converge_checkpoints(now):
         if i and (time.monotonic() - t0 > CKPT_CONVERGE_MS / 1000.0 or spent > CKPT_CONVERGE_BYTES):
             em.converge_stat("deferred", len(cands) - i)   # gated on candidates PROCESSED, not documents written: a first
             break                                          #  candidate that writes nothing must not lift the budget (review)
+        if p in leaves and em.file_quiescent(p):           # T361 (the live loop): a leaf unchanged past the reader's quiescence
+            em.converge_stat("quiescent"); _converge_skip(p)   #  window loses its whole entry right after a fold steps it, so a heal
+            continue                                       #  or a prime here would read it whole every cycle and the write would
+        #                                                    find no entry; the boot's cold refold or the next settle converges it
         cold = [k for k, r in em.cold_fold_reasons(p).items() if r == "cold"]
         if p in leaves:
-            before = em.read_bytes_report().get(p, 0)
+            before = _read_bytes_of(p)
             healed = _heal_cold_folds(p)                   # drops every tail-only cursor, reruns the five leaf folds
             if healed:
-                got = em.read_bytes_report().get(p, 0) - before
+                got = _read_bytes_of(p) - before
                 em.converge_stat("heals", len(healed)); em.converge_stat("healBytes", got); spent += got
             unhealed = [k for k in cold if k not in healed]
             if em.entry_whole_resident(p) and _prime_leaf_folds(p):
@@ -9937,8 +9944,45 @@ def _converge_checkpoints(now):
                 size = 0
             em.converge_stat("writes"); em.converge_stat("bytes", size); spent += size
         else:
-            em.converge_stat("failed")                     # nothing to write, or the write failed (a full or read-only disk)
+            em.converge_stat("failed"); _converge_skip(p)  # nothing to write, or the write failed: not again until the file changes
     return n
+
+
+_CONVERGE_SKIP = {}                 # path -> the file's (mtime_ns, size) when the pass last refused or failed it (T361): the path is
+#                                     no candidate until that changes, so a refusal is one per file state, never one per cycle
+
+
+def _stat_key_ns(p):
+    try:
+        st = os.stat(p)
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def _converge_skip(p):
+    _CONVERGE_SKIP[p] = _stat_key_ns(p)
+    if len(_CONVERGE_SKIP) > 4096:
+        _CONVERGE_SKIP.clear()
+
+
+def _converge_skipped(p):
+    """True while the file stands as it did when the pass last refused or failed it."""
+    k = _CONVERGE_SKIP.get(p)
+    if k is None:
+        return False
+    if _stat_key_ns(p) == k:
+        em.converge_stat("skipped")
+        return True
+    _CONVERGE_SKIP.pop(p, None)
+    return False
+
+
+def _read_bytes_of(p):
+    """The reader's bytes read for `p` under the key it counts by (the path as given, else its real path): the heal's whole
+    read must reach the pass's byte budget (T361: it read as zero under a key the reader did not use)."""
+    rb = em.read_bytes_report()
+    return rb.get(p, 0) or rb.get(os.path.realpath(p), 0)
 
 
 def _persist_checkpoints(now):
