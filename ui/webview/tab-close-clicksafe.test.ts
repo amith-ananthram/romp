@@ -24,7 +24,11 @@ test("renderTabs defers its rebuild while a pointer is pressed on the tab strip"
 test("the press guard is armed on #tabs pointerdown and released on pointerup/cancel/blur", () => {
   assert.match(RENDER, /tabs\.addEventListener\("pointerdown", \(\) => \{ tabPointerHeld = true; \}\)/);
   assert.match(RENDER, /window\.addEventListener\("pointerup", releaseTabStrip\)/);
-  assert.match(RENDER, /window\.addEventListener\("pointercancel", releaseTabStrip\)/);
+  // pointercancel releases only when no drag of ours is in flight: the browser fires it the moment a drag starts, and the
+  // drag IS the press — its dragend handlers release the hold (2026-09-11: a kernel push mid-drag rebuilt #tabs under the
+  // gesture, detaching the dragged node, because this release had already let it)
+  assert.match(RENDER, /window\.addEventListener\("pointercancel", \(\) => \{ if \(draggedId \|\| draggedGroup\) return; releaseTabStrip\(\); \}\);/);
+  assert.doesNotMatch(RENDER, /window\.addEventListener\("pointercancel", releaseTabStrip\)/, "never the bare release: it would end the hold at dragstart");
   assert.match(RENDER, /window\.addEventListener\("blur", releaseTabStrip\)/);   // press may end off-strip / in another frame
 });
 
