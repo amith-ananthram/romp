@@ -4329,7 +4329,9 @@ class _LazyView(LazyAtoms):
     and a client's ready frame both building the same chat) every locked access convoyed on the index lock at about one
     atom per scheduler switch, and a restored session's first frame took 20 s on a four-core runner (T358 CI, 2026-09-12).
     A view is per build and short-lived, so what it holds is bounded by the build; an eviction in the parent is not seen by
-    a slot the view already read. json's encoder is refused while the parent's slots are unbuilt; slicing a view is a
+    a slot the view already read, so while a build (or a planner pass whose returned tasks hold its views) is alive
+    its read set pins atoms past the index cap by that one build's worth, as the plain-list slices did. json's encoder
+    is refused while the parent's slots are unbuilt; slicing a view is a
     view of the parent."""
     def __init__(self, parent, start, stop):
         list.__init__(self, [_UNMAT] * (stop - start))

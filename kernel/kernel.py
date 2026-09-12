@@ -577,8 +577,9 @@ class _PerfStats:
         if os.environ.get("ROMP_PERF_STACKS"):     # a debugging aid (T358): every thread's last frames, named, for a served test that
             import traceback                        #  has to say where a kernel sits while a client waits on a runner nobody can log into
             names = {t.ident: t.name for t in threading.enumerate()}
-            stacks = {names.get(tid, str(tid)): [l.strip() for l in traceback.format_stack(f)[-6:]]
-                      for tid, f in sys._current_frames().items()}
+            stacks = {"%s %s" % (tid, names.get(tid, "?")): [l.strip() for l in traceback.format_stack(f)[-6:]]
+                      for tid, f in sys._current_frames().items()}   # keyed by ident WITH the name: two workers sharing a name
+            #                                                          stay two entries, the duplicate-worker case the aid is for
         return {"now": now, "since": since, "uptime_s": now - _STARTED, "log": _PERF, "stacks": stacks,
                 "process": _process_stats(), "pusher": pusher, "stages_ms": stages,
                 "builds": builds, "sends": sends, "goals": goals, "memos": memos, "judge": judge, "skillLoadIndex": skill_idx, "http": http,
