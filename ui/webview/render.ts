@@ -12090,7 +12090,7 @@ function stripShows(id: string, only: string | null = onlyTag()): boolean {
 function unfocusHiddenByView(id: string): void {
   if (activeId !== id) return;
   stashActiveDraft(id);
-  activeId = null; vanishedId = id; vanishedWhy = "hidden"; vanishedName = sessions.get(id)?.name || tabMeta.get(id)?.name || "";
+  activeId = null; vanishedId = id; vanishedWhy = "hidden"; vanishedName = sessions.get(id)?.name || tabMeta.get(id)?.name || ""; vanishedByDecline = false;   // the user's own tab: no arrival may adopt over it
   loadComposerFor(null);
   renderTabs();
   showActive();
@@ -16475,8 +16475,8 @@ function upsert(msg: any) {
   if (vanishedId === msg.id) restoreIfShown(msg.id);   // …if the strip shows it: hidden by the view or the filter, the pane stays unfocused (applyTabOrder's rule)
   const wouldAdopt = !activeId && (!vanishedId || vanishedByDecline) && !wantActive && !wantActiveGone;   // …nor while the persisted tab is awaited after a reload, nor while the body says it is gone: a pick, not an arrival, moves on (T357); and never a session the view or the #only= filter hides (the review's low: the adopt wrote activeId past the restore rule's visibility half; membership is the append above)
   const adopted = wouldAdopt && stripShows(msg.id);   // …and never a session the view or the #only= filter hides (the review's low: the adopt wrote activeId past the rule's visibility half; membership is the append above)
-  if (adopted) { activeId = msg.id; assertPeekFor(msg.id); loadComposerFor(msg.id, true); persistActive(msg.id); }   // persisted like a pick: a restart lands here again; the peek asserted like a pick's, so a view-hidden first arrival has a tab (the review's lows)   // adopted as the only tab → its draft too (T236: the once-per-page restore below never covers a session that LEFT and came back)
-  else if (wouldAdopt) { vanishedId = msg.id; vanishedWhy = "hidden"; vanishedName = sessions.get(msg.id)?.name || tabMeta.get(msg.id)?.name || ""; vanishedByDecline = true; }   // a DECLINED adoption records the session as restoreIfShown does, so renderTabs's schedule restores it when the filter shows it (the review's low: under a filter matching no live session the body showed the generic line and lifting the filter restored nothing); the record yields to a later VISIBLE first arrival (vanishedByDecline), since nothing was chosen
+  if (adopted) { activeId = msg.id; assertPeekFor(msg.id); loadComposerFor(msg.id, true); persistActive(msg.id); vanishedId = null; vanishedWhy = null; vanishedName = ""; wantActive = null; wantActiveGone = null; vanishedByDecline = false; }   // persisted like a pick: a restart lands here again; the peek asserted like a pick's, so a view-hidden first arrival has a tab (the review's lows)   // adopted as the only tab → its draft too (T236: the once-per-page restore below never covers a session that LEFT and came back) An adoption ends the unfocused state exactly as setActive does (the review's high: a declined record left standing beside the adopted tab would hand its session to applyTabOrder's restore the moment the filter lifted, and the pane jumped to a session the user never had).
+  else if (wouldAdopt && !vanishedId) { vanishedId = msg.id; vanishedWhy = "hidden"; vanishedName = sessions.get(msg.id)?.name || tabMeta.get(msg.id)?.name || ""; vanishedByDecline = true; }   // a DECLINED adoption records the session as restoreIfShown does, so renderTabs's schedule restores it when the filter shows it (the review's low: under a filter matching no live session the body showed the generic line and lifting the filter restored nothing); the record yields to a later VISIBLE first arrival (vanishedByDecline), since nothing was chosen, and is taken on FIRST sight only: a later hidden arrival never overwrites it, so which session the lift restores does not change between builds (the review's low)
   if (wantActive && msg.id === wantActive && stripLists(msg.id)) { wantActive = null; restoreIfShown(msg.id); }   // restore persisted tab on arrival, if the strip shows it (else unfocused as hidden, restored when shown)
   renderTabs();                                   // a new id appended to `order` above → strip repaints in kernel order
   // Active tab: a content refresh appends + preserves scroll (appendActive); a new tab or a fork
@@ -17105,8 +17105,12 @@ function dismissSession(id: string, why: DismissWhy, doomed?: ReadonlySet<string
   renderTabs();                          // tab removed from `order` above → repaint without it
   if (!wasActive && vanishedId === id) {
     // the tab the UNFOCUSED pane names is torn down while not active: the body's line follows the reason (the review's
-    // low: it kept the view's name-free line after the tab was gone; the vanished write below is the active tab's alone)
-    vanishedWhy = why; vanishedName = name;
+    // low: it kept the view's name-free line after the tab was gone; the vanished write below is the active tab's alone).
+    // A DECLINED record's session (never the user's; hidden by a filter meant to keep the frame clean) takes its record
+    // with it instead, so the frame never paints that session's name (the review's medium), and the next hidden arrival
+    // may be recorded on first sight
+    if (vanishedByDecline) { vanishedId = null; vanishedWhy = null; vanishedName = ""; vanishedByDecline = false; }
+    else { vanishedWhy = why; vanishedName = name; }
     repaintEmptyStateIfUnfocused();
   }
   if (wasActive) {
@@ -17122,7 +17126,7 @@ function dismissSession(id: string, why: DismissWhy, doomed?: ReadonlySet<string
     const goingToo = (x: string) => (doomed?.has(x) ?? false) || (why === "hostDrop" && !!home && hostOf(x) === home);
     const next = focusAfterDismiss(why, mru, order, goingToo);
     activeId = next.activeId;
-    if (next.unfocused) { vanishedId = id; vanishedWhy = why; vanishedName = name; }
+    if (next.unfocused) { vanishedId = id; vanishedWhy = why; vanishedName = name; vanishedByDecline = false; }   // the user's own tab went: no arrival may adopt over it (the review's high)
     loadComposerFor(activeId);   // the strip was showing the CLOSED session's chip/thumbnails/draft — swap in the new active tab's (usually none)
     // The box just changed hands under the user. Their own ✕ is the one case they already know; for every
     // other reason BLUR it — a keystroke a moment later must not land in the survivor's session unnoticed
