@@ -457,15 +457,19 @@ class ScalarWalkers(Restored):
             em._ASM_INDEX_STATS.update(materialized=0, materializedBy={})
         self.assertEqual(jd._ready_tasks(tree, None, ids), [])
         work_ids = {w["id"] for t in all_tasks if t["kind"] == "work" for w in t["writes"]}   # every work caption filed, no
-        real = em.segments                                                                   #  prompt caption: with hp False
-        em.segments = lambda turn: [dict(sg, hp=False) if turn.get("pre") else sg for sg in real(turn)]   # nothing is planned...
+        path2, whole2, tree2 = self.restored_tree("compaction_broken_stitch")                #  prompt caption: with hp False
+        with em._MAT_LOCK:                                                                   #  nothing is planned. A FRESH
+            em._ASM_INDEX_STATS.update(materialized=0, materializedBy={})                    #  restored tree: the one above is
+        work_ids2 = {w["id"] for t in jd._ready_tasks(whole2) if t["kind"] == "work" for w in t["writes"]}   # built and hydrated
+        real_segments, real_hydrate, calls = em.segments, em.hydrate, []                     #  whole by now, so its counters
+        em.segments = lambda turn: [dict(sg, hp=False) for sg in real_segments(turn)]      # cannot move; every segment's prompt
+        em.hydrate = lambda atoms, *a, **k: calls.append(len(atoms)) or real_hydrate(atoms, *a, **k)
         try:
-            h1 = em.asm_checkpoint_stats()["hydratedAtoms"]
-            self.assertEqual(jd._ready_tasks(tree, None, work_ids), [])
+            self.assertEqual(jd._ready_tasks(tree2, None, work_ids2), [])
         finally:
-            em.segments = real
-        self.assertEqual((em.asm_index_stats()["materialized"], em.asm_checkpoint_stats()["hydratedAtoms"]), (0, h1),
-                         "...and the segment is neither built nor body-read (arm low 1)")
+            em.segments, em.hydrate = real_segments, real_hydrate
+        self.assertEqual((em.asm_index_stats()["materialized"], calls), (0, []),
+                         "...and no segment is built or handed to hydrate (arm low 1): %s" % em.asm_index_stats()["materializedBy"])
         self.assertEqual(em.asm_index_stats()["materialized"], 0,
                          "a segment with no human message (no #p caption ever) is not re-checked by building its trigger: %s"
                          % em.asm_index_stats()["materializedBy"])
@@ -502,8 +506,9 @@ class ScalarWalkers(Restored):
         import hashlib, inspect
         rule = "\n".join(inspect.getsource(f).strip() for f in (em.atom_has_work, em._has_text, em.atom_tool_uses, em.seg_prompt_atom,
                                                                 em._prose_chars, em.atom_prose_chars, em.postal_mids, em._encoded_mids,
-                                                                em.is_interrupt_record, em._content, em._text_of, em._lazy_of, em.atom_mids))
-        self.assertEqual((em._ASM_CKPT_V, hashlib.sha1(rule.encode()).hexdigest()[:10]), (5, "42d84c7ab4"),
+                                                                em.is_interrupt_record, em._content, em._text_of, em._lazy_of, em.atom_mids,
+                                                                em._machine_written)) + "\n" + em.POSTAL_RE.pattern
+        self.assertEqual((em._ASM_CKPT_V, hashlib.sha1(rule.encode()).hexdigest()[:10]), (5, "56888f276a"),
                          "the stored verdicts' rules changed: bump em._ASM_CKPT_V and re-pin the digest here")
 
     def test_the_stored_rules_on_odd_content_shapes(self):

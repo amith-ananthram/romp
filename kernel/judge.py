@@ -2704,8 +2704,8 @@ def _ready_tasks(session, store=None, done=()):
                                   "atoms": seg["atoms"],
                                   "writes": [{"id": seg["id"], "grain": "segment", "t": seg["t"]}]})
                 continue                               # no turn-grain while open; the final caption supersedes on close
-            if not want_w or not _seg_work(seg):       # a work-less segment (bare prompt / aborted) → no WORK caption
-                continue                               # (its #p message caption still glosses the ask)
+            if not want_w:                             # a work-less segment (bare prompt / aborted) → no WORK caption
+                continue                               # (its #p message caption still glosses the ask; want_w carried _seg_work)
             writes = [{"id": seg["id"], "grain": "segment", "t": seg["t"]}]
             if single and not turn_open:               # the turn IS this segment → mirror, no 2nd call
                 writes.append({"id": turn["id"], "grain": "turn", "t": turn["t"]})
