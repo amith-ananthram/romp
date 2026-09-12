@@ -204,10 +204,11 @@ origin when present; else the sender of the delegate mail the goal's anchor
 names, the primary record, and only for a top the latch has read as a machine
 record: a goal you typed keeps its blocks, a goal split out of one you typed
 inherits that, and a script mailer's pseudo-sid is never a peer; a goal whose
-anchor names no dispatch falls back to the latest delegate the session
-received before its mint only while that dispatch's own goal was still open
-at the mint, so a finished or goal-less dispatch never claims your later
-decisions), and words only to pick among
+anchor names no dispatch, or whose stamp the latch has not written yet, falls
+back to the newest delegate the session received before its mint whose own
+goal, latched or courier-planted, was still open at the mint, so a finished or
+goal-less dispatch never claims your later decisions and a stray hand-off note
+never displaces the manager's standing one), and words only to pick among
 several open asks; a block on a
 "delegated to <peer>" tracker waits on that peer, whose report ends the
 delegate edge. A block in a
@@ -281,10 +282,10 @@ delegate mail its anchor names (the delegate-kind marker of the delivery that
 is a dispatch to this session, never one quoted from another session's, so a
 batched inbox whose first mail is a peer's heads-up still belongs to the
 manager whose dispatch follows it; a stamp naming no such dispatch leaves the
-latest delegate as the fallback, and only while that dispatch's own goal is
-open at the mint), so a worker two managers dispatched relays each block to
-the manager that asked, and a dispatch handled without a goal, or finished,
-claims none of the session's later goals.
+newest delegate whose own goal is open at the mint as the fallback), so a
+worker two managers dispatched relays each block to the manager that asked,
+and a dispatch handled without a goal, or finished, claims none of the
+session's later goals.
 An open question to a peer the block never names does not capture a block in
 the delegator's work: that block goes to the delegator, relayed. Rows filed before the rule convert once per boot. The debt ladder judges a debtor's
 reminder only at an idle turn end (the nudge walk's own gates); for a manager

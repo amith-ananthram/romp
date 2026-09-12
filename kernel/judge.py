@@ -12208,12 +12208,18 @@ def apply_group(store, menu, ops, t):
             if child not in nodes or nodes[child].get("parentId") is None:
                 continue                               # merged away this reply, or already a top
             ptop = nodes.get(_top_of(nodes, child) or "") or {}
-            if ptop.get("askAnchor") and not isinstance(nodes[child].get("origin"), dict):
-                for k in ("askAnchor", "askAnchorRecord", "promptMsgId"):   # the parent's anchor verdict comes along: the
-                    if k in ptop:                      #   child's own mint record is a step's (a system record after a
-                        nodes[child][k] = ptop[k]      #   compaction, a notice), which a later latch would read as a
-                    else:                              #   machine anchor and hand the user's own decision to a peer
-                        nodes[child].pop(k, None)      #   (the manager's live case, 2026-09-12)
+            if ptop.get("askAnchor") and ptop.get("askAnchor") != "machine" and not isinstance(nodes[child].get("origin"), dict):
+                for k in ("askAnchor", "askAnchorRecord", "promptMsgId"):   # a NON-machine parent's verdict (human,
+                    if k in ptop:                      #   scheduled, absent) comes along: the child's own mint record is
+                        nodes[child][k] = ptop[k]      #   a step's (a system record after a compaction, a notice), which
+                    else:                              #   a later latch would read as a machine anchor and hand the
+                        nodes[child].pop(k, None)      #   user's own decision to a peer (the manager's live case,
+                #                                          2026-09-12). A MACHINE parent's child is left to latch itself
+                #                                          from its own record: a system record reads machine with no
+                #                                          stamp and meets the standing-relation check, a typed record
+                #                                          reads human, where an inherited machine verdict would have
+                #                                          mailed the user's own question to the peer and dropped the top
+                #                                          out of the feed heal's hosts set (the verifier's first round)
             nodes[child]["parentId"] = None            # of group: a drifted tangent gets its own card
             if o.get("retitle"):                       # a step-phrased title may not stand alone as a card
                 nodes[child]["text"] = o["retitle"]
@@ -12810,7 +12816,7 @@ def _peer_name(sid):
         return ""
 
 
-_DELEG_CACHE = [None, {}]    # (mtime_ns, size), {to_sid: [(t, from_id), ...] ascending}: one scan per log change
+_DELEG_CACHE = [None, {}]    # (mtime_ns, size), {to_sid: [(t, from_id, mid), ...] ascending}: one scan per log change
 _DELEG_BY_MID = {}           # message id -> (from_id, to_sid) of that delegate row (filled by the same scan)
 
 
@@ -12881,18 +12887,30 @@ def _open_at(nd, at):
 
 def _delegate_relation_open(nodes, row, at, exclude=None):
     """Whether the delegate mail `row` ((t, from_id, mid) of _delegates_to) still stood as a relation at evidence time
-    `at`: a top of this store other than `exclude` carries that mail as its anchor (promptMsgId, the latch's stamp) and
-    was open then (_open_at). A dispatch that anchored no top (handled without a goal) or whose top had finished is no
-    standing relation, and a later top minted with no dispatch of its own is the user's."""
+    `at`: a top of this store other than `exclude` carries that mail as its anchor, by the latch's stamp (promptMsgId)
+    or by the courier's planted origin (origin.msgId), and was open then (_open_at). A dispatch that anchored no top
+    (handled without a goal) or whose top had finished is no standing relation, and a later top minted with no
+    dispatch of its own is the user's. A delegate row with no message id cannot qualify: nothing could name it."""
     mid = str(row[2] or "") if len(row) > 2 else ""
     if not mid:
         return False
     for tid, tn in nodes.items():
         if tid == exclude or not isinstance(tn, dict) or tn.get("parentId") is not None:
             continue
-        if str(tn.get("promptMsgId") or "") == mid and _open_at(tn, at):
+        o = tn.get("origin") if isinstance(tn.get("origin"), dict) else {}
+        if (str(tn.get("promptMsgId") or "") == mid or str(o.get("msgId") or "") == mid) and _open_at(tn, at):
             return True
     return False
+
+
+def _standing_delegator(nodes, rows, at, exclude=None):
+    """The sender of the NEWEST delegate row at or before `at` whose relation stands (_delegate_relation_open), else
+    None: a stray later delegate from another peer that anchored nothing (a hand-off note) neither captures the block
+    nor strands it as the user's while the manager's dispatch top is open (the verifier's first round)."""
+    for row in reversed([r for r in rows if r[0] <= at]):
+        if _delegate_relation_open(nodes, row, at, exclude=exclude):
+            return row[1]
+    return None
 
 
 def _delegator_of(store, nid):
@@ -12902,9 +12920,10 @@ def _delegator_of(store, nid):
     anchor as a machine record (askAnchor "machine": the dispatch mail, never a prompt the user typed). An unlatched
     top, one whose anchor is gone ("absent") or a scheduled prompt's top is left to the user (fail open to the block),
     whatever mail the session got before. A top whose anchor names no dispatch (a delivery holding only a peer's
-    heads-up, a watch notice, a record after a compaction) falls back to the latest delegate this session received at
-    or before its mint ONLY while that dispatch stands as a relation: its own top, open at the mint
-    (_delegate_relation_open). A worker under a manager's standing dispatch mints later tops from notices and peers'
+    heads-up, a watch notice, a record after a compaction; an unlatched stamp gets the same bound) falls back to the
+    newest delegate this session received at or before its mint whose dispatch stands as a relation: its own top,
+    latched or courier-planted, open at the mint (_standing_delegator, walking the rows newest first past any stray
+    delegate that anchored nothing). A worker under a manager's standing dispatch mints later tops from notices and peers'
     mails, and those blocks still go to the manager; a dispatch that anchored no top or whose top has finished is no
     relation, and the fallback would otherwise hand the user's own decisions to whichever peer last sent any delegate
     mail (the manager's live case, 2026-09-12: three decisions relayed to an unrelated peer nine hours after its mail,
@@ -12920,10 +12939,9 @@ def _delegator_of(store, nid):
     sid = str(store.get("rompUuid") or str(nid).rsplit(":", 1)[0])
     peer = _delegate_sender(tn["promptMsgId"], sid) if tn.get("promptMsgId") else None   # the mail the anchor names, first
     if not peer:                                  # no mail id on the anchor, or one that is no dispatch to this session (a
-        mint = int(tn.get("t") or 0)              #   stamp from before the delegate-kind rule, a quoted marker): the latest
-        before = [r for r in _delegates_to().get(sid, []) if r[0] <= mint]   # delegate at or before the mint, and only
-        if before and _delegate_relation_open(nodes, before[-1], mint, exclude=top):   # while its own top stood open then
-            peer = before[-1][1]
+        mint = int(tn.get("t") or 0)              #   stamp from before the delegate-kind rule, a quoted marker): the newest
+        peer = _standing_delegator(nodes, _delegates_to().get(sid, []), mint, exclude=top)   # delegate at or before the
+        #                                                                                       mint whose own top stood open then
     return None if not peer or ":" in peer else peer   # an ext: mailer or an unresolved cross-host key is no session that
                                                        #   could ever be asked (judge _presumed_closed: closed by construction)
 

@@ -239,8 +239,11 @@ class CloserBlocks(_Peer):
         self.ask("ext:morning", WORKER, T0 - 100, kind="delegate")
         st, top, step = self.store()
         st["nodes"][top]["askAnchor"] = "machine"
-        nd = self._close(st, step, "cannot move further without you")
+        tid = WORKER + ":g0"                               # the mailer's dispatch anchored an open top, so the relation
+        st["nodes"][tid] = node(tid, "The morning sweep", t=T0 - 50, askAnchor="machine", promptMsgId=self.rows[-1]["id"])
+        nd = self._close(st, step, "cannot move further without you")   #   stands and the ext: filter itself is what decides
         self.assertTrue(nd["blocked"])
+        self.assertNotIn("relayWanted", nd)
         st2, top2, step2 = self.store(delegated=True)
         st2["nodes"][top2]["origin"]["peer"] = "ext:morning"
         nd2 = self._close(st2, step2, "cannot move further without you")
@@ -1247,6 +1250,74 @@ class TwoDelegators(_Peer):
         self._coordinate_only_top(st, top)
         nd = self._close_block(st, step, "cannot move further without you")
         self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER], "the relation stood when the top was born: judged at the mint, not at the block")
+
+    def test_a_typed_step_split_out_of_a_delegated_top_stays_the_users(self):
+        # the inheritance runs one way only: a step whose OWN record is the user's typed prompt, filed under a
+        # machine-anchored delegated top and split out, must not inherit machine and the dispatch stamp (the latch
+        # skips a top with a verdict, so nothing could correct it and the user's own question would be mailed away)
+        self.rows.append(mail(MANAGER, WORKER, T0 - 200, kind="delegate", mid="m-web-1"))
+        self._write_mail()
+        st, top, step = self.store()
+        st["nodes"][top]["askAnchor"] = "machine"; st["nodes"][top]["promptMsgId"] = "m-web-1"   # the delegated top
+        st["nodes"][step]["promptUuid"] = "u-typed-step"  # the step's own record: a prompt the user typed mid-thread
+        menu = [st["nodes"][top], st["nodes"][step]]
+        self.assertEqual(jd.apply_group(st, menu, [{"do": "split", "goal": 2, "why": "a thread of its own"}], T0 + 100), 1)
+        self.assertNotIn("askAnchor", st["nodes"][step], "a machine parent's verdict is not inherited: the child latches itself")
+        self.assertNotIn("promptMsgId", st["nodes"][step])
+        session = {"turns": [{"atoms": [{"uuid": "u-typed-step", "type": "user", "author": "human",
+                                         "message": {"role": "user", "content": "should the exporter keep the old client too?"}}]}]}
+        jd._latch_ask_anchors(WORKER, session, st)
+        jd._latch_prompt_msg_ids(session, st)
+        self.assertEqual(st["nodes"][step].get("askAnchor"), "human", "its own record: the user's typed prompt")
+        nd = self._close_block(st, step, "should the exporter keep the old client too?")
+        self.assertEqual(list(nd.get("awaitingPeers") or ()), [], "a goal the user typed keeps its blocks")
+        self.assertTrue(nd["blocked"])
+        self.assertNotIn("relayWanted", nd)
+
+    def test_a_system_record_step_split_out_of_a_delegated_top_latches_machine_and_meets_the_relation(self):
+        # the other half of the one-way rule: a machine parent's child latches from its own record; a system record
+        # reads machine with no stamp, and the standing-relation check then attributes it to the manager as before
+        self.rows.append(mail(MANAGER, WORKER, T0 - 200, kind="delegate", mid="m-web-1"))
+        self._write_mail()
+        st, top, step = self.store()
+        st["nodes"][top]["askAnchor"] = "machine"; st["nodes"][top]["promptMsgId"] = "m-web-1"
+        st["nodes"][step]["promptUuid"] = "u-sys"
+        menu = [st["nodes"][top], st["nodes"][step]]
+        self.assertEqual(jd.apply_group(st, menu, [{"do": "split", "goal": 2, "why": "a thread of its own"}], T0 + 100), 1)
+        session = {"turns": [{"atoms": [{"uuid": "u-sys", "type": "user", "author": "system",
+                                         "message": {"role": "user", "content": [{"type": "text", "text": "<!-- romp-note: bookkeeping -->"}]}}]}]}
+        jd._latch_ask_anchors(WORKER, session, st)
+        jd._latch_prompt_msg_ids(session, st)
+        self.assertEqual(st["nodes"][step].get("askAnchor"), "machine")
+        self.assertEqual(st["nodes"][step].get("promptMsgId"), "")
+        nd = self._close_block(st, step, "cannot move further without you")
+        self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER], "the dispatch's top (its former parent) is open: the manager's work")
+
+    def test_a_stray_later_delegate_that_anchors_nothing_does_not_end_the_managers_relation(self):
+        # the walk takes the newest delegate whose relation STANDS, not the newest row: a hand-off note from another
+        # peer that anchored no goal must neither capture the block (the base) nor strand it as a needs-you (a head
+        # that judged the latest row alone)
+        self.rows.append(mail(MANAGER, WORKER, T0 - 200, kind="delegate", mid="m-web-1"))
+        self.rows.append(mail(OTHER, WORKER, T0 - 100, kind="delegate", mid="m-tests-1"))   # anchors nothing
+        self._write_mail()
+        st, top, step = self.store()
+        self._dispatch_top(st, "m-web-1")                  # the manager's dispatch top, open
+        self._coordinate_only_top(st, top)
+        nd = self._close_block(st, step, "cannot move further without you")
+        self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER], "the newest delegate whose top is open")
+        self.assertTrue(nd.get("relayWanted"))
+
+    def test_a_courier_planted_dispatch_top_sustains_the_fallback_too(self):
+        # LOW 3: the relation is recognised through the planted origin's msgId as well as the latch's promptMsgId
+        self.rows.append(mail(MANAGER, WORKER, T0 - 200, kind="delegate", mid="m-web-1"))
+        self._write_mail()
+        st, top, step = self.store()
+        tid = WORKER + ":g0"
+        st["nodes"][tid] = node(tid, "Land the exporter's login check", t=T0 - 150,
+                                origin={"peer": MANAGER, "goalId": MANAGER + ":g7", "msgId": "m-web-1"})
+        self._coordinate_only_top(st, top)
+        nd = self._close_block(st, step, "cannot move further without you")
+        self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER], "the planted dispatch top stands as the relation")
 
     def test_a_top_split_out_of_a_human_anchored_top_stays_the_users(self):
         # the second observation: three decisions were split out of a top the user typed, and the split children were
