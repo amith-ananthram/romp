@@ -135,8 +135,9 @@ completed); the feed just paints columns. (Reflected in `docs/judges.md`.)
   peer, else from the peer that delegated the work it sits under (the planted
   origin, or the delegate mail the goal's anchor names; a goal whose anchor
   names no dispatch falls back to the newest delegate received before its mint
-  only while that dispatch's own goal was still open at the mint; never a goal
-  you typed, nor one split out of it), and file the
+  only while that dispatch's own goal was still open at the mint, an id-less
+  mail never; never a goal you typed, nor one split out of it, while a goal
+  split out of a delegated one reads its own record), and file the
   awaiting-a-peer stamp instead of the block, so the card shows the "Awaiting
   <peer>" chip in working and never a needs-you; when the worker never mailed
   that peer, the kernel relays the block's why to it as the worker's own question,

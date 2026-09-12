@@ -10703,8 +10703,9 @@ def _latch_prompt_msg_ids(session, store):
     it; the last delegate when a drained inbox holds several, the rule author_of applies to the delivery's peer), or ""
     when it carries no delegate (checked: a batched inbox whose first mail is a peer's coordinate and whose second the
     manager's dispatch is the manager's, and a delivery with no dispatch in it leaves _delegator_of its fallback, the
-    latest delegate at or before the mint, which stands only while that dispatch's own top is open at the mint; the
-    manager's fourth review and the 2026-09-12 fix). The delegating peer of a top is then the
+    newest delegate at or before the mint whose relation stands, its own top open at the mint, walking past a stray
+    that anchored nothing (_standing_delegator); the manager's fourth review and the 2026-09-12 fix). The delegating
+    peer of a top is then the
     sender of THAT mail (_delegator_of), never merely the latest delegate the session received (a worker dispatched by
     two managers relays each block to the manager that asked, T334)."""
     cands = [nd for nd in store.get("nodes", {}).values()
@@ -12885,30 +12886,40 @@ def _open_at(nd, at):
     return _fold_node(dict(nd, log=log)).get("state") not in ("done", "cleared")
 
 
-def _delegate_relation_open(nodes, row, at, exclude=None):
-    """Whether the delegate mail `row` ((t, from_id, mid) of _delegates_to) still stood as a relation at evidence time
-    `at`: a top of this store other than `exclude` carries that mail as its anchor, by the latch's stamp (promptMsgId)
-    or by the courier's planted origin (origin.msgId), and was open then (_open_at). A dispatch that anchored no top
-    (handled without a goal) or whose top had finished is no standing relation, and a later top minted with no
-    dispatch of its own is the user's. A delegate row with no message id cannot qualify: nothing could name it."""
-    mid = str(row[2] or "") if len(row) > 2 else ""
-    if not mid:
-        return False
+def _dispatch_tops_open_at(nodes, at, exclude=None):
+    """{message id: whether a top it anchored was open at evidence time `at`} over the parentless nodes other than
+    `exclude`, keyed by the latch's stamp (promptMsgId) and the courier's planted origin (origin.msgId) alike; a mail
+    two tops name is open when either was (_open_at). Built once per attribution, so the walk over the delegate rows
+    costs a lookup per row rather than a pass over the store (the verifier's second round: rows times tops per call)."""
+    out = {}
     for tid, tn in nodes.items():
         if tid == exclude or not isinstance(tn, dict) or tn.get("parentId") is not None:
             continue
         o = tn.get("origin") if isinstance(tn.get("origin"), dict) else {}
-        if (str(tn.get("promptMsgId") or "") == mid or str(o.get("msgId") or "") == mid) and _open_at(tn, at):
-            return True
-    return False
+        mids = {str(tn.get("promptMsgId") or ""), str(o.get("msgId") or "")} - {""}
+        if not mids:
+            continue
+        opened = _open_at(tn, at)
+        for m in mids:
+            out[m] = out.get(m, False) or opened
+    return out
 
 
 def _standing_delegator(nodes, rows, at, exclude=None):
-    """The sender of the NEWEST delegate row at or before `at` whose relation stands (_delegate_relation_open), else
-    None: a stray later delegate from another peer that anchored nothing (a hand-off note) neither captures the block
-    nor strands it as the user's while the manager's dispatch top is open (the verifier's first round)."""
-    for row in reversed([r for r in rows if r[0] <= at]):
-        if _delegate_relation_open(nodes, row, at, exclude=exclude):
+    """The sender of the NEWEST delegate row ((t, from_id, mid) of _delegates_to) at or before `at` whose relation
+    stands, else None. A relation stands when a top of this store other than `exclude` carries the row's mail as its
+    anchor, by the latch's stamp or the courier's planted origin, and was open at `at` (_dispatch_tops_open_at). A
+    dispatch that anchored no top (handled without a goal) or whose top had finished is no standing relation; a row
+    with no message id sustains nothing (nothing could name it); and a stray later delegate from another peer that
+    anchored nothing (a hand-off note) is walked past, so it neither captures the block nor strands it as the user's
+    while the manager's dispatch top is open (the verifier's first round)."""
+    before = [r for r in rows if r[0] <= at]
+    if not before:
+        return None
+    open_by_mid = _dispatch_tops_open_at(nodes, at, exclude=exclude)
+    for row in reversed(before):
+        mid = str(row[2] or "") if len(row) > 2 else ""
+        if mid and open_by_mid.get(mid):
             return row[1]
     return None
 
@@ -12923,7 +12934,7 @@ def _delegator_of(store, nid):
     heads-up, a watch notice, a record after a compaction; an unlatched stamp gets the same bound) falls back to the
     newest delegate this session received at or before its mint whose dispatch stands as a relation: its own top,
     latched or courier-planted, open at the mint (_standing_delegator, walking the rows newest first past any stray
-    delegate that anchored nothing). A worker under a manager's standing dispatch mints later tops from notices and peers'
+    delegate that anchored nothing; a row with no message id sustains nothing). A worker under a manager's standing dispatch mints later tops from notices and peers'
     mails, and those blocks still go to the manager; a dispatch that anchored no top or whose top has finished is no
     relation, and the fallback would otherwise hand the user's own decisions to whichever peer last sent any delegate
     mail (the manager's live case, 2026-09-12: three decisions relayed to an unrelated peer nine hours after its mail,

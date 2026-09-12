@@ -34,9 +34,12 @@ MANAGER = "11111111-2222-3333-4444-bbbbbbbbbbbb"    # the peer that delegated it
 OTHER = "11111111-2222-3333-4444-cccccccccccc"      # another peer it asked something
 
 
-def mail(from_id, to_id, t, kind="question", mid=None):
-    return {"id": mid or "m-%s-%s-%d" % (from_id[-4:], to_id[-4:], t), "from_id": from_id, "to_id": to_id,
-            "from": "api", "to": "web", "t": t, "kind": kind}
+def mail(from_id, to_id, t, kind="question", mid=None, noid=False):
+    d = {"id": mid or "m-%s-%s-%d" % (from_id[-4:], to_id[-4:], t), "from_id": from_id, "to_id": to_id,
+         "from": "api", "to": "web", "t": t, "kind": kind}
+    if noid:
+        d.pop("id")                                        # an older row shape: nothing could ever name it
+    return d
 
 
 def node(nid, text, parent=None, t=T0, **kw):
@@ -1318,6 +1321,32 @@ class TwoDelegators(_Peer):
         self._coordinate_only_top(st, top)
         nd = self._close_block(st, step, "cannot move further without you")
         self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER], "the planted dispatch top stands as the relation")
+
+    def test_a_courier_planted_dispatch_top_sustains_the_fallback_only_while_open_at_the_mint(self):
+        self.rows.append(mail(MANAGER, WORKER, T0 - 200, kind="delegate", mid="m-web-1"))
+        self._write_mail()
+        for done_at, expect in ((T0 - 50, []), (T0 + 30, [MANAGER])):   # finished before the mint: nothing; after: stands
+            with self.subTest(done_at=done_at):
+                st, top, step = self.store()
+                tid = WORKER + ":g0"
+                st["nodes"][tid] = node(tid, "Land the exporter's login check", t=T0 - 150, nodeComplete=True,
+                                        origin={"peer": MANAGER, "goalId": MANAGER + ":g7", "msgId": "m-web-1"},
+                                        log=[{"kind": "done", "src": "closer", "ev_t": done_at, "at": done_at, "why": "landed"}])
+                self._coordinate_only_top(st, top)
+                nd = self._close_block(st, step, "cannot move further without you")
+                self.assertEqual(list(nd.get("awaitingPeers") or ()), expect)
+                self.assertEqual(nd["blocked"], not expect)
+
+    def test_a_delegate_row_without_a_message_id_sustains_nothing(self):
+        self.rows.append(mail(MANAGER, WORKER, T0 - 200, kind="delegate", noid=True))
+        self._write_mail()
+        st, top, step = self.store()
+        self._dispatch_top(st, "m-web-1")                  # even an open top claiming some id: nothing names the id-less row
+        self._coordinate_only_top(st, top)
+        nd = self._close_block(st, step, "did the real-token login check pass?")
+        self.assertEqual(list(nd.get("awaitingPeers") or ()), [], "an id-less delegate sustains no relation")
+        self.assertTrue(nd["blocked"])
+        self.assertNotIn("relayWanted", nd)
 
     def test_a_top_split_out_of_a_human_anchored_top_stays_the_users(self):
         # the second observation: three decisions were split out of a top the user typed, and the split children were
