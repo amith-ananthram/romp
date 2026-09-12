@@ -3,6 +3,8 @@
 resolves a session to its group's file, ships a byte-bounded index frame, and answers GET /glossary/<term>. The fixture
 is SYNTHETIC (tests/fixtures/glossary_grammar.json: an invented notes-api team's entries); the TS twin reads the same
 file. Hermetic state; nothing of any real glossary reaches the repo."""
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -15,7 +17,10 @@ from romp_load import load_source
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
-os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
+_ROOT = tempfile.mkdtemp()
+os.environ["XDG_STATE_HOME"] = _ROOT
+os.makedirs(os.path.join(_ROOT, "romp"), exist_ok=True)
+Path(_ROOT, "romp", "session-hosts").write_text("off\n")   # this root replaces the conftest's floored one, so it writes its own hosts off (the review's low)
 os.environ.pop("ROMP_STATE_DIR", None)
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
@@ -51,6 +56,9 @@ class Parser(unittest.TestCase):
         got = km._glossary_parse(many)
         self.assertEqual(len(got["terms"]), km._SLICE_HEADINGS_MAX, "the heading index's ceiling"); self.assertEqual(got["cutHeadings"], 300 - km._SLICE_HEADINGS_MAX, "…and the sections past it are counted, not dropped silently")
         self.assertEqual(km._glossary_parse(FIX["text"])["cutHeadings"], 0)
+        two_skips = "## Not coinages\n\n- head\n\n## a\n\nx\n\n## Not coinages\n\n- round\n\n## b\n\ny\n"
+        got = km._glossary_parse(two_skips)
+        self.assertEqual((got["cutHeadings"], got["skip"], [e["term"] for e in got["terms"]]), (0, ["head", "round"], ["a", "b"]), "a second Not-coinages heading is handled, not counted as a cut section")
 
 
 class Lookup(unittest.TestCase):
@@ -100,17 +108,24 @@ class Lookup(unittest.TestCase):
             before = dict(km._PERF_STATS.glossary_stats)
             fr = km._glossary_frame(SID)
             self.assertLess(len(fr["terms"]), 4); self.assertEqual(fr["truncated"], 4 - len(fr["terms"]), "the cut is counted on the frame")
+            self.assertEqual((fr["cutBytes"], fr["cutHeadings"]), (fr["truncated"], 0), "…as a BYTE cut, apart from a heading cut (the card's note names each)")
             self.assertEqual(km._PERF_STATS.glossary_stats["cut"] - before["cut"], fr["truncated"], "…and in /perf")
         finally:
             km._GLOSSARY_INDEX_MAX_BYTES = cap
+
+    def test_sections_past_the_heading_ceiling_ride_the_frame_as_their_own_cut(self):
+        p = Path(self.td, "glossaries", "notes-api.md")
+        st = p.stat(); p.write_text(FIX["text"] + "".join("\n## t%d\n\nd%d\n" % (i, i) for i in range(300))); os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 7_000_000_000))
+        fr = km._glossary_frame(SID)
+        self.assertGreater(fr["cutHeadings"], 0); self.assertEqual(fr["truncated"], fr["cutHeadings"] + fr["cutBytes"], "the frame carries the two cuts apart and their sum")
 
     def test_a_rewrite_is_a_new_cache_key_and_the_old_one_goes(self):
         km._glossary_frame(SID)
         self.assertEqual(len(km._GLOSSARY_CACHE), 1)
         p = Path(self.td, "glossaries", "notes-api.md")
-        st = p.stat(); p.write_text(FIX["text"] + "\n## wire\n\nA coined verb.\n\n- plain words: to connect\n"); os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+        st = p.stat(); p.write_text(FIX["text"] + "\n## bramblet\n\nAn invented noun, appended after the first frame.\n\n- plain words: a made-up thing\n"); os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
         fr = km._glossary_frame(SID)
-        self.assertIn("wire", [e["term"] for e in fr["terms"]]); self.assertEqual(len(km._GLOSSARY_CACHE), 1, "one entry per file")
+        self.assertIn("bramblet", [e["term"] for e in fr["terms"]]); self.assertEqual(len(km._GLOSSARY_CACHE), 1, "one entry per file")
 
     def test_the_route_answers_a_term_or_an_alias_and_404s_with_the_paths_tried(self):
         s, b = km._glossary_lookup(SID, "Tessel")
@@ -134,7 +149,14 @@ class Lookup(unittest.TestCase):
             self.assertEqual(len(km._GLOSSARY_CACHE), 2, "least recently read out first")
             km._TEXT_MAX_BYTES = 64
             big = Path(self.td, "glossaries", "big.md"); big.write_text("## huge\n\n" + "x" * 200 + "\n")
-            self.assertEqual(km._glossary_load(big), (None, 0), "over the preview route's own ceiling: not read, not held")
+            before = km._PERF_STATS.glossary_stats["refused"]
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), mock.patch.dict(os.environ, {"HOME": self.td}):   # the lab root stands in for $HOME: the line is tilded
+                self.assertEqual(km._glossary_load(big), (None, 0), "over the preview route's own ceiling: not read, not held")
+                self.assertEqual(km._glossary_load(big), (None, 0))
+            self.assertEqual(km._PERF_STATS.glossary_stats["refused"] - before, 2, "every refusal counts in /perf (the review's low: it was counted nowhere)")
+            self.assertEqual(err.getvalue().count("refused:"), 1, "…and is logged once per file version: %r" % err.getvalue())
+            self.assertIn("glossary refused: ~/glossaries/big.md is 210 bytes, over the 64-byte read ceiling", err.getvalue(), "tilded, sized, and naming the ceiling")
         finally:
             km._TEXT_MAX_BYTES, km._GLOSSARY_CACHE_ENTRIES = cap, ents
 
@@ -144,7 +166,7 @@ class Lookup(unittest.TestCase):
             self.assertIn("glossary", snap)
         src = Path(os.path.join(BIN, "romp-kernel")).read_text()
         self.assertIn('"glossary": glossary_stats,', src)
-        self.assertEqual(set(km._PERF_STATS.glossary_stats), {"parses", "framesBuilt", "termsBuilt", "bytesBuilt", "cut"}, "counted at the build, and named so")
+        self.assertEqual(set(km._PERF_STATS.glossary_stats), {"parses", "framesBuilt", "termsBuilt", "bytesBuilt", "cut", "refused"}, "counted at the build, and named so; the read-ceiling refusals too")
 
 
 if __name__ == "__main__":

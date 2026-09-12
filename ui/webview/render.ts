@@ -2189,7 +2189,8 @@ function termMatcherFor(sid: string | null): TermMatcher | null {
  *  glossary path and the term's slug exactly like a path link's absorbed section, so the same hover and click roads
  *  serve it. Nothing when the session's group has no glossary. */
 function linkTerms(root: HTMLElement, sid: string | null = renderingSid): number {
-  // the four documented roots (the nudge's full text, the user bubble, the assistant body, the mail body) are MARKED
+  // the message roots (the nudge, continue and tagged-template bubbles' full text, the user bubble, the assistant body,
+  // the mail body) are MARKED
   // here, matcher or not, so a later index frame re-links exactly them (relinkTerms) and never a tool or subagent
   // report body; a root nested inside a marked root is the ancestor's to scan, with the ancestor's one seen set
   // (the review's mediums: every .md in the view was relinked, and a nested body was visited twice)
@@ -3612,6 +3613,7 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
         bubble.appendChild(head);
         const full = el("div", "nudge-full md");
         full.innerHTML = md(ev.md);
+        linkTerms(full);   // a message root (T351 stage 2): linked at render, like the nudge's full text below
         bubble.appendChild(full);
         bubble.classList.add("nudge-collapsible");
         bubble.dataset.act = "nudgetoggle";   // the stable body delegate, never a per-render listener (CLAUDE.md)
@@ -3634,6 +3636,7 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
         if (more) {
           const full = el("div", "nudge-full md");
           full.innerHTML = md(ev.md);
+          linkTerms(full);   // a message root (T351 stage 2): linked at render, like the nudge's full text below
           bubble.appendChild(full);
           bubble.classList.add("nudge-collapsible");
           bubble.dataset.act = "nudgetoggle";   // the stable body delegate, never a per-render listener

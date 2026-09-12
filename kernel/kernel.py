@@ -336,16 +336,20 @@ class _PerfStats:
             # the file preview popover's slice cache (T351): hits and misses of GET /file?slice=1, the bytes it served,
             # and the entries the pusher's path warmed ahead of a hover
             self.file_slice_stats = {"hit": 0, "miss": 0, "bytes": 0, "warm": 0}
-            # the glossary (T351 stage 2): files parsed, terms shipped, bytes shipped, and terms CUT by the index's byte cap
-            self.glossary_stats = {"parses": 0, "framesBuilt": 0, "termsBuilt": 0, "bytesBuilt": 0, "cut": 0}
+            # the glossary (T351 stage 2): files parsed, frames / terms / bytes BUILT per cycle (the dedup slot decides what
+            # is shipped), entries cut (the byte cap or the heading ceiling), files refused over the read ceiling
+            self.glossary_stats = {"parses": 0, "framesBuilt": 0, "termsBuilt": 0, "bytesBuilt": 0, "cut": 0, "refused": 0}
 
     # ── writers (hot paths) ──
-    def glossary(self, parsed=False, terms=0, nbytes=0, cut=0):
+    def glossary(self, parsed=False, terms=0, nbytes=0, cut=0, refused=False):
         """One glossary file parsed (parsed=True) or one index frame BUILT (the pusher builds one per session per cycle;
         the dedup slot decides what is shipped, so these are build counts, named so): the terms and bytes it carried,
         and the entries cut (the byte cap, or sections past the heading ceiling), the /perf note beside a bounded cache."""
         with self.lock:
             d = self.glossary_stats
+            if refused:                      # a file over the read ceiling: not read, not held, said here and once on stderr
+                d["refused"] += 1
+                return
             if parsed:
                 d["parses"] += 1
             else:
@@ -572,7 +576,7 @@ class _PerfStats:
                 "process": _process_stats(), "pusher": pusher, "stages_ms": stages,
                 "builds": builds, "sends": sends, "goals": goals, "memos": memos, "judge": judge, "skillLoadIndex": skill_idx, "http": http,
                 "fileSlice": file_slice,                   # T351: the preview popover's slice cache (hit / miss / bytes / warm)
-                "glossary": glossary_stats,                # T351 stage 2: glossary files parsed, terms / bytes shipped, terms cut by the byte cap
+                "glossary": glossary_stats,                # T351 stage 2: files parsed, frames / terms / bytes BUILT per cycle, entries cut, files refused
                 # T323: cold parses through the ONE parse store (stage 2): total = every miss (whoever asked), kernel =
                 # the display's asks among them, judge = the rest, hits = the display's asks served from the store,
                 # sharedHits = every hit. A boot with no client reads kernel 0.
@@ -43468,6 +43472,7 @@ _GLOSSARY_INDEX_MAX_BYTES = 256 * 1024
 _GLOSSARY_CACHE = collections.OrderedDict()  # (real path, mtime_ns) -> the parsed file; a rewrite is a new key, the old one goes
 _GLOSSARY_CACHE_ENTRIES = 16                 # files held at once (one per group in use); the read ceiling below bounds the bytes
 _GLOSSARY_CACHE_LOCK = threading.Lock()
+_GLOSSARY_REFUSED = set()                    # (real path, mtime_ns) already logged as over the read ceiling: one line per file version
 _GLOSSARY_LINK_MODES = ("all", "first", "off")
 _GLOSSARY_STATUSES = ("unconfirmed", "confirmed", "retired")
 _GLOSSARY_BULLET_RE = re.compile(r"^-\s+(plain words|also|scope|status|registered|link)\s*:\s*(.*?)\s*$", re.I)
@@ -43547,7 +43552,7 @@ def _glossary_parse(text):
             fence = not fence
         elif not fence and re.match(r"^##\s+\S", line):
             total_h2 += 1
-    handled = len(terms) + (1 if any(h["level"] == 2 and h["text"].strip().lower() == "not coinages" for h in heads) else 0)
+    handled = len(terms) + sum(1 for h in heads if h["level"] == 2 and h["text"].strip().lower() == "not coinages")   # every skip section within the ceiling is handled, not cut
     return {"skip": skip, "terms": terms, "cutHeadings": max(0, total_h2 - handled)}
 
 
@@ -43566,6 +43571,15 @@ def _glossary_load(path):
     if hit is not None:
         return hit, st.st_mtime_ns
     if st.st_size > _TEXT_MAX_BYTES:            # the preview route's own ceiling (2 MB): a glossary is a short file
+        _PERF_STATS.glossary(refused=True)       # counted every time (the review's low: it was counted and logged nowhere)…
+        with _GLOSSARY_CACHE_LOCK:
+            fresh = key not in _GLOSSARY_REFUSED
+            if fresh:
+                if len(_GLOSSARY_REFUSED) >= 64:
+                    _GLOSSARY_REFUSED.clear()
+                _GLOSSARY_REFUSED.add(key)
+        if fresh:                                # …and said once per file version, not once per pusher cycle
+            sys.stderr.write("glossary refused: %s is %d bytes, over the %d-byte read ceiling\n" % (_tilde(real), st.st_size, _TEXT_MAX_BYTES))
         return None, 0
     try:
         text = Path(real).read_text(encoding="utf-8", errors="replace")
@@ -43626,17 +43640,19 @@ def _glossary_frame(sid):
     parsed, mtime = _glossary_load(path)
     if parsed is None:
         return None
-    terms, size, cut = [], 0, int(parsed.get("cutHeadings") or 0)   # the sections past the heading ceiling count as cut too
+    # two cuts, carried apart so the card's note can name each (the review's low): sections past the heading ceiling
+    # (cutHeadings, from the parse) and entries past the index's byte cap (cutBytes, here); `truncated` is their sum
+    terms, size, cut_h, cut_b = [], 0, int(parsed.get("cutHeadings") or 0), 0
     for e in parsed["terms"]:
         slim = {k: v for k, v in e.items() if k != "section"}
         n = len(json.dumps(slim, ensure_ascii=False).encode("utf-8"))
         if size + n > _GLOSSARY_INDEX_MAX_BYTES:
-            cut += 1
+            cut_b += 1
             continue
         terms.append(slim); size += n
-    _PERF_STATS.glossary(terms=len(terms), nbytes=size, cut=cut)
+    _PERF_STATS.glossary(terms=len(terms), nbytes=size, cut=cut_h + cut_b)
     return {"type": "glossary", "id": sid, "group": group, "path": _tilde(str(path)), "mtime": str(mtime),
-            "skip": parsed["skip"], "terms": terms, "truncated": cut}
+            "skip": parsed["skip"], "terms": terms, "truncated": cut_h + cut_b, "cutHeadings": cut_h, "cutBytes": cut_b}
 
 
 def _glossary_lookup(sid, term):

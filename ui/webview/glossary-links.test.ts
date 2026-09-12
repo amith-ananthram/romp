@@ -15,7 +15,7 @@ const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "
 const fn2 = (name: string) => { const i = RENDER.indexOf("function " + name + "("); const b = RENDER.slice(i); return b.slice(0, b.indexOf("\n}\n") + 3); };
 
 test("plurals by the everyday rule; an entry's forms are the term, its aliases and their plurals, minus the skip list; off links nothing", () => {
-  assert.deepEqual(pluralForms("tessel"), ["tessels"]); assert.deepEqual(pluralForms("quill"), ["quills"]); assert.deepEqual(pluralForms("staircase"), ["staircases"]);
+  assert.deepEqual(pluralForms("tessel"), ["tessels"]); assert.deepEqual(pluralForms("quill"), ["quills"]); assert.deepEqual(pluralForms("bramblet"), ["bramblets"]);
   assert.deepEqual(pluralForms("tessel head"), ["tessel heads"]); assert.deepEqual(pluralForms("query"), ["queries"]); assert.deepEqual(pluralForms("day"), ["days"]);
   const skip = new Set(IX.skip);
   const tessel = IX.terms[0] as GlossaryEntry;
@@ -61,13 +61,17 @@ test("the term card fills the popover's contract from the index, no fetch; a ret
   assert.deepEqual(c.open, { label: "Open glossary", path: IX.path, frag: "tessel" });
   const spar = termContent(IX.terms[2] as GlossaryEntry, IX);
   assert.match(spar.body.markdown!, /^\*Retired: say the plain phrase\.\*/);
-  assert.equal(termContent(tessel, { ...IX, truncated: 3 }).note, "3 entries beyond the index's byte cap are not linked");
+  assert.equal(termContent(tessel, { ...IX, truncated: 3 }).note, "3 entries are not linked (the index was cut)", "an older kernel's frame: the sum alone");
+  assert.equal(termContent(tessel, { ...IX, truncated: 3, cutBytes: 3, cutHeadings: 0 }).note, "3 entries beyond the index's byte cap are not linked");
+  assert.equal(termContent(tessel, { ...IX, truncated: 2, cutBytes: 0, cutHeadings: 2 }).note, "2 sections past the heading ceiling are not linked", "a heading cut is named as one, never blamed on the byte cap");
+  assert.equal(termContent(tessel, { ...IX, truncated: 5, cutBytes: 3, cutHeadings: 2 }).note, "3 entries beyond the index's byte cap are not linked; 2 sections past the heading ceiling are not linked");
+  assert.equal(termContent(tessel, IX).note, undefined);
   assert.match(TERM_SKIP_SELECTOR, /code, pre, a, \.file-uri-link, h1, h2, h3, h4, h5, h6, \.katex, svg, \.term-link, \.cmt-pop, \.file-preview-pop/);
 });
 
 test("the wiring: the frame per session, the matcher per index, links at the two chat grammars and the mail body, the card on the popover, the click to the viewer", () => {
   assert.match(RENDER, /else if \(m\.type === "glossary" && typeof m\.id === "string"\) \{[\s\S]{0,300}?glossaries\.set\(m\.id, m as GlossaryIndex\);\s*\n\s*relinkTerms\(m\.id\);/);
-  assert.equal((RENDER.match(/\blinkTerms\((full|bubble|body)\)/g) || []).length, 4, "the nudge's full text, the user bubble, the assistant body, the mail body");
+  assert.equal((RENDER.match(/\blinkTerms\((full|bubble|body)\)/g) || []).length, 6, "the nudge, continue and tagged-template bubbles' full text, the user bubble, the assistant body, the mail body (the review's low: the two bubbles never linked)");
   assert.match(RENDER, /linkifyFileUris\(body, undefined, ev\.spacePaths, ev\.pathLinks, ev\.pathPins, ev\.pathPreview\);[^\n]*\n\s*linkTerms\(body\);/, "after the path links, so a path token is never split by a term");
   assert.match(RENDER, /s\.dataset\.path = m\.index\.path; s\.dataset\.frag = e\.slug;[\s\S]{0,200}?armFilePreview\(s\);/, "a term span is a path link's twin: the same hover road");
   assert.match(RENDER, /if \(a\.dataset\.term\) \{[\s\S]{0,600}?renderFilePreview\(p, termContent\(e, ix\), a\.dataset\.gsid \|\| activeId\);/, "the card from the index, no fetch");
@@ -76,6 +80,8 @@ test("the wiring: the frame per session, the matcher per index, links at the two
   assert.match(RENDER, /querySelectorAll\("\[data-term-root\]"\)\)\) linkTerms\(root as HTMLElement, sid\);/, "…exactly the marked roots, never every .md (the review's medium)");
   assert.match(fn2("linkTerms"), /if \(root\.parentElement\?\.closest\("\[data-term-root\]"\)\) return 0;\s*\n\s*root\.dataset\.termRoot = "1";/, "a nested root is its ancestor's to scan, one seen set per message");
   assert.doesNotMatch(RENDER, /querySelectorAll\("\.md"\)\)\) linkTerms/, "no relink over every .md");
+  assert.equal((RENDER.match(/const full = el\("div", "nudge-full md"\);\s*\n\s*full\.innerHTML = md\(ev\.md\);\s*\n\s*linkTerms\(full\);/g) || []).length, 2,
+               "the Continue-send and tagged-template bubbles link at render too (the review's low: built as nudge-full md with no linkTerms, they never linked)");
   assert.match(CSS, /\.term-link \{ text-decoration: underline dotted;/); assert.match(CSS, /\.term-link\.term-retired \{ opacity: 0\.6; \}/);
   // the kernel: the frame on the pusher's cycle beside the comments frame, on its own slot; the route; the byte cap and its /perf note
   assert.match(KERNEL, /gfr = _glossary_frame\(s\["sid"\]\)[\s\S]{0,400}?_send_client\(c, \("glossary", s\["sid"\]\), gfr\)/);

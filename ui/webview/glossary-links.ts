@@ -14,10 +14,12 @@ export interface GlossaryEntry {
   term: string; slug: string; definition: string; plainWords: string; also: string[]; scope: string;
   status: string; registered: { date: string; by: string }; link: GlossaryLink;
 }
-export interface GlossaryIndex { type?: string; id?: string; group: string; path: string; mtime?: string; skip: string[]; terms: GlossaryEntry[]; truncated?: number }
+export interface GlossaryIndex { type?: string; id?: string; group: string; path: string; mtime?: string; skip: string[]; terms: GlossaryEntry[];
+                                 truncated?: number; cutHeadings?: number; cutBytes?: number }   // truncated = the two cuts' sum (an older kernel carries it alone)
 
-/** A form's plurals by the everyday rule: tessel → tessels; quill → quills; spar → spars; staircase → staircases; the
- *  trailing y → ies (a declared `also` alias always wins over a guessed plural). */
+/** A form's plurals by the everyday rule: tessel → tessels; quill → quills; spar → spars; a trailing s, x, z, ch or sh
+ *  → es (quillbox → quillboxes); a consonant + y → ies (sparfly → sparflies). A declared `also` alias always wins over
+ *  a guessed plural. */
 export function pluralForms(f: string): string[] {
   const out: string[] = [];
   if (/(s|x|z|ch|sh)$/i.test(f)) out.push(f + "es");
@@ -163,7 +165,12 @@ export function termContent(e: GlossaryEntry, ix: GlossaryIndex): PreviewContent
   const body = (retired ? "*Retired: say the plain phrase.*\n\n" : "") + (e.definition || "")
     + (e.plainWords ? "\n\n*plain words:* " + e.plainWords : "")
     + (e.scope ? "\n\n*scope:* " + e.scope : "");
+  // the index's cuts, each named for what cut it (the review's low: a heading-ceiling cut was blamed on the byte cap)
+  const notes: string[] = [];
+  if (ix.cutBytes) notes.push(ix.cutBytes + " entries beyond the index's byte cap are not linked");
+  if (ix.cutHeadings) notes.push(ix.cutHeadings + " sections past the heading ceiling are not linked");
+  if (!notes.length && ix.truncated) notes.push(ix.truncated + " entries are not linked (the index was cut)");   // an older kernel: the sum alone
   return { kind: "term", title: e.term, subtitle: (e.status || "unconfirmed") + reg + " · " + ix.group,
-           body: { markdown: body }, note: ix.truncated ? ix.truncated + " entries beyond the index's byte cap are not linked" : undefined,
+           body: { markdown: body }, note: notes.length ? notes.join("; ") : undefined,
            open: { label: "Open glossary", path: ix.path, frag: e.slug } };
 }

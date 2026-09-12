@@ -92,11 +92,11 @@ out.route = await page.evaluate(async (sid) => {
 // a rewrite of the file: a new term links on the next PUSH (the pusher stats the file on every cycle it runs; a
 // glossary edit alone wakes no cycle, and nothing here polls, so the session speaks once more: a transcript record
 // is the event the pusher wakes on, exactly as it would be in use)
-fs.appendFileSync(cfg.glossary, "\n## staircase\n\nA cumulative ledger that climbs at every re-bill.\n\n- plain words: a re-billing ledger\n- also: staircases\n- status: unconfirmed\n- registered: 2026-09-11 by web\n");
+fs.appendFileSync(cfg.glossary, "\n## bramblet\n\nAn invented noun, appended after the page loaded.\n\n- plain words: an appended entry\n- also: bramblets\n- status: unconfirmed\n- registered: 2026-09-11 by web\n");
 const t = Date.now() / 1000 + 5; fs.utimesSync(cfg.glossary, t, t);
 fs.appendFileSync(cfg.transcript, JSON.stringify({ type: "user", uuid: "u-2", parentUuid: "a-1", timestamp: new Date().toISOString(), sessionId: cfg.sid,
-  message: { role: "user", content: "And the staircase in the ledger, was that a re-bill?" } }) + "\n");
-await page.waitForFunction(() => Array.from(document.querySelectorAll("#content .term-link")).some((s) => s.dataset.term === "staircase"), null, { timeout: 20000 });
+  message: { role: "user", content: "And the bramblet you appended, did it link?" } }) + "\n");
+await page.waitForFunction(() => Array.from(document.querySelectorAll("#content .term-link")).some((s) => s.dataset.term === "bramblet"), null, { timeout: 20000 });
 out.afterRewrite = await links();
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
@@ -213,7 +213,7 @@ class ServedGlossary(unittest.TestCase):
         self.assertTrue(rt["tessel"]["body"]["markdown"].startswith("## tessel"))
         self.assertEqual(rt["alias"]["body"]["title"], "tessel"); self.assertEqual(rt["missing"]["status"], 404); self.assertTrue(rt["missing"]["body"]["tried"])
         # the rewrite: the new term links on the next frame
-        self.assertTrue(any(l["term"] == "staircase" for l in r["afterRewrite"]), "a rewrite of the file reaches the page on the next push, without a reload or a poll: %r" % r["afterRewrite"])
+        self.assertTrue(any(l["term"] == "bramblet" for l in r["afterRewrite"]), "a rewrite of the file reaches the page on the next push, without a reload or a poll: %r" % r["afterRewrite"])
 
 
 if __name__ == "__main__":
