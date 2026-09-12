@@ -508,6 +508,20 @@ class PlannerSkipsCaptioned(PassFrame):
         v3 = jd.tasks_for(SID, str(self.path), [str(self.path)], T0 + 100)
         self.assertEqual(self._ended_work_tasks(v3), [], "a tombstoned unit is captioned: dropped from the plan")
 
+    def test_an_unreadable_captions_file_plans_nothing_for_that_session_and_raises_nothing(self):
+        """The captions file exists but will not stat (EACCES, ENOTDIR, EIO): _file_key's sentinel is no key; tasks_for answers []
+        for that session instead of raising out of the whole pass (every other session's captions proceed)."""
+        self._finish()
+        cap = jd.CAPDIR / (SID + ".jsonl")
+        real = jd._file_key
+        jd._file_key = lambda p: object() if p == str(cap) else real(p)
+        try:
+            self.assertEqual(jd.tasks_for(SID, str(self.path), [str(self.path)], T0 + 100), [])
+        finally:
+            jd._file_key = real
+        self.assertFalse((jd.PCACHE / (SID + ".json")).exists(), "no memo for a pass that planned nothing")
+        self.assertTrue(self._ended_work_tasks(jd.tasks_for(SID, str(self.path), [str(self.path)], T0 + 100)), "the next pass plans")
+
     def test_a_captioned_unit_is_skipped_before_its_text_is_read(self):
         self._finish()
         v1 = jd.tasks_for(SID, str(self.path), [str(self.path)], T0 + 100)

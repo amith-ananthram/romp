@@ -484,10 +484,25 @@ class ScalarWalkers(Restored):
         (mid, mids): a change to any of them changes what a stored document means, so it is a version bump. Re-pin here
         WITH the bump."""
         import hashlib, inspect
-        rule = "\n".join(inspect.getsource(f).strip() for f in (em.atom_has_work, em.seg_prompt_atom, em._prose_chars, em.postal_mids,
-                                                                em._encoded_mids))
-        self.assertEqual((em._ASM_CKPT_V, hashlib.sha1(rule.encode()).hexdigest()[:10]), (5, "d96d930e55"),
+        rule = "\n".join(inspect.getsource(f).strip() for f in (em.atom_has_work, em._has_text, em.atom_tool_uses, em.seg_prompt_atom,
+                                                                em._prose_chars, em.atom_prose_chars, em.postal_mids, em._encoded_mids,
+                                                                em.is_interrupt_record))
+        self.assertEqual((em._ASM_CKPT_V, hashlib.sha1(rule.encode()).hexdigest()[:10]), (5, "c56a1970a8"),
                          "the stored verdicts' rules changed: bump em._ASM_CKPT_V and re-pin the digest here")
+
+    def test_the_stored_rules_on_odd_content_shapes(self):
+        """The readings the document stores where the body road's shape is odd: an assistant message whose content is a bare
+        string counts as text (work) for a resident atom and for its lazy marker alike, unlike the judges' body road, which
+        read no text there (documented at atom_has_work); a bare string or a nested list inside a content list carries no
+        message id (as the body road read it), while a bare-string content does."""
+        bare = {"type": "assistant", "uuid": "a-bare", "message": {"role": "assistant", "content": "a bare reply"}}
+        self.assertTrue(em.atom_has_work(bare))
+        lazy = dict(bare, lazy=em._lazy_of(bare, "a", 0), message=None)
+        self.assertTrue(em.atom_has_work(lazy), "the marker's nt reads the bare string as text: the two roads agree")
+        mk = "<!-- romp-msg-id: 1700000000.1_1.TESTHOST -->"
+        self.assertEqual(em.postal_mids(mk), ["1700000000.1_1.TESTHOST"], "a bare-string content")
+        self.assertEqual(em.postal_mids([mk, [{"type": "text", "text": mk}]]), [], "no block: no id")
+        self.assertEqual(em.postal_mids([{"type": "text", "text": mk}, "x"]), ["1700000000.1_1.TESTHOST"])
 
 
 class CapsSizedToTheMachine(unittest.TestCase):

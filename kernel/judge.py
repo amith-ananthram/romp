@@ -3491,7 +3491,9 @@ def tasks_for(fsid, leaf, files, now, done=None):
         return []
     key = list(pair)                                   # as JSON reads it back: [[[mtime, size], ...], cut]
     cap_key = _file_key(str(CAPDIR / (fsid + ".jsonl")))   # the captions file's stat beside it (T358): the memo holds the UNDONE
-    cap_key = list(cap_key) if cap_key else None      #  units' tasks only, so a caption filed since must miss it (a strike files none)
+    if cap_key is not None and not isinstance(cap_key, tuple):   #  units' tasks only, so a caption filed since must miss it (a strike
+        return []                                      #  files none). The sentinel (a file that exists but will not stat): this
+    cap_key = list(cap_key) if cap_key else None      #  session plans nothing this pass; the others' captions proceed
     cf = PCACHE / (fsid + ".json")
     try:
         o = json.loads(cf.read_text())

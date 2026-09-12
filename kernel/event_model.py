@@ -4906,7 +4906,8 @@ def postal_mids(content, ids=None):
                 _encoded_mids(c, ids)               # any other block (thinking, tool_use, image) carries no marker: skipped
     elif isinstance(content, (list, tuple)):
         for b in content:
-            postal_mids(b, ids)
+            if isinstance(b, dict):                   # a bare string or a nested list inside a content list is no block: skipped,
+                postal_mids(b, ids)                   #  as the kernel's body road read it
     return ids
 
 
@@ -4967,7 +4968,10 @@ def atom_has_work(atom):
     """Whether an atom is real ASSISTANT output: its own text or a tool_use, on an assistant record that is not an
     API error (the captioner has nothing to gloss without one; an error record carries the error's text and is not
     work). Read from the lazy scalars (nt, tu) for a lazy atom. A segment row's `w` in the assembly document is this
-    verdict at write time over the segment's atoms: changing this rule is a document version bump (_ASM_CKPT_V)."""
+    verdict at write time over the segment's atoms: changing this rule is a document version bump (_ASM_CKPT_V).
+    An assistant message whose content is a bare string counts as text here (the judges' body road read no text in that
+    shape): the lazy marker's nt cannot tell a bare string from a text block, and the two roads must agree; no CLI writes
+    an assistant record in that shape (tests/test_asm_index.py pins the reading)."""
     if atom.get("type") != "assistant" or atom.get("isApiError"):
         return False
     return _has_text(atom) or bool(atom_tool_uses(atom))
