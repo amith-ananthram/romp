@@ -23,6 +23,14 @@ test("focusAfterDismiss: the user's own ✕ keeps the recency fallback; every ot
   }
 });
 
+test("emptyStateParts: a declined record's hidden line says the first arrival is hidden, name-free; the user's own hidden tab keeps the view's line", () => {
+  const own = emptyStateParts({ name: "web", why: "hidden", dialing: false }, true);
+  assert.deepEqual(own, { head: "This tab view shows no session. Change the view, or pick a tab.", name: null, tail: "" });
+  const declined = emptyStateParts({ name: "api", why: "hidden", dialing: false, declined: true }, true);
+  assert.deepEqual(declined, { head: "The first session to arrive is hidden by this view. Pick a tab, or change the view.", name: null, tail: "" }, "worded for the record's case, still name-free (a visible placeholder tab may be on the strip)");
+  assert.equal(emptyStateParts({ name: "api", why: "hidden", dialing: false, declined: true }, false).name, null);
+});
+
 test("emptyStateParts: the body names the session that vanished and why; reconnecting when the host is dialing", () => {
   assert.deepEqual(emptyStateParts(null, false), { head: "No session open — click + to add one.", name: null, tail: "" });
   assert.deepEqual(emptyStateParts(null, true), { head: "No session selected. Pick a tab to start.", name: null, tail: "" });
