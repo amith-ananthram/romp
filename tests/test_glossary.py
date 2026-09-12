@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import tempfile
+from unittest import mock
 import unittest
 from pathlib import Path
 
@@ -33,18 +34,23 @@ class Parser(unittest.TestCase):
         self.assertEqual([e["slug"] for e in km._slice_headings(FIX["text"])], FIX["expect"]["slugs"], "slugs over ALL headings, the viewer's rule")
         slim = [{k: v for k, v in e.items() if k != "section"} for e in got["terms"]]
         self.assertEqual(slim, FIX["expect"]["terms"])
-        self.assertTrue(got["terms"][0]["section"].startswith("## fold\n"), "each entry keeps its whole section for the route")
+        self.assertTrue(got["terms"][0]["section"].startswith("## tessel\n"), "each entry keeps its whole section for the route")
         self.assertIn("- registered: 2026-09-11 by web", got["terms"][0]["section"])
 
     def test_edge_cases(self):
-        self.assertEqual(km._glossary_parse(""), {"skip": [], "terms": []})
-        self.assertEqual(km._glossary_parse("# only a title\n\nprose\n"), {"skip": [], "terms": []})
+        self.assertEqual(km._glossary_parse(""), {"skip": [], "terms": [], "cutHeadings": 0})
+        self.assertEqual(km._glossary_parse("# only a title\n\nprose\n"), {"skip": [], "terms": [], "cutHeadings": 0})
         got = km._glossary_parse("## a\n\ndef\n\n### sub\n\nmore\n\n## b\n\n- status: retired\n")
         self.assertEqual([e["term"] for e in got["terms"]], ["a", "b"], "a level-3 heading stays inside its section")
-        self.assertEqual(got["terms"][0]["definition"], "def more", "…and its prose folds into the definition")
+        self.assertEqual(got["terms"][0]["definition"], "def more", "…and its prose tessels into the definition")
         self.assertEqual(got["terms"][1]["definition"], ""); self.assertEqual(got["terms"][1]["status"], "retired")
         fenced = "## x\n\n```\n## not a heading\n```\n\n- plain words: y\n"
         self.assertEqual([e["term"] for e in km._glossary_parse(fenced)["terms"]], ["x"], "fenced code hides no heading")
+        self.assertEqual([e["term"] for e in km._glossary_parse("## \n\nnothing\n\n## real\n\nx\n")["terms"]], ["real"], "a bare '## ' names nothing (the review: its plural was the letter s)")
+        many = "".join("## t%d\n\nd%d\n\n" % (i, i) for i in range(300))
+        got = km._glossary_parse(many)
+        self.assertEqual(len(got["terms"]), km._SLICE_HEADINGS_MAX, "the heading index's ceiling"); self.assertEqual(got["cutHeadings"], 300 - km._SLICE_HEADINGS_MAX, "…and the sections past it are counted, not dropped silently")
+        self.assertEqual(km._glossary_parse(FIX["text"])["cutHeadings"], 0)
 
 
 class Lookup(unittest.TestCase):
@@ -54,6 +60,8 @@ class Lookup(unittest.TestCase):
         os.environ["CLAUDE_CONFIG_DIR"] = self.td
         self.saved_state = km.jd.STATE
         km.jd._rebind_state(Path(self.td) / "state")
+        (Path(self.td) / "state").mkdir(parents=True, exist_ok=True)
+        Path(self.td, "state", "session-hosts").write_text("off\n")   # a lab root writes its own hosts off (the conftest rule)
         (Path(self.td) / "glossaries").mkdir(parents=True)
         Path(self.td, "glossaries", "notes-api.md").write_text(FIX["text"])
         km._GLOSSARY_CACHE.clear()
@@ -83,7 +91,7 @@ class Lookup(unittest.TestCase):
         fr = km._glossary_frame(SID)
         self.assertEqual((fr["type"], fr["id"], fr["group"]), ("glossary", SID, "notes-api"))
         self.assertTrue(fr["path"].endswith("glossaries/notes-api.md")); self.assertTrue(fr["mtime"].isdigit())
-        self.assertEqual(fr["skip"], FIX["expect"]["skip"]); self.assertEqual([e["term"] for e in fr["terms"]], ["fold", "lens", "pin", "fold head"])
+        self.assertEqual(fr["skip"], FIX["expect"]["skip"]); self.assertEqual([e["term"] for e in fr["terms"]], ["tessel", "quill", "spar", "tessel head"])
         self.assertNotIn("section", fr["terms"][0], "the section stays on the kernel's side"); self.assertEqual(fr["truncated"], 0)
         self.assertIsNone(km._glossary_frame(OTHER), "no file: no frame")
         cap = km._GLOSSARY_INDEX_MAX_BYTES
@@ -105,15 +113,30 @@ class Lookup(unittest.TestCase):
         self.assertIn("wire", [e["term"] for e in fr["terms"]]); self.assertEqual(len(km._GLOSSARY_CACHE), 1, "one entry per file")
 
     def test_the_route_answers_a_term_or_an_alias_and_404s_with_the_paths_tried(self):
-        s, b = km._glossary_lookup(SID, "Fold")
-        self.assertEqual((s, b["title"], b["anchor"], b["group"], b["status"]), (200, "fold", "fold", "notes-api", "unconfirmed"))
-        self.assertTrue(b["markdown"].startswith("## fold")); self.assertTrue(b["source_path"].endswith("notes-api.md"))
-        self.assertEqual(km._glossary_lookup(SID, "review fold")[1]["title"], "fold", "an alias answers the term")
-        self.assertEqual(km._glossary_lookup(SID, "fold head")[1]["anchor"], "fold-head", "the multi-word term is its own entry")
-        s, b = km._glossary_lookup(SID, "nonesuch")
-        self.assertEqual(s, 404); self.assertTrue(b["tried"][0].endswith("notes-api.md"))
-        s, b = km._glossary_lookup(OTHER, "fold")
+        s, b = km._glossary_lookup(SID, "Tessel")
+        self.assertEqual((s, b["title"], b["anchor"], b["group"], b["status"]), (200, "tessel", "tessel", "notes-api", "unconfirmed"))
+        self.assertTrue(b["markdown"].startswith("## tessel")); self.assertTrue(b["source_path"].endswith("notes-api.md"))
+        self.assertEqual(km._glossary_lookup(SID, "review tessel")[1]["title"], "tessel", "an alias answers the term")
+        self.assertEqual(km._glossary_lookup(SID, "tessel head")[1]["anchor"], "tessel-head", "the multi-word term is its own entry")
+        with mock.patch.dict(os.environ, {"HOME": self.td}):     # the lab root stands in for $HOME, so the tilde has something to abbreviate
+            s, b = km._glossary_lookup(SID, "nonesuch")
+        self.assertEqual(s, 404); self.assertTrue(b["tried"][0].startswith("~/") and b["tried"][0].endswith("notes-api.md"), "tilded like the 200's source_path: %r" % b["tried"])
+        s, b = km._glossary_lookup(OTHER, "tessel")
         self.assertEqual(s, 404); self.assertTrue(any(t.endswith("docs.md") for t in b["tried"]), "the paths tried, for a session with no file")
+
+    def test_the_cache_is_bounded_and_refuses_a_file_over_the_read_ceiling(self):
+        cap, ents = km._TEXT_MAX_BYTES, km._GLOSSARY_CACHE_ENTRIES
+        try:
+            km._GLOSSARY_CACHE_ENTRIES = 2
+            for i in range(3):
+                Path(self.td, "glossaries", "g%d.md" % i).write_text("## w%d\n\nx\n" % i)
+                km._glossary_load(Path(self.td, "glossaries", "g%d.md" % i))
+            self.assertEqual(len(km._GLOSSARY_CACHE), 2, "least recently read out first")
+            km._TEXT_MAX_BYTES = 64
+            big = Path(self.td, "glossaries", "big.md"); big.write_text("## huge\n\n" + "x" * 200 + "\n")
+            self.assertEqual(km._glossary_load(big), (None, 0), "over the preview route's own ceiling: not read, not held")
+        finally:
+            km._TEXT_MAX_BYTES, km._GLOSSARY_CACHE_ENTRIES = cap, ents
 
     def test_the_perf_snapshot_carries_the_counters(self):
         snap = km._PERF_STATS.snapshot() if hasattr(km._PERF_STATS, "snapshot") else None
@@ -121,6 +144,7 @@ class Lookup(unittest.TestCase):
             self.assertIn("glossary", snap)
         src = Path(os.path.join(BIN, "romp-kernel")).read_text()
         self.assertIn('"glossary": glossary_stats,', src)
+        self.assertEqual(set(km._PERF_STATS.glossary_stats), {"parses", "framesBuilt", "termsBuilt", "bytesBuilt", "cut"}, "counted at the build, and named so")
 
 
 if __name__ == "__main__":

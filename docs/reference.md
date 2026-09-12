@@ -1788,26 +1788,33 @@ linked (each bullet's bold lead, or the text before its colon, read as words), t
 one `## <term>` section per coinage with a definition paragraph and the labelled
 bullets `plain words`, `also` (aliases, spaces allowed), `scope`, `status`
 (unconfirmed, confirmed, retired), `registered` (`<date> by <session>`) and
-`link` (`all`, `first`, `off`; default `all`). A message is resolved against its
-author's group: the session's tag group's file, else its own name's; the
-repo-local `docs/glossary.md` is a seam kept for a second source with no file
-today.
+`link` (`all`, `first`, `off`; default `all`). A chat message is resolved
+against its author's group: the session's tag group's file, else its own name's;
+a mail body shown in a session's chat links the READER's group (the chat
+session's index; the sender's group is a later refinement). The repo-local
+`docs/glossary.md` is a seam kept for a second source with no file today.
 
 The kernel parses a file once per `(path, mtime)` and ships each session a
 `{type: "glossary"}` frame on the pusher's cycle, on its own dedup slot like the
 comments frame (the stat is the event; no timer, no watcher): `group`, `path`,
 `mtime`, `skip`, `terms` (term, slug, definition, plain words, also, scope,
 status, registered, link) and `truncated`, the count of entries cut by the
-index's byte cap (256 KB, counted in `/perf` under `glossary` beside the parses,
-the terms and the bytes shipped). Slugs come from the file's headings in order
+index's byte cap (256 KB) or lying past the heading index's ceiling (256
+headings), counted in `/perf` under `glossary` beside the parses and the frames,
+terms and bytes BUILT per cycle (the dedup slot decides what is shipped). A file
+over the preview route's 2 MB read ceiling is not read; the parsed cache holds
+sixteen files, least recently read out first. Slugs come from the file's headings in order
 through the viewer's own rule, the Not-coinages heading included, so a card opens
 the viewer on the heading the viewer gave that id.
 
 The chat page compiles one matcher per index (`glossary-links.ts`): every form
-(the term, its aliases, and their plurals by the everyday rule) whole-word and
-case-insensitive, longest first, minus the skip list, over the prose of assistant
-and user text and mail bodies; never code, links, headings, math, the composer,
-tool heads or the timeline. Each occurrence becomes a `.term-link` span carrying
+(the term, its aliases, and their plurals by the everyday rule; nothing shorter
+than two characters) whole-word and case-insensitive, longest first, minus the
+skip list (a listed word, its plurals and any alias equal to one of them), over
+the prose of assistant and user text and mail bodies; never code, links,
+headings, math, the composer, tool heads, the timeline, nor inside a path-shaped
+or host-shaped token (a path the kernel could not verify stays plain, unsplit).
+A term split across text nodes by an inline element is not matched. Each occurrence becomes a `.term-link` span carrying
 the glossary path and the term's slug, exactly like a path link's absorbed
 section: the same hover card (filled from the index, no fetch) and the same
 click (the viewer at the heading). `link: first` links the first occurrence per

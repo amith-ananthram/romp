@@ -2189,6 +2189,12 @@ function termMatcherFor(sid: string | null): TermMatcher | null {
  *  glossary path and the term's slug exactly like a path link's absorbed section, so the same hover and click roads
  *  serve it. Nothing when the session's group has no glossary. */
 function linkTerms(root: HTMLElement, sid: string | null = renderingSid): number {
+  // the four documented roots (the nudge's full text, the user bubble, the assistant body, the mail body) are MARKED
+  // here, matcher or not, so a later index frame re-links exactly them (relinkTerms) and never a tool or subagent
+  // report body; a root nested inside a marked root is the ancestor's to scan, with the ancestor's one seen set
+  // (the review's mediums: every .md in the view was relinked, and a nested body was visited twice)
+  if (root.parentElement?.closest("[data-term-root]")) return 0;
+  root.dataset.termRoot = "1";
   const m = termMatcherFor(sid);
   if (!m) return 0;
   return linkifyTerms(root, m, (e, text) => {
@@ -2220,7 +2226,7 @@ function relinkTerms(sid: string): void {
     s.replaceWith(t);
     t.parentNode?.normalize();
   }
-  for (const body of Array.from(v.el.querySelectorAll(".md"))) linkTerms(body as HTMLElement, sid);
+  for (const root of Array.from(v.el.querySelectorAll("[data-term-root]"))) linkTerms(root as HTMLElement, sid);   // the marked roots alone
 }
 
 // ── the file PREVIEW popover (T351, the user 2026-09-11) ──────────────────────────────────────────

@@ -31,9 +31,10 @@ import test_ship_reship as _lab   # noqa: E402
 
 SID = "11111111-2222-3333-4444-555555555555"
 FIX = json.loads(Path(HERE, "fixtures", "glossary_grammar.json").read_text())
-REPLY = ("I folded the fixes from your review and pushed the fold head; the lens was security, and the lens again. "
-         "The pin on `fold` stays as code, and docs/guide.md#fold is a path, not a term. Two folds landed.")
-USER = "Did the fold cover the second lens?"
+REPLY = ("I tesselled the fixes from your review and pushed the tessel head; the quill was security, and the quill again. "
+         "The spar on `tessel` stays as code, and docs/guide.md#tessel is a path, not a term. Two tessels landed. "
+         "The unverified docs/widget/tessel.md and the host example.com/tessel/y stay plain too.")
+USER = "Did the tessel cover the second quill?"
 
 
 def _free_port():
@@ -63,10 +64,10 @@ const links = () => page.evaluate(() => Array.from(document.querySelectorAll("#c
 const out = { links: await links() };
 out.codeLinks = await page.evaluate(() => document.querySelectorAll("#content code .term-link, #content a .term-link, #content .file-uri-link .term-link").length);
 out.pathLink = await page.evaluate(() => { const a = document.querySelector('#content .file-uri-link[data-path="docs/guide.md"]'); return a ? { text: a.textContent, frag: a.dataset.frag } : null; });
-// the term card: hover "fold head" (the multi-word term), no request
+// the term card: hover "tessel head" (the multi-word term), no request
 const before = requests;
 const shot = async (name) => { if (!cfg.shots) return; fs.mkdirSync(cfg.shots, { recursive: true }); await page.screenshot({ path: cfg.shots + "/" + name + ".png", clip: { x: 0, y: 60, width: 1100, height: 520 } }); };
-await page.hover('#content .term-link[data-term="fold-head"]');
+await page.hover('#content .term-link[data-term="tessel-head"]');
 await page.waitForFunction(() => { const p = document.getElementById("file-preview-pop"); return !!p && getComputedStyle(p).display !== "none" && !!p.querySelector(".fp-body"); }, null, { timeout: 5000 });
 await page.waitForTimeout(150);
 out.card = await page.evaluate(() => { const p = document.getElementById("file-preview-pop"); const b = p.querySelector(".fp-body");
@@ -78,15 +79,15 @@ await shot("romp_chat-glossary-light");
 await page.evaluate(() => document.body.classList.remove("theme-light"));
 await page.mouse.move(900, 700); await page.waitForTimeout(400);
 // a click opens the glossary in the viewer at the heading
-await page.click('#content .term-link[data-term="fold"]');
+await page.click('#content .term-link[data-term="tessel"]');
 await page.waitForSelector("#romp-fileview", { timeout: 10000 });
-await page.waitForFunction(() => !!document.querySelector("#romp-fileview #md-fold, #romp-fileview [id='md-fold']"), null, { timeout: 10000 });
-out.viewer = await page.evaluate(() => ({ heading: document.querySelector("#romp-fileview #md-fold")?.textContent, title: (document.querySelector("#romp-fileview .fv-title, #romp-fileview .fileview-title, #romp-fileview header") || {}).textContent }));
+await page.waitForFunction(() => !!document.querySelector("#romp-fileview #md-tessel, #romp-fileview [id='md-tessel']"), null, { timeout: 10000 });
+out.viewer = await page.evaluate(() => ({ heading: document.querySelector("#romp-fileview #md-tessel")?.textContent, title: (document.querySelector("#romp-fileview .fv-title, #romp-fileview .fileview-title, #romp-fileview header") || {}).textContent }));
 await page.keyboard.press("Escape"); await page.waitForTimeout(300);
 // the route, by hand
 out.route = await page.evaluate(async (sid) => {
   const get = async (t) => { const r = await fetch("/glossary/" + encodeURIComponent(t) + "?sid=" + encodeURIComponent(sid), { credentials: "same-origin" }); return { status: r.status, body: await r.json() }; };
-  return { fold: await get("Fold"), alias: await get("review fold"), missing: await get("nonesuch") };
+  return { tessel: await get("Tessel"), alias: await get("review tessel"), missing: await get("nonesuch") };
 }, cfg.sid);
 // a rewrite of the file: a new term links on the next PUSH (the pusher stats the file on every cycle it runs; a
 // glossary edit alone wakes no cycle, and nothing here polls, so the session speaks once more: a transcript record
@@ -133,7 +134,7 @@ class ServedGlossary(unittest.TestCase):
         for d in ("names", "sdk", "states"):
             os.makedirs(os.path.join(state, d), exist_ok=True)
         os.makedirs(os.path.join(cwd, "docs"), exist_ok=True)
-        Path(cwd, "docs", "guide.md").write_text("# Guide\n\n## Fold\n\nThe kernel's chat fold.\n")
+        Path(cwd, "docs", "guide.md").write_text("# Guide\n\n## Tessel\n\nThe kernel's chat tessel.\n")
         claude = os.path.join(cls.lab, "claude")
         os.makedirs(os.path.join(claude, "glossaries"), exist_ok=True)
         cls.glossary = os.path.join(claude, "glossaries", "web.md")     # the session's own name: the fallback when it has no tag group
@@ -187,29 +188,30 @@ class ServedGlossary(unittest.TestCase):
         self.assertIsNotNone(line, "driver printed no result:\n" + p.stdout[-3000:])
         r = json.loads(line[len("RESULT:"):])
         texts = [(l["text"], l["term"]) for l in r["links"]]
-        # the assistant's words: folded (alias), fold head (longest first: one term), lens once (first), folds (plural);
-        # the user's words: fold and lens (its own message, its own first)
-        self.assertIn(("folded", "fold"), texts); self.assertIn(("fold head", "fold-head"), texts); self.assertIn(("folds", "fold"), texts)
-        self.assertEqual(sum(1 for t, k in texts if k == "lens"), 2, "lens once per message, in two messages: %r" % texts)
-        self.assertNotIn(("pin", "pin"), texts, "link: off links nothing"); self.assertFalse(any(t == "fold" and False for t, _ in texts))
+        # the assistant's words: tesselled (alias), tessel head (longest first: one term), quill once (first), tessels (plural);
+        # the user's words: tessel and quill (its own message, its own first)
+        self.assertIn(("tesselled", "tessel"), texts); self.assertIn(("tessel head", "tessel-head"), texts); self.assertIn(("tessels", "tessel"), texts)
+        self.assertEqual(sum(1 for t, k in texts if k == "quill"), 2, "quill once per message, in two messages: %r" % texts)
+        self.assertNotIn(("spar", "spar"), texts, "link: off links nothing"); self.assertFalse(any(t == "tessel" and False for t, _ in texts))
         self.assertEqual(r["codeLinks"], 0, "never inside code or a link")
-        self.assertEqual(r["pathLink"], {"text": "docs/guide.md#fold", "frag": "fold"}, "the path link's absorbed section is not a term's")
+        self.assertEqual(sum(1 for t, k in texts if k == "tessel"), 3, "the user's tessel, tesselled and tessels; none from inside the unverified path or the host: %r" % texts)
+        self.assertEqual(r["pathLink"], {"text": "docs/guide.md#tessel", "frag": "tessel"}, "the path link's absorbed section is not a term's")
         for l in r["links"]:
             self.assertTrue(l["path"].endswith("glossaries/web.md")); self.assertEqual(l["frag"], l["term"])
         self.assertTrue(any(l["inUser"] for l in r["links"]), "the user's own words link too")
         # the card, from the index: no request
         c = r["card"]
-        self.assertEqual((c["title"], c["open"]), ("fold head", "Open glossary")); self.assertIn("fp-term", c["kind"] or "")
+        self.assertEqual((c["title"], c["open"]), ("tessel head", "Open glossary")); self.assertIn("fp-term", c["kind"] or "")
         self.assertIn("unconfirmed", c["sub"]); self.assertIn("web", c["sub"])
         self.assertIn("The head a review's fixes land on", c["text"]); self.assertIn("plain words:", c["text"])
         self.assertEqual(r["cardRequests"], 0, "the term card is filled from the index, no fetch")
         # the click: the viewer on the heading
-        self.assertEqual((r["viewer"]["heading"] or "").strip().lower(), "fold")
+        self.assertEqual((r["viewer"]["heading"] or "").strip().lower(), "tessel")
         # the route
         rt = r["route"]
-        self.assertEqual((rt["fold"]["status"], rt["fold"]["body"]["title"], rt["fold"]["body"]["anchor"]), (200, "fold", "fold"))
-        self.assertTrue(rt["fold"]["body"]["markdown"].startswith("## fold"))
-        self.assertEqual(rt["alias"]["body"]["title"], "fold"); self.assertEqual(rt["missing"]["status"], 404); self.assertTrue(rt["missing"]["body"]["tried"])
+        self.assertEqual((rt["tessel"]["status"], rt["tessel"]["body"]["title"], rt["tessel"]["body"]["anchor"]), (200, "tessel", "tessel"))
+        self.assertTrue(rt["tessel"]["body"]["markdown"].startswith("## tessel"))
+        self.assertEqual(rt["alias"]["body"]["title"], "tessel"); self.assertEqual(rt["missing"]["status"], 404); self.assertTrue(rt["missing"]["body"]["tried"])
         # the rewrite: the new term links on the next frame
         self.assertTrue(any(l["term"] == "staircase" for l in r["afterRewrite"]), "a rewrite of the file reaches the page on the next push, without a reload or a poll: %r" % r["afterRewrite"])
 

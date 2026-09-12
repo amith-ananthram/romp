@@ -3,7 +3,10 @@
 // module builds the matcher from it and links every whole-word occurrence of a term or its `also` forms (plurals
 // too) in the prose of a message, skipping code, links, headings, math, and the popover cards. The term card is
 // filled from the same index with no fetch (termContent, the file preview popover's contract). Pure: no DOM writes
-// beyond what the caller hands in through `make`.
+// beyond what the caller hands in through `make`. Two limits, by design: a term split across text nodes by an inline
+// element (`fo*ld*`, a link inside the words) is not matched, since each text node is scanned alone; and a term inside
+// a path-shaped or host-shaped token (docs/widget/x.md, example.com/y) is never linked, so a path a session named but
+// the kernel could not verify is not split by an underline (the review's medium).
 import type { PreviewContent } from "./file-preview";
 
 export type GlossaryLink = "all" | "first" | "off";
@@ -13,7 +16,7 @@ export interface GlossaryEntry {
 }
 export interface GlossaryIndex { type?: string; id?: string; group: string; path: string; mtime?: string; skip: string[]; terms: GlossaryEntry[]; truncated?: number }
 
-/** A form's plurals by the everyday rule: fold → folds; lens → lenses; belt → belts; staircase → staircases; the
+/** A form's plurals by the everyday rule: tessel → tessels; quill → quills; spar → spars; staircase → staircases; the
  *  trailing y → ies (a declared `also` alias always wins over a guessed plural). */
 export function pluralForms(f: string): string[] {
   const out: string[] = [];
@@ -23,15 +26,25 @@ export function pluralForms(f: string): string[] {
   return out;
 }
 
-/** The forms one entry links under: the term, its `also` aliases (spaces allowed: "fold head" is one form) and their
+/** The forms one entry links under: the term, its `also` aliases (spaces allowed: "tessel head" is one form) and their
  *  plurals, lowercased and deduped, minus the skip list (the Not-coinages words win over any heading or alias, in
  *  every file: lab_manager 2026-09-11). An entry with `link: off` links nothing. */
 export function linkForms(e: GlossaryEntry, skip: Set<string>): string[] {
   if (e.link === "off") return [];
-  const base = [e.term, ...(e.also || [])].map((s) => s.trim().toLowerCase()).filter(Boolean);
+  // a form shorter than two characters links nothing, nor is it pluralised (the review: an empty heading's plural
+  // was the letter s; the letter's own plural would be "ses")
+  const base = [e.term, ...(e.also || [])].map((s) => s.trim().toLowerCase()).filter((b) => b.length >= 2);
   const all = new Set<string>();
   for (const b of base) { all.add(b); for (const p of pluralForms(b)) all.add(p); }
-  return Array.from(all).filter((f) => !skip.has(f));
+  return Array.from(all).filter((f) => f.length >= 2 && !skip.has(f));
+}
+
+/** The skip list by WORD: a listed word, its plurals and any alias equal to one of them never link (the review's low:
+ *  "head" listed left "heads" linking). */
+export function skipForms(skip: readonly string[]): Set<string> {
+  const out = new Set<string>();
+  for (const s of skip) { const w = s.trim().toLowerCase(); if (!w) continue; out.add(w); for (const p of pluralForms(w)) out.add(p); }
+  return out;
 }
 
 export interface TermMatcher { re: RegExp; byForm: Map<string, GlossaryEntry>; index: GlossaryIndex }
@@ -39,38 +52,63 @@ export interface TermMatcher { re: RegExp; byForm: Map<string, GlossaryEntry>; i
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /** One case-insensitive, whole-word (Unicode letters and digits bound a word) regex over every form, LONGEST first so
- *  "fold head" is one term and never "fold" plus a word; null when the index links nothing. */
+ *  "tessel head" is one term and never "tessel" plus a word; null when the index links nothing. */
 export function buildMatcher(ix: GlossaryIndex): TermMatcher | null {
-  const skip = new Set((ix.skip || []).map((s) => s.toLowerCase()));
+  const skip = skipForms(ix.skip || []);
   const byForm = new Map<string, GlossaryEntry>();
-  // an exact TERM claims its form before any other entry's alias does ("fold head" is its own entry even though
-  // "fold" lists it as an alias; the route reads the same way), so the terms pass first and the aliases after
-  const terms = (ix.terms || []).filter((e) => e.link !== "off");
+  // an exact TERM claims its form before any other entry's alias does ("tessel head" is its own entry even though
+  // "tessel" lists it as an alias; the route reads the same way), so the terms pass first and the aliases after
+  const terms = (ix.terms || []).filter((e) => e.link !== "off" && e.term.trim().length >= 2);
   for (const e of terms) {
     const t = e.term.trim().toLowerCase();
-    for (const f of [t, ...pluralForms(t)]) if (f && !skip.has(f) && !byForm.has(f)) byForm.set(f, e);
+    for (const f of [t, ...pluralForms(t)]) if (f.length >= 2 && !skip.has(f) && !byForm.has(f)) byForm.set(f, e);
   }
   for (const e of terms) for (const f of linkForms(e, skip)) if (!byForm.has(f)) byForm.set(f, e);
   if (!byForm.size) return null;
   const forms = Array.from(byForm.keys()).sort((a, b) => b.length - a.length || a.localeCompare(b));
-  // a word is letters, digits, the underscore and the HYPHEN (the team coins hyphenated terms, and "fold-ish" is not
-  // a use of "fold"), on both sides
+  // a word is letters, digits, the underscore and the HYPHEN (the team coins hyphenated terms, and "tessel-ish" is not
+  // a use of "tessel"), on both sides
   const re = new RegExp("(?<![\\p{L}\\p{N}_-])(" + forms.map(escapeRe).join("|") + ")(?![\\p{L}\\p{N}_-])", "giu");
   return { re, byForm, index: ix };
 }
 
 export interface TermSpan { start: number; end: number; entry: GlossaryEntry }
 
+/** The entries already linked under a root (their spans' `data-term` slugs), as the seen set a fresh walk starts
+ *  from: a body linked on its own before it was placed inside a message root keeps its `first` pick, and the outer
+ *  walk does not link that term a second time in the prose around it. */
+export function seenFromLinked(slugs: Iterable<string>, m: TermMatcher): Set<GlossaryEntry> {
+  const seen = new Set<GlossaryEntry>();
+  const bySlug = new Map((m.index.terms || []).map((e) => [e.slug, e] as const));
+  for (const s of slugs) { const e = bySlug.get(s); if (e) seen.add(e); }
+  return seen;
+}
+
+/** The [start, end) spans of `text` a term may never be linked inside: a slash-joined path shape (with or without a
+ *  leading ~, ., or scheme) and a dotted host (example.com, api.example.org/x). The same shape family the kernel's
+ *  path linker reads as a candidate; a candidate it could not verify stays plain text here, unsplit. */
+export function noLinkZones(text: string): Array<[number, number]> {
+  const out: Array<[number, number]> = [];
+  // the token may follow a bracket or a quote (a path in parentheses is the common case); a bare host is one dot
+  const re = /(?<![\w.\/~@%+-])(?:[A-Za-z][A-Za-z0-9+.-]*:\/\/\S+|[~.]?[\w.\-@%+]*\/[\w.\-@%+~\/#?=&]+|[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}(?:\/\S*)?)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) out.push([m.index, m.index + m[0].length]);
+  return out;
+}
+
 /** The spans of `text` to link, honouring each entry's link mode: `all` every occurrence, `first` the first occurrence
  *  per message (`seen` is the message's set, shared across its text nodes), `off` never (its forms never entered the
  *  matcher). Pure over strings: the DOM walker below and the tests share it. */
 export function scanTerms(text: string, m: TermMatcher, seen: Set<GlossaryEntry>): TermSpan[] {
   const out: TermSpan[] = [];
+  const zones = noLinkZones(text);
   m.re.lastIndex = 0;
   let hit: RegExpExecArray | null;
   while ((hit = m.re.exec(text))) {
     const e = m.byForm.get(hit[1].toLowerCase());
     if (!e) continue;
+    const a = hit.index, b = hit.index + hit[0].length;
+    if (zones.some(([za, zb]) => a < zb && b > za)) continue;   // inside a path-shaped or host-shaped token: never
     if (e.link === "first") { if (seen.has(e)) continue; seen.add(e); }
     out.push({ start: hit.index, end: hit.index + hit[0].length, entry: e });
   }
@@ -94,7 +132,9 @@ export function linkifyTerms(root: ParentNode, m: TermMatcher, make: (e: Glossar
     if (!p || (p.closest && p.closest(skipSel))) continue;
     if (t.data.length >= 2) nodes.push(t);
   }
-  const seen = new Set<GlossaryEntry>();
+  const el = root as Element;
+  const linked = el.querySelectorAll ? Array.from(el.querySelectorAll("span.term-link[data-term]")).map((s) => (s as HTMLElement).dataset.term || "") : [];
+  const seen = seenFromLinked(linked, m);
   let count = 0;
   for (const t of nodes) {
     const spans = scanTerms(t.data, m, seen);

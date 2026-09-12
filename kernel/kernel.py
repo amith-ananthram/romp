@@ -337,17 +337,20 @@ class _PerfStats:
             # and the entries the pusher's path warmed ahead of a hover
             self.file_slice_stats = {"hit": 0, "miss": 0, "bytes": 0, "warm": 0}
             # the glossary (T351 stage 2): files parsed, terms shipped, bytes shipped, and terms CUT by the index's byte cap
-            self.glossary_stats = {"parses": 0, "terms": 0, "bytes": 0, "cut": 0}
+            self.glossary_stats = {"parses": 0, "framesBuilt": 0, "termsBuilt": 0, "bytesBuilt": 0, "cut": 0}
 
     # ── writers (hot paths) ──
     def glossary(self, parsed=False, terms=0, nbytes=0, cut=0):
-        """One glossary file parsed (parsed=True) or one index shipped: the terms and bytes it carried, and the terms
-        the byte cap cut (a cut is the /perf note the user asked for beside every bounded cache)."""
+        """One glossary file parsed (parsed=True) or one index frame BUILT (the pusher builds one per session per cycle;
+        the dedup slot decides what is shipped, so these are build counts, named so): the terms and bytes it carried,
+        and the entries cut (the byte cap, or sections past the heading ceiling), the /perf note beside a bounded cache."""
         with self.lock:
             d = self.glossary_stats
             if parsed:
                 d["parses"] += 1
-            d["terms"] += int(terms); d["bytes"] += int(nbytes); d["cut"] += int(cut)
+            else:
+                d["framesBuilt"] += 1
+            d["termsBuilt"] += int(terms); d["bytesBuilt"] += int(nbytes); d["cut"] += int(cut)
 
     def file_slice(self, hit, nbytes=0, warm=False):
         """One GET /file?slice=1 served (hit: from the text cache; miss: read and indexed now), or one entry the
@@ -43462,7 +43465,8 @@ def _slice_body(fp, sid, anchor):
 # cycle like the comments frame (no timer, no watcher: the stat is the event); the client links terms at render time
 # and fills the term card from the index with no fetch. GET /glossary/<term> answers the lab's own consumers.
 _GLOSSARY_INDEX_MAX_BYTES = 256 * 1024
-_GLOSSARY_CACHE = {}                        # (real path, mtime_ns) -> the parsed file; a rewrite is a new key, the old one goes
+_GLOSSARY_CACHE = collections.OrderedDict()  # (real path, mtime_ns) -> the parsed file; a rewrite is a new key, the old one goes
+_GLOSSARY_CACHE_ENTRIES = 16                 # files held at once (one per group in use); the read ceiling below bounds the bytes
 _GLOSSARY_CACHE_LOCK = threading.Lock()
 _GLOSSARY_LINK_MODES = ("all", "first", "off")
 _GLOSSARY_STATUSES = ("unconfirmed", "confirmed", "retired")
@@ -43497,6 +43501,8 @@ def _glossary_parse(text):
                 break
         body = lines[h["line"] + 1:end]
         name = h["text"].strip()
+        if not name:
+            continue                                   # a bare "## " names nothing: no entry (the review: its plural was the letter s)
         if name.lower() == "not coinages":
             for ln in body:
                 s = ln.strip()
@@ -43531,7 +43537,18 @@ def _glossary_parse(text):
                 para.append(ln)
         e["definition"] = " ".join(x.strip() for x in para if x.strip()).strip()
         terms.append(e)
-    return {"skip": skip, "terms": terms}
+    # sections past the heading index's ceiling (_SLICE_HEADINGS_MAX) never reached `heads`: count them, so the frame
+    # and /perf say how many entries were cut (the review's low: they were dropped silently)
+    total_h2 = 0
+    fence = False
+    for line in lines:
+        st = line.lstrip()
+        if st.startswith("```") or st.startswith("~~~"):
+            fence = not fence
+        elif not fence and re.match(r"^##\s+\S", line):
+            total_h2 += 1
+    handled = len(terms) + (1 if any(h["level"] == 2 and h["text"].strip().lower() == "not coinages" for h in heads) else 0)
+    return {"skip": skip, "terms": terms, "cutHeadings": max(0, total_h2 - handled)}
 
 
 def _glossary_load(path):
@@ -43544,8 +43561,12 @@ def _glossary_load(path):
     key = (real, st.st_mtime_ns)
     with _GLOSSARY_CACHE_LOCK:
         hit = _GLOSSARY_CACHE.get(key)
+        if hit is not None:
+            _GLOSSARY_CACHE.move_to_end(key)
     if hit is not None:
         return hit, st.st_mtime_ns
+    if st.st_size > _TEXT_MAX_BYTES:            # the preview route's own ceiling (2 MB): a glossary is a short file
+        return None, 0
     try:
         text = Path(real).read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -43556,6 +43577,8 @@ def _glossary_load(path):
         for k2 in [k2 for k2 in _GLOSSARY_CACHE if k2[0] == real]:   # a rewrite: the older mtime goes
             _GLOSSARY_CACHE.pop(k2, None)
         _GLOSSARY_CACHE[key] = parsed
+        while len(_GLOSSARY_CACHE) > _GLOSSARY_CACHE_ENTRIES:         # least recently read out first
+            _GLOSSARY_CACHE.popitem(last=False)
     return parsed, st.st_mtime_ns
 
 
@@ -43603,7 +43626,7 @@ def _glossary_frame(sid):
     parsed, mtime = _glossary_load(path)
     if parsed is None:
         return None
-    terms, size, cut = [], 0, 0
+    terms, size, cut = [], 0, int(parsed.get("cutHeadings") or 0)   # the sections past the heading ceiling count as cut too
     for e in parsed["terms"]:
         slim = {k: v for k, v in e.items() if k != "section"}
         n = len(json.dumps(slim, ensure_ascii=False).encode("utf-8"))
@@ -43623,12 +43646,12 @@ def _glossary_lookup(sid, term):
     group, path = _glossary_source(sid)
     if not group:
         d = _glossary_dir()
-        tried = [str(d / (_GLOSSARY_GROUP_RE.sub("", g) + ".md")) for g in (_session_groups(sid) + [str(_name_of(sid) or "")]) if g]
+        tried = [_tilde(str(d / (_GLOSSARY_GROUP_RE.sub("", g) + ".md"))) for g in (_session_groups(sid) + [str(_name_of(sid) or "")]) if g]
         return 404, {"error": "no glossary for this session's group", "tried": tried}
     parsed, _ = _glossary_load(path)
     if parsed is None:
-        return 404, {"error": "the glossary file could not be read", "tried": [str(path)]}
-    # an exact term wins over another entry's alias ("fold head" is its own entry even though "fold" lists it as an
+        return 404, {"error": "the glossary file could not be read", "tried": [_tilde(str(path))]}
+    # an exact term wins over another entry's alias ("tessel head" is its own entry even though "tessel" lists it as an
     # alias), so the terms are read first and the aliases after
     hit = next((e for e in parsed["terms"] if e["term"].lower() == want), None) \
         or next((e for e in parsed["terms"] if want in [a.lower() for a in e["also"]]), None)
@@ -43636,7 +43659,7 @@ def _glossary_lookup(sid, term):
         e = hit
         return 200, {"title": e["term"], "markdown": e["section"], "source_path": _tilde(str(path)),
                      "anchor": e["slug"], "group": group, "status": e["status"], "link": e["link"]}
-    return 404, {"error": "no such term in the group's glossary: %r" % want, "tried": [str(path)], "group": group}
+    return 404, {"error": "no such term in the group's glossary: %r" % want, "tried": [_tilde(str(path))], "group": group}
 
 
 def _path_previews(links, sid):
