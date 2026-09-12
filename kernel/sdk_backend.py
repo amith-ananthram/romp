@@ -8222,16 +8222,18 @@ class SdkSession:
         BOUNDED, and FILE-FREE for an ordinary prompt (2026-09-12; the prompt-cache note above): the
         body runs under asyncio.wait_for with prompt_hook_timeout_s() (ROMP_PROMPT_HOOK_TIMEOUT_S,
         default 8 s — well inside the SDK's deadline, which is the one that refuses the prompt), with
-        the reg read on a worker thread because wait_for can only interrupt a body that yields: a
-        blocking read on the loop thread would run the cap out without ever tripping it. A timeout
-        is logged as a problem and answered {} — the prompt runs."""
+        the reg read AND the cronDelivered write on a worker thread because wait_for can only
+        interrupt a body that yields: a blocking read or write on the loop thread would run the cap
+        out without ever tripping it. A timeout is logged as a problem (one counted ring row per
+        session for the whole stall, not a row per prompt) and answered {} — the prompt runs."""
         cap = prompt_hook_timeout_s()
         try:
             return await asyncio.wait_for(self._prompt_submit_gate(inp), timeout=cap)
         except asyncio.TimeoutError:
             self.backend._log("cron dedupe (%s): the prompt hook ran past its %.2fs cap "
                               "(ROMP_PROMPT_HOOK_TIMEOUT_S) — prompt allowed rather than left for the SDK "
-                              "to refuse at its own deadline" % (self.name, cap), problem=True)
+                              "to refuse at its own deadline" % (self.name, cap), problem=True,
+                              key=("prompt-hook-cap", self.sid))
             return {}
         except Exception as e:
             self.backend._log("cron dedupe (%s): %s — prompt allowed" % (self.name, e))
@@ -8285,7 +8287,11 @@ class SdkSession:
                     for c in recurring_crons(reg)}
             delivered = {k: v for k, v in delivered.items() if k in live}
             delivered.update(record)
-            self.backend._update_reg(self.sid, cronDelivered=delivered)
+            # Off the loop thread like the read: _update_reg is a lock wait, a read and a write, and
+            # the cap can only interrupt at an await. A write the cap cuts still lands (the worker
+            # finishes it), which is the outcome this {} was about to record: the prompt runs and
+            # the slot is on file, so the next resume's catch-up sees it as delivered.
+            await asyncio.to_thread(self.backend._update_reg, self.sid, cronDelivered=delivered)
             return {}
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(replay_of))
         self.backend._log("cron dedupe (%s): blocked a replayed schedule fire — its %s slot was "

@@ -12,10 +12,12 @@ recurring schedule carries still reads the reg and still blocks a replayed slot 
 The cache follows the armed set through its three refresh paths: construction, every sessionCrons
 writer on the session object (the scheduling-tool hook's arm and delete, the Stop hook's record),
 and a once-a-minute stat-then-read backstop for writers the object never saw. (2) The whole body runs
-under a wall-time cap (ROMP_PROMPT_HOOK_TIMEOUT_S, default 8 s) with the reg read off the loop
-thread, so a stall — even a blocking one — is answered {} inside the cap: the prompt runs. Plus the
-SDK-side matcher deadline: raised to 120 s where no session host raises it, left to the host's own
-540 s bound where one does. Synthetic fixtures (hostname TESTHOST, placeholder sid); PRIVATE sid."""
+under a wall-time cap (ROMP_PROMPT_HOOK_TIMEOUT_S, default 8 s) with the reg read AND the
+cronDelivered write off the loop thread, so a stall — even a blocking one — is answered {} inside the
+cap: the prompt runs, and a stall that outlasts many prompts is one counted problem row per session,
+not a row per prompt. Plus the SDK-side matcher deadline: raised to 120 s where no session host
+raises it, left to the host's own 540 s bound where one does. Synthetic fixtures (hostname TESTHOST,
+placeholder sid); PRIVATE sid."""
 import asyncio
 import json
 import os
@@ -329,6 +331,52 @@ class TimeoutFailsOpen(_Gate):
         self.assertEqual(out, {}, "the cron prompt is allowed rather than refused at the SDK's deadline")
         self.assertLess(took, 0.5, "the hook did not wait for the stalled read")
         self.assertTrue(any("ran past its" in m for m in self.logs))
+
+    def test_a_stalled_blocking_cron_delivered_write_is_cut_too(self):
+        """The cron-prompt path's OTHER file touch: recording the slot is _update_reg, a lock wait plus a
+        read plus a write, and the cap can only interrupt at an await, so the write runs off the loop
+        thread as the read does. Pinned by a BLOCKING sleep in write_reg (which _update_reg reaches
+        by module name); the cut write still lands, so the slot the prompt ran is on file."""
+        self._write([_armed()])
+        s = self._session()
+        os.environ["ROMP_PROMPT_HOOK_TIMEOUT_S"] = "0.05"
+        real = sb.write_reg
+
+        def stalled(state_dir, sid, reg):
+            time.sleep(0.6)
+            return real(state_dir, sid, reg)
+        sb.write_reg = stalled
+        self.addCleanup(setattr, sb, "write_reg", real)
+        out, took = self._timed_fire(s)
+        self.assertEqual(out, {}, "the cron prompt is allowed rather than refused at the SDK's deadline")
+        self.assertLess(took, 0.5, "the hook did not wait for the stalled write")
+        self.assertTrue(any("ran past its" in m for m in self.logs))
+        self.assertTrue(self._reg().get("cronDelivered"),
+                        "the worker finished the write the cap cut: the delivered slot is recorded")
+
+    def test_repeated_timeouts_are_one_counted_problem_row(self):
+        """A stall lasts an EPISODE, not a prompt. The kernel log gets every timed-out hook's line, but
+        the ring row is keyed per session, so the dashboard sees one counted row rather than a fresh
+        entry per prompt evicting every other problem (the 2026-09-06 class)."""
+        self._write([_armed()])
+        s = self._session()
+        os.environ["ROMP_PROMPT_HOOK_TIMEOUT_S"] = "0.05"
+        real = sb.read_reg_for_rmw
+
+        def stalled(state_dir, sid):
+            time.sleep(0.6)
+            return real(state_dir, sid)
+        sb.read_reg_for_rmw = stalled
+        self.addCleanup(setattr, sb, "read_reg_for_rmw", real)
+        self.assertEqual(self._timed_fire(s)[0], {})
+        self.assertEqual(self._timed_fire(s)[0], {})
+        self.assertEqual(len([m for m in self.logs if "ran past its" in m]), 2,
+                         "the kernel log still gets every line")
+        rows = [p for p in self.be._problems if "ran past its" in str(p.get("text"))]
+        self.assertEqual(len(rows), 1, "…but the ring holds ONE row for the episode")
+        self.assertEqual(rows[0].get("count"), 2, "…that counts the repeat")
+        self.assertIn("1 repeat", rows[0]["text"])
+        self.assertEqual(rows[0].get("key"), ("prompt-hook-cap", SID), "keyed per session")
 
     def test_the_cap_reads_the_env_at_call_time(self):
         self.assertEqual(sb.prompt_hook_timeout_s(), sb.PROMPT_HOOK_TIMEOUT_S_DEFAULT)
