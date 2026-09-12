@@ -1428,7 +1428,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   state, which the next settle heals), `converge` (the converge pass: `passes`,
   `writes`, `bytes`, `heals`, `healBytes`, `primed`, `deferred`, `failed` for a
   write that wrote nothing, `unhealed` for a cold fold the pass could not rerun,
-  whose cursor it dropped so its next run reads the file whole once), `coldWrites` (per fold name, writes that kept such a tail-only state
+  whose cursor it dropped so its next run reads the file whole once, and
+  `docReadBytes`, the documents the pass's writes read for their carry), `coldWrites` (per fold name, writes that kept such a tail-only state
   out of the document so no later kernel restores it as complete), `droppedRestores` (a
   restore lost to a read that replaced the entry under it; the reader
   serializes reads per path, so this should stay at zero), `documentBytes`

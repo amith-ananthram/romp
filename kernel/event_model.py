@@ -766,7 +766,7 @@ _CKPT_DIR_FN = None               # () -> Path of the checkpoint directory; None
 _CKPT_STATS = {"restored": 0, "writes": 0, "swept": 0, "skippedFolds": 0, "fallbacks": {}, "restoredFolds": {}, "droppedRestores": 0,
                "oversizeFolds": {}, "coldFolds": {}, "coldWrites": {},
                "converge": {"passes": 0, "writes": 0, "bytes": 0, "heals": 0, "healBytes": 0, "primed": 0, "deferred": 0,
-                            "failed": 0, "unhealed": 0}}   # T360
+                            "failed": 0, "unhealed": 0, "docReadBytes": 0}}   # T360
 _CKPT_DOC_FOLDS = {}              # path -> {fold name: "state" | "over" | "cold" | "bare"}: the document on disk as last written or
 #                                   loaded in this process, so the converge pass can tell a document lacking a state without a read
 _COLD = object()                  # a restored cursor with no state (its fold was oversize): fold_records inits it and steps the tail
@@ -897,7 +897,7 @@ def set_checkpoint_dir(fn):
     global _CKPT_DIR_FN
     _CKPT_DIR_FN = fn
     with _CKPT_LOCK:
-        _CKPT_PENDING.clear(); _CKPT_SEQ.clear(); _FOLD_DIRTY.clear()
+        _CKPT_PENDING.clear(); _CKPT_SEQ.clear(); _FOLD_DIRTY.clear(); _CKPT_DOC_FOLDS.clear()
 
 
 def _ckpt_dir():
@@ -1292,14 +1292,15 @@ def checkpoint_converge_candidates():
         if ent is None:
             continue
         shapes = _CKPT_DOC_FOLDS.get(key, {})
+        total = ent[5] + len(ent[4])
         for name, cache in list(_FOLD_REG.items()):
             if (key, name) in cold:
                 out.append(key); break
             cur = cache.get(key)
-            if cur is None or cur[1] != ent[6] or not ent[5] <= cur[0] <= ent[5] + len(ent[4]):
-                continue
-            if shapes.get(name) not in ("state", "over"):
-                out.append(key); break
+            if cur is None or cur[1] != ent[6] or not ent[5] <= cur[0] <= total or not _lag_ok(total, cur[0]):
+                continue                                  # no cursor the writer would record: a fold stopped beyond the lag bound
+            if shapes.get(name) not in ("state", "over"):   #  is left out by the writer and refused by the carry, so it is no
+                out.append(key); break                    #  candidate either (it refolds once when it runs, then is written current)
     return out
 
 

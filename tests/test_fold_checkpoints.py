@@ -1038,9 +1038,32 @@ class KernelFolds(Base):
         self.assertTrue(em.checkpoint_write(self.leaf, force=True))
         self.assertEqual((self.doc(self.leaf)["count"], sorted(self.doc(self.leaf)["folds"])), (1990, ["near", "whole"]), "a small lag is written at its count")
 
+    def test_a_fold_stopped_beyond_the_bound_on_a_dirty_leaf_does_not_keep_the_pass_writing(self):
+        """Round three: a fold stopped more than the bound behind on a path dirty without a settle (the leaf mid-turn) was left out
+        by the writer and refused by the carry, its shape read None, and the pass rewrote the identical document every dirty
+        cycle. The candidate check knows the bound: such a fold is no candidate (it refolds once when it runs)."""
+        self._converge_world({"bgJudge": "missing"})
+        _write(self.leaf, [json.loads(l) for l in open(self.leaf)] + [_user("p%d" % i, "ux%d" % i, None, TS0 + 1000 + i) for i in range(400)])
+        stopped = {}
+        em.fold_records(stopped, self.leaf, list, lambda st, o: st + [1], ckpt="stopped")   # a sixth fold, run over the whole leaf...
+        stopped[self.leaf] = (2, stopped[self.leaf][1], [1, 1])                              # ...and stopped at count 2 (skipped since)
+        jd._bg_scan(self.leaf)                                                                 # the missing pairing: a real candidate
+        self.assertEqual(km._converge_checkpoints(TS0 + 600), 1, "one write, for the pairing")
+        self.assertNotIn("stopped", self.doc(self.leaf)["folds"])
+        seq = self.doc(self.leaf)["seq"]
+        for k in range(3):                                                                     # three dirty cycles: an append and a fold each
+            _write(self.leaf, [json.loads(l) for l in open(self.leaf)] + [_user("q%d" % k, "uq%d" % k, None, TS0 + 2000 + k)])
+            km._session_meta(self.leaf)
+            self.assertIn(self.leaf, em.checkpoint_dirty())
+            self.assertEqual(em.checkpoint_converge_candidates(), [], "a fold beyond the bound is no candidate")
+            self.assertEqual(km._converge_checkpoints(TS0 + 601 + k), 0)
+        self.assertEqual(self.doc(self.leaf)["seq"], seq, "no write over three dirty cycles")
+
     def test_a_fallback_forgets_the_documents_shape(self):
         """Review, low 4: _ckpt_fallback removed the document but left the pass believing it still carried every state."""
         self._converge_world({})
+        self.assertNotIn(self.leaf, em._CKPT_DOC_FOLDS, "a fresh process knows no shapes until it consults a document")
+        km._session_meta(self.leaf)                                       # the restore consults the document: its shape is known
         self.assertTrue(em._CKPT_DOC_FOLDS.get(self.leaf))
         em._ckpt_fallback(self.leaf, "guard", "test")
         self.assertNotIn(self.leaf, em._CKPT_DOC_FOLDS)
@@ -1048,16 +1071,24 @@ class KernelFolds(Base):
 
     def test_the_carry_refuses_a_same_size_edit_under_another_mtime(self):
         """Review, low 3: the carry checked the guard bytes alone, so an in-place edit outside them (a same-size rewrite under
-        another mtime) was laundered into a fresh document the restore then trusted. The carry asks the restore's verdict first."""
+        another mtime) was laundered into a fresh document the restore then trusted. The carry asks the restore's verdict first.
+        The gate is driven directly: the reader's entry is a plain whole read that consulted no document (so no restore fallback
+        removed it first), a cursor is planted at that entry, and the write's carry meets the document over the edited file. In
+        production the restore usually falls back before a write can carry, so this path is defensive."""
         self._converge_world({}, extra=("extraA",))
         recs = [json.loads(l) for l in open(self.leaf)]
         recs[1] = dict(recs[1], text="X" * len(recs[1].get("text", "")))   # a same-size edit inside the prefix, outside the guard
         _write(self.leaf, recs); os.utime(self.leaf, ns=(os.stat(self.leaf).st_atime_ns, os.stat(self.leaf).st_mtime_ns + 10 ** 9))
         self.fresh_process()
-        km._session_meta(self.leaf)                                       # the restore refuses the rewritten file (a fallback)...
-        self.assertTrue(em.checkpoint_stats()["fallbacks"])
-        self.assertTrue(em.checkpoint_write(self.leaf, force=True))       # ...and the write carries nothing from the void document
-        self.assertNotIn("extraA", self.doc(self.leaf)["folds"])
+        ent = em._read_jsonl_entry(self.leaf)                              # a whole read, no document consulted
+        self.assertEqual(ent[5], 0)
+        em._FOLD_REG["planted"] = {self.leaf: (ent[5] + len(ent[4]), ent[6], [1])}   # a cursor at that entry
+        self.addCleanup(em._FOLD_REG.pop, "planted", None)
+        self.assertTrue(os.path.exists(em._ckpt_file(self.leaf)), "the older document is still on disk when the write runs")
+        self.assertEqual(em.checkpoint_stats()["fallbacks"], {}, "no restore refused it first: the carry's own gate decides")
+        self.assertTrue(em.checkpoint_write(self.leaf, force=True))
+        self.assertEqual(sorted(self.doc(self.leaf)["folds"]), ["planted"], "the write carries nothing from a document the verdict calls a rewrite")
+        self.assertEqual(em.checkpoint_stats()["fallbacks"], {})
 
     def test_perf_carries_the_checkpoint_counters_and_the_kernel_wires_the_three_events(self):
         snap = km._PERF_STATS.snapshot()

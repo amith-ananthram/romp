@@ -9923,6 +9923,12 @@ def _converge_checkpoints(now):
             unhealed = em.drop_cold_cursors(p)
         if unhealed:                                       # a fold the heal cannot rerun here (not one of the leaf's five): its
             em.converge_stat("unhealed", len(unhealed))    #  cursor and cold mark are dropped, the write leaves it out, its next
+        try:                                               # the write reads the document on disk for its carry: that read is the
+            pre = em._ckpt_file(p).stat().st_size          #  pass's I/O too, so it counts against the budget (review, round 3)
+        except (OSError, AttributeError):
+            pre = 0
+        if pre:
+            em.converge_stat("docReadBytes", pre); spent += pre
         if em.checkpoint_write(p):                         #  run reads the file whole once, and the path is no candidate for it
             n += 1
             try:
