@@ -766,7 +766,7 @@ _CKPT_DIR_FN = None               # () -> Path of the checkpoint directory; None
 _CKPT_STATS = {"restored": 0, "writes": 0, "swept": 0, "skippedFolds": 0, "fallbacks": {}, "restoredFolds": {}, "droppedRestores": 0,
                "oversizeFolds": {}, "coldFolds": {}, "coldWrites": {},
                "converge": {"passes": 0, "writes": 0, "bytes": 0, "heals": 0, "healBytes": 0, "primed": 0, "deferred": 0,
-                            "failed": 0, "unhealed": 0, "docReadBytes": 0}}   # T360
+                            "failed": 0, "unhealed": 0, "docReadBytes": 0, "quiescent": 0, "skipped": 0}}   # T360, T361
 _CKPT_DOC_FOLDS = {}              # path -> {fold name: "state" | "over" | "cold" | "bare"}: the document on disk as last written or
 #                                   loaded in this process, so the converge pass can tell a document lacking a state without a read
 _COLD = object()                  # a restored cursor with no state (its fold was oversize): fold_records inits it and steps the tail
@@ -1302,6 +1302,22 @@ def checkpoint_converge_candidates():
             if shapes.get(name) not in ("state", "over"):   #  is left out by the writer and refused by the carry, so it is no
                 out.append(key); break                    #  candidate either (it refolds once when it runs, then is written current)
     return out
+
+
+def checkpoint_has_work():
+    """Whether any fold cursor moved since its checkpoint was written, or any fold began cold: the converge pass's zero-cost
+    gate (no lock, no stat) so a quiet cycle costs it nothing (T361)."""
+    return bool(_FOLD_DIRTY) or bool(_COLD_FOLDS)
+
+
+def file_quiescent(path):
+    """Whether `path` has been unchanged for longer than the reader keeps a quiescent file's whole entry
+    (_DROP_AFTER_QUIESCENT_S): a fold with drop_after="quiescent" drops that entry right after it steps, so a whole read
+    of such a file on the pusher's cycle cannot be held long enough to write its checkpoint from (T361)."""
+    try:
+        return time.time() - os.stat(str(path)).st_mtime >= _DROP_AFTER_QUIESCENT_S
+    except OSError:
+        return False
 
 
 def converge_stat(name, n=1):

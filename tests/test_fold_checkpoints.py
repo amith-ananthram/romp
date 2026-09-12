@@ -818,16 +818,26 @@ class KernelFolds(Base):
         self.assertEqual(em.checkpoint_stats()["coldFolds"].get("bgAll", 0), cold_before, "and not cold")
         self.assertLess(em.read_bytes_report().get(self.leaf, 0), size / 2, "and reads no leaf whole")
 
-    def _converge_world(self, strip, extra=()):
+    def _converge_world(self, strip, extra=(), quiescent=False):
         """Documents for every file, then the leaf's document with `strip`'s folds removed or reduced to bare cursors (what an
         older kernel, or a kernel where the fold never ran, left behind), then a fresh process. `extra` names generic folds
-        run over the leaf beside the five leaf folds (the transcript's wake-tail and queue-ledger folds in production)."""
+        run over the leaf beside the five leaf folds (the transcript's wake-tail and queue-ledger folds in production).
+        `quiescent` ages the leaf before its document is written, so the document records the old mtime and the leaf stands
+        unchanged past the reader's quiescence window (an idle session)."""
         self.write_all(tail=False)
-        self.answers()
-        for name in extra:
-            em.fold_records({}, self.leaf, list, lambda st, o: st + [1], ckpt=name)
-        for p in self.files:
-            em.checkpoint_write(p)
+        saved_q = em._DROP_AFTER_QUIESCENT_S
+        if quiescent:
+            old = time.time() - 600
+            os.utime(self.leaf, (old, old))
+            em._DROP_AFTER_QUIESCENT_S = 1e9                       # the world's own folds and writes must not meet the drop
+        try:
+            self.answers()
+            for name in extra:
+                em.fold_records({}, self.leaf, list, lambda st, o: st + [1], ckpt=name)
+            for p in self.files:
+                em.checkpoint_write(p)
+        finally:
+            em._DROP_AFTER_QUIESCENT_S = saved_q
         d = self.doc(self.leaf)
         for name, how in strip.items():
             if how == "missing":
@@ -935,7 +945,7 @@ class KernelFolds(Base):
         em.fold_records({}, a, list, lambda st, o: st + [o["n"]], ckpt="gen")   # cold: the first candidate, writing nothing
         jd._bg_scan(self.leaf); jd._bg_scan(leaf2)
         self.assertEqual(em.checkpoint_converge_candidates(), [a, self.leaf, leaf2])
-        saved = (km.CKPT_CONVERGE_MS, km.CKPT_CONVERGE_BYTES); km.CKPT_CONVERGE_MS, km.CKPT_CONVERGE_BYTES = 0.0, 1
+        saved = (km.CKPT_CONVERGE_MS, km.CKPT_CONVERGE_BYTES); km.CKPT_CONVERGE_MS, km.CKPT_CONVERGE_BYTES = 1e-6, 1   # (0 turns the pass off: T361)
         self.addCleanup(lambda: setattr(km, "CKPT_CONVERGE_MS", saved[0])); self.addCleanup(lambda: setattr(km, "CKPT_CONVERGE_BYTES", saved[1]))
         self.assertEqual(km._converge_checkpoints(TS0 + 600), 0, "the empty first candidate, then the budget")
         cv = em.checkpoint_stats()["converge"]
@@ -1089,6 +1099,60 @@ class KernelFolds(Base):
         self.assertTrue(em.checkpoint_write(self.leaf, force=True))
         self.assertEqual(sorted(self.doc(self.leaf)["folds"]), ["planted"], "the write carries nothing from a document the verdict calls a rewrite")
         self.assertEqual(em.checkpoint_stats()["fallbacks"], {})
+
+    def test_converge_refuses_a_quiescent_leaf_and_reads_nothing_over_three_cycles(self):
+        """T361, the live loop: an idle leaf (unchanged past the reader's quiescence window) with a legacy bare cursor. The
+        reader drops such a file's whole entry right after the agent-launch fold steps it, so the pass's heal read the file whole
+        every cycle and its write found no entry and failed, forever (about 300 MB per cycle on the devbox). The pass refuses a
+        quiescent leaf outright, counts it, and skips it until the file changes: zero reads, zero writes, three cycles."""
+        self._converge_world({"bgAll": "bare"}, quiescent=True)      # unchanged for ten minutes
+        km._session_meta(self.leaf); km._bg_scan_all_cached(self.leaf)  # the boot: the tail, and bgAll cold
+        self.assertEqual(em.cold_fold_reasons(self.leaf), {"bgAll": "cold"})
+        size = os.path.getsize(self.leaf); read0 = em.read_bytes_report().get(self.leaf, 0)
+        self.assertLess(read0, size / 2)
+        self.assertEqual(em.checkpoint_converge_candidates(), [self.leaf])
+        for k in range(3):
+            self.assertEqual(km._converge_checkpoints(TS0 + 600 + k), 0)
+        cv = em.checkpoint_stats()["converge"]
+        self.assertEqual((cv["quiescent"], cv["skipped"], cv["heals"], cv["writes"], cv["failed"]), (1, 2, 0, 0, 0), "refused once, skipped twice: %s" % cv)
+        self.assertEqual(em.read_bytes_report().get(self.leaf, 0), read0, "the pass read nothing of the leaf")
+        self.assertEqual(em.cold_fold_reasons(self.leaf), {"bgAll": "cold"}, "left for the boot's cold refold or the next settle")
+        _append(self.leaf, _user("a new prompt", "u_new", "a3", TS0 + 700))   # the file changes: the pass may look again
+        self.assertFalse(km._converge_skipped(self.leaf))
+
+    def test_converge_skips_a_path_whose_write_failed_until_its_file_changes(self):
+        """T361 (b): a failed write must not repeat every cycle."""
+        self._converge_world({"bgJudge": "missing"})
+        jd._bg_scan(self.leaf)
+        saved = em.checkpoint_write; em.checkpoint_write = lambda path, force=False: False
+        try:
+            self.assertEqual(km._converge_checkpoints(TS0 + 600), 0)
+        finally:
+            em.checkpoint_write = saved
+        self.assertEqual(em.checkpoint_stats()["converge"]["failed"], 1)
+        self.assertEqual(km._converge_checkpoints(TS0 + 601), 0, "skipped while the file stands")
+        self.assertEqual(em.checkpoint_stats()["converge"]["skipped"], 1)
+        _append(self.leaf, _user("a new prompt", "u_new", "a3", TS0 + 700)); km._session_meta(self.leaf)
+        self.assertEqual(km._converge_checkpoints(TS0 + 702), 1, "the file changed: written")
+
+    def test_converge_heal_bytes_reach_the_budget(self):
+        """T361 (c): the heal's whole read is attributed under the reader's own key, so the byte budget sees it."""
+        self._converge_world({"bgAll": "bare"})
+        km._session_meta(self.leaf); km._bg_scan_all_cached(self.leaf)   # a tail entry, bgAll cold; the leaf is fresh (not quiescent)
+        size = os.path.getsize(self.leaf)
+        self.assertEqual(km._converge_checkpoints(TS0 + 600), 1)
+        cv = em.checkpoint_stats()["converge"]
+        self.assertGreaterEqual(cv["healBytes"], size, "the heal's whole read counted: %s" % cv)
+
+    def test_converge_off_at_zero_milliseconds(self):
+        """T361 (d): ROMP_CKPT_CONVERGE_MS=0 turns the pass off outright, candidates or not."""
+        self._converge_world({"bgJudge": "missing"})
+        jd._bg_scan(self.leaf)
+        self.assertEqual(em.checkpoint_converge_candidates(), [self.leaf])
+        saved = km.CKPT_CONVERGE_MS; km.CKPT_CONVERGE_MS = 0.0
+        self.addCleanup(setattr, km, "CKPT_CONVERGE_MS", saved)
+        self.assertEqual(km._converge_checkpoints(TS0 + 600), 0)
+        self.assertEqual(em.checkpoint_stats()["converge"]["passes"], 0, "no pass counted: off")
 
     def test_perf_carries_the_checkpoint_counters_and_the_kernel_wires_the_three_events(self):
         snap = km._PERF_STATS.snapshot()
