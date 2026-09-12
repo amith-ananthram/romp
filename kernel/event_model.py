@@ -764,7 +764,10 @@ def read_bytes_report():
 _CKPT_V = 1
 _CKPT_DIR_FN = None               # () -> Path of the checkpoint directory; None = checkpoints off
 _CKPT_STATS = {"restored": 0, "writes": 0, "swept": 0, "skippedFolds": 0, "fallbacks": {}, "restoredFolds": {}, "droppedRestores": 0,
-               "oversizeFolds": {}, "coldFolds": {}, "coldWrites": {}}
+               "oversizeFolds": {}, "coldFolds": {}, "coldWrites": {},
+               "converge": {"passes": 0, "writes": 0, "bytes": 0, "heals": 0, "healBytes": 0, "primed": 0, "deferred": 0}}   # T360
+_CKPT_DOC_FOLDS = {}              # path -> {fold name: "state" | "over" | "cold" | "bare"}: the document on disk as last written or
+#                                   loaded in this process, so the converge pass can tell a document lacking a state without a read
 _COLD = object()                  # a restored cursor with no state (its fold was oversize): fold_records inits it and steps the tail
 _COLD_FOLDS = set()               # (path, fold name) whose state in this process began cold at a cut: a TAIL-ONLY state, written as a
 _COLD_OVER_KB = {}                # (path, fold name) -> the KB an over-the-cap state measured, carried through a cold write (T359)
@@ -1004,6 +1007,7 @@ def _checkpoint_entry(path, st):
     guard bytes are verified by the reader against the file; here the document and the size are: a file shorter than
     the recorded offset is a shrink."""
     doc = _ckpt_load(path)
+    _CKPT_DOC_FOLDS[str(path)] = _doc_fold_shapes(doc.get("folds")) if isinstance(doc, dict) else {}   # what the disk holds (T360)
     if doc is None:
         return None
     offset, count = int(doc["offset"]), int(doc["count"])
@@ -1032,6 +1036,7 @@ def _ckpt_pending(path, ent):
         if key in _CKPT_SEQ:                          # already consulted (or written) in this process: nothing new
             return None
     doc = _ckpt_load(path)
+    _CKPT_DOC_FOLDS[str(path)] = _doc_fold_shapes(doc.get("folds")) if isinstance(doc, dict) else {}   # what the disk holds (T360)
     if doc is None:
         with _CKPT_LOCK:
             _CKPT_SEQ.setdefault(key, 0)
@@ -1192,6 +1197,7 @@ def checkpoint_write(path, force=False):
     with _CKPT_LOCK:
         _CKPT_SEQ[key] = seq
         _CKPT_STATS["writes"] += 1
+        _CKPT_DOC_FOLDS[key] = _doc_fold_shapes(folds)
         if left_out:
             _FOLD_DIRTY.add(key)                          # a lagging fold has no cursor in this document yet
         else:
@@ -1203,6 +1209,45 @@ def checkpoint_dirty():
     """The paths whose fold cursors moved since their checkpoint was last written."""
     with _CKPT_LOCK:
         return sorted(_FOLD_DIRTY)
+
+
+def _doc_fold_shapes(folds):
+    return {n: ("state" if "state" in f else "over" if f.get("over") else "cold" if f.get("cold") else "bare")
+            for n, f in (folds or {}).items() if isinstance(f, dict)}
+
+
+def checkpoint_converge_candidates():
+    """The dirty paths whose document on disk lacks a complete state for a fold this process holds a cursor for at the
+    current entry (the fold is missing from it, or recorded as a bare or tail-only cursor), or whose fold began cold for
+    want of a state: the writes that make a boot's whole reads pay ONCE (T360). Before them a fold that never ran in the
+    writing process had no entry, the next boot read the leaf whole for it, and an idle session, which never settles,
+    paid that at every boot. A dirty path whose document already carries every fold that ran is not one: a live session's
+    leaf is dirty every turn and is written at its settle, never here (no steady stream of writes)."""
+    out = []
+    with _CKPT_LOCK:
+        cold = {(k, n) for k, n in _COLD_FOLDS if _COLD_REASONS.get((k, n), "cold") == "cold"}
+        paths = sorted(_FOLD_DIRTY | {k for k, n in cold})   # a cold cursor at the witness steps nothing and marks nothing dirty
+    for key in paths:
+        with _JSONL_CACHE_LOCK:
+            ent = _JSONL_CACHE.get(key)
+        if ent is None:
+            continue
+        shapes = _CKPT_DOC_FOLDS.get(key, {})
+        for name, cache in list(_FOLD_REG.items()):
+            if (key, name) in cold:
+                out.append(key); break
+            cur = cache.get(key)
+            if cur is None or cur[1] != ent[6] or not ent[5] <= cur[0] <= ent[5] + len(ent[4]):
+                continue
+            if shapes.get(name) not in ("state", "over"):
+                out.append(key); break
+    return out
+
+
+def converge_stat(name, n=1):
+    """Count a converge pass's work under checkpoints.converge (the kernel's pass reports through here)."""
+    with _CKPT_LOCK:
+        _CKPT_STATS["converge"][name] = _CKPT_STATS["converge"].get(name, 0) + n
 
 
 def checkpoint_write_dirty(paths=None, budget_s=None):
@@ -1258,7 +1303,7 @@ def checkpoint_stats():
     with _CKPT_LOCK:
         out = dict(_CKPT_STATS); out["fallbacks"] = dict(_CKPT_STATS["fallbacks"]); out["restoredFolds"] = dict(_CKPT_STATS["restoredFolds"])
         out["oversizeFolds"] = dict(_CKPT_STATS["oversizeFolds"]); out["coldFolds"] = dict(_CKPT_STATS["coldFolds"])
-        out["coldWrites"] = dict(_CKPT_STATS["coldWrites"])
+        out["coldWrites"] = dict(_CKPT_STATS["coldWrites"]); out["converge"] = dict(_CKPT_STATS["converge"])
     d = _ckpt_dir()
     with _READ_BYTES_LOCK:
         out["documentBytes"] = sum(n for p_, n in _READ_BYTES.items() if d is not None and p_.startswith(str(d) + os.sep))

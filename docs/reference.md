@@ -997,7 +997,16 @@ so, and is healed by one whole refold: a leaf's folds at the session's next
 settle, before the write, so that write carries their states; another file's
 fold (a states log's) is left out of its next checkpoint write and read whole
 once at the next boot. After that the fold is written whole and every later
-boot restores it warm. Checkpoints
+boot restores it warm. A fold that never ran in the process that wrote the
+document has no entry there, and the next kernel reads the file whole for it
+at first touch; the converge pass on the pusher's cycle then writes that
+document (and, over the whole entry the read left, every leaf fold with it),
+independent of settle evidence, so the read is paid once even for a session
+that never settles again; the pass is bounded per cycle (`ROMP_CKPT_CONVERGE_MS`,
+default 150 ms of wall, and `ROMP_CKPT_CONVERGE_MB`, default 8 MB of documents
+written plus leaf bytes read for a heal), heals a legacy bare cursor under the
+same budget, and never rewrites a document that already carries every fold
+that ran. Checkpoints
 are written when a session's turn settles or its states log moves, and all of
 them at exit; checkpoints of files that no longer exist are swept at boot. A
 compaction appends records and changes nothing here.
@@ -1409,7 +1418,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   state, with the state's KB as the reason, and the next kernel starts the fold
   cold at the cut over the tail only), `coldFolds` (per fold name, folds that
   started cold this boot, for that reason or for a cursor recorded without a
-  state, which the next settle heals), `coldWrites` (per fold name, writes that kept such a tail-only state
+  state, which the next settle heals), `converge` (the converge pass: `passes`,
+  `writes`, `bytes`, `heals`, `healBytes`, `primed`, `deferred`), `coldWrites` (per fold name, writes that kept such a tail-only state
   out of the document so no later kernel restores it as complete), `droppedRestores` (a
   restore lost to a read that replaced the entry under it; the reader
   serializes reads per path, so this should stay at zero), `documentBytes`
