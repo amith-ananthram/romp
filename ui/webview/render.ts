@@ -101,6 +101,7 @@ import { agentCount, replyOwed, threadsByAnchor, threadBusy, threadStuck, findAn
          pickMarkToOpen, type CommentThread, type CommentCreate, markSkipsParent } from "./comments";
 import { isReplyReady, placeMark, placeWindowed, readyChips, replyLine, chipLabel, chipTip, chipAria, type Dir, type ReadyMark, type ReadyChip } from "./reply-ready";
 import { dragSlotIndex } from "./dragslot";
+import { acceptDragEnter } from "./drag-accept";
 import { perfFrameHandler } from "./perf-telemetry";
 import { linkifyPrRefs, senderPrRepo, postalSenderHost } from "./pr-links";
 import { listenForFrames, federationMissing, federationLoadEntry, fedRetryKey } from "./frame-listener";
@@ -19398,7 +19399,14 @@ setupSettings();
   // so the click — dispatched immediately after pointerup, before the timer — fires against the live node first.
   tabs.addEventListener("pointerdown", () => { tabPointerHeld = true; });
   window.addEventListener("pointerup", releaseTabStrip);
-  window.addEventListener("pointercancel", releaseTabStrip);
+  // pointercancel arrives in TWO shapes. A touch that became a scroll: the press is over, release. The start of a
+  // drag: the browser cancels the pointer the moment a drag-and-drop operation begins (dragstart, then pointercancel,
+  // the same tick), and the press is NOT over — the drag is the press, and the hold must outlive it, as the dragend
+  // handlers (wireTabDrag, makeGroupHead) assume when they release it themselves. Releasing here let any kernel push
+  // that landed mid-drag rebuild #tabs under the gesture (the drag had blanked the strip's signature), detaching the
+  // dragged node: the live reorder stopped, and the drop moved nothing (2026-09-11, a rename pushed mid-drag in the
+  // served lab). The drag state the dragstart handlers set is the tell; a drag of ours in flight keeps the hold.
+  window.addEventListener("pointercancel", () => { if (draggedId || draggedGroup) return; releaseTabStrip(); });
   window.addEventListener("blur", releaseTabStrip);
   // LIVE REORDER (T127, the user 2026-08-27: dragging should push the other tabs into their new
   // locations as you drag, the way browsers do): while a tab drags, its in-flow element moves
@@ -19407,6 +19415,11 @@ setupSettings();
   // pushed past a row's end wraps to the next row mid-drag; siblings FLIP to their new rects
   // (flipTabs). The no-op guard (already sitting immediately before the reference node) is what
   // keeps a pointer resting inside one slot from churning the DOM on every dragover tick.
+  // The tick on which the element under the pointer CHANGES is a dragenter tick, not a dragover one, and Chromium
+  // takes that tick's drop operation from the dragenter — which the live reorder makes happen under a still pointer,
+  // since its insert slides a new element under the cursor. Accepted here while a drag of ours is in flight, so a
+  // release right after a hop drops instead of cancelling (drag-accept.ts has the account; 2026-09-11).
+  acceptDragEnter(tabs, () => !!(draggedId || draggedGroup));
   tabs.addEventListener("dragover", (e) => {
     if (draggedGroup) {
       // a GROUP drag (tab groups): the target is the section under the pointer — its header, or
@@ -19445,9 +19458,14 @@ setupSettings();
     const others = Array.from(tabs.querySelectorAll<HTMLElement>(".tab[data-id], .tab-group-head, .tab-group-sep")).filter((t) => t !== dragged);
     const isBreak = (n: Element | null) => !!n && n.classList.contains("tab-group-break");
     const before = (t: HTMLElement) => { let p = t.previousElementSibling; while (p && p === dragged) p = p.previousElementSibling; return p; };
+    // the row openers: a break itself, and a HEADER a break precedes (the break before a named group is not in
+    // `others`, so its header carries the opening). The trail's first tab follows its break but is not one: the break
+    // (in `others`, zero width) already opened the trail's row, and marking the tab too put two openers on that row —
+    // which the simulation now tolerates (dragslot.ts: a zero-width box fills nothing), but one opener per row is the
+    // strip's own shape (the user 2026-09-11, whose drops on the untagged row all landed at its head in the themed strip)
     const boxes = others.map((t) => ({ id: t.dataset.id || " head:" + (t.dataset.group || ""),
                                        w: isBreak(t) ? 0 : (t.dataset.id ? dragGeom!.widths.get(t.dataset.id) : undefined) ?? t.getBoundingClientRect().width,
-                                       br: isBreak(t) || isBreak(before(t)) }));
+                                       br: isBreak(t) || (t.classList.contains("tab-group-head") && isBreak(before(t))) }));
     const br = tabs.getBoundingClientRect();
     const idx = dragSlotIndex(boxes, dragGeom.containerW, dragGeom.gapX, dragGeom.rowH,
                               e.clientX - br.left, e.clientY - br.top);

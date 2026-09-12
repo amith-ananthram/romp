@@ -246,11 +246,14 @@ class RestartOverACheckpointedSession(unittest.TestCase):
             self.assertLess(leaf_read - asm["hydratedBytes"], size / 4, "without the frame's hydration the leaf cost its tail and guards only: "
                                                                         "%d read, %d hydrated, %d whole" % (leaf_read, asm["hydratedBytes"], size))
             self.assertGreater(len(frame.get("events") or []), 0, "the frame carries events")
-            self.assertLess(dt2, 10.0, "the first frame of the restored kernel came in %.1fs: hydration seeks to each record's offset; a scan "
+            bound = max(15.0, 2.5 * dt1)   # headroom over the runner's observed 10 s, scaling with this run's own whole-parse frame: a
+            #                                per-atom scan reads 20 s and up here (below); a slow serial step read 10.08 s (2026-09-12)
+            self.assertLess(dt2, bound, "the first frame of the restored kernel came in %.1fs against a bound of %.1fs (the first kernel's "
+                                        "whole-parse frame %.1fs): hydration seeks to each record's offset; a scan "
                                        "from byte zero per atom measured 5.5 s on a 2000-turn fixture and grows with its square, so it "
                                        "would take over 20 s on this %d-record one; asmIndex=%s hydratedBy=%s; while the frame was awaited:%s; "
                                        "at boot: %s; the kernel's last lines:%s"
-                                       % (dt2, sum(1 for _ in open(self.leaf)), perf.get("asmIndex"), asm.get("hydratedBy"),
+                                       % (dt2, bound, dt1, sum(1 for _ in open(self.leaf)), perf.get("asmIndex"), asm.get("hydratedBy"),
                                           "".join("\n  " + json.dumps(x, sort_keys=True, default=str) for x in timeline),
                                           json.dumps({k: perf_boot.get(k) for k in ("asmIndex", "asmCheckpoint", "process", "pusher", "stages_ms", "judge")},
                                                      sort_keys=True, default=str),
