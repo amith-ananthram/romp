@@ -5,7 +5,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { onlyTag, matchesOnly, onlyTags } from "./only-filter";
+import { onlyTag, matchesOnly, onlyTags, onlyWindow } from "./only-filter";
 
 const read = (p: string) => fs.readFileSync(path.resolve(process.cwd(), "..", p), "utf8");
 const RENDER = read("ui/webview/render.ts");
@@ -55,6 +55,23 @@ test("onlyTag reads #only= / ?only= from the shell URL (window.top), lowercased"
   } finally { g.window = prev; }
 });
 
+test("onlyWindow: the shell's window when readable (a same-origin frame), else this pane's own (a top-level page, a cross-origin top, a harness)", () => {
+  const g = global as any;
+  const prev = g.window;
+  try {
+    const top: any = { location: { hash: "#only=demo", search: "" } };
+    const pane: any = { top, location: { hash: "", search: "" } };
+    g.window = pane; assert.equal(onlyWindow(), top); assert.equal(onlyTag(), "demo", "the filter is read from the shell's URL, not the pane's");
+    const cross: any = { get location() { throw new Error("SecurityError"); } };
+    const pane2: any = { top: cross, location: { hash: "#only=own", search: "" } };
+    g.window = pane2; assert.equal(onlyWindow(), pane2); assert.equal(onlyTag(), "own", "a cross-origin top throws on the read: the pane's own URL");
+    const solo: any = { location: { hash: "", search: "" } }; solo.top = solo;
+    g.window = solo; assert.equal(onlyWindow(), solo, "a top-level page is its own top");
+    const noTop: any = { location: { hash: "", search: "" } };
+    g.window = noTop; assert.equal(onlyWindow(), noTop, "no top at all (a harness window): the pane's own");
+  } finally { g.window = prev; }
+});
+
 test("the helper: case-insensitive prefix + reads the shell URL via window.top", () => {
   assert.match(ONLY, /export function onlyTag\(\)/);
   assert.match(ONLY, /window\.top \|\| window/);
@@ -66,8 +83,10 @@ test("the timeline's standalone helper splits the tag the same way", () => {
 });
 
 test("chat tabs filter by the #only tag", () => {
-  assert.match(RENDER, /import \{ onlyTag, matchesOnly \} from "\.\/only-filter";/);
-  assert.match(RENDER, /const visibleIds = only \? inViewIds\.filter\(\(id\) => matchesOnly\(nameOf\(id\), only\)\) : inViewIds;/);
+  assert.match(RENDER, /import \{ onlyTag, matchesOnly, onlyWindow \} from "\.\/only-filter";/);
+  assert.match(RENDER, /onlyWindow\(\)\.addEventListener\("hashchange", \(\) => renderTabs\(\)\);/, "the strip's live-edit listener binds to the window the filter is read from (the shell's when framed)");
+  assert.match(RENDER, /const visibleIds = ids\.filter\(\(id\) => stripShows\(id, only\)\);/, "the #only= filter rides the one predicate the deferred checks read too (stripShows: tabInView, then matchesOnly over the hash)");
+  assert.match(RENDER, /return !only \|\| matchesOnly\(sessions\.get\(id\)\?\.name \?\? tabMeta\.get\(id\)\?\.name \?\? "", only\);/);
   // the filtered ids are what the strip plan renders (tab-groups.ts planStrip, since tab groups 2026-09-04)
   assert.match(RENDER, /const plan = planStrip\(visibleIds,/);
 });

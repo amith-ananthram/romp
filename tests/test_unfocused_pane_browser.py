@@ -186,6 +186,32 @@ out.onlyFiltered = await page.evaluate(() => {
            empty: empty && getComputedStyle(empty).display !== "none" ? { text: empty.textContent, vanished: empty.dataset.vanished || "" } : null,
            visibleTurns: turns.length, composerDisabled: document.getElementById("composer-input").disabled };
 });
+// the SHELL road (the review's medium): on the dashboard the chat pane is a same-origin iframe of the shell and the
+// filter lives on the SHELL's URL (only-filter.ts reads window.top), so a live edit of the shell's hash must reach the
+// framed pane, whose own hash never changes: the pane unfocuses at once and restores when the filter shows the tab again
+await page.evaluate((sid) => { const key = Object.keys(localStorage).find((k) => k.startsWith("romp-vscode-state-")); const st = JSON.parse(localStorage.getItem(key) || "{}"); st.activeId = sid; st.activeName = "web"; localStorage.setItem(key, JSON.stringify(st)); }, cfg.sidA);
+await page.goto(cfg.shell);
+await page.waitForSelector("#f-chat", { timeout: 20000 });
+const fr = await (await page.$("#f-chat")).contentFrame();
+await fr.waitForFunction((sid) => { const a = document.querySelector("#tabs .tab.active[data-id]"); return !!a && a.dataset.id === sid; }, cfg.sidA, { timeout: 20000 });
+await fr.waitForFunction(() => document.querySelectorAll("#content .turn").length > 0, null, { timeout: 20000 });
+const frameState = () => fr.evaluate(() => {
+  const act = document.querySelector("#tabs .tab.active[data-id]");
+  const empty = document.getElementById("empty-state");
+  const turns = Array.from(document.querySelectorAll("#content .turn")).filter((t) => { const r = t.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(t).display !== "none"; });
+  let topHash = null; try { topHash = window.top.location.hash; } catch (e) { topHash = "cross-origin"; }
+  return { active: act ? act.dataset.id : null, tabs: Array.from(document.querySelectorAll("#tabs .tab[data-id]")).map((t) => t.dataset.id),
+           empty: empty && getComputedStyle(empty).display !== "none" ? { text: empty.textContent, vanished: empty.dataset.vanished || "" } : null,
+           visibleTurns: turns.length, paneHash: location.hash, topHash };
+});
+const t0 = Date.now();
+await page.evaluate(() => { location.hash = "#only=api"; });   // the SHELL's hash; the pane's own URL is untouched
+await fr.waitForFunction((sid) => !document.querySelector("#tabs .tab.active[data-id]") && !Array.from(document.querySelectorAll("#tabs .tab[data-id]")).some((t) => t.dataset.id === sid), cfg.sidA, { timeout: 5000 });
+out.shellHidden = Object.assign(await frameState(), { ms: Date.now() - t0 });
+await page.evaluate(() => { location.hash = "#only="; });      // the filter lifted, on the shell again
+await fr.waitForFunction((sid) => { const a = document.querySelector("#tabs .tab.active[data-id]"); return !!a && a.dataset.id === sid; }, cfg.sidA, { timeout: 5000 });
+await fr.waitForFunction(() => document.querySelectorAll("#content .turn").length > 0, null, { timeout: 5000 });
+out.shellRestored = await frameState();
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
 process.exit(0);
@@ -256,7 +282,7 @@ class ServedUnfocusedPane(unittest.TestCase):
     def test_the_focused_tab_leaving_on_its_own_unfocuses_the_pane_and_its_return_restores_it(self):
         cfg = os.path.join(self.lab, "cfg.json")
         with open(cfg, "w") as f:
-            json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "sidA": SID_A, "sidB": SID_B, "sidC": SID_C, "remote": REMOTE, "provisional": PROVISIONAL,
+            json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "shell": "http://127.0.0.1:%d/?token=%s" % (self.port, self.token), "sidA": SID_A, "sidB": SID_B, "sidC": SID_C, "remote": REMOTE, "provisional": PROVISIONAL,
                        "shots": os.environ.get("PV_SHOTS", "")}, f)
         driver = os.path.join(self.lab, "driver.mjs")
         with open(driver, "w") as f:
@@ -324,8 +350,20 @@ class ServedUnfocusedPane(unittest.TestCase):
         self.assertIsNone(of["active"], "no tab active under the filter: %r" % of); self.assertNotIn(SID_A, of["tabs"]); self.assertIn(SID_B, of["tabs"])
         self.assertEqual(of["visibleTurns"], 0, "the filtered session's transcript is NOT on screen (the demo leak): %r" % of)
         self.assertIsNotNone(of["empty"]); self.assertEqual(of["empty"]["vanished"], SID_A)
-        self.assertIn("web", of["empty"]["text"]); self.assertIn("is not shown by this tab view", of["empty"]["text"])
+        self.assertEqual(of["empty"]["text"], "This tab view shows no session. Change the view, or pick a tab.", "name-free: a clean recording frame")
         self.assertTrue(of["composerDisabled"])
+        # the SHELL road (the review's medium): the pane framed on the dashboard, the filter edited on the SHELL's URL
+        # (where only-filter.ts reads it): the pane's own hash never changes, yet the framed pane unfocuses off the live
+        # edit and restores when the filter lifts
+        sh = r["shellHidden"]
+        self.assertEqual((sh["paneHash"], sh["topHash"]), ("", "#only=api"), "the edit was the shell's; the pane's own URL carries no hash: %r" % sh)
+        self.assertIsNone(sh["active"]); self.assertNotIn(SID_A, sh["tabs"]); self.assertIn(SID_B, sh["tabs"])
+        self.assertEqual(sh["visibleTurns"], 0, "the filtered session's transcript left the framed pane: %r" % sh)
+        self.assertEqual(sh["empty"]["text"], "This tab view shows no session. Change the view, or pick a tab.")
+        self.assertLess(sh["ms"], 2000, "off the live edit, not a later kernel frame: %r" % sh)
+        sr = r["shellRestored"]
+        self.assertEqual(sr["active"], SID_A, "the filter lifted on the shell: the hidden tab takes focus back: %r" % sr)
+        self.assertGreater(sr["visibleTurns"], 0); self.assertIsNone(sr["empty"])
 
 
 if __name__ == "__main__":

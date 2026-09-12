@@ -75,7 +75,7 @@ test("peek is FIRST-CLASS in nav history by storing only the sid — apply lands
 test("the first-tab fallback never fires on an active peek: tabInView counts the peek as visible", () => {
   assert.match(RENDER, /function tabInView\(id: string\): boolean \{ return id === peekId \|\| chatVisible\(id\); \}/);
   // the #only=-era bounce reads visibleIds, which is built from tabInView — an active peek is in it
-  assert.match(RENDER, /const inViewIds = ids\.filter\(tabInView\);/);
+  assert.match(RENDER, /const visibleIds = ids\.filter\(\(id\) => stripShows\(id, only\)\);/, "the view (tabInView, a peek counts) and the #only= filter through ONE predicate, stripShows (T357 later lows)");
   assert.match(RENDER, /if \(activeId && ids\.includes\(activeId\) && !visibleIds\.includes\(activeId\)\) \{/, "the only-filter's check on the active tab (unfocus, not a re-point)");
   // …and the DEFERRED bounce re-validates at fire time: an activation between schedule and fire
   // (the feed click that just opened this peek) makes the active tab visible — no bounce then
