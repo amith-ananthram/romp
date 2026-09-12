@@ -81,8 +81,8 @@ os.environ["ROMP_SERVE_PORT"] = "1"
 # sys.path itself. One module object either way.
 from . import romp_load as _romp_load  # noqa: E402
 sys.modules.setdefault("romp_load", _romp_load)
-# fs_clock (2026-09-12): the shared force-until-moved ctime helper the memo tests and the thread mail-off test import, registered like romp_load
-# `from fs_clock import move_ctime` in a test module (tests/fs_clock.py): the shared force-until-moved ctime helper, registered like romp_load
+# `from fs_clock import move_ctime` in a test module (tests/fs_clock.py, 2026-09-12): the shared force-until-moved ctime
+# helper the memo tests and the thread mail-off test import, registered under its bare name like romp_load above
 from . import fs_clock as _fs_clock  # noqa: E402
 sys.modules.setdefault("fs_clock", _fs_clock)
 # `from git_fixture import git, init_repo` (tests/git_fixture.py, T299): the throwaway-repo fixtures' one git
