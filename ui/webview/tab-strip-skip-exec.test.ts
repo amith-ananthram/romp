@@ -105,6 +105,7 @@ function lift(): (hooks: Hooks) => Api {
     const tabInView = (id) => id === peekId || !H.hidden.has(id);
     // the one visibility predicate renderTabs builds visibleIds from (T357 later lows): the view, then the #only= filter
     const stripShows = (id, only) => tabInView(id) && (!only || matchesOnly(sessions.get(id)?.name ?? tabMeta.get(id)?.name ?? "", only));
+    const stripLists = (id) => !closingTabs.has(id) && (order.includes(id) || tabMeta.has(id));   // the strip's one membership rule (T357 fix)
     const setActive = (id) => { H.activated.push(id); }; const setTimeout = (f) => { H.timers.push(f); return 0; };   // the deferred checks, held for the test to fire
     const unfocusHiddenByView = () => {};
     // the section-at-a-glance view's readers on the strip, inert: the plan the view reads (lastStripItems), the
@@ -433,4 +434,16 @@ test("executed: the hidden tab's restore fires only for a tab still on the strip
   assert.equal(w2.H.timers.length, 1);
   w2.H.timers[0]();
   assert.deepEqual(w2.H.activated, ["a"], "the tab still on the strip takes focus back");
+});
+
+test("executed: the restore's fire-time membership is the paint's own rule: a tab listed only as a placeholder paints, so it restores (T357 fix)", () => {
+  // the schedule reads visibleIds (order AND the tabMeta placeholders); the fire-time check read `order` alone, so a
+  // tab present only as a placeholder painted while its restore declined (the review's low). One rule at both ends.
+  const { H, api, tabMeta } = world();
+  tabMeta.set("a", { name: "web", color: { bg: "#112233", fg: "#ffffff" } });
+  api.set({ order: ["b", "p"], activeId: null, vanishedId: "a", vanishedWhy: "hidden" });
+  api.renderTabs();
+  assert.equal(H.timers.length, 1, "the placeholder-only tab is visible, so the restore is scheduled");
+  H.timers[0]();
+  assert.deepEqual(H.activated, ["a"], "…and fires: it paints, so it restores");
 });

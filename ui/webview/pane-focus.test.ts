@@ -62,8 +62,17 @@ test("the wiring: the dismiss branch, the unfocused body, the composer, the rest
   assert.match(paint, /empty\.classList\.toggle\("unfocused", !!v\);\s*\n\s*empty\.dataset\.vanished = named \|\| "";/, "the body names the vanished or the awaited id");
   assert.doesNotMatch(RENDER, /empty\.textContent = "No session open/, "the one writer of the empty body is paintEmptyState");
   // the return: the session frame, or the strip re-listing it; no other arrival adopts the box meanwhile
-  assert.match(RENDER, /if \(vanishedId === msg\.id\) setActive\(msg\.id\);\s*\n\s*const adopted = !activeId && !vanishedId && !wantActive && !wantActiveGone;/);
-  assert.match(fn("applyTabOrder"), /for \(const id of kernelOrder\) kernelListed\.add\(id\);[\s\S]{0,500}?const back = vanishedId \|\| wantActive;[^\n]*\n\s*if \(back && order\.includes\(back\)\) setActive\(back\);/);
+  assert.match(RENDER, /if \(vanishedId === msg\.id\) restoreIfShown\(msg\.id\);[^\n]*\n\s*const adopted = !activeId && !vanishedId && !wantActive && !wantActiveGone;/);
+  assert.match(fn("applyTabOrder"), /for \(const id of kernelOrder\) kernelListed\.add\(id\);[\s\S]{0,500}?const back = vanishedId \|\| wantActive;[^\n]*\n\s*if \(back && restoreIfShown\(back\)\)/);
+  // every restore reads ONE rule (the review's leak: applyTabOrder's had no visibility predicate, so a routine push
+  // re-focused a filtered-out session for one frame): listed AND shown takes focus back; listed but hidden leaves the
+  // pane unfocused as "hidden", for renderTabs's schedule to restore when the filter shows it
+  assert.match(fn("restoreIfShown"), /if \(!stripLists\(id\)\) return false;\s*\n\s*if \(stripShows\(id\)\) \{ setActive\(id\); return true; \}\s*\n\s*if \(!activeId\) \{ vanishedId = id; vanishedWhy = "hidden";/);
+  assert.match(fn("stripLists"), /return !closingTabs\.has\(id\) && \(order\.includes\(id\) \|\| tabMeta\.has\(id\)\);/, "the paint's membership rule, shared with every restore");
+  assert.match(RENDER, /if \(wantActive && msg\.id === wantActive && stripLists\(msg\.id\)\) \{ wantActive = null; restoreIfShown\(msg\.id\); \}/, "the persisted tab's arrival restores only if shown");
+  assert.equal((RENDER.match(/\bsetActive\(back\)/g) || []).length, 1, "the one direct setActive(back) left is renderTabs's own fire-time restore, behind stripLists and stripShows");
+  // a hidden tab torn down while the pane is unfocused: the body's line follows the reason (the review's low)
+  assert.match(fn("dismissSession"), /if \(!wasActive && vanishedId === id\) \{[\s\S]{0,400}?vanishedWhy = why; vanishedName = name;\s*\n\s*repaintEmptyStateIfUnfocused\(\);\s*\n\s*\}/);
   // the reload road (the review's HIGH): the persisted tab is awaited at boot, the body names it, nothing adopts
   assert.match(RENDER, /^let wantActiveName: string = /m);
   assert.match(fn("paintEmptyState"), /const awaited = !vanishedId && wantActive \? wantActive : null;/);
@@ -72,7 +81,7 @@ test("the wiring: the dismiss branch, the unfocused body, the composer, the rest
   assert.match(fn("paintEmptyState"), /const nameOf = \(id: string, carried = ""\) => carried \|\| wantActiveName \|\| tabMeta\.get\(id\)\?\.name \|\| sessions\.get\(id\)\?\.name \|\| "a session";/, "never a raw sid in the body, on any branch");
   assert.match(RENDER, /if \(wantActive && \(isSubId\(wantActive\) \|\| isProvisionalId\(wantActive\)\)\) \{ wantActiveGone = wantActive; wantActive = null; \}/, "an id that can never be listed again is not awaited");
   assert.match(fn("paintEmptyState"), /gone \? \{ name: nameOf\(gone\), why: "gone" as const, dialing: false \}/);
-  assert.match(fn("applyTabOrder"), /if \(back && order\.includes\(back\)\) setActive\(back\);\s*\n\s*else if \(!activeId\) showActive\(\);/, "the strip changing under an unfocused pane repaints the body (an emptied strip included)");
+  assert.match(fn("applyTabOrder"), /if \(back && restoreIfShown\(back\)\) \{[^\n]*\}\s*\n\s*else if \(!activeId\) showActive\(\);/, "the strip changing under an unfocused pane repaints the body (an emptied strip, or the named tab listed but hidden)");
   // the body repaints on the dial event; the view filter routes through the same rule; the keyboard picks the first tab
   assert.match(RENDER, /window\.addEventListener\("romp:hostDial", \(\) => \{ syncHostOfflineFoot\(\); repaintEmptyStateIfUnfocused\(\); \}\);/);
   assert.match(fn("repaintEmptyStateIfUnfocused"), /if \(activeId\) return;[\s\S]*?if \(e\) paintEmptyState\(e\);/);
@@ -81,11 +90,12 @@ test("the wiring: the dismiss branch, the unfocused body, the composer, the rest
   // applied on top of tabInView and is no peek input, so an only-filtered active tab goes UNFOCUSED here, never
   // re-pointed; the fire-time check reads the same predicate visibleIds is built from (stripShows)
   assert.match(fn("renderTabs"), /if \(activeId && ids\.includes\(activeId\) && !visibleIds\.includes\(activeId\)\) \{\s*\n\s*const hid = activeId;\s*\n\s*setTimeout\(\(\) => \{ if \(activeId === hid && !stripShows\(hid\)\) unfocusHiddenByView\(hid\); \}, 0\);/);
-  assert.match(fn("renderTabs"), /if \(!activeId && vanishedId && vanishedWhy === "hidden" && visibleIds\.includes\(vanishedId\)\)[\s\S]{0,900}?if \(!activeId && vanishedId === back && vanishedWhy === "hidden" && order\.includes\(back\) && stripShows\(back\)\) setActive\(back\);/, "…and comes back when the filter shows it again, the reason AND the strip's membership re-read at fire time (a tab torn down meanwhile left `order` with the reason still hidden)");
+  assert.match(fn("renderTabs"), /if \(!activeId && vanishedId && vanishedWhy === "hidden" && visibleIds\.includes\(vanishedId\)\)[\s\S]{0,900}?if \(!activeId && vanishedId === back && vanishedWhy === "hidden" && stripLists\(back\) && stripShows\(back\)\) setActive\(back\);/, "…and comes back when the filter shows it again, the reason AND the strip's membership (stripLists, the paint's rule) re-read at fire time");
   assert.doesNotMatch(fn("renderTabs"), /const nameOf = /, "no second name ladder in renderTabs: stripShows carries the one (the review's low)");
   assert.match(fn("stripShows"), /function stripShows\(id: string, only: string \| null = onlyTag\(\)\): boolean \{\s*\n\s*if \(!tabInView\(id\)\) return false;\s*\n\s*return !only \|\| matchesOnly\(sessions\.get\(id\)\?\.name \?\? tabMeta\.get\(id\)\?\.name \?\? "", only\);/, "the one predicate");
   assert.match(fn("renderTabs"), /const visibleIds = ids\.filter\(\(id\) => stripShows\(id, only\)\);/, "visibleIds is built from it: no second copy");
-  assert.match(RENDER, /onlyWindow\(\)\.addEventListener\("hashchange", \(\) => renderTabs\(\)\);/, "a live edit of the #only= hash repaints at once, heard on the window that carries the filter (the shell's when framed)");
+  assert.match(RENDER, /const onlyHashWindow = onlyWindow\(\);\s*\n\s*onlyHashWindow\.addEventListener\("hashchange", onOnlyHashChange\);/, "a live edit of the #only= hash repaints at once, heard on the window that carries the filter (the shell's when framed), by a NAMED handler…");
+  assert.match(RENDER, /window\.addEventListener\("pagehide", \(\) => onlyHashWindow\.removeEventListener\("hashchange", onOnlyHashChange\)\);/, "…taken off the shell's window on pagehide (a closed split column must not hold the detached pane alive)");
   assert.doesNotMatch(RENDER, /window\.addEventListener\("hashchange"/, "never the pane's own window alone: framed on the dashboard its hash never changes (the review's medium)");
   assert.doesNotMatch(RENDER, /visibleIds\.includes\(activeId\) && visibleIds\.length/, "no first-visible-tab RE-POINT");
   assert.match(fn("unfocusHiddenByView"), /activeId = null; vanishedId = id; vanishedWhy = "hidden";/);

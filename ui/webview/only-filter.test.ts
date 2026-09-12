@@ -84,7 +84,7 @@ test("the timeline's standalone helper splits the tag the same way", () => {
 
 test("chat tabs filter by the #only tag", () => {
   assert.match(RENDER, /import \{ onlyTag, matchesOnly, onlyWindow \} from "\.\/only-filter";/);
-  assert.match(RENDER, /onlyWindow\(\)\.addEventListener\("hashchange", \(\) => renderTabs\(\)\);/, "the strip's live-edit listener binds to the window the filter is read from (the shell's when framed)");
+  assert.match(RENDER, /const onlyHashWindow = onlyWindow\(\);\s*\n\s*onlyHashWindow\.addEventListener\("hashchange", onOnlyHashChange\);/, "the strip's live-edit listener binds to the window the filter is read from (the shell's when framed)");
   assert.match(RENDER, /const visibleIds = ids\.filter\(\(id\) => stripShows\(id, only\)\);/, "the #only= filter rides the one predicate the deferred checks read too (stripShows: tabInView, then matchesOnly over the hash)");
   assert.match(RENDER, /return !only \|\| matchesOnly\(sessions\.get\(id\)\?\.name \?\? tabMeta\.get\(id\)\?\.name \?\? "", only\);/);
   // the filtered ids are what the strip plan renders (tab-groups.ts planStrip, since tab groups 2026-09-04)
@@ -132,4 +132,23 @@ test("timeline lanes filter by the #only tag (self-contained helper in the stand
   assert.match(TL, /function _rompOnlyTag\(\)/);
   assert.match(TL, /function _rompMatchesOnly\(name, tag\)/);
   assert.match(TL, /sessions: data\.sessions\.filter\(\(s\) => _rompMatchesOnly\(s\.name, _only\)\)/);
+});
+
+test("the hash listener is a named handler and comes off the shell's window on pagehide (a closed split column must not hold the pane alive)", () => {
+  const a = RENDER.indexOf("const onOnlyHashChange = ");
+  const p = RENDER.indexOf('window.addEventListener("pagehide", () => onlyHashWindow.removeEventListener', a);
+  const b = RENDER.indexOf("\n", p);
+  assert.ok(a > 0 && p > a && b > p, "anchors not found: the listener block moved; re-anchor");
+  const js = RENDER.slice(a, b).replace(/\(\): void =>/g, "() =>");
+  const shell: any = { added: [] as string[], removed: [] as string[], f: null,
+    addEventListener(t: string, f: unknown) { this.added.push(t); this.f = f; },
+    removeEventListener(t: string, f: unknown) { this.removed.push(t + (f === this.f ? ":same" : ":other")); } };
+  const paneHandlers: Record<string, () => void> = {};
+  const pane: any = { addEventListener(t: string, f: () => void) { paneHandlers[t] = f; } };
+  let repaints = 0;
+  new Function("onlyWindow", "renderTabs", "window", js)(() => shell, () => { repaints++; }, pane);
+  assert.deepEqual(shell.added, ["hashchange"], "one listener on the window the filter is read from");
+  assert.deepEqual(Object.keys(paneHandlers), ["pagehide"], "the pane's own window carries only the pagehide belt");
+  shell.f(); assert.equal(repaints, 1, "the named handler repaints the strip");
+  paneHandlers.pagehide(); assert.deepEqual(shell.removed, ["hashchange:same"], "the same handler comes off on pagehide");
 });
