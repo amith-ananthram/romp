@@ -993,8 +993,11 @@ copy of the file); its cursor stays with the state's size as the reason, and
 it cold-folds at first touch over the tail, while the bounded folds beside it
 restore. A cursor recorded without a state for any other reason (a tail-only
 state a cold fold left, or an older kernel's entry) restarts cold once, says
-so, and is healed at the session's next settle by one whole refold, after which
-its state is written and the next boot restores it warm. Checkpoints
+so, and is healed by one whole refold: a leaf's folds at the session's next
+settle, before the write, so that write carries their states; another file's
+fold (a states log's) is left out of its next checkpoint write and read whole
+once at the next boot. After that the fold is written whole and every later
+boot restores it warm. Checkpoints
 are written when a session's turn settles or its states log moves, and all of
 them at exit; checkpoints of files that no longer exist are swept at boot. A
 compaction appends records and changes nothing here.

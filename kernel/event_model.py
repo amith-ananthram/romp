@@ -1155,24 +1155,25 @@ def checkpoint_write(path, force=False):
     moved = None                                          #  next process's tail read holds every record a lagging fold has
     if cut < count and len(ent) >= 8 and ent[7]:          #  yet to step (its append), bounded by the records this entry holds
         off_cut = int(ent[7][(cut - base) * 2])           # the cut record's byte offset; the 64 bytes before it are the guard.
-        try:                                              # The entry holds records, not bytes, so the guard is read from the file,
-            st = os.stat(key)                             #  gated on the entry's own stat before and after the read: a leaf rewritten
-            if (st.st_mtime, st.st_size) != (mtime, size):   #  whole meanwhile (review, medium 1) would pair the entry's counts and
-                raise OSError("the file moved under the entry")   #  states with the new file's bytes, and the next boot would restore
-            with open(key, "rb") as fh:                   #  every fold onto a prefix that no longer exists; a changed stat writes
-                fh.seek(max(0, off_cut - 64)); guard_cut = fh.read(min(64, off_cut))   #  the witness form instead (the entry's guard,
-            st = os.stat(key)                             #  captured with its records), which such a rewrite then fails to verify
-            if (st.st_mtime, st.st_size) != (mtime, size) or (off_cut and not guard_cut.endswith(b"\n")):
-                raise OSError("the file moved under the entry")
+        try:                                              # The entry holds records, not bytes, so the guard is read from the file, in
+            with open(key, "rb") as fh:                   #  the same open that first verifies the entry's OWN witness guard (its bytes
+                fh.seek(max(0, offset - len(tail)))       #  before its offset, captured with its records): an append since the read
+                if fh.read(len(tail)) != tail:            #  leaves that prefix intact and the cut move proceeds, carrying the lagging
+                    raise OSError("the file was rewritten under the entry")   #  fold; a rewrite of any size or time fails it and writes
+                fh.seek(max(0, off_cut - 64)); guard_cut = fh.read(min(64, off_cut))   #  the witness form, which the restore then refuses
+            if off_cut and not guard_cut.endswith(b"\n"):   #  (review: a stat gate refused appends and passed a time-preserving copy)
+                raise OSError("no record boundary at the cut")
         except OSError:
             guard_cut = None
         if guard_cut is not None:
             moved = (off_cut, guard_cut, records[cut - base - 1] if cut > base else None, cut)
+    left_out = False
     if moved is not None:
         offset, tail, last, count = moved
     else:
-        if cut < count:                                   # no cut move: the folds at the witness only (the lagging ones stay dirty)
-            folds = {n: f for n, f in folds.items() if f["count"] == count}
+        if cut < count:                                   # no cut move: the folds at the witness only; the lagging ones are left
+            folds = {n: f for n, f in folds.items() if f["count"] == count}   #  out, and the path stays DIRTY below so the next
+            left_out = True                               #  write (a settle, the exit drain) tries them again (review, low 3)
             if not folds and not force:
                 return False
         last = records[-1] if records else None
@@ -1191,7 +1192,10 @@ def checkpoint_write(path, force=False):
     with _CKPT_LOCK:
         _CKPT_SEQ[key] = seq
         _CKPT_STATS["writes"] += 1
-        _FOLD_DIRTY.discard(key)
+        if left_out:
+            _FOLD_DIRTY.add(key)                          # a lagging fold has no cursor in this document yet
+        else:
+            _FOLD_DIRTY.discard(key)
     return True
 
 

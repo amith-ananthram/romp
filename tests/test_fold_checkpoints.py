@@ -110,6 +110,7 @@ class Base(unittest.TestCase):
             c.clear()
         with em._CKPT_LOCK:
             em._COLD_FOLDS.clear()                                # a process-wide set: a new process starts with none
+            em._COLD_REASONS.clear(); em._COLD_OVER_KB.clear()   # ...and no reason or KB inherited from the previous boot (T359)
         km._CKPT_SETTLE_SEEN.clear()
 
     def ckpt_files(self):
@@ -859,6 +860,46 @@ class ReviewProbes(Base):
         got = em.fold_records({}, self.p, list, self._step, on=self.kinds.append, ckpt="t")
         self.assertEqual(got, [1000 + i for i in range(20)], "the next process folds the file as it is")
         self.assertEqual(self.kinds[-1], "refold"); self.assertTrue(em.checkpoint_stats()["fallbacks"], "the document was refused")
+
+    def test_an_append_between_the_read_and_the_write_still_carries_the_lagging_fold(self):
+        """Fold review: a stat gate on the cut's guard refused a plain APPEND between the entry's read and the write (a states log,
+        the postal log, a peer advancing a leaf), so the lagging fold fell out and the next boot refolded it whole. The entry's
+        own witness guard is verified instead: an append leaves that prefix intact, so the cut move proceeds."""
+        _write(self.p, [{"n": 0}, {"n": 1}])
+        lo = {}
+        em.fold_records(lo, self.p, list, self._step, ckpt="lo")          # lo at 2
+        _append(self.p, {"n": 2})
+        self.fold()                                                        # "t" at 3; lo lags at 2
+        _append(self.p, {"n": 3})                                          # an append the entry has not read yet
+        self.assertTrue(em.checkpoint_write(self.p))
+        d = self.doc(self.p)
+        self.assertEqual((sorted(d["folds"]), d["count"], d["folds"]["lo"]["count"]), (["lo", "t"], 2, 2), "the cut moved: the lagging fold is carried")
+        self.fresh_process()
+        got = em.fold_records({}, self.p, list, self._step, on=self.kinds.append, ckpt="lo")
+        self.assertEqual((got, self.kinds[-1]), ([0, 1, 2, 3], "restore"), "the next process restores it warm over the tail")
+        self.assertEqual(em.checkpoint_stats()["fallbacks"], {})
+
+    def test_a_rewrite_keeping_size_and_mtime_between_the_read_and_the_write_gets_no_cut_document(self):
+        """Fold review: a rewrite that keeps the size AND the modification time (a copy preserving times, a coarse timestamp) passed
+        a stat gate and paired the entry's counts with the new file's bytes. The entry's witness guard catches it: the bytes
+        before its offset changed, so the write is the witness form, which the next process refuses."""
+        _write(self.p, [{"n": i} for i in range(12)])
+        lo = {}
+        em.fold_records(lo, self.p, list, self._step, ckpt="lo")          # lo at 12
+        _append(self.p, {"n": 12}, {"n": 13})
+        self.fold()                                                        # "t" at 14, lo lags at 12
+        st = os.stat(self.p)
+        _write(self.p, [{"n": 9 - i} for i in range(10)] + [{"n": 23 - i} for i in range(10, 14)])   # the same byte length, other content
+        os.utime(self.p, ns=(st.st_atime_ns, st.st_mtime_ns))              # ...and the same modification time
+        self.assertEqual((os.stat(self.p).st_size, os.stat(self.p).st_mtime_ns), (st.st_size, st.st_mtime_ns))
+        self.assertTrue(em.checkpoint_write(self.p))
+        d = self.doc(self.p)
+        self.assertEqual((d["count"], sorted(d["folds"])), (14, ["t"]), "the witness form, the lagging fold left out")
+        self.assertIn(self.p, em.checkpoint_dirty(), "...and the path stays dirty, so the next write (a settle, the exit drain) tries it again")
+        self.fresh_process()
+        got = em.fold_records({}, self.p, list, self._step, on=self.kinds.append, ckpt="t")
+        self.assertEqual((self.kinds[-1], len(got)), ("refold", 14), "the next process refuses the document and folds the file as it is")
+        self.assertTrue(em.checkpoint_stats()["fallbacks"])
 
     def test_an_over_cap_fold_stays_over_through_a_cold_write_across_three_boots(self):
         """Medium 2: a fold that restored cold because its state was over the cap was written {count, cold} at the next write,

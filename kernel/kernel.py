@@ -9823,7 +9823,7 @@ def _LEAF_FOLDS():
 
 def _heal_cold_folds(leaf):
     """At a SETTLE write (never the exit drain and its budget): a leaf fold that began cold in this process for want of a state
-    in its document (em.cold_fold_reasons: "cold", not "over") is refolded whole once, its cursor dropped first, so the write
+    in its document (em.drop_cold_cursors drops those cursors: reason "cold", never "over") is refolded whole once, so the write
     that follows carries its complete state and the next boot restores it warm (T359: the kernel's background-task view stayed
     a tail-only state boot after boot, each write recording the cursor alone and every boot blaming the cap). An over-the-cap
     fold is left cold: a heal would only be written cursor-only again. Returns the names healed."""
