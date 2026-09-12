@@ -81,10 +81,12 @@ test("the wiring: the dismiss branch, the unfocused body, the composer, the rest
   // applied on top of tabInView and is no peek input, so an only-filtered active tab goes UNFOCUSED here, never
   // re-pointed; the fire-time check reads the same predicate visibleIds is built from (stripShows)
   assert.match(fn("renderTabs"), /if \(activeId && ids\.includes\(activeId\) && !visibleIds\.includes\(activeId\)\) \{\s*\n\s*const hid = activeId;\s*\n\s*setTimeout\(\(\) => \{ if \(activeId === hid && !stripShows\(hid\)\) unfocusHiddenByView\(hid\); \}, 0\);/);
-  assert.match(fn("renderTabs"), /if \(!activeId && vanishedId && vanishedWhy === "hidden" && visibleIds\.includes\(vanishedId\)\)[\s\S]{0,240}?if \(!activeId && vanishedId === back && vanishedWhy === "hidden" && stripShows\(back\)\) setActive\(back\);/, "…and comes back when the filter shows it again, the reason re-read at fire time");
+  assert.match(fn("renderTabs"), /if \(!activeId && vanishedId && vanishedWhy === "hidden" && visibleIds\.includes\(vanishedId\)\)[\s\S]{0,900}?if \(!activeId && vanishedId === back && vanishedWhy === "hidden" && order\.includes\(back\) && stripShows\(back\)\) setActive\(back\);/, "…and comes back when the filter shows it again, the reason AND the strip's membership re-read at fire time (a tab torn down meanwhile left `order` with the reason still hidden)");
+  assert.doesNotMatch(fn("renderTabs"), /const nameOf = /, "no second name ladder in renderTabs: stripShows carries the one (the review's low)");
   assert.match(fn("stripShows"), /function stripShows\(id: string, only: string \| null = onlyTag\(\)\): boolean \{\s*\n\s*if \(!tabInView\(id\)\) return false;\s*\n\s*return !only \|\| matchesOnly\(sessions\.get\(id\)\?\.name \?\? tabMeta\.get\(id\)\?\.name \?\? "", only\);/, "the one predicate");
   assert.match(fn("renderTabs"), /const visibleIds = ids\.filter\(\(id\) => stripShows\(id, only\)\);/, "visibleIds is built from it: no second copy");
-  assert.match(RENDER, /window\.addEventListener\("hashchange", \(\) => renderTabs\(\)\);/, "a live edit of the #only= hash repaints at once");
+  assert.match(RENDER, /onlyWindow\(\)\.addEventListener\("hashchange", \(\) => renderTabs\(\)\);/, "a live edit of the #only= hash repaints at once, heard on the window that carries the filter (the shell's when framed)");
+  assert.doesNotMatch(RENDER, /window\.addEventListener\("hashchange"/, "never the pane's own window alone: framed on the dashboard its hash never changes (the review's medium)");
   assert.doesNotMatch(RENDER, /visibleIds\.includes\(activeId\) && visibleIds\.length/, "no first-visible-tab RE-POINT");
   assert.match(fn("unfocusHiddenByView"), /activeId = null; vanishedId = id; vanishedWhy = "hidden";/);
   assert.match(fn("assertPeekFor"), /const next = chatVisible\(id\) \? null : id;/, "the peek rule, over the views blob alone");

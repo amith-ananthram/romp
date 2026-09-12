@@ -58,7 +58,7 @@ import { reconcileHeld, heldAsQueued, type HeldCopy, type HeldQueued, type HeldM
 import { reloadHoldReason } from "./reload-hold";
 import { liveNotices, keepReloadNotices, takeReloadNotices } from "./reload-notices";
 import { mintProvisionalId, isProvisionalId, provisionalName, adoptsProvisional, focusResolvesProvisional } from "./provisional";
-import { onlyTag, matchesOnly } from "./only-filter";
+import { onlyTag, matchesOnly, onlyWindow } from "./only-filter";
 import { numberDiff, type DiffRow } from "./diff-lines";
 import { parseAgentNotif, notifHead, type AgentNotif } from "./agent-notif";
 import { injectedHead, type InjectedSource } from "./injected-source";
@@ -6263,7 +6263,6 @@ function renderTabs() {
   // demo/recording view filter (the user 2026-07-14): `#only=<tag>` shows only matching-name tabs; the
   // real sessions keep running, just hidden from this view. No tag → visibleIds === ids (unchanged).
   const only = onlyTag();
-  const nameOf = (id: string) => sessions.get(id)?.name ?? tabMeta.get(id)?.name ?? "";
   // the session VIEWS filter composes here too (the user 2026-08-18): a view-hidden session keeps
   // its state, drafts and cached transcript — it just loses its tab until revealed. ONE predicate (stripShows) builds
   // this list and answers the deferred checks below, so the two can never disagree (the review's low)
@@ -6284,7 +6283,11 @@ function renderTabs() {
   }
   if (!activeId && vanishedId && vanishedWhy === "hidden" && visibleIds.includes(vanishedId)) {
     const back = vanishedId;
-    setTimeout(() => { if (!activeId && vanishedId === back && vanishedWhy === "hidden" && stripShows(back)) setActive(back); }, 0);   // the reason re-read too: a teardown queued in between must not be undone
+    // the reason re-read too: a teardown queued in between must not be undone. And the strip's MEMBERSHIP, not only the
+    // predicate: a teardown of a tab that is not active writes no vanished* (dismissSession does that for the active tab
+    // alone), so the reason still reads "hidden" after the tab left `order`; stripShows knows the view and the filter,
+    // not the strip, and would hand focus to a tab nobody can see (the review's low)
+    setTimeout(() => { if (!activeId && vanishedId === back && vanishedWhy === "hidden" && order.includes(back) && stripShows(back)) setActive(back); }, 0);
   }
   // TAB SECTIONS (the user 2026-09-04): groups are tags. With sectioning on (per browser — the
   // tag-lens menu's "Group tabs by tag") and some tag holding a visible tab, the strip renders one
@@ -7194,8 +7197,11 @@ window.addEventListener("romp-hosts", () => { renderTabs(); syncComposerPh(); })
 // spins while one is in flight, as of the last /tunnels poll, so it repaints on this event and on nothing else
 window.addEventListener("romp:hostDial", () => { syncHostOfflineFoot(); repaintEmptyStateIfUnfocused(); });   // the unfocused body's "reconnecting" follows the dial state too (T357)
 // the `#only=` filter is the location hash, so a LIVE edit of the hash repaints the strip at once: the hidden tab's
-// unfocus and its return both run off this repaint, not off the next kernel frame (T357 later lows)
-window.addEventListener("hashchange", () => renderTabs());
+// unfocus and its return both run off this repaint, not off the next kernel frame (T357 later lows). On the dashboard
+// this pane is a same-origin iframe of the shell and the filter lives on the SHELL's URL (only-filter.ts reads
+// window.top), so the listener binds to the window onlyTag reads: the shell's there, this pane's own on a top-level
+// page or under a cross-origin top (the review: the pane's own hash never changes on the dashboard)
+onlyWindow().addEventListener("hashchange", () => renderTabs());
 window.addEventListener("mousedown", (e) => { if (ctxMenuEl && !ctxMenuEl.contains(e.target as Node)) dismissTabMenu(); }, true);
 // an Escape that closed the menu says so on the event (preventDefault), so the section view's own Escape
 // (installSnapshotEscape, armed at this same capture phase, later in the listener order) yields to it
