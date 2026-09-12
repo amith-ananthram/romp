@@ -9828,11 +9828,10 @@ def _prime_leaf_folds(leaf):
     would otherwise drop out of the settle write and read the leaf whole at the next boot), while a fold with no
     cursor there, and a leaf this process never read, are left to their callers. The leaf's folds: the kernel's two background-task views, the judges' pairing,
     the session meta and the agent launch state (the agent files' and the logs' folds are their own callers').
-    Best-effort per fold; True when the leaf was primed."""
+    Best-effort per fold; True when the leaf was primed. The settle's heal of a tail-only fold is _heal_cold_folds, beside it."""
     whole = em.entry_whole_resident(leaf)
     primed = False
-    for fn, cache in ((_bg_scan_cached, _bgtasks_cache), (_bg_scan_all_cached, _bgall_cache), (jd._bg_scan, jd._BG_SCAN_CACHE),
-                      (_session_meta, _session_meta_cache), (_agent_launch_state, _AGENT_LAUNCH_CACHE)):
+    for fn, cache in _LEAF_FOLDS():
         if not whole and not em.fold_cursor_appendable(cache, leaf):
             continue                          # over a tail entry only a fold with a cursor at this entry (an append, no read):
         try:                                  #  one with none would read the file whole, and a leaf with no entry is left alone
@@ -9840,6 +9839,35 @@ def _prime_leaf_folds(leaf):
         except Exception:
             pass
     return primed
+
+
+def _LEAF_FOLDS():
+    """The leaf's checkpointed folds with their cursor dicts: the kernel's two background-task views, the judges' pairing, the
+    session meta and the agent launch state."""
+    return ((_bg_scan_cached, _bgtasks_cache), (_bg_scan_all_cached, _bgall_cache), (jd._bg_scan, jd._BG_SCAN_CACHE),
+            (_session_meta, _session_meta_cache), (_agent_launch_state, _AGENT_LAUNCH_CACHE))
+
+
+def _heal_cold_folds(leaf):
+    """At a SETTLE write (never the exit drain and its budget): a leaf fold that began cold in this process for want of a state
+    in its document (em.drop_cold_cursors drops those cursors: reason "cold", never "over") is refolded whole once, so the write
+    that follows carries its complete state and the next boot restores it warm (T359: the kernel's background-task view stayed
+    a tail-only state boot after boot, each write recording the cursor alone and every boot blaming the cap). An over-the-cap
+    fold is left cold: a heal would only be written cursor-only again. Returns the names healed."""
+    dropped = set(em.drop_cold_cursors(leaf))   # no cursor: the fold reads the leaf whole once and is complete again
+    if not dropped:
+        return []
+    names = {id(c): n for n, c in em._FOLD_REG.items()}
+    healed = []
+    for fn, cache in _LEAF_FOLDS():
+        name = names.get(id(cache))
+        if name not in dropped:
+            continue
+        try:
+            fn(leaf); healed.append(name)
+        except Exception:
+            pass
+    return healed
 
 
 def _stored_tree(path, sid):
@@ -9892,9 +9920,13 @@ def _persist_checkpoints(now):
         if not settle_due and not periodic_due:
             continue
         _CKPT_PERIODIC_SEEN[sid] = (leaf_stat, mono)
+        _heal_cold_folds(leaf)                # the settle heals a tail-only fold (T359); the exit drain does not
         _prime_leaf_folds(leaf)
         dirty = set(em.checkpoint_dirty())
         mine = _session_fold_files(sid, leaf) & dirty
+        for _p in mine:                        # a tail-only fold of the session's OTHER files (its states log): its cursor is
+            if _p != leaf:                     #  dropped so the write leaves it out and the next boot reads that small file
+                em.drop_cold_cursors(_p)       #  whole once, complete again (T359 review, low 3; the leaf's folds heal above)
         if mine:
             written += em.checkpoint_write_dirty(sorted(mine))
         try:                                   # the assembly document for the leaf (T323 stage 4a): from a whole entry
