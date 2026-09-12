@@ -1441,18 +1441,25 @@ class CodexBackend:
         with s.lock:
             if s.dead:
                 return False
-            tid, cwd = s.tid, s.cwd
+            tid, cwd, model = s.tid, s.cwd, s.model
             create = tid.startswith("pending-") or tid.startswith("failed-")
         if create:
-            resp = c.thread_start({"cwd": cwd, **_approval_params(s.mode),
-                                   **_execution_permissions(cwd, thread_start=True)})
+            params = {"cwd": cwd, **_approval_params(s.mode),
+                      **_execution_permissions(cwd, thread_start=True)}
+            if model:
+                params["model"] = model    # picked while the row was a placeholder: born on it
+            resp = c.thread_start(params)
             loaded_client_generation = self._client_generation_for(c)
             with s.lock:
                 if s.dead:
                     return False
                 prior = (s.tid, s.model, s.loaded, s.loaded_client_generation)
                 s.tid = resp.thread.id
-                s.model = getattr(resp, "model", "") or s.model
+                # The pick outlives the create. The server's reply names ITS model, never empty
+                # (ThreadStartResponse.model is a required string), so `resp.model or s.model` let
+                # the default overwrite a model the user chose on the pending-/failed- row, saved
+                # it below, and ran every turn on it with no word to anyone (2026-09-11).
+                s.model = s.model or getattr(resp, "model", "") or ""
                 s.loaded = True
                 s.loaded_client_generation = loaded_client_generation
                 try:
