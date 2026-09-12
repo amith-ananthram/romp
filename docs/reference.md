@@ -1006,7 +1006,17 @@ hash, and hands the judges and the display one tree. Since the lazy index
 each pre-cut turn as its identity, its atoms' row indexes, its segments' spans
 and the scalars the kernel's walkers read (the atoms' uuids, the last and
 latest times, the last model, the tool calls), so a restore builds the turns
-without building an atom. The pre-cut rows stay as bytes; a turn's atoms are
+without building an atom. Document version 5 (T358) adds what the per-cycle
+walkers read: each turn's assistant prose chars by uuid and its newest
+genuine-human time, each segment's has-work verdict and postal message ids,
+and on every lazy marker the prose chars and message ids; the caption
+planner, the feed's transcript-side sets and citation gate, the timeline's
+message-id join then read scalars and build no atom for a captioned or
+already-rendered history, and a segment's atoms are a view that builds only
+what is read. The summary anchors read scalars too (no body is hydrated) but
+still build each pre-cut atom they walk on a cold pass, until the document
+carries per-segment anchors. A version 4 document is refused and the
+session parses whole once. The pre-cut rows stay as bytes; a turn's atoms are
 a list whose slots are built one at a time when a consumer reaches for them,
 through a process-wide LRU of 20000 built atoms across every session (eviction
 drops the memo; a consumer's own reference stays whole), counted per consumer
