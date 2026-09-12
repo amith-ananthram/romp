@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The glossary (T351 stage 2, the user 2026-09-11): the kernel parses a group's glossary file in the README's grammar,
 resolves a session to its group's file, ships a byte-bounded index frame, and answers GET /glossary/<term>. The fixture
-is SYNTHETIC (tests/fixtures/glossary_grammar.json: an invented notes-api team's entries); the TS twin reads the same
+is SYNTHETIC (tests/fixtures/glossary_grammar.json: an invented notes-api team's entries); the TS counterpart reads the same
 file. Hermetic state; nothing of any real glossary reaches the repo."""
 import contextlib
 import io
@@ -92,7 +92,7 @@ class Lookup(unittest.TestCase):
         g, p = km._glossary_source(SID)
         self.assertEqual((g, p.name), ("notes-api", "notes-api.md"))
         self.assertEqual(km._glossary_source(OTHER), (None, None), "no group, no docs.md: nothing")
-        Path(self.td, "glossaries", "docs.md").write_text("## twin\n\nThe TS mirror of a Python rule.\n\n- plain words: the mirror test\n")
+        Path(self.td, "glossaries", "docs.md").write_text("## glimmerwick\n\nAn invented noun for the docs group's own file.\n\n- plain words: a made-up thing\n")
         self.assertEqual(km._glossary_source(OTHER)[0], "docs", "its own name's file")
 
     def test_the_frame_is_the_index_bounded_by_bytes_with_the_cut_counted(self):
