@@ -23,6 +23,11 @@ complementary views of what the agents are doing:
 
 ![Tool calls fold into runs; each expands to one line per call](assets/guide/chat-detail.png){ width="100%" }
 
+**Dropping a file.** Drop an image or any file anywhere on the chat pane and it attaches to
+the message box of the session you are looking at; a dashed ring shows the pane is the target
+while you drag, and in a split each column takes its own drops. Dropped anywhere else on the
+dashboard, a file is refused (the cursor says so) rather than opened in place of the page.
+
 **Reviewing a document.** Select any passage in the file viewer and it lands in the
 composer as a quote chip, labeled with the file and the line the passage lives on. Type
 what should change and press **⌘⏎** to set the note aside; keep reading, select the next

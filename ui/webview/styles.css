@@ -3264,6 +3264,11 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
 /* composer drop cue: dragging a file over the box shows it will be accepted
    (its path gets inserted at the cursor on drop) */
 #composer-input.drop-target { outline: 1.5px dashed var(--vscode-focusBorder, #4daafc); outline-offset: -2px; }
+/* a file drag over the chat pane (the user 2026-09-12): the WHOLE pane is the drop area and says so — a dashed inset ring
+   over the pane while the drag is over it (pointer-transparent, above the pane's own layers), the box's outline above as the
+   landing spot. Each split column is its own document, so each rings on its own. */
+body.drop-over::after { content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 300;
+  outline: 2px dashed var(--accent); outline-offset: -4px; }
 
 /* ---- cross-highlight from the feed modal (glowTurns) ---- */
 /* Hovering a row in a feed-card modal lights the matching turns here in the SAME thicken-in-color

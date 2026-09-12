@@ -48886,6 +48886,14 @@ var connT=0;   // when the current socket's connect() attempt started — the pr
 // Tell the shell this pane's WS state so it can show ONE "disconnected" banner (the user 2026-06-27): a real
 // network drop used to blind-reload into a dead page, leaving the pane silently frozen with no explanation.
 function netState(s){try{if(window.parent!==window)window.parent.postMessage({romp:"wsState",app:APP,state:s},"*");}catch(e){}}
+// A FILE dragged onto a pane that takes no drops must not navigate the pane to the file — the browser's default for an
+// unhandled drop (the user 2026-09-12: an image dropped beside the chat's box replaced the page with the image). Every
+// pane but the chat refuses it here: a not-allowed cursor over the pane, the drop swallowed. The chat's own document takes
+// a drop anywhere (render.ts setupComposer), so it is left to its bundle; the shell refuses the same way (_LANDING_FOCUS_JS).
+// Only OS file drags (types holds "Files"): a text selection, a tab, a card drag carry none and keep their handlers.
+if(APP!=="chat"){var fileDrag=function(e){var t=e.dataTransfer&&e.dataTransfer.types;if(!t)return false;for(var i=0;i<t.length;i++)if(t[i]==="Files")return true;return false;};
+document.addEventListener("dragover",function(e){if(fileDrag(e)){e.preventDefault();try{e.dataTransfer.dropEffect="none";}catch(x){}}});
+document.addEventListener("drop",function(e){if(fileDrag(e))e.preventDefault();});}
 // raiseStale: the live connection dropped-and-reconnected (or a foregrounded tab found its socket dead), so
 // what's rendered may be frozen behind the kernel's real state (the user 2026-07-05: a feed card sat on a stale
 // "Re-judging" frame long after the kernel had moved on). PROMPT the user to reload rather than silently
@@ -49875,6 +49883,13 @@ function allCols(){var c=window.__rompChatFrameIds?window.__rompChatFrameIds():[
 function setFocus(id){var pid=paneOf(id);if(!pid)return;curFocus=id;if(allCols().indexOf(id)>=0)lastCol=id;if(pid.indexOf('chat-pane')===0)lastChat=id;
 Array.prototype.forEach.call(document.querySelectorAll('.pane'),function(el){el.classList.toggle('pane-focused',el.id===pid);});}
 window.__rompFocusedChatId=function(){return document.getElementById(lastChat)?lastChat:'f-chat';};
+// A FILE dragged onto the shell's own chrome (a gutter, the bar between panes) must not navigate the page to the file —
+// the browser's default for an unhandled drop (the user 2026-09-12). The chat columns take a drop anywhere in their
+// documents (render.ts); every other pane refuses one (_shim); the shell refuses the same way: not-allowed cursor, drop
+// swallowed. Only OS file drags (types holds "Files"): the shell's own drags (a gutter) carry none.
+function fileDrag(e){var t=e.dataTransfer&&e.dataTransfer.types;if(!t)return false;for(var i=0;i<t.length;i++)if(t[i]==='Files')return true;return false;}
+document.addEventListener('dragover',function(e){if(fileDrag(e)){e.preventDefault();try{e.dataTransfer.dropEffect='none';}catch(x){}}});
+document.addEventListener('drop',function(e){if(fileDrag(e))e.preventDefault();});
 // SPATIAL cross-pane keyboard nav (the user 2026-07-01): Alt(Option)+Arrow jumps focus between VISIBLE panes —
 // Alt-Left/Right along the columns (Chat <-> Outline <-> Feed, skipping hidden ones), Alt-Down into the
 // timeline band, Alt-Up back out. Alt (not Shift, which selects text; not Ctrl/Cmd, which macOS uses for

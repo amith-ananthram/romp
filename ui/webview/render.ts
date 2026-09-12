@@ -18755,31 +18755,38 @@ function setupComposer() {
   ta.addEventListener("dragleave", () => ta.classList.remove("drop-target"));
   ta.addEventListener("drop", (e) => {
     e.preventDefault(); e.stopPropagation();
-    ta.classList.remove("drop-target");
-    const dt = e.dataTransfer;
-    if (!dt) return;
-    const remote = hostOf(activeId || "");
-    const uris = (dt.getData("text/uri-list") || "").split(/\r?\n/).filter((u) => u && !u.startsWith("#"));
-    const fromUri = (u: string) => addComposerFile(activeId, decodeURIComponent(u.replace(/^file:\/\//, "")));
-    const files = Array.from(dt.files || []);
-    if (!files.length) {
-      // a path-only drag (no File objects) can't be shipped — a browser can't read file:// bytes.
-      // For a remote session that is a dead end, and it must be said, not silently mis-attached.
-      for (const u of uris) if (u.startsWith("file://")) {
-        if (remote) warnToast("That drag carried only this machine's path, which " + remote
-          + " can't read — drop the file itself (or paste it) and the bytes will be shipped over.");
-        else fromUri(u);
-      }
-      return;
-    }
-    files.forEach((f, i) => {
-      if (!remote) {
-        const p = (f as any).path as string | undefined;
-        if (p) { addComposerFile(activeId, p); return; }
-        if (uris[i] && uris[i].startsWith("file://")) { fromUri(uris[i]); return; }
-      }
-      shipFileToHost(f);
-    });
+    ta.classList.remove("drop-target"); paneDropOver(false);
+    if (e.dataTransfer) acceptDroppedTransfer(e.dataTransfer);
+  });
+  // The WHOLE pane takes a file drop (the user 2026-09-12: an image dropped beside the box replaced the page with the
+  // image — the browser's default for an unhandled drop navigates the pane, or the shell, to the file). A drop anywhere
+  // in this document lands the file in the box of the session this column shows; each split column is its own document,
+  // so each column is its own drop area. While an OS file drag is over the pane, the pane wears a dashed ring and the box
+  // its drop-target outline, so the landing spot reads. Only OS FILE drags (`types` holds "Files"): a tab drag, a text
+  // selection and the strip's own drags carry none and keep their handlers. The box's own listeners above stop
+  // propagation, so a drop on it is taken once. Enter/leave are counted rather than trusted one by one: a dragleave fires
+  // at every element edge inside the document (and its relatedTarget is not reliable across browsers), so the ring is
+  // dropped only when the count falls to zero — the pointer has left the pane — or a drop lands. The shell and the other
+  // panes REFUSE a file drag instead (kernel _LANDING_FOCUS_JS, _shim), so a miss never navigates anywhere.
+  let dragDepth = 0;
+  const paneDropOver = (on: boolean): void => {
+    if (!on) dragDepth = 0;
+    document.body.classList.toggle("drop-over", on);
+    ta.classList.toggle("drop-target", on);
+  };
+  document.addEventListener("dragenter", (e) => { if (!fileDrag(e)) return; dragDepth++; paneDropOver(true); });
+  document.addEventListener("dragover", (e) => {
+    if (!fileDrag(e)) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+    if (!dragDepth) { dragDepth = 1; paneDropOver(true); }
+  });
+  document.addEventListener("dragleave", (e) => { if (!fileDrag(e)) return; if (--dragDepth <= 0) paneDropOver(false); });
+  document.addEventListener("drop", (e) => {
+    if (!fileDrag(e)) return;
+    e.preventDefault();
+    paneDropOver(false);
+    if (e.dataTransfer) acceptDroppedTransfer(e.dataTransfer);
   });
 
   // Cmd+V a copied file (Finder "Copy") or a clipboard screenshot → insert its
@@ -18894,6 +18901,41 @@ function setupComposer() {
 // agent on THAT machine, so bytes saved on any other kernel would hand the agent
 // a path that does not exist there.
 const SHIP_MAX_BYTES = 50 * 1024 * 1024;   // payload ceiling for shipped attachment bytes
+// An OS file drag: `types` holds "Files" (a dragged tab, a text selection, the strip's own drags carry none).
+function fileDrag(e: DragEvent): boolean {
+  return !!e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files");
+}
+
+// What a drop hands the active session's box — from the box itself, or from anywhere in the pane (setupComposer). Best path
+// source first, but ONLY for a session this machine owns: File.path (Electron, when exposed), then text/uri-list file://
+// entries (explorer drags), else the bytes go to the owning kernel, which saves them and posts the saved path back
+// ("droppedPath"). A REMOTE host's session (hostOf) never takes the path branches: a path on this machine means nothing on
+// that kernel's disk (the user 2026-08-11); its drops ship the BYTES, the same dropFile route federation carries.
+function acceptDroppedTransfer(dt: DataTransfer): void {
+  const remote = hostOf(activeId || "");
+  const uris = (dt.getData("text/uri-list") || "").split(/\r?\n/).filter((u) => u && !u.startsWith("#"));
+  const fromUri = (u: string) => addComposerFile(activeId, decodeURIComponent(u.replace(/^file:\/\//, "")));
+  const files = Array.from(dt.files || []);
+  if (!files.length) {
+    // a path-only drag (no File objects) can't be shipped — a browser can't read file:// bytes.
+    // For a remote session that is a dead end, and it must be said, not silently mis-attached.
+    for (const u of uris) if (u.startsWith("file://")) {
+      if (remote) warnToast("That drag carried only this machine's path, which " + remote
+        + " can't read — drop the file itself (or paste it) and the bytes will be shipped over.");
+      else fromUri(u);
+    }
+    return;
+  }
+  files.forEach((f, i) => {
+    if (!remote) {
+      const p = (f as any).path as string | undefined;
+      if (p) { addComposerFile(activeId, p); return; }
+      if (uris[i] && uris[i].startsWith("file://")) { fromUri(uris[i]); return; }
+    }
+    shipFileToHost(f);
+  });
+}
+
 function shipFileToHost(f: File, sidAt: string | null = activeId) {
   if (f.size > SHIP_MAX_BYTES) {
     // an oversize file must be REFUSED VISIBLY, never dropped silently — name the
