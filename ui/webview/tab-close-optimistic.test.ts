@@ -181,8 +181,9 @@ test("closeTabLocally drops the tab, THEN records the close — in that order", 
 
 test("the strip skips a just-closed tab on BOTH passes (order AND the tabMeta placeholder pass)", () => {
   // the tabMeta pass is the one that drew the swirl: an id the kernel still lists with no session behind it
-  assert.match(RENDER, /for \(const id of order\) \{ if \(!seen\.has\(id\) && !closingTabs\.has\(id\)\)/);
-  assert.match(RENDER, /for \(const id of tabMeta\.keys\(\)\) \{ if \(!seen\.has\(id\) && !closingTabs\.has\(id\)\)/);
+  assert.match(RENDER, /for \(const id of order\) \{ if \(!seen\.has\(id\) && stripLists\(id\)\)/);
+  assert.match(RENDER, /for \(const id of tabMeta\.keys\(\)\) \{ if \(!seen\.has\(id\) && stripLists\(id\)\)/);
+  assert.match(RENDER, /function stripLists\(id: string\): boolean \{\s*\n\s*return !closingTabs\.has\(id\) && \(order\.includes\(id\) \|\| tabMeta\.has\(id\)\);/, "the closing set is read through the strip's one membership rule (T357 fix)");
 });
 
 test("every close path is optimistic — the in-page ✕, a dead read-only tab, and the kernel's confirmClose", () => {

@@ -186,6 +186,27 @@ out.onlyFiltered = await page.evaluate(() => {
            empty: empty && getComputedStyle(empty).display !== "none" ? { text: empty.textContent, vanished: empty.dataset.vanished || "" } : null,
            visibleTurns: turns.length, composerDisabled: document.getElementById("composer-input").disabled };
 });
+// a ROUTINE push under the filter (the review's leak, pre-existing on main): applyTabOrder's restore re-focused the
+// filtered-out session for one animation frame per push, its cached transcript on screen, before renderTabs's deferred
+// unfocus put the body back. A frame recorder samples every animation frame across a tabOrder push listing web.
+await page.evaluate(() => {
+  window.__rec = [];
+  const empty = document.getElementById("empty-state");
+  const tick = () => {
+    const turns = Array.from(document.querySelectorAll("#content .turn")).filter((t) => { const r = t.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(t).display !== "none"; }).length;
+    window.__rec.push({ turns, active: !!document.querySelector("#tabs .tab.active[data-id]"), emptyShown: !!empty && getComputedStyle(empty).display !== "none" });
+    if (window.__rec.length < 90) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+});
+await inject({ type: "tabOrder", order: [cfg.sidA, cfg.sidB], tabs: [A_TAB, B_TAB], live: [cfg.sidA, cfg.sidB], skeleton: [] });
+await page.waitForFunction(() => window.__rec && window.__rec.length >= 90, null, { timeout: 15000 });
+out.pushUnderFilter = await page.evaluate(() => ({ frames: window.__rec.length, leaked: window.__rec.filter((f) => f.turns > 0 || f.active).length, bodyDown: window.__rec.filter((f) => !f.emptyShown).length }));
+// the hidden tab torn down while the pane is unfocused (the review's low): the body's line follows the reason
+await inject({ type: "closed", id: cfg.sidA, hostDrop: true });
+await inject({ type: "tabOrder", order: [cfg.sidB], tabs: [B_TAB], live: [cfg.sidB], skeleton: [] });
+await page.waitForFunction((sid) => { const e = document.getElementById("empty-state"); return !!e && (e.textContent || "").includes("host disconnected") && !document.querySelector('#tabs .tab[data-id="' + sid + '"]'); }, cfg.sidA, { timeout: 10000 });
+out.tornDownWhileHidden = await state();
 // the SHELL road (the review's medium): on the dashboard the chat pane is a same-origin iframe of the shell and the
 // filter lives on the SHELL's URL (only-filter.ts reads window.top), so a live edit of the shell's hash must reach the
 // framed pane, whose own hash never changes: the pane unfocuses at once and restores when the filter shows the tab again
@@ -352,6 +373,14 @@ class ServedUnfocusedPane(unittest.TestCase):
         self.assertIsNotNone(of["empty"]); self.assertEqual(of["empty"]["vanished"], SID_A)
         self.assertEqual(of["empty"]["text"], "This tab view shows no session. Change the view, or pick a tab.", "name-free: a clean recording frame")
         self.assertTrue(of["composerDisabled"])
+        # a routine push under the filter never re-focuses the hidden tab, not for one animation frame (the review's leak:
+        # 1 frame of 70 with the body down and four transcript rows visible per push)
+        pu = r["pushUnderFilter"]
+        self.assertGreaterEqual(pu["frames"], 90); self.assertEqual((pu["leaked"], pu["bodyDown"]), (0, 0), "no frame with a focused tab, a visible transcript row, or the body down: %r" % pu)
+        # the hidden tab torn down while the pane is unfocused: the line follows the reason, naming the tab
+        td = r["tornDownWhileHidden"]
+        self.assertIsNone(td["active"]); self.assertEqual(td["empty"]["vanished"], SID_A); self.assertNotIn(SID_A, td["tabs"])
+        self.assertIn("web", td["empty"]["text"]); self.assertIn("host disconnected", td["empty"]["text"], "no longer the view's name-free line once the tab is gone: %r" % td)
         # the SHELL road (the review's medium): the pane framed on the dashboard, the filter edited on the SHELL's URL
         # (where only-filter.ts reads it): the pane's own hash never changes, yet the framed pane unfocuses off the live
         # edit and restores when the filter lifts
