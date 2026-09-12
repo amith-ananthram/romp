@@ -43,7 +43,8 @@ test("membership in pathLinks gates the link, and the map's value is the OPEN ta
   assert.match(LINKS, /a\.setAttribute\("title", "Open " \+ open\);/);
   // …and the chat binds the click per span, off the span's own data (the walk marks; render.ts acts)
   assert.match(RENDER, /const open = a\.dataset\.path \|\| "", relative = a\.dataset\.rel === "1";/);
-  assert.match(RENDER, /for \(const \{ el: link, open, verified \} of linkifyPathTokens\(root, pathLinks\)\) \{\n\s*bindPathLink\(link\);/);
+  assert.match(RENDER, /for \(const \{ el: link, open, verified, inPre \} of linkifyPathTokens\(root, pathLinks, FENCE_WALK\)\) \{\n\s*bindPathLink\(link\);/,
+    "the chat's walk, with its fenced-block options (2026-09-12; file-uri-link.test.ts pins them)");
 });
 
 test("file:// URIs are explicit absolute paths — never gated on the map", () => {

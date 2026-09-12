@@ -69,8 +69,9 @@ import { fileLinkRoute, browseRoute, type BrowseRoute } from "./file-route";   /
 // initFileView rides its OWN line: the import above is pinned verbatim by file-view.test.ts
 import { initFileView, setFileViewIdentity, hostStub } from "./file-view";
 import { openUrlView } from "./file-view";                 // the URL mode of the same viewer (md-url-view.test.ts)
+import { viewerPathGate } from "./file-view-links";       // the viewer's code-aware path gate, for the chat's fenced blocks (2026-09-12)
 import { isMarkdownUrl } from "./md-links";
-import { openPathLink, linkifyPathTokens, selectionOpenIn } from "./path-links";   // the path matcher the chat's links are made from (a shared module)
+import { openPathLink, linkifyPathTokens, selectionOpenIn, type PathLinkOptions } from "./path-links";   // the path matcher the chat's links are made from (a shared module)
 import { PREVIEW_DWELL_MS, PREVIEW_GRACE_MS, HoverIntent, parsePreviewLink, previewKindOf, sliceUrl, contentFor, textOnlyContent, stripRemoteLoads, type PreviewContent } from "./file-preview";
 import { buildMatcher, linkifyTerms, termContent, type GlossaryIndex, type GlossaryEntry, type TermMatcher } from "./glossary-links";   // the team's coinages, linked where written (T351 stage 2)   // the file preview popover's pure half (T351)
 import { initFileBrowse, openFileBrowse } from "./file-browse";   // the browser is pane-local here now (the user 2026-08-24)
@@ -2434,6 +2435,10 @@ function showFilePreview(a: HTMLElement): void {
 // kernel, a cached payload) keeps today's shape-only linking rather than unlinking history.
 // file:// URIs are explicit absolute paths — never gated on the map. (The gates and the map walk are
 // path-links.ts's; the map is threaded through to it.)
+const FENCE_WALK: PathLinkOptions = {
+  inPre: true, preVerified: true, unit: ".cl",
+  accept: (tok, ctx) => !ctx.inPre || viewerPathGate(tok, ctx),   // prose keeps the chat's rules; a fenced token takes the viewer's
+};
 function linkifyFileUris(root: HTMLElement, skipThumbs?: string[], spacePaths?: string[],
     pathLinks?: Record<string, string>, pathPins?: Record<string, string>, pathPreview?: Record<string, string>): void {
   // pathPreview (T351): the kernel's word on which of these links a hover may PREVIEW, by kind; the link carries it
@@ -2481,11 +2486,19 @@ function linkifyFileUris(root: HTMLElement, skipThumbs?: string[], spacePaths?: 
   // The token walk is the shared one (path-links.ts linkifyPathTokens): it marks every path-shaped token, the
   // kernel's pathLinks verdict narrowing it when the event carries one, and hands back the hits in document
   // order; this document binds each click and reads the hits for the figure pass below.
-  for (const { el: link, open, verified } of linkifyPathTokens(root, pathLinks)) {
+  // FENCED blocks walk too (the user 2026-09-12, whose session printed a report's path in a ``` block and got dead
+  // text): a path there links under the file viewer's code-aware gate (an import's or require()'s package, a glob's
+  // tail, a substitution, a site name stay text) and ONLY on the kernel's verdict — code is verbatim material, so a
+  // path in it links when the kernel has stat'd the file, never on shape alone as prose may. The block's rows (.cl,
+  // code-block.ts) are the units, as the viewer's rows are, so a highlight's spans never cut a line's path into pieces
+  // the scan cannot see. A fenced hit opens the file and previews on hover like any link, but renders no figure under a
+  // code sample.
+  for (const { el: link, open, verified, inPre } of linkifyPathTokens(root, pathLinks, FENCE_WALK)) {
     bindPathLink(link);
     armPreview(link, link.textContent || "", open);
     absorbFragment(link);
     if (verified) kernelVerified.add(open);   // the kernel stat'd it this build
+    if (inPre) continue;                      // no figure under a code sample
     if (previewKind(open) && !previewable.includes(open) && !(skipThumbs && skipThumbs.includes(open))) {
       previewable.push(open);
       mentionAt.set(open, link);

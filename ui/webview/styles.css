@@ -2195,6 +2195,7 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
   text-decoration: underline dotted; text-underline-offset: 2px;
 }
 .file-uri-link:hover { text-decoration: underline; }
+pre code .file-uri-link { color: var(--accent); }   /* a fenced block's path (2026-09-12): the accent over the highlight's token colour beneath it */
 .img-copy { flex: 0 0 auto; cursor: pointer; padding: 0 3px; border-radius: 3px; }
 .img-copy:hover { background: rgba(255, 255, 255, 0.18); }
 /* (harness-injected user-role lines — a compact summary, /command stdout — are a SYSTEM notice now; the

@@ -219,7 +219,7 @@ export class PathTokenScanner {
 
 /** One link the walk emitted: the element, what it opens, and whether the kernel stat'd that target this
  *  build (a fixed mention). The chat's figure pass wants exactly these. */
-export interface PathLinkHit { el: HTMLElement; open: string; verified: boolean }
+export interface PathLinkHit { el: HTMLElement; open: string; verified: boolean; inPre: boolean }   // inPre: the token sat in a fenced block
 
 // `opts` is how a surface whose text is not chat prose runs the same walk (the file viewer, file-view-links.ts).
 // `inPre` walks the text inside <pre> too (the viewer's code body IS one); `accept` narrows every non-URI token
@@ -233,9 +233,13 @@ export interface PathLinkHit { el: HTMLElement; open: string; verified: boolean 
 // element whose text nodes are scanned as ONE string (the viewer's row: a highlight's spans cut a line's text
 // into several nodes, and a token is what the LINE says, never what one node says). Absent, the walk is
 // exactly the chat's.
+// `preVerified` (the chat, 2026-09-12): with `inPre` on, a token INSIDE a <pre> links only on the kernel's verdict — a
+// fenced block is verbatim material, so a path there links when the kernel has stat'd the file, never on shape alone
+// as prose may; `accept`'s ctx says whether the token sat in a <pre>, so a surface can gate its code differently.
 export interface PathLinkOptions {
   inPre?: boolean;
-  accept?: (tok: string, ctx: { text: string; at: number }) => boolean;
+  preVerified?: boolean;
+  accept?: (tok: string, ctx: { text: string; at: number; inPre: boolean }) => boolean;
   resolve?: (tok: string) => string;
   lineSuffix?: boolean;
   unit?: string;
@@ -251,7 +255,7 @@ const LINE_SUFFIX_AT_RE = new RegExp(LINE_SUFFIX_RE.source.replace(/^\^/, ""), "
 
 /** One text node's place in its unit's joined text. `dead`: inside a link (or, in the chat, a fenced block): the
  *  scan READS it, so a token glued to it is seen whole, but never marks in it. */
-export interface TextSpan { tn: Text; start: number; end: number; dead: boolean; inCode: boolean }
+export interface TextSpan { tn: Text; start: number; end: number; dead: boolean; inCode: boolean; inPre: boolean }
 export interface TextUnit { text: string; spans: TextSpan[] }
 /** The ancestors whose text no walk marks in, whatever the surface: a link already made, and an inline SVG (an
  *  HTML span or anchor put inside SVG text does not render, so a mark there would make the token vanish from the
@@ -284,7 +288,7 @@ export function textUnits(root: HTMLElement, unit: string | undefined, skip: str
     broke = false;
     const start = last.text.length;
     last.text += tn.data;
-    last.spans.push({ tn, start, end: last.text.length, dead: !!p?.closest(skip), inCode: !!p?.closest("code") });
+    last.spans.push({ tn, start, end: last.text.length, dead: !!p?.closest(skip), inCode: !!p?.closest("code"), inPre: !!p?.closest("pre") });
   }
   return units;
 }
@@ -333,7 +337,7 @@ export function rewriteSpan(u: TextUnit, span: TextSpan, marks: Array<{ start: n
 // walk's first.
 export function linkifyPathTokens(root: HTMLElement, pathLinks?: Record<string, string>, opts?: PathLinkOptions): PathLinkHit[] {
   const hits: PathLinkHit[] = [];
-  const skip = opts && opts.inPre ? DEAD_TEXT : DEAD_TEXT + ", pre";   // a link, an SVG, or (the chat) a fenced code block
+  const skip = opts && opts.inPre ? DEAD_TEXT : DEAD_TEXT + ", pre";   // a link, an SVG, or (a surface that asks for none) a fenced code block
   for (const u of textUnits(root, opts && opts.unit, skip)) {
     if (u.spans.every((s) => s.dead)) continue;
     const text = u.text;
@@ -355,9 +359,10 @@ export function linkifyPathTokens(root: HTMLElement, pathLinks?: Record<string, 
       const span = spanHolding(u, start, start + tok.length);
       if (!span) continue;                          // across a node's edge, or inside a link: as it is
       if (!isUri && !looksLikeFilePath(tok) && !(span.inCode && looksLikeBareFileName(tok))) continue;   // "and/or", `np.array` etc.: leave as prose
-      if (!isUri && opts && opts.accept && !opts.accept(tok, { text, at: start })) continue;   // the surface's own gate (the viewer's: an extension on the file)
+      if (!isUri && opts && opts.accept && !opts.accept(tok, { text, at: start, inPre: span.inPre })) continue;   // the surface's own gate (the viewer's: an extension on the file)
       const fixed = !isUri && pathLinks ? pathLinks[tok] : undefined;   // the kernel's verdict, when it rendered one
       if (!isUri && pathLinks && typeof fixed !== "string") continue;   // checked against the filesystem: no such file (or several) → prose
+      if (!isUri && span.inPre && opts && opts.preVerified && typeof fixed !== "string") continue;   // fenced: the kernel's word or nothing (no map at all → nothing)
       // what the link opens: a URI's own path (absolute, percent-decoded), else the kernel's fixed target or the token;
       // placed by the surface's resolve when it has one (the viewer normalizes a URI's path there as it does any
       // absolute path, so `file:///a/b/../c.md` opens and is titled the same whichever way it was written)
@@ -374,7 +379,7 @@ export function linkifyPathTokens(root: HTMLElement, pathLinks?: Record<string, 
       let list = marks.get(span);
       if (!list) { list = []; marks.set(span, list); }
       list.push({ start, end: last, el: link });
-      hits.push({ el: link, open, verified: !isUri && typeof fixed === "string" });   // the kernel stat'd a fixed one this build
+      hits.push({ el: link, open, verified: !isUri && typeof fixed === "string", inPre: span.inPre });   // the kernel stat'd a fixed one this build
       from = last;                                  // a linked token: resume right after what was linked; its trimmed tail is prose
     }
     for (const [span, list] of marks) rewriteSpan(u, span, list);

@@ -147,7 +147,8 @@ same document scrolls to it when the document has a heading or an anchor by that
 click, since a section of the shown file has no tab of its own. One click does one thing: a plain
 click acts in the dashboard, and a Cmd-click (Ctrl on Windows and Linux) or a middle-click opens
 the link in a browser tab of its own. Inside a file the test for a path is stricter than the one
-a chat message gets: a path links only when it has a slash and a file extension, starts on its
+a chat message's prose gets, and a fenced code block in a chat message follows the file's test
+too, linking a path only once the kernel has verified it is a file: a path links only when it has a slash and a file extension, starts on its
 own, at the start of a line or after a space, a quote, a bracket, a comma, a semicolon, an
 equals sign, a pipe or Markdown's `*` (so `$HOME/docs/a.md`, `@scope/pkg/index.js` and
 `C:/Users/x.txt` stay text), is not part of a web address, does not start with a site name

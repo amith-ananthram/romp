@@ -34,12 +34,20 @@ test("linkify runs on chat message bodies (assistant reply + user bubble + nudge
   assert.equal(uses.length, 4, "linkifyFileUris is defined once and applied to exactly the three chat bodies");
 });
 
-test("linkify works inside INLINE backticks (agents backtick paths), skips only fenced code + existing links, trims trailing punctuation", () => {
-  // inline <code> is NOT skipped — a `file://…` path in backticks still linkifies; only fenced <pre> + links are skipped
+test("linkify works inside INLINE backticks (agents backtick paths), skips existing links, trims trailing punctuation; a fenced block links on the kernel's verdict under the viewer's code gate (2026-09-12)", () => {
+  // inline <code> is NOT skipped — a `file://…` path in backticks still linkifies; links and inline SVGs are dead text
   assert.match(LINKS, /export const DEAD_TEXT = "a, \.file-uri-link, svg";/);
-  assert.match(LINKS, /const skip = opts && opts\.inPre \? DEAD_TEXT : DEAD_TEXT \+ ", pre";/, "the chat skips a link, an inline SVG and a fenced block; never inline code");
+  assert.match(LINKS, /const skip = opts && opts\.inPre \? DEAD_TEXT : DEAD_TEXT \+ ", pre";/, "a surface that asks for no fenced walk skips the block; never inline code");
   assert.doesNotMatch(LINKS, /DEAD_TEXT \+ ", code/);
   assert.match(LINKS, /tok = tok\.slice\(0, tok\.length - trail\[0\]\.length\)/);
+  // the chat asks for the fenced walk (the user 2026-09-12: a report's path printed in a ``` block did not link): the
+  // kernel's verdict or nothing inside a fence, the viewer's code-aware gate there, the fence's rows as units, and a
+  // fenced hit opens the file and previews on hover like any link, and renders no figure under a code sample
+  assert.match(RENDER, /^import \{ viewerPathGate \} from "\.\/file-view-links";/m);
+  assert.match(RENDER, /^const FENCE_WALK: PathLinkOptions = \{\n\s*inPre: true, preVerified: true, unit: "\.cl",\n\s*accept: \(tok, ctx\) => !ctx\.inPre \|\| viewerPathGate\(tok, ctx\),/m);
+  assert.match(RENDER, /for \(const \{ el: link, open, verified, inPre \} of linkifyPathTokens\(root, pathLinks, FENCE_WALK\)\) \{\n\s*bindPathLink\(link\);\n\s*armPreview\(link, link\.textContent \|\| "", open\);\n\s*absorbFragment\(link\);\n\s*if \(verified\) kernelVerified\.add\(open\);[^\n]*\n\s*if \(inPre\) continue;/);
+  assert.match(LINKS, /if \(!isUri && span\.inPre && opts && opts\.preVerified && typeof fixed !== "string"\) continue;/, "fenced: the kernel's word or nothing");
+  assert.match(CSS, /^pre code \.file-uri-link \{ color: var\(--accent\); \}/m, "the link keeps the accent over the highlight's token colour");
 });
 
 test(".file-uri-link is styled as a wrapping accent link", () => {

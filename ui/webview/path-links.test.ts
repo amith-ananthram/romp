@@ -297,11 +297,12 @@ test("source: the module marks and binds nothing; render.ts binds the click and 
   const RENDER = fs.readFileSync(path.join(UI, "render.ts"), "utf8");
   assert.doesNotMatch(LINKS, /addEventListener|onclick|openPath\(|window\.open|postMessage|fetch\(/, "no action of its own: its handlers are about focus (keydown, the press)");
   assert.match(LINKS, /export function linkifyPathTokens\(root: HTMLElement, pathLinks\?: Record<string, string>, opts\?: PathLinkOptions\): PathLinkHit\[\] \{/);
-  assert.match(LINKS, /export interface PathLinkHit \{ el: HTMLElement; open: string; verified: boolean \}/);
-  assert.match(RENDER, /import \{ openPathLink, linkifyPathTokens, selectionOpenIn \} from "\.\/path-links";/);
+  assert.match(LINKS, /export interface PathLinkHit \{ el: HTMLElement; open: string; verified: boolean; inPre: boolean \}/, "+ inPre: the chat skips its figure pass for a fenced hit (2026-09-12)");
+  assert.match(RENDER, /import \{ openPathLink, linkifyPathTokens, selectionOpenIn, type PathLinkOptions \} from "\.\/path-links";/);
   assert.match(RENDER, /function bindPathLink\(a: HTMLElement\): HTMLElement \{\n\s*const open = a\.dataset\.path \|\| "", relative = a\.dataset\.rel === "1";\n\s*a\.addEventListener\("click", \(e\) => \{\n\s*e\.stopPropagation\(\);\n\s*filePreviewIntent\.cancel\(\);\n\s*openPath\(open, relative \? activeId : null, e, a\.dataset\.frag \|\| null\);[^\n]*\n\s*\}\);\n\s*onMiddleClick\(a, \(e\) => openPath\(open, relative \? activeId : null, e, a\.dataset\.frag \|\| null\)\);\n\s*armFilePreview\(a\);[^\n]*\n\s*return a;\n\}/);
   assert.match(RENDER, /const link = bindPathLink\(openPathLink\(tok, tok, true\)\);\n\s*armPreview\(link, tok, tok\);\n\s*code\.replaceChildren\(link\);/, "the kernel-verified spaced span takes the same binder");
-  assert.match(RENDER, /for \(const \{ el: link, open, verified \} of linkifyPathTokens\(root, pathLinks\)\) \{\n\s*bindPathLink\(link\);\n\s*armPreview\(link, link\.textContent \|\| "", open\);\n\s*absorbFragment\(link\);\n\s*if \(verified\) kernelVerified\.add\(open\);/);
+  assert.match(RENDER, /for \(const \{ el: link, open, verified, inPre \} of linkifyPathTokens\(root, pathLinks, FENCE_WALK\)\) \{\n\s*bindPathLink\(link\);\n\s*armPreview\(link, link\.textContent \|\| "", open\);\n\s*absorbFragment\(link\);\n\s*if \(verified\) kernelVerified\.add\(open\);/,
+    "the chat's walk carries its fenced-block options (2026-09-12); every hit is bound and previewable, a fenced one renders no figure");
   // the matcher lives in ONE place: render.ts no longer declares the regex or its gates
   for (const name of ["CLICKABLE_PATH_RE", "function looksLikeFilePath", "function looksLikeBareFileName", "const BARE_FILE_EXTS", "function fileUriToPath", "function openPathLink", "function fileUriLink"]) {
     assert.ok(!RENDER.includes(name), name + " is path-links.ts's alone");
@@ -462,4 +463,31 @@ test("the walk under the viewer's options: inPre reads a code body, unit joins a
   const h2 = linkifyPathTokens(chat as unknown as HTMLElement);
   assert.deepEqual(h2.map((h) => h.open), ["docs/e.md"]);
   assert.deepEqual(textNodesOf(chat.childNodes[0] as El).map((t) => t.data), ["see ", "docs/e.md", ":12 now"], "the :12 stays prose in the chat");
+});
+
+test("the chat's fenced blocks (the user 2026-09-12): under inPre + preVerified a fenced token links ONLY on the kernel's verdict and under the surface's code gate; prose in the same body keeps the chat's rules; a fenced hit says so", async () => {
+  const { linkifyPathTokens } = await import("./path-links");
+  const { viewerPathGate } = await import("./file-view-links");
+  const row = (...kids: Array<El | string>) => el("span", "cl", el("span", "ct", ...kids));   // code-block.ts's rows, as the chat's highlight leaves a fence
+  const opts = { inPre: true, preVerified: true, unit: ".cl",
+    accept: (tok: string, ctx: { text: string; at: number; inPre: boolean }) => !ctx.inPre || viewerPathGate(tok, ctx) };
+  const body = () => el("div", "",
+    el("p", "", "see docs/e.md and a/dup.md"),
+    el("pre", "", el("code", "hljs",
+      row("open ", el("span", "hljs-string", "'/tmp/TESTHOST/report/viewer.html'"), " now"),
+      row("import fp from ", el("span", "hljs-string", "'lodash/fp.js'")),
+      row("cat docs/e.md"))));
+  // the kernel's map names the fenced path, the import's package and the prose path: the fenced path and both docs/e.md
+  // link; the package stays text under the code gate, verdict or not; a/dup.md (no verdict) stays prose
+  const map = { "/tmp/TESTHOST/report/viewer.html": "/tmp/TESTHOST/report/viewer.html", "lodash/fp.js": "node_modules/lodash/fp.js", "docs/e.md": "docs/e.md" };
+  const b1 = body();
+  assert.deepEqual(linkifyPathTokens(b1 as unknown as HTMLElement, map, opts).map((h) => [h.open, h.verified, h.inPre]),
+    [["docs/e.md", true, false], ["/tmp/TESTHOST/report/viewer.html", true, true], ["docs/e.md", true, true]]);
+  assert.deepEqual(links(b1).map((a) => a.textContent), ["docs/e.md", "/tmp/TESTHOST/report/viewer.html", "docs/e.md"], "the quotes around the fenced path stay text");
+  // no map at all (an old kernel, a cached payload): prose links on shape as before; NOTHING in the fence does
+  assert.deepEqual(linkifyPathTokens(body() as unknown as HTMLElement, undefined, opts).map((h) => [h.open, h.inPre]), [["docs/e.md", false], ["a/dup.md", false]]);
+  // an empty map is a verdict of none: nothing links anywhere
+  assert.deepEqual(linkifyPathTokens(body() as unknown as HTMLElement, {}, opts), []);
+  // without the options the fence is dead text, as every other surface walked it before
+  assert.deepEqual(linkifyPathTokens(body() as unknown as HTMLElement, map).map((h) => h.open), ["docs/e.md"]);
 });

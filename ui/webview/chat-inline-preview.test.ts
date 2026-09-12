@@ -157,7 +157,7 @@ test("a verified relative path is previewable exactly like an absolute one — t
   // eager and the expanded render hand previewFull the SAME entry previewable carries — pin lookup
   // included, so a relative embed rides its own pin key ((pathPins || {})[p]).
   assert.match(LINKS, /const target = isUri \? fileUriToPath\(tok\) : \(fixed \?\? tok\);\n\s*const open = opts && opts\.resolve \? opts\.resolve\(target\) : target;/);   // the walk's open target (path-links.ts; the chat passes no resolve)…
-  assert.match(RENDER, /for \(const \{ el: link, open, verified \} of linkifyPathTokens\(root, pathLinks\)\) \{/);   // …is what the chat reads per hit
+  assert.match(RENDER, /for \(const \{ el: link, open, verified, inPre \} of linkifyPathTokens\(root, pathLinks, FENCE_WALK\)\) \{/);   // …is what the chat reads per hit (a fenced hit is skipped for the preview, 2026-09-12)
   assert.match(RENDER, /previewable\.push\(open\);/);
   assert.match(PREVIEW, /const ext = path\.slice\(path\.lastIndexOf\("\."\) \+ 1\)\.toLowerCase\(\);/);
   assert.match(RENDER, /previewFull\(p, renderingOwnerSid \?\? activeId, kernelVerified\.has\(p\), \(pathPins \|\| \{\}\)\[p\]\)/);
