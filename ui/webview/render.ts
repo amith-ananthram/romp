@@ -1023,6 +1023,7 @@ let activeId: string | null = null;
 let vanishedId: string | null = null;
 let vanishedWhy: VanishWhy | null = null;
 let vanishedName = "";
+let vanishedByDecline = false;   // the vanished record is a declined first adoption's (hidden by the filter), not the user's own tab: a later visible first arrival may adopt over it (T357)
 /** why the pane is unfocused: a dismissal's reason, or "hidden" (the strip's #only= filter stopped showing the active tab) */
 type VanishWhy = DismissWhy | "hidden";
 let renderingSid: string | null = null;   // the session id syncView is currently building (for per-session fold keys)
@@ -16302,6 +16303,7 @@ function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: s
   }
   activeId = id;
   vanishedId = null; vanishedWhy = null; vanishedName = ""; wantActive = null; wantActiveGone = null;   // any activation ends the unfocused state, the awaited tab included (T357)
+  vanishedByDecline = false;
   updateLivePaused();   // the entering tab's own detached state shows or hides the strip (round 2, item 7)
   persistActive(id);   // the name rides beside the id: after a reload the unfocused body names the awaited tab before its host relays (T357)
   renderTabs();
@@ -16466,13 +16468,16 @@ function upsert(msg: any) {
   // since (a click into the box, a tab switch or the ✕ would have retired it), so put them back exactly
   // where they were — its tab active, its kept draft in the box. Merely retiring the note here left the
   // fallback tab active with the box unheld, and the next blind keystroke landed there after all (the
-  // T236 harness, omission path: the tab is re-listed within seconds). setActive clears the note.
+  // T236 harness, omission path: the tab is re-listed within seconds). restoreIfShown retires the note through setActive,
+  // and only when the strip shows the tab: a tab the view or the filter hides keeps the box held for it.
   if (composerNoteSid === msg.id) restoreIfShown(msg.id);   // …through the one restore rule: a tab the view or the filter hides takes no focus (the review's low)
   // T357: the session the user was on is back (its host re-attached, the relay redialed) → its focus is restored;
   // and while it is away, an arrival of ANY OTHER session adopts nothing — the pane stays unfocused
   if (vanishedId === msg.id) restoreIfShown(msg.id);   // …if the strip shows it: hidden by the view or the filter, the pane stays unfocused (applyTabOrder's rule)
-  const adopted = !activeId && !vanishedId && !wantActive && !wantActiveGone && stripShows(msg.id);   // …nor while the persisted tab is awaited after a reload, nor while the body says it is gone: a pick, not an arrival, moves on (T357); and never a session the view or the #only= filter hides (the review's low: the adopt wrote activeId past the restore rule's visibility half; membership is the append above)
+  const wouldAdopt = !activeId && (!vanishedId || vanishedByDecline) && !wantActive && !wantActiveGone;   // …nor while the persisted tab is awaited after a reload, nor while the body says it is gone: a pick, not an arrival, moves on (T357); and never a session the view or the #only= filter hides (the review's low: the adopt wrote activeId past the restore rule's visibility half; membership is the append above)
+  const adopted = wouldAdopt && stripShows(msg.id);   // …and never a session the view or the #only= filter hides (the review's low: the adopt wrote activeId past the rule's visibility half; membership is the append above)
   if (adopted) { activeId = msg.id; assertPeekFor(msg.id); loadComposerFor(msg.id, true); persistActive(msg.id); }   // persisted like a pick: a restart lands here again; the peek asserted like a pick's, so a view-hidden first arrival has a tab (the review's lows)   // adopted as the only tab → its draft too (T236: the once-per-page restore below never covers a session that LEFT and came back)
+  else if (wouldAdopt) { vanishedId = msg.id; vanishedWhy = "hidden"; vanishedName = sessions.get(msg.id)?.name || tabMeta.get(msg.id)?.name || ""; vanishedByDecline = true; }   // a DECLINED adoption records the session as restoreIfShown does, so renderTabs's schedule restores it when the filter shows it (the review's low: under a filter matching no live session the body showed the generic line and lifting the filter restored nothing); the record yields to a later VISIBLE first arrival (vanishedByDecline), since nothing was chosen
   if (wantActive && msg.id === wantActive && stripLists(msg.id)) { wantActive = null; restoreIfShown(msg.id); }   // restore persisted tab on arrival, if the strip shows it (else unfocused as hidden, restored when shown)
   renderTabs();                                   // a new id appended to `order` above → strip repaints in kernel order
   // Active tab: a content refresh appends + preserves scroll (appendActive); a new tab or a fork

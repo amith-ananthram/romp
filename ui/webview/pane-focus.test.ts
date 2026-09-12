@@ -62,7 +62,11 @@ test("the wiring: the dismiss branch, the unfocused body, the composer, the rest
   assert.match(paint, /empty\.classList\.toggle\("unfocused", !!v\);\s*\n\s*empty\.dataset\.vanished = named \|\| "";/, "the body names the vanished or the awaited id");
   assert.doesNotMatch(RENDER, /empty\.textContent = "No session open/, "the one writer of the empty body is paintEmptyState");
   // the return: the session frame, or the strip re-listing it; no other arrival adopts the box meanwhile
-  assert.match(RENDER, /if \(vanishedId === msg\.id\) restoreIfShown\(msg\.id\);[^\n]*\n\s*const adopted = !activeId && !vanishedId && !wantActive && !wantActiveGone && stripShows\(msg\.id\);/, "an adoption reads the rule's visibility half: a first arrival the filter hides is not adopted (the review's low)");
+  assert.match(RENDER, /if \(vanishedId === msg\.id\) restoreIfShown\(msg\.id\);[^\n]*\n\s*const wouldAdopt = !activeId && \(!vanishedId \|\| vanishedByDecline\) && !wantActive && !wantActiveGone;[^\n]*\n\s*const adopted = wouldAdopt && stripShows\(msg\.id\);/, "an adoption reads the rule's visibility half: a first arrival the filter hides is not adopted (the review's low)");
+  // a DECLINED adoption is recorded like restoreIfShown's hidden case, so the schedule restores it when the filter shows
+  // it; the record yields to a later visible first arrival (nothing was chosen), and any activation clears the mark
+  assert.match(RENDER, /else if \(wouldAdopt\) \{ vanishedId = msg\.id; vanishedWhy = "hidden"; vanishedName = sessions\.get\(msg\.id\)\?\.name \|\| tabMeta\.get\(msg\.id\)\?\.name \|\| ""; vanishedByDecline = true; \}/);
+  assert.match(fn("setActive"), /wantActiveGone = null;[^\n]*\n\s*vanishedByDecline = false;/, "…cleared with the rest of the unfocused state");
   assert.match(RENDER, /if \(composerNoteSid === msg\.id\) restoreIfShown\(msg\.id\);/, "the composer note's restore goes through the rule too");
   assert.equal((RENDER.match(/\bsetActive\(msg\.id\)/g) || []).length, 0, "no frame-reachable direct setActive(msg.id) is left in the arrival path");
   assert.ok(RENDER.indexOf("/** Does the strip show `id` right now:") > RENDER.indexOf("function restoreIfShown("), "stripShows's docstring sits above its own function, after restoreIfShown");

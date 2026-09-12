@@ -192,7 +192,7 @@ out.onlyFiltered = await page.evaluate(() => {
 // filter is set live again (unfocused, view cached), and a MutationObserver samples every DOM change across a routine
 // tabOrder push listing web: the most transcript rows visible at once, and how often the body was down. A frame
 // recorder saw nothing here (headless Chromium reverts the leak in the same task, before any paint); the observer sees
-// the transient: 4 rows / 1 body-down per push on the merge-base, 0 / 0 on the fix.
+// the transient: 4 rows / 1 body-down per push with applyTabOrder's visibility predicate reverted, 0 / 0 with it.
 await page.evaluate(() => { location.hash = ""; });
 await page.waitForFunction((sid) => { const a = document.querySelector("#tabs .tab.active[data-id]"); return !!a && a.dataset.id === sid && document.querySelectorAll("#content .turn").length > 0; }, cfg.sidA, { timeout: 10000 });
 await page.evaluate(() => { location.hash = "#only=api"; });
@@ -221,13 +221,27 @@ await inject({ type: "tabOrder", order: [cfg.sidB], tabs: [B_TAB], live: [cfg.si
 await page.waitForFunction((sid) => { const e = document.getElementById("empty-state"); return !!e && (e.textContent || "").includes("host disconnected") && !document.querySelector('#tabs .tab[data-id="' + sid + '"]'); }, cfg.sidA, { timeout: 10000 });
 out.tornDownWhileHidden = await state();
 // a FIRST arrival the filter hides is not adopted (the review's low: the adopt wrote activeId past the rule's visibility
-// half): nothing persisted, the page served at #only=api, the sessions arrive: the pane adopts the first VISIBLE one
-await page.evaluate(() => { for (const k of Object.keys(localStorage)) if (k.startsWith("romp-vscode-state-")) localStorage.removeItem(k); });
-await page.goto(cfg.chat + "#only=api");
+// half): nothing persisted, the page served under a filter that hides the FIRST-arriving session (api arrives before web in
+// this world) and shows a later one, the sessions arrive: the pane adopts the first VISIBLE one, never the hidden first
+const clearState = () => page.evaluate(() => { for (const k of Object.keys(localStorage)) if (k.startsWith("romp-vscode-state-")) localStorage.removeItem(k); });
+await clearState();
+await page.goto(cfg.chat + "#only=web");
 await page.reload();
 await page.waitForFunction(() => document.querySelectorAll("#tabs .tab[data-id]").length >= 1, null, { timeout: 20000 });
 await page.waitForTimeout(800);
 out.firstArrivalUnderFilter = await state();
+// a filter matching NO live session: every adoption is declined, and the declined first arrival is RECORDED (the review's
+// low: the body showed the generic line and lifting the filter restored nothing), so the body wears the view's line and
+// lifting the filter live restores that session through renderTabs's schedule
+await clearState();
+await page.goto(cfg.chat + "#only=nomatch-zz");
+await page.reload();
+await page.waitForFunction(() => document.getElementById("empty-state") && getComputedStyle(document.getElementById("empty-state")).display !== "none" && (document.getElementById("empty-state").dataset.vanished || "") !== "", null, { timeout: 20000 });
+await page.waitForTimeout(300);
+out.noMatchFilter = await state();
+await page.evaluate(() => { location.hash = ""; });
+await page.waitForFunction(() => !!document.querySelector("#tabs .tab.active[data-id]"), null, { timeout: 10000 });
+out.noMatchLifted = await state();
 // the SHELL road (the review's medium): on the dashboard the chat pane is a same-origin iframe of the shell and the
 // filter lives on the SHELL's URL (only-filter.ts reads window.top), so a live edit of the shell's hash must reach the
 // framed pane, whose own hash never changes: the pane unfocuses at once and restores when the filter shows the tab again
@@ -398,10 +412,16 @@ class ServedUnfocusedPane(unittest.TestCase):
         # 1 frame of 70 with the body down and four transcript rows visible per push)
         pu = r["pushUnderFilter"]
         self.assertGreater(pu["samples"], 0, "the push mutated the strip, so the observer sampled: %r" % pu)
-        self.assertEqual((pu["maxRows"], pu["bodyDown"], pu["focused"]), (0, 0, 0), "no transient with a transcript row visible, the body down or a tab focused (the merge-base: 4 rows and 1 body-down per push): %r" % pu)
+        self.assertEqual((pu["maxRows"], pu["bodyDown"], pu["focused"]), (0, 0, 0), "no transient with a transcript row visible, the body down or a tab focused (4 rows and 1 body-down per push with applyTabOrder's predicate reverted): %r" % pu)
         fa = r["firstArrivalUnderFilter"]
-        self.assertNotIn(SID_A, fa["tabs"]); self.assertNotEqual(fa["active"], SID_A, "a first arrival the filter hides is never adopted: %r" % fa)
-        self.assertEqual(fa["active"], SID_B, "…the first VISIBLE arrival is: %r" % fa)
+        self.assertNotIn(SID_B, fa["tabs"]); self.assertNotEqual(fa["active"], SID_B, "the first arrival (api), hidden by #only=web, is never adopted: %r" % fa)
+        self.assertEqual(fa["active"], SID_A, "…the first VISIBLE arrival (web) is, over the declined record: %r" % fa)
+        nm = r["noMatchFilter"]
+        self.assertIsNone(nm["active"]); self.assertEqual(nm["tabs"], [], "no tab shows under a filter matching nothing: %r" % nm)
+        self.assertIn(nm["empty"]["vanished"], (SID_A, SID_B), "the declined first arrival is recorded: %r" % nm)
+        self.assertEqual(nm["empty"]["text"], "This tab view shows no session. Change the view, or pick a tab.")
+        nl = r["noMatchLifted"]
+        self.assertEqual(nl["active"], nm["empty"]["vanished"], "lifting the filter restores the recorded session through the schedule: %r" % nl)
         # the hidden tab torn down while the pane is unfocused: the line follows the reason, naming the tab
         td = r["tornDownWhileHidden"]
         self.assertIsNone(td["active"]); self.assertEqual(td["empty"]["vanished"], SID_A); self.assertNotIn(SID_A, td["tabs"])

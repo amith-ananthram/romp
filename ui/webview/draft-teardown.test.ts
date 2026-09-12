@@ -337,7 +337,7 @@ test("while the note holds the box, the type-from-anywhere defaults stand down; 
 test("the note retires on the exact events: an explicit switch, the session's return, or its ✕", () => {
   // setActive: a real switch re-binds the box → the note is stale
   assert.match(RENDER, /function setActive\(id: string[\s\S]*?if \(ta && activeId !== id\) \{[\s\S]*?clearComposerNote\(\);/);
-  // the session frame: the torn-down session is back while the note still holds → back on it (setActive retires the note)
+  // the session frame: the torn-down session is back while the note still holds → back on it through restoreIfShown, which retires the note (setActive) only when the strip shows the tab
   assert.match(RENDER, /if \(composerNoteSid === msg\.id\) restoreIfShown\(msg\.id\);/, "the note's own tab comes back through the one restore rule (shown takes focus; hidden does not)");
   // its own ✕
   assert.match(RENDER, /function renderComposerNote\(sid: string, why: DismissWhy, name: string\): void \{[\s\S]*?x\.dataset\.act = "composerNoteX";/);   // the ✕ rides the body delegate since 2026-09-08 (click-safe, no per-node listener)
@@ -345,7 +345,7 @@ test("the note retires on the exact events: an explicit switch, the session's re
 });
 
 test("the `!activeId` adoption loads the adopted session's draft (once-per-page restore is not enough)", () => {
-  assert.match(RENDER, /const adopted = !activeId && !vanishedId && !wantActive && !wantActiveGone && stripShows\(msg\.id\);[^\n]*\n\s*if \(adopted\) \{ activeId = msg\.id; assertPeekFor\(msg\.id\); loadComposerFor\(msg\.id, true\); persistActive\(msg\.id\); \}/, "…and never while the user's own tab is away, awaited after a reload, or shown as gone (T357); an adoption asserts the peek and persists like a pick");
+  assert.match(RENDER, /const wouldAdopt = !activeId && \(!vanishedId \|\| vanishedByDecline\) && !wantActive && !wantActiveGone;[^\n]*\n\s*const adopted = wouldAdopt && stripShows\(msg\.id\);[^\n]*\n\s*if \(adopted\) \{ activeId = msg\.id; assertPeekFor\(msg\.id\); loadComposerFor\(msg\.id, true\); persistActive\(msg\.id\); \}/, "…and never while the user's own tab is away, awaited after a reload, or shown as gone (T357); an adoption asserts the peek and persists like a pick");
   // …and the adoption is a first SHOW even for a payload the page already held (the append path never re-reveals a hidden view)
   assert.match(RENDER, /if \(existed && !forked && !firstBuild && !adopted\) \{\s*\n\s*appendActive\(\);/);
   // the loader: box ← drafts.get(id), chips, thumbnails, staged stack — the same set setActive paints
