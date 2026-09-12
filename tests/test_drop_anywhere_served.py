@@ -126,7 +126,7 @@ out.shell = await dropOn(null, null, "shot-shell.png");
 out.feed = await dropOn("f-feed", null, "shot-feed.png");
 // 4. a split: column 2 on the other session; a drop on ITS transcript attaches there and only there
 out.split = await page.evaluate((sidB) => { const f = window.__rompSplitChat(sidB); return { frameId: f && f.id }; }, cfg.sidB);
-await waitTabs("f-chat-2", [cfg.sidA, cfg.sidB]);
+await waitTabs("f-chat-2", [cfg.sidB]);   // a column holds the session moved into it and no other (chat columns are tab groups since 2026-09-12)
 await waitActive("f-chat-2", cfg.sidB);
 out.col2 = await dropOn("f-chat-2", "#content", "shot-b.png");
 await chipLanded("f-chat-2", "shot-b.png", "the drop on column 2's transcript never landed in its box");
