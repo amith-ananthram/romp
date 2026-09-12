@@ -57,11 +57,12 @@ test("a pick of a session another column holds is shown where it lives: the setA
   assert.ok(guard < fn.indexOf("assertPeekFor(id);"), "before the peek: a forwarded pick never opens a peek here");
   assert.ok(guard < fn.indexOf("// Stash the leaving tab's draft"), "before the drafts swap: this page's box never changes hands for a session it does not show");
   // the boot memberships: a later column never adopts a non-member's frame, and a reload never re-activates a tab dragged away
-  assert.match(RENDER, /const adopted = !activeId && !vanishedId && !wantActive && heldHere\(msg\.id\);/);   // …with T357\'s away and awaited gates beside the membership one
-  assert.match(RENDER, /if \(wantActive && msg\.id === wantActive && heldHere\(msg\.id\)\) \{ wantActive = null; setActive\(msg\.id\); \}/);
+  assert.match(RENDER, /const wouldAdopt = !activeId && \(!vanishedId \|\| vanishedByDecline\) && !wantActive && !wantActiveGone && heldHere\(msg\.id\);[^\n]*\n\s*const adopted = wouldAdopt && stripShows\(msg\.id\);/);   // …with T357's away, awaited and gone gates beside the membership one; a non-member neither adopts nor leaves a declined record
+  assert.match(RENDER, /if \(vanishedId === msg\.id && heldHere\(msg\.id\)\) restoreIfShown\(msg\.id\);/, "the user's own tab's return is restored only while this column holds it");
+  assert.match(RENDER, /if \(wantActive && msg\.id === wantActive && stripLists\(msg\.id\) && heldHere\(msg\.id\)\) \{ wantActive = null; restoreIfShown\(msg\.id\); \}/);
   // …with the sets read fresh right there, not the last render's
   const up = RENDER.slice(RENDER.indexOf("function upsert(msg: any) {"), RENDER.indexOf("function update(msg: any) {"));
-  assert.ok(up.indexOf("colSets = readColSets();") > 0 && up.indexOf("colSets = readColSets();") < up.indexOf("const adopted = "), "membership re-read before the adoptions");
+  assert.ok(up.indexOf("colSets = readColSets();") > 0 && up.indexOf("colSets = readColSets();") < up.indexOf("const wouldAdopt = "), "membership re-read before the adoptions");
   // a session created from a later column is claimed for it before the switch that shows it
   const adopt = RENDER.slice(RENDER.indexOf("function adoptProvisional("), RENDER.indexOf("function resolveProvisionalToExisting("));
   assert.ok(adopt.indexOf("claimSession(realId);") > 0 && adopt.indexOf("claimSession(realId);") < adopt.indexOf("setActive(realId);"));

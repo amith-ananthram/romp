@@ -3664,6 +3664,11 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
 .file-preview-pop .fp-text { font-family: ui-monospace, monospace; word-break: break-all; }
 .file-preview-pop .rl-in { margin: auto; }
 /* a callout (md-wiki.ts calloutBlockquote): the kind as a small label at the top of its blockquote */
+/* the glossary's term links (T351 stage 2, design A): a quiet dotted underline in the text colour, no colour change;
+   a retired term greys (its card says to use the plain phrase) */
+.term-link { text-decoration: underline dotted; text-decoration-thickness: 1px; text-underline-offset: 3px; cursor: help; }
+.term-link:hover, .term-link:focus-visible { text-decoration-style: solid; outline: none; }
+.term-link.term-retired { opacity: 0.6; }
 .md-callout-label { font-size: 0.72em; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--accent); margin: 0 0 2px; }
 /* the popover's boot loader (the user 2026-08-25: a fresh thread flashed the plain msgs projection
    before jumping into the chat rendering) — the standard romp loader holds the conversation area

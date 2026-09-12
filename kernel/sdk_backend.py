@@ -3193,6 +3193,32 @@ BOOT_RESUME_CONCURRENCY = max(1, int(os.environ.get("ROMP_BOOT_RESUME_CONCURRENC
 # Backstop ONLY (never the mechanism): a CLI that wedges before init would otherwise hold its slot
 # forever and trap the whole sweep — after this long the sweep proceeds anyway, loudly.
 BOOT_RESUME_SLOT_S = float(os.environ.get("ROMP_BOOT_RESUME_SLOT_S", "180"))
+# The UserPromptSubmit hook's WALL-TIME CAP (2026-09-12). The SDK runs SdkSession._prompt_submit_hook
+# for every prompt a session receives and REFUSES the prompt when the hook misses the CLI's own hook
+# deadline (about 30 s), instead of failing open — under a host load of 100 to 300 on 64 cores the
+# hook's reg read stalled past it and six sessions missed messages for 14 to 76 minutes each. The
+# hook now gives up FIRST: its body runs under asyncio.wait_for with this cap (env
+# ROMP_PROMPT_HOOK_TIMEOUT_S, read at call time so a test can set it; default 8 s) and answers a
+# timeout with {} — the prompt runs. The matcher-level deadline handed to the SDK for this hook
+# (PROMPT_HOOK_SDK_TIMEOUT_S, when the installed HookMatcher takes one) sits far above it, so the
+# inner cap is always the one that fires and the SDK's refusal never is.
+PROMPT_HOOK_TIMEOUT_S_DEFAULT = 8.0
+PROMPT_HOOK_SDK_TIMEOUT_S = 120.0
+# How often (wall clock, at most) an ORDINARY prompt may cost the gate a stat of the reg — the
+# backstop that catches a sessionCrons writer this session object never saw (see the prompt-cache
+# note above _prompt_submit_hook). Only a moved mtime costs a read.
+CRON_PROMPTS_REFRESH_S = 60.0
+
+
+def prompt_hook_timeout_s() -> float:
+    """The prompt hook's cap in seconds, read from ROMP_PROMPT_HOOK_TIMEOUT_S at call time; a value
+    that will not parse, or is not positive, falls to PROMPT_HOOK_TIMEOUT_S_DEFAULT."""
+    raw = os.environ.get("ROMP_PROMPT_HOOK_TIMEOUT_S", "")
+    try:
+        v = float(raw) if raw.strip() else PROMPT_HOOK_TIMEOUT_S_DEFAULT
+    except ValueError:
+        return PROMPT_HOOK_TIMEOUT_S_DEFAULT
+    return v if v > 0 else PROMPT_HOOK_TIMEOUT_S_DEFAULT
 # Boot RE-ATTACHES to live session hosts (T315) are socket connects and a replay of a few hundred small records,
 # not the launch of a claude process, so they do not take the spawn stagger's slots: they run on a wider bound of
 # their own (the restart-path work, 2026-09-11: twelve attaches paced three at a time cost 4 s of a 20 s restart).
@@ -4920,6 +4946,13 @@ class SdkSession:
         self.name = reg.get("name", self.sid)
         self.cwd = reg.get("cwd") or os.path.expanduser("~")
         self.mode = reg.get("mode") or "acceptEdits"
+        # The recurring-cron PROMPT CACHE (2026-09-12): the prompt hook's common path touches no file
+        # (see the note above _prompt_submit_hook). Seeded from the reg this session was built from;
+        # every sessionCrons writer on this object re-reads it, and a 60 s mtime backstop covers the rest.
+        self._cron_prompts: frozenset = frozenset()
+        self._cron_prompts_at = 0.0                 # monotonic stamp of the last (attempted) refresh
+        self._cron_prompts_mtime = None             # the reg file's st_mtime_ns the cache was read at
+        self._cron_prompts_seed(reg)
         # The PROCESS GENERATION stamp: session-scoped timers live in THIS CLI process's memory, so
         # every armed-timer record carries the generation that armed it (procGen). A recorded timer
         # whose generation is still the live one WILL be fired by the CLI itself — the kernel must
@@ -5155,6 +5188,8 @@ class SdkSession:
         #   2026-09-06). Which counter is which, and the measurement: _turn_usage.
         self._spend_unknown_open = False   # True from an attach-unknown seed until the first LIVE result: every replayed
         #                                    record meanwhile is the lifetime so far and advances the watermarks (T354)
+        self._spend_seed_epoch_seen = False   # an orphan drain: a record of the watermark's own epoch has been replayed, so
+        #                                       a different epoch from here on is a NEWER one (_spend_redelivered)
         self._spend_baseline = "fresh"     # what the watermarks stand on: "fresh" (a new CLI process: zero, or the
         #                                    resumed transcript's cost-state record), "attach-pending" (a host attach:
         #                                    the surviving CLI's watermark is read from the registry at the first
@@ -6883,6 +6918,9 @@ class SdkSession:
         self._last_usage_totals = {}  # and its cumulative token counters
         self._spend_first_result = True
         self._spend_baseline = "fresh"
+        self._spend_unknown_open = False   # no unknown window on a fresh seed (the follow-up's second round, low 3)
+        self._spend_seed_epoch_seen = False
+        self._spend_seed_session = ""
         self._replay_cli = ""         # a dead CLI's replay is over once a connect seeds
         if getattr(self, "_host_is_attach", False) and getattr(self, "_host", None) is not None:
             # a host ATTACH (T315), and only with the host transport in hand (the flag alone is not trusted, M1 of
@@ -6927,6 +6965,8 @@ class SdkSession:
         self._last_usage_totals = {}
         self._spend_first_result = True
         self._spend_baseline = "attach-pending"
+        self._spend_seed_session = ""
+        self._spend_seed_epoch_seen = False
         self._replay_cli = str(cli or "")
         self._seed_from_reg_cost_state(cli=cli, dead=True)
 
@@ -6947,6 +6987,7 @@ class SdkSession:
             self._last_usage_totals = {k: int(v) for k, v in toks.items() if isinstance(v, (int, float))}
             self._spend_baseline = "seeded"
             self._spend_unknown_open = False
+            self._spend_seed_session = str(cs.get("session") or "")   # the epoch the watermark's totals belong to
             self.backend._log("spend: %s %s (%s): watermarks seeded at the registry's "
                               "cumulative $%.2f so the first result records only this turn" % (self.name, how, cli, cs["total"]),
                               problem=False)
@@ -6975,7 +7016,7 @@ class SdkSession:
         except (IndexError, AttributeError):
             return None
 
-    def _spend_redelivered(self, tag, total) -> bool:
+    def _spend_redelivered(self, tag, total, session_id="") -> bool:
         """Is this result one an earlier kernel already folded? From the record's own journal position (round four of
         1450's review): a replayed record (its offset before the journal's next at the attach) folds nothing, moves no
         watermark and marks its row, WHATEVER its total, since the kernel that died folded what it saw and the ack it
@@ -6990,6 +7031,24 @@ class SdkSession:
         t = getattr(self, "_host", None)
         orphan = getattr(t, "journal_dir", None) is not None and getattr(t, "hello", None) is None
         if orphan:
+            # the dead CLI's watermark is the line, with two exceptions (the lows of the fix's round five): a seed that
+            # named no watermark (attach-unknown) knows no line, so every replayed record folds nothing rather than
+            # every ascending step after the first folding its delta (the watermark advances with each, the fix's
+            # second round); and a record from another session epoch is not comparable to the watermark's totals, so
+            # it is judged by its POSITION in the tail (the follow-up's second round): before the watermark epoch's own
+            # records it is OLDER (a /clear the dead kernel bracketed, its post-clear watermark on record: folded, so
+            # it folds nothing); after them it is NEWER (a /clear the dead kernel never folded past: live, and a total
+            # below the watermark folds whole as the counter reset it is, the new epoch's watermark from there)
+            if getattr(self, "_spend_baseline", "") == "attach-unknown":
+                return True
+            seed_epoch = str(getattr(self, "_spend_seed_session", "") or "")
+            if seed_epoch and session_id:
+                if str(session_id) == seed_epoch:
+                    self._spend_seed_epoch_seen = True
+                elif getattr(self, "_spend_seed_epoch_seen", False):
+                    return False                     # a newer epoch: live
+                else:
+                    return True                      # an older epoch: folded before the dead kernel's /clear
             return float(total) <= float(self._last_cost_total)
         return True
 
@@ -7000,7 +7059,11 @@ class SdkSession:
         try:
             self.backend._update_reg(self.sid, costState={"total": float(total), "tokens": dict(self._last_usage_totals),
                                                            "cli": self._cli_ident(), "t": int(time.time()),
-                                                           "session": str(getattr(self, "_spend_session_id", "") or "")})
+                                                           # the epoch a live result named, else the watermark's own (a drain
+                                                           # of duplicates alone must not erase the epoch the next drain's
+                                                           # guard compares against: the follow-up's second round, low b)
+                                                           "session": str(getattr(self, "_spend_session_id", "") or
+                                                                          getattr(self, "_spend_seed_session", "") or "")})
         except Exception as e:
             self.backend._log("spend (%s): costState write failed: %s" % (self.name, e), problem=False)
 
@@ -7520,7 +7583,7 @@ class SdkSession:
                     # the kernel did not see, a resumed cost-state seed against a print-mode CLI) and folds whole, as
                     # it always did; read from the total alone, a reset latched the session at $0 for the process's life
                     tag = getattr(self, "_result_tag", None)          # popped at the top of _on_message for every result
-                    duplicate = self._spend_redelivered(tag, total)
+                    duplicate = self._spend_redelivered(tag, total, str(getattr(msg, "session_id", "") or ""))
                     # the UNKNOWN window (the fix's second round): with no watermark on record, every replayed record is
                     # the lifetime so far and advances the watermarks to its total (a whole-journal replay, the attach
                     # whose hostAck names another host, hands over several); the first LIVE result closes the window and
@@ -7529,9 +7592,15 @@ class SdkSession:
                     unknown = baseline == "attach-unknown" and (first or (duplicate and getattr(self, "_spend_unknown_open", False)))
                     if not duplicate:
                         self._spend_unknown_open = False
-                    if not duplicate or unknown:                       # a replayed record names the replayed epoch, not the
-                        #                                                watermark's, unless the replay IS the watermark's source
-                        self._spend_session_id = str(getattr(msg, "session_id", "") or "")   # the CLI's session epoch (a /clear moves it)
+                    epoch = str(getattr(msg, "session_id", "") or "")
+                    seed_epoch = str(getattr(self, "_spend_seed_session", "") or "")
+                    if not duplicate or unknown or (epoch and epoch == seed_epoch):
+                        # the CLI's session epoch (a /clear moves it): a live record names it; a replayed record names the
+                        # replayed epoch, which is the watermark's only when the replay IS its source (the unknown window)
+                        # or when it is the seed's own (the seeded road: persisted, so the next drain's guard has it;
+                        # an OLDER epoch's replay must not overwrite it). A record without one keeps the epoch on record
+                        # (the follow-up's second round, lows 1 and 2)
+                        self._spend_session_id = epoch or str(getattr(self, "_spend_session_id", "") or "")
                     if unknown or duplicate:
                         delta = 0.0       # unknown: the lifetime's total, this turn's share unknowable; duplicate: already folded
                     else:
@@ -7949,6 +8018,7 @@ class SdkSession:
                         slim.append(c)
                 if slim != prev.get("sessionCrons"):
                     self.backend._update_reg(self.sid, sessionCrons=slim, sessionCronsAt=int(nw))
+                    self._cron_prompts_refresh()       # the armed set moved under the gate's cache
         except Exception as e:
             self.backend._log("stop hook (%s): session_crons record failed: %s" % (self.name, e))
         # Reconcile the LAUNCH LEDGER against the payload's background_tasks — the per-turn snapshot
@@ -8044,6 +8114,7 @@ class SdkSession:
                     # cancels its own pending wakeup on stop, and keeping ours would fabricate a wake
                     cur = [c for c in cur if not (c.get("src") == "toolhook" and not c.get("recurring"))]
                     self.backend._update_reg(self.sid, sessionCrons=cur, sessionCronsAt=int(nw))
+                    self._cron_prompts_refresh()
                     return {}
                 delay = targs.get("delaySeconds")
                 prompt = str(targs.get("prompt") or "")[:500]
@@ -8071,9 +8142,65 @@ class SdkSession:
             else:
                 return {}
             self.backend._update_reg(self.sid, sessionCrons=cur, sessionCronsAt=int(nw))
+            self._cron_prompts_refresh()               # an arm or delete: the gate's cache follows it
         except Exception as e:
             self.backend._log("sched tool hook (%s): %s" % (self.name, e))
         return {}
+
+    # ── the recurring-cron PROMPT CACHE (2026-09-12) ─────────────────────────────────────────────
+    # _prompt_submit_hook runs for EVERY prompt a session receives, and the SDK REFUSES a prompt whose
+    # hook misses the CLI's hook deadline (about 30 s) instead of failing open. Its first step used to
+    # be a reg read on every prompt; under a host load of 100 to 300 on 64 cores (2026-09-11 21:00Z to
+    # 2026-09-12 00:00Z) that read stalled past the deadline and six sessions missed messages for 14 to
+    # 76 minutes each — the one failure the gate's own docstring forbids. So the gate answers an
+    # ORDINARY prompt from memory: this set holds the recurring-cron prompt heads (recurring_crons(reg)
+    # → prompt[:500], exactly what the gate matches on), seeded from the reg at construction, re-read
+    # by every sessionCrons writer on this object (the Stop hook's record, the scheduling-tool hook's
+    # arm and delete) and, once a minute at most, by a stat-then-read backstop when the reg's mtime
+    # moved (a writer this object never saw: the boot reconcile, a kernel-side prune). Only a prompt IN
+    # the set costs a read. A stale set errs on the side the gate was always built to err on: a
+    # schedule fires once more (a duplicate), never once less.
+
+    def _reg_mtime_ns(self):
+        """The reg file's st_mtime_ns, None when it cannot be read (absent reg, a fake backend)."""
+        try:
+            return _reg_path(self.backend.state_dir, self.sid).stat().st_mtime_ns
+        except Exception:
+            return None
+
+    def _cron_prompts_seed(self, reg, mtime=None):
+        """Rebuild the cache from a reg ALREADY IN HAND — a reseed never costs a read of its own.
+        `mtime` is the reg file's st_mtime_ns taken BEFORE that reg was read: stamping the pre-read
+        stat means any write landing after it shows as a change to the backstop. None stats now
+        (construction, where the caller read the reg moments ago)."""
+        if not isinstance(reg, dict):
+            return
+        self._cron_prompts = frozenset(str(c.get("prompt") or "")[:500] for c in recurring_crons(reg))
+        self._cron_prompts_at = time.monotonic()
+        self._cron_prompts_mtime = self._reg_mtime_ns() if mtime is None else mtime
+
+    def _cron_prompts_refresh(self):
+        """Stat, read, reseed — what every sessionCrons writer on this object runs after its write.
+        A reg that will not read leaves the cache as it was: the hook fails OPEN on a stale miss."""
+        try:
+            m = self._reg_mtime_ns()
+            reg = read_reg(self.backend.state_dir, self.sid)
+            if reg is not None:
+                self._cron_prompts_seed(reg, m)
+        except Exception:
+            pass
+
+    def _cron_prompts_backstop(self):
+        """The once-a-minute backstop body (runs OFF the loop thread): a read only when the reg's
+        mtime moved since the cache was seeded."""
+        if self._reg_mtime_ns() != self._cron_prompts_mtime:
+            self._cron_prompts_refresh()
+
+    def _reg_read_stamped(self):
+        """(st_mtime_ns before the read, read_reg_for_rmw's answer): the gate's own read, run off the
+        loop thread so the hook's cap can interrupt a stall."""
+        m = self._reg_mtime_ns()
+        return m, read_reg_for_rmw(self.backend.state_dir, self.sid)
 
     async def _prompt_submit_hook(self, inp, tool_use_id, context):
         """UserPromptSubmit: the RECURRING-CRON REPLAY GATE (T211, 2026-09-01). A resumed CLI
@@ -8090,52 +8217,89 @@ class SdkSession:
         slot the dead process genuinely never delivered still fires exactly once after a restart
         (the CLI's own catch-up becomes the recovery instead of the bug). Every uncertain path fails
         OPEN (unreadable reg, unparseable schedule, hook error → the prompt runs): a duplicate fire
-        costs a turn, a swallowed slot costs the schedule itself."""
+        costs a turn, a swallowed slot costs the schedule itself.
+
+        BOUNDED, and FILE-FREE for an ordinary prompt (2026-09-12; the prompt-cache note above): the
+        body runs under asyncio.wait_for with prompt_hook_timeout_s() (ROMP_PROMPT_HOOK_TIMEOUT_S,
+        default 8 s — well inside the SDK's deadline, which is the one that refuses the prompt), with
+        the reg read AND the cronDelivered write on a worker thread because wait_for can only
+        interrupt a body that yields: a blocking read or write on the loop thread would run the cap
+        out without ever tripping it. A timeout is logged as a problem (one counted ring row per
+        session for the whole stall, not a row per prompt) and answered {} — the prompt runs."""
+        cap = prompt_hook_timeout_s()
         try:
-            prompt = str((inp or {}).get("prompt") or "")
-            if not prompt:
-                return {}
-            reg = read_reg_for_rmw(self.backend.state_dir, self.sid)
-            if reg is None:
-                self.backend._log("cron dedupe (%s): reg unreadable — prompt allowed rather than "
-                                  "risking a swallowed schedule slot" % self.name, problem=True)
-                return {}
-            hits = [c for c in recurring_crons(reg)
-                    if str(c.get("prompt") or "") == prompt[:500] and str(c.get("cron") or "").strip()]
-            if not hits:
-                return {}
-            delivered = reg.get("cronDelivered")
-            delivered = dict(delivered) if isinstance(delivered, dict) else {}
-            now = time.time()
-            record, replay_of = {}, None
-            for c in hits:
-                slot = cron_prev_due(str(c.get("cron")), now)
-                if slot is None:
-                    return {}                  # a shape we can't reason about exactly → stand down
-                k = cron_slot_key(str(c.get("cron")), prompt[:500])
-                if float(delivered.get(k) or 0) >= slot:
-                    replay_of = slot           # this schedule's current slot already delivered
-                else:
-                    record[k] = slot
-            if record:
-                # Record AT the delivery moment; keys whose schedule left the armed set drop here
-                # (natural GC — the map can never outgrow the armed set + this delivery).
-                live = {cron_slot_key(str(c.get("cron")), str(c.get("prompt") or ""))
-                        for c in recurring_crons(reg)}
-                delivered = {k: v for k, v in delivered.items() if k in live}
-                delivered.update(record)
-                self.backend._update_reg(self.sid, cronDelivered=delivered)
-                return {}
-            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(replay_of))
-            self.backend._log("cron dedupe (%s): blocked a replayed schedule fire — its %s slot was "
-                              "already delivered (a fresh process re-fires passed slots on resume)"
-                              % (self.name, when), problem=False)
-            return {"decision": "block",
-                    "reason": "This scheduled prompt already ran for its %s slot — skipping the "
-                              "duplicate." % when}
+            return await asyncio.wait_for(self._prompt_submit_gate(inp), timeout=cap)
+        except asyncio.TimeoutError:
+            self.backend._log("cron dedupe (%s): the prompt hook ran past its %.2fs cap "
+                              "(ROMP_PROMPT_HOOK_TIMEOUT_S) — prompt allowed rather than left for the SDK "
+                              "to refuse at its own deadline" % (self.name, cap), problem=True,
+                              key=("prompt-hook-cap", self.sid))
+            return {}
         except Exception as e:
             self.backend._log("cron dedupe (%s): %s — prompt allowed" % (self.name, e))
             return {}
+
+    async def _prompt_submit_gate(self, inp):
+        """The replay gate proper — the body _prompt_submit_hook runs under its cap. Its first step
+        is a set lookup, not a read: only a prompt some armed recurring schedule carries goes on to
+        the reg (and that read is what the backstop and the writers keep the set faithful to)."""
+        prompt = str((inp or {}).get("prompt") or "")
+        if not prompt:
+            return {}
+        head = prompt[:500]
+        if head not in self._cron_prompts:
+            # The common path: no armed recurring schedule carries this prompt → no file is touched.
+            # Once a minute at most, a stat off the loop thread asks whether a writer this object
+            # never saw moved the reg; only a moved mtime costs a read. The slot is claimed BEFORE the
+            # stat so prompts arriving while it runs skip it instead of piling on.
+            if time.monotonic() - self._cron_prompts_at >= CRON_PROMPTS_REFRESH_S:
+                self._cron_prompts_at = time.monotonic()
+                await asyncio.to_thread(self._cron_prompts_backstop)
+            if head not in self._cron_prompts:
+                return {}
+        mtime, reg = await asyncio.to_thread(self._reg_read_stamped)
+        if reg is None:
+            self.backend._log("cron dedupe (%s): reg unreadable — prompt allowed rather than "
+                              "risking a swallowed schedule slot" % self.name, problem=True)
+            return {}
+        self._cron_prompts_seed(reg, mtime)        # a reseed for free, from the read just paid for
+        hits = [c for c in recurring_crons(reg)
+                if str(c.get("prompt") or "") == prompt[:500] and str(c.get("cron") or "").strip()]
+        if not hits:
+            return {}
+        delivered = reg.get("cronDelivered")
+        delivered = dict(delivered) if isinstance(delivered, dict) else {}
+        now = time.time()
+        record, replay_of = {}, None
+        for c in hits:
+            slot = cron_prev_due(str(c.get("cron")), now)
+            if slot is None:
+                return {}                  # a shape we can't reason about exactly → stand down
+            k = cron_slot_key(str(c.get("cron")), prompt[:500])
+            if float(delivered.get(k) or 0) >= slot:
+                replay_of = slot           # this schedule's current slot already delivered
+            else:
+                record[k] = slot
+        if record:
+            # Record AT the delivery moment; keys whose schedule left the armed set drop here
+            # (natural GC — the map can never outgrow the armed set + this delivery).
+            live = {cron_slot_key(str(c.get("cron")), str(c.get("prompt") or ""))
+                    for c in recurring_crons(reg)}
+            delivered = {k: v for k, v in delivered.items() if k in live}
+            delivered.update(record)
+            # Off the loop thread like the read: _update_reg is a lock wait, a read and a write, and
+            # the cap can only interrupt at an await. A write the cap cuts still lands (the worker
+            # finishes it), which is the outcome this {} was about to record: the prompt runs and
+            # the slot is on file, so the next resume's catch-up sees it as delivered.
+            await asyncio.to_thread(self.backend._update_reg, self.sid, cronDelivered=delivered)
+            return {}
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(replay_of))
+        self.backend._log("cron dedupe (%s): blocked a replayed schedule fire — its %s slot was "
+                          "already delivered (a fresh process re-fires passed slots on resume)"
+                          % (self.name, when), problem=False)
+        return {"decision": "block",
+                "reason": "This scheduled prompt already ran for its %s slot — skipping the "
+                          "duplicate." % when}
 
     # ---- subagent tracking (the transparency tmux never had) ----
 
@@ -10213,12 +10377,16 @@ class SdkBackend:
             # option that did what the card said. Context is managed by hand for now. Every cut/queued
             # session resumes here, exactly as it did before the gate.
             to_start = [s for s in to_start if s in self._boot_attach_sids] + [s for s in to_start if s not in self._boot_attach_sids]
+            # the attaches this phase waits for, FROZEN with the count: a session a send started ahead of this loop has its
+            # hello discard its sid from _boot_attach_sids, and a per-iteration membership test then saw no attach, parked no
+            # callback, and the count never reached zero (two boots of 2026-09-11 said attachTimedOut with every hello landed)
+            attach_set = {s for s in to_start if s in self._boot_attach_sids}
             with self._boot_attach_lock:
-                self._boot_attach_pending = sum(1 for s in to_start if s in self._boot_attach_sids)
+                self._boot_attach_pending = len(attach_set)
             if not self._boot_attach_pending:
                 self._boot_milestone("attachDone")       # nothing to attach: the phase is over before it began
             for sid in to_start:                         # re-attaches first, then the cold launches
-                attach = sid in self._boot_attach_sids
+                attach = sid in attach_set
                 # a RE-ATTACH (a live host holds the CLI) is a socket connect, first and on its own wider bound; a
                 # cold launch keeps the spawn stagger (the CPU burst the stagger exists for)
                 sem = self._attach_sem if attach else self._spawn_sem
@@ -11381,6 +11549,27 @@ class SdkBackend:
                 self._log("kernel wake failed: %s" % e)
 
     # ---- SDK option assembly (mirrors the tmux launch flags) ----
+    def _prompt_hook_matcher(self, HookMatcher, sess: SdkSession):
+        """The UserPromptSubmit matcher, with the SDK-side hook deadline RAISED where nothing else raises it.
+        The CLI refuses a prompt whose hook misses that deadline — how six sessions went deaf under host
+        load on 2026-09-11 — so the hook's own cap (ROMP_PROMPT_HOOK_TIMEOUT_S, 8 s) must always fire first.
+        Under session hosts (the default since T348) _options's loop below already gives EVERY matcher the
+        host's HOOK_TIMEOUT_S (540 s), far above the cap, and only fills a `timeout` that is None — so
+        with hosts on this leaves it None and lets the host bound stand; with hosts OFF it passes
+        PROMPT_HOOK_SDK_TIMEOUT_S (120 s), so the SDK's default is never the deadline that fires.
+        HookMatcher takes `timeout` in claude-agent-sdk 0.2.152 (the installed version); an older venv's
+        HookMatcher refuses the keyword, and the matcher is then built without it — logged as a problem,
+        so the degraded deadline is visible rather than silent."""
+        if self.session_hosts_on():
+            return HookMatcher(matcher=None, hooks=[sess._prompt_submit_hook])
+        try:
+            return HookMatcher(matcher=None, hooks=[sess._prompt_submit_hook], timeout=PROMPT_HOOK_SDK_TIMEOUT_S)
+        except TypeError:
+            self._log("prompt hook: this claude-agent-sdk's HookMatcher takes no timeout — the SDK's own "
+                      "hook deadline stays at its default; the hook's %.0fs cap still fails open"
+                      % PROMPT_HOOK_TIMEOUT_S_DEFAULT, problem=True, key="prompt-hook-matcher-timeout")
+            return HookMatcher(matcher=None, hooks=[sess._prompt_submit_hook])
+
     def _options(self, sess: SdkSession, ClaudeAgentOptions):
         from claude_agent_sdk import HookMatcher
         kw = dict(
@@ -11408,7 +11597,7 @@ class SdkBackend:
             can_use_tool=sess._can_use_tool,
             hooks={"Stop": [HookMatcher(matcher=None, hooks=[sess._stop_hook])],          # awaiting overlay producer
                    # recurring-cron replay gate: a resumed CLI re-fires passed slots (T211)
-                   "UserPromptSubmit": [HookMatcher(matcher=None, hooks=[sess._prompt_submit_hook])],
+                   "UserPromptSubmit": [self._prompt_hook_matcher(HookMatcher, sess)],
                    "SubagentStart": [HookMatcher(matcher=None, hooks=[sess._subagent_start_hook])],  # live subagent
                    "SubagentStop": [HookMatcher(matcher=None, hooks=[sess._subagent_stop_hook])],    #   count/types
                    # scheduling tools record their arm at the CALL moment, with the exact due time the

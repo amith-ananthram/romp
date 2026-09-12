@@ -25,8 +25,11 @@ export function focusAfterDismiss(why: Why, mru: readonly string[], order: reado
 
 /** The session that vanished from under the user, for the empty body's line: how it left (a dismissal's reason), or
  *  "awaited" (the tab this page showed before a reload, not listed yet: a kernel restart reloads the page, so no
- *  dismissal ran and the persisted choice is all the pane has), or "hidden" (the tab view no longer shows it). */
-export type Vanished = { name: string; why: Exclude<Why, "close"> | "awaited" | "hidden"; dialing: boolean };
+ *  dismissal ran and the persisted choice is all the pane has), "gone" (a persisted id that can never be listed
+ *  again as a tab of its own: a subagent viewer's tab, a provisional create), or "hidden" (the strip's `#only=` filter
+ *  no longer shows the active tab; the peek covers a view's exclusion, not the filter's). */
+export type Vanished = { name: string; why: Exclude<Why, "close"> | "awaited" | "gone" | "hidden"; dialing: boolean;
+                         declined?: boolean };   // "hidden" by a DECLINED adoption (no tab was ever the user's): the head says so, name-free
 
 /** The empty body's text in three pieces, so the pane can dress the name the way the strip does (host prefix,
  *  identity colour): `head` + `name` + `tail`, `name` null when no session vanished. */
@@ -43,8 +46,16 @@ export function emptyStateParts(v: Vanished | null, hasTabs: boolean): EmptyStat
     : v.why === "omitted" ? " is no longer listed by romp. It comes back here if it returns."
     : v.why === "awaited" ? (v.dialing ? " is not listed yet; its host is reconnecting… It comes back here when the host does."
                                        : " is not listed yet. It comes back here when its host does.")
-    : v.why === "hidden" ? " is not shown by this tab view. Pick a tab, or change the view."
+    : v.why === "gone" ? " is no longer on the strip. Pick a tab."
     : " ended.";
+  // the #only= filter hid the tab: a NAME-FREE line (the frame's purpose is a clean recording, and the pick
+  // instruction is said once): the manager's call, 2026-09-11
+  if (v.why === "hidden") {
+    // a declined record (the first session to arrive was hidden; nothing was the user's yet) says so, since a visible
+    // placeholder tab may well be on the strip (the review's low: "shows no session" read wrong beside a tab)
+    if (v.declined) return { head: "The first session to arrive is hidden by this view. Pick a tab, or change the view.", name: null, tail: "" };
+    return { head: "This tab view shows no session. Change the view, or pick a tab.", name: null, tail: "" };
+  }
   // an EMPTY strip invites no pick (the review's low): the session named is all there is to say
   return { head: hasTabs ? "No session selected. Pick a tab to start. " : "No sessions yet. ", name: v.name, tail };
 }

@@ -29,7 +29,14 @@ export function dragSlotIndex(boxes: readonly SlotBox[], containerW: number, gap
     const needsWrap = row !== null && cx > 0 && (b.br === true || cx + b.w > containerW);
     if (row === null || needsWrap) { row = { start: i, mids: [] }; rows.push(row); cx = 0; }
     row.mids.push(cx + b.w / 2);
-    cx += b.w + gapX;
+    // A zero-width box (the untagged trail's row break, T264) fills nothing and takes no gap, so the guard above
+    // still reads a row holding only such a box as EMPTY and a `br` box after it shares the row instead of opening
+    // another. It used to add the gap alone: under a themed column gap (the yatharth strip's 3px seam) cx stood at 3
+    // after the break, the trail's first tab (a row opener too, as the strip marked it) opened a row of its own, the
+    // break sat alone on the row the pointer's y resolved the trail to, its one midpoint at 0, and every drop on the
+    // untagged row fell past it to the next row's head — the user (2026-09-11) could drag a tab to that row's first
+    // slot and nowhere else on it. The classic strip's gap of 0 kept cx at 0 and never showed it.
+    cx += b.w ? b.w + gapX : 0;
   });
   const ri = Math.max(0, Math.min(rows.length - 1, Math.floor(y / Math.max(1, rowH))));
   const r = rows[ri];

@@ -59,7 +59,7 @@ import { reloadHoldReason } from "./reload-hold";
 import { liveNotices, keepReloadNotices, takeReloadNotices } from "./reload-notices";
 import { mintProvisionalId, isProvisionalId, provisionalName, adoptsProvisional, focusResolvesProvisional } from "./provisional";
 import { colFromSearch, columnHolds, type ColSets } from "./chat-columns";   // the chat split's partition (2026-09-11): which column this page is, which sessions it holds
-import { onlyTag, matchesOnly } from "./only-filter";
+import { onlyTag, matchesOnly, onlyWindow } from "./only-filter";
 import { numberDiff, type DiffRow } from "./diff-lines";
 import { parseAgentNotif, notifHead, type AgentNotif } from "./agent-notif";
 import { injectedHead, type InjectedSource } from "./injected-source";
@@ -72,7 +72,8 @@ import { initFileView, setFileViewIdentity, hostStub } from "./file-view";
 import { openUrlView } from "./file-view";                 // the URL mode of the same viewer (md-url-view.test.ts)
 import { isMarkdownUrl } from "./md-links";
 import { openPathLink, linkifyPathTokens, selectionOpenIn } from "./path-links";   // the path matcher the chat's links are made from (a shared module)
-import { PREVIEW_DWELL_MS, PREVIEW_GRACE_MS, HoverIntent, parsePreviewLink, previewKindOf, sliceUrl, contentFor, textOnlyContent, stripRemoteLoads, type PreviewContent } from "./file-preview";   // the file preview popover's pure half (T351)
+import { PREVIEW_DWELL_MS, PREVIEW_GRACE_MS, HoverIntent, parsePreviewLink, previewKindOf, sliceUrl, contentFor, textOnlyContent, stripRemoteLoads, type PreviewContent } from "./file-preview";
+import { buildMatcher, linkifyTerms, termContent, type GlossaryIndex, type GlossaryEntry, type TermMatcher } from "./glossary-links";   // the team's coinages, linked where written (T351 stage 2)   // the file preview popover's pure half (T351)
 import { initFileBrowse, openFileBrowse } from "./file-browse";   // the browser is pane-local here now (the user 2026-08-24)
 import { pastedFilePath } from "./paste-path";
 import { insertAtCaret } from "./composer-insert";
@@ -101,6 +102,7 @@ import { agentCount, replyOwed, threadsByAnchor, threadBusy, threadStuck, findAn
          pickMarkToOpen, type CommentThread, type CommentCreate, markSkipsParent } from "./comments";
 import { isReplyReady, placeMark, placeWindowed, readyChips, replyLine, chipLabel, chipTip, chipAria, type Dir, type ReadyMark, type ReadyChip } from "./reply-ready";
 import { dragSlotIndex } from "./dragslot";
+import { acceptDragEnter } from "./drag-accept";
 import { perfFrameHandler } from "./perf-telemetry";
 import { linkifyPrRefs, senderPrRepo, postalSenderHost } from "./pr-links";
 import { listenForFrames, federationMissing, federationLoadEntry, fedRetryKey } from "./frame-listener";
@@ -1042,7 +1044,8 @@ let activeId: string | null = null;
 let vanishedId: string | null = null;
 let vanishedWhy: VanishWhy | null = null;
 let vanishedName = "";
-/** why the pane is unfocused: a dismissal's reason, or "hidden" (the tab view stopped showing the active tab) */
+let vanishedByDecline = false;   // the vanished record is a declined first adoption's (hidden by the filter), not the user's own tab: a later visible first arrival may adopt over it (T357)
+/** why the pane is unfocused: a dismissal's reason, or "hidden" (the strip's #only= filter stopped showing the active tab) */
 type VanishWhy = DismissWhy | "hidden";
 let renderingSid: string | null = null;   // the session id syncView is currently building (for per-session fold keys)
 // The SESSION whose transcript DOM is being built — the id preview/image URLs must bake in, host prefix
@@ -1070,6 +1073,19 @@ let wantActive: string | null = (() => { try { return ((vscodeApi?.getState?.() 
 // arrives (its frame, or the strip re-listing it), and clears the wait when the user picks another tab (setActive). A
 // session that never returns leaves the body standing until a pick: no timer.
 let wantActiveName: string = (() => { try { return String(((vscodeApi?.getState?.() || {}) as any).activeName || ""); } catch { return ""; } })();
+// A persisted id that can never be listed again (a subagent viewer's tab, a provisional create) is not awaited: the
+// body says it is gone and invites a pick (the review's low). A session that ended while the page was away is not
+// knowable up front: it is awaited like any other, and the body stands until a pick.
+let wantActiveGone: string | null = null;
+if (wantActive && (isSubId(wantActive) || isProvisionalId(wantActive))) { wantActiveGone = wantActive; wantActive = null; }
+/** The persisted choice this page restores after a reload: the id and the name the body can show before the strip
+ *  knows it. Written by every activation, a pick or an adoption alike (the review's low: an adopted tab was never
+ *  persisted, so a restart still landed elsewhere). */
+function persistActive(id: string): void {
+  try {
+    vscodeApi?.setState?.({ ...(vscodeApi.getState?.() || {}), activeId: id, activeName: liveSession(id)?.name || tabMeta.get(id)?.name || "" });
+  } catch { /* ignore */ }
+}
 let pendingAnchor: string | null = null; // deep-link target waiting to be scrolled to
 let pendingAnchorIntent: string | null = null; // kind the uuid anchor must honor — sticks with pendingAnchor across render-pass retries (pendingAnchorKind is cleared each pass, this isn't)
 let pendingAnchorT: number | null = null; // time fallback (epoch s) when the uuid can't resolve
@@ -2190,6 +2206,65 @@ function absorbFragment(link: HTMLElement): void {
   nx.textContent = (nx.textContent || "").slice(m[0].length);
 }
 
+// ── the GLOSSARY (T351 stage 2, the user 2026-09-11): the team's coinages, linked where they are written ──────────
+// The kernel ships one index per session (its author group's glossary file, parsed and byte-bounded) on its own frame;
+// the matcher is compiled once per index and every message's prose is linked at render time (glossary-links.ts). A
+// term wears a quiet dotted underline in the text colour (.term-link); its card rides the file preview popover with no
+// fetch (termContent), and a click opens the glossary file in the viewer at the term's heading. Surfaces: assistant and
+// user text and mail bodies in the chat; never tool heads, the composer or the timeline. The DRESS (design A, the
+// underline and hover card, or design B, a marker and click popover) is the user's pick; the mechanics are the same.
+const glossaries = new Map<string, GlossaryIndex>();        // by session id: the frame's index
+const termMatchers = new Map<string, TermMatcher | null>();  // compiled once per index (dropped when the frame changes)
+function termMatcherFor(sid: string | null): TermMatcher | null {
+  if (!sid) return null;
+  if (!termMatchers.has(sid)) { const ix = glossaries.get(sid); termMatchers.set(sid, ix ? buildMatcher(ix) : null); }
+  return termMatchers.get(sid) || null;
+}
+/** Link the terms in a rendered message body for the session being built (renderingSid), the span carrying the
+ *  glossary path and the term's slug exactly like a path link's absorbed section, so the same hover and click roads
+ *  serve it. Nothing when the session's group has no glossary. */
+function linkTerms(root: HTMLElement, sid: string | null = renderingSid): number {
+  // the message roots (the nudge, continue and tagged-template bubbles' full text, the user bubble, the assistant body,
+  // the mail body) are MARKED
+  // here, matcher or not, so a later index frame re-links exactly them (relinkTerms) and never a tool or subagent
+  // report body; a root nested inside a marked root is the ancestor's to scan, with the ancestor's one seen set
+  // (the review's mediums: every .md in the view was relinked, and a nested body was visited twice)
+  if (root.parentElement?.closest("[data-term-root]")) return 0;
+  root.dataset.termRoot = "1";
+  const m = termMatcherFor(sid);
+  if (!m) return 0;
+  return linkifyTerms(root, m, (e, text) => {
+    const s = el("span", "term-link" + (e.status === "retired" ? " term-retired" : ""));
+    s.textContent = text;
+    s.dataset.term = e.slug; s.dataset.gsid = sid || "";
+    s.dataset.path = m.index.path; s.dataset.frag = e.slug;
+    s.title = e.plainWords ? e.term + ": " + e.plainWords : e.term;
+    s.tabIndex = 0;
+    armFilePreview(s);   // the hover card (the popover's dwell and grace), filled from the index without a fetch
+    return s;
+  });
+}
+/** A fresh index for a session: drop its matcher and re-link the session's rendered view, so a rewrite of the file
+ *  shows on the next frame, never on a timer (the old links are unwrapped first). */
+document.addEventListener("click", (e) => {
+  const s = (e.target as HTMLElement | null)?.closest?.("span.term-link") as HTMLElement | null;
+  if (!s) return;
+  e.preventDefault(); e.stopPropagation();
+  filePreviewIntent.cancel();
+  openPath(s.dataset.path || "", s.dataset.gsid || activeId, e, s.dataset.frag || null);   // the viewer, at the term's heading
+});
+function relinkTerms(sid: string): void {
+  termMatchers.delete(sid);
+  const v = views.get(sid);
+  if (!v) return;
+  for (const s of Array.from(v.el.querySelectorAll("span.term-link"))) {
+    const t = document.createTextNode(s.textContent || "");
+    s.replaceWith(t);
+    t.parentNode?.normalize();
+  }
+  for (const root of Array.from(v.el.querySelectorAll("[data-term-root]"))) linkTerms(root as HTMLElement, sid);   // the marked roots alone
+}
+
 // ── the file PREVIEW popover (T351, the user 2026-09-11) ──────────────────────────────────────────
 // Hovering a local file link pops up a card with the rendered head of the file, or the section a `path#slug` link
 // names, near-instantly: the kernel keeps the text of recently linked files with a heading index and warms it on the
@@ -2246,6 +2321,7 @@ function armFilePreview(a: HTMLElement): void {
 // the comment popover's size (70% × 60% of the pane, capped, never under the minimum), below the link when there is
 // room, else above it, and inside the viewport by the popover edge
 function placeFilePreview(p: HTMLElement, a: HTMLElement): void {
+  p.style.maxHeight = "";   // a term card's content-sized height (showFilePreview) must not outlive it: every show starts from the fractions
   const pane = (document.getElementById("content") || document.body).getBoundingClientRect();
   const w = Math.max(CMT_POP_MIN_W, Math.min(pane.width * CMT_POP_THREAD_DEFAULT.w, innerWidth * CMT_POP_CAP_W));
   const h = Math.max(CMT_POP_MIN_H, Math.min(pane.height * CMT_POP_THREAD_DEFAULT.h, innerHeight * CMT_POP_CAP_H));
@@ -2304,6 +2380,23 @@ function previewMdClean(src: string): HTMLElement {
 function showFilePreview(a: HTMLElement): void {
   const open = a.dataset.path || "";
   if (!open) return;
+  if (a.dataset.term) {   // a glossary term (T351 stage 2): the card is filled from the session's index, no request
+    const ix = glossaries.get(a.dataset.gsid || "");
+    const e = ix ? ix.terms.find((x) => x.slug === a.dataset.term) : undefined;
+    if (!ix || !e) return;
+    const p = ensureFilePreview();
+    placeFilePreview(p, a);
+    p.style.display = "";
+    watchFilePreviewAnchor(a);
+    ++filePreviewSeq;
+    renderFilePreview(p, termContent(e, ix), a.dataset.gsid || activeId);
+    // a term card is a few lines: it keeps the file card's width cap but sizes its height to its content (the pane
+    // fraction stays the ceiling), so it never sits mostly empty
+    p.style.maxHeight = p.style.height; p.style.height = "auto";
+    p.style.width = Math.min(parseFloat(p.style.width) || 520, 520) + "px";
+    p.dataset.renderMs = "0"; delete p.dataset.sliceHit;
+    return;
+  }
   const sid = activeId;                          // the kernel resolves a relative path against it and confines by its folder
   const parsed = parsePreviewLink(open);
   const path = parsed.path, anchor = a.dataset.frag || parsed.anchor;   // the section: the absorbed #slug, else one inside a file:// URI
@@ -3555,6 +3648,7 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
         bubble.appendChild(head);
         const full = el("div", "nudge-full md");
         full.innerHTML = md(ev.md);
+        linkTerms(full);   // a message root (T351 stage 2): linked at render, like the nudge's full text below
         bubble.appendChild(full);
         bubble.classList.add("nudge-collapsible");
         bubble.dataset.act = "nudgetoggle";   // the stable body delegate, never a per-render listener (CLAUDE.md)
@@ -3577,6 +3671,7 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
         if (more) {
           const full = el("div", "nudge-full md");
           full.innerHTML = md(ev.md);
+          linkTerms(full);   // a message root (T351 stage 2): linked at render, like the nudge's full text below
           bubble.appendChild(full);
           bubble.classList.add("nudge-collapsible");
           bubble.dataset.act = "nudgetoggle";   // the stable body delegate, never a per-render listener
@@ -3613,6 +3708,7 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
           const full = el("div", "nudge-full md");
           full.innerHTML = md(raw);
           linkifyFileUris(full, imgPaths, ev.spacePaths, ev.pathLinks, ev.pathPins, ev.pathPreview);
+          linkTerms(full);
           bubble.appendChild(full);
           bubble.classList.add("nudge-collapsible");
           // toggle rides the stable document.body delegate (data-act), NOT a per-render listener —
@@ -3628,6 +3724,7 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
         // summary, command stdout — shares this branch and stays on the assistant grammar
         bubble.innerHTML = kind === "user" ? userMd(ev.md) : md(ev.md);
         linkifyFileUris(bubble, imgPaths, ev.spacePaths, ev.pathLinks, ev.pathPins, ev.pathPreview);   // bare file:// URLs in a message → clickable (open in the host's default app)
+        linkTerms(bubble);   // the team's coinages, in the user's own words too (T351 stage 2)
         if (kind === "user") markMentions(bubble);   // in the user's own bubble a typed "@name" that names a live session wears that session's color; a harness note is not the user naming a session
       }
       // images, IN the bubble (part of his message): thumbnail + open/copy caption;
@@ -3785,6 +3882,7 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
     body.innerHTML = md(ev.md);
     highlight(body);
     linkifyFileUris(body, undefined, ev.spacePaths, ev.pathLinks, ev.pathPins, ev.pathPreview);   // bare file:// URLs + verified spaced filenames → clickable
+    linkTerms(body);   // the team's coinages (T351 stage 2)
     turn.appendChild(body);
     return turn;
   }
@@ -5281,7 +5379,7 @@ function renderPostalService(ev: Extract<ChatEvent, { kind: "postal-service" }>)
   // 2026-07-25, who watched a card open and snap shut a moment later: a DOM-only toggle died with every push).
   const { gist: summaryText, body: fullMd } = postalHead(ev);   // gist.ts: the caption, else the CLIPPED first line; the fold whenever the gist does not carry the whole message (T294)
   let body: HTMLElement | null = null;
-  if (fullMd) { body = el("div", "notice-md md"); body.innerHTML = md(fullMd, postalRepoFor(ev)); highlight(body); }
+  if (fullMd) { body = el("div", "notice-md md"); body.innerHTML = md(fullMd, postalRepoFor(ev)); highlight(body); linkTerms(body); }   // a mail body links the reader's group's terms (T351 stage 2; the sender's group is a later refinement)
   // an incoming QUESTION opens by default: a reply is owed, and the whole ask is what you need to read
   const owed = !!intent && intent.cls === "question" && ev.direction === "in";
   const turn = notice({ src, glyph: "peer", gist: summaryText, meta, body, open: owed,
@@ -5511,7 +5609,8 @@ function applyTabOrder(o: any, tabs?: any, report?: OrderReport, live?: any) {
   // skeleton branch of showActive asks for its frame. Another session's tab appearing does nothing here.
   const back = vanishedId || wantActive;   // …or the tab this page showed before a reload, awaited since boot
   colSets = readColSets();   // membership is fresh for the restore below (the chat split)
-  if (back && order.includes(back) && heldHere(back)) setActive(back);   // …and only a tab this column holds (the chat split): another column's session is its owner's to restore
+  if (back && heldHere(back) && restoreIfShown(back)) { /* focus is back on the tab the pane named; nothing more to paint here. Only a tab this column holds (the chat split): another column's session is its owner's to restore, and no record of it is this column's to keep */ }
+  else if (!activeId) showActive();   // the strip changed under an unfocused pane (it may have emptied), or the tab it names is listed but hidden: the body's line and the box's placeholder follow it (the review's low)
   tabOrderSeen = true;   // the board has been heard once on this socket (the chat split's emptiness post and stale-active fallback wait for it; set after the restore above, so its render is the first that may post or fall back)
   renderTabs();
 }
@@ -6288,37 +6387,39 @@ function renderTabs() {
   // placeholder back on screen. Cleared the moment the kernel's list agrees — see ackClosingTabs.
   const ids: string[] = [];
   const seen = new Set<string>();
-  for (const id of order) { if (!seen.has(id) && !closingTabs.has(id)) { seen.add(id); ids.push(id); } }
-  for (const id of tabMeta.keys()) { if (!seen.has(id) && !closingTabs.has(id)) { seen.add(id); ids.push(id); } }   // any pushed tab not yet in `order` (placeholder)
+  for (const id of order) { if (!seen.has(id) && stripLists(id)) { seen.add(id); ids.push(id); } }
+  for (const id of tabMeta.keys()) { if (!seen.has(id) && stripLists(id)) { seen.add(id); ids.push(id); } }   // any pushed tab not yet in `order` (placeholder); stripLists is the one membership rule the restores read too
   auditTabOrder(ids);
   noteColumnEmptiness(ids);   // a later column none of whose members the kernel lists any more tells the shell (the chat split)
   noteOrphanState();          // …and state held for a session another column shows is offered to the shell (the chat split)
   // demo/recording view filter (the user 2026-07-14): `#only=<tag>` shows only matching-name tabs; the
   // real sessions keep running, just hidden from this view. No tag → visibleIds === ids (unchanged).
   const only = onlyTag();
-  const nameOf = (id: string) => sessions.get(id)?.name ?? tabMeta.get(id)?.name ?? "";
   // the session VIEWS filter composes here too (the user 2026-08-18): a view-hidden session keeps
-  // its state, drafts and cached transcript — it just loses its tab until revealed
-  const inViewIds = ids.filter(tabInView);
-  const visibleIds = only ? inViewIds.filter((id) => matchesOnly(nameOf(id), only)) : inViewIds;
+  // its state, drafts and cached transcript — it just loses its tab until revealed. ONE predicate (stripShows) builds
+  // this list and answers the deferred checks below, so the two can never disagree (the review's low)
+  const visibleIds = ids.filter((id) => stripShows(id, only));
   // ...and it must govern the CHAT BODY too, not just the bar (the user 2026-07-16). Hiding a
   // non-matching TAB while its transcript keeps rendering leaks precisely what the filter exists to
   // hide: a real session's chat sitting on screen under `#only=api,tests,web`, statusline and all —
-  // found while shooting the demo, with nimbus's transcript filling a "filtered" frame. Re-point the
-  // selection at the first visible session. Deferred so we never re-enter the render we're inside;
-  // setActive is a no-op once activeId is visible, so this settles in one pass.
-  if (activeId && ids.includes(activeId) && !visibleIds.includes(activeId) && visibleIds.length) {
-    const next = visibleIds[0];
-    // re-validate at FIRE time, not schedule time: an activation between the two (a feed click
-    // opening an ephemeral peek, a reveal landing) can have made the active tab visible — bouncing
-    // then would kick the user off the very tab they just opened (the no-flap rule)
-    // …but never at ANOTHER session on the pane's own initiative (T357): the pane goes unfocused, naming the tab the
-    // view no longer shows, and comes back to it below when the view shows it again
-    setTimeout(() => { if (activeId !== next && activeId && !tabInView(activeId)) unfocusHiddenByView(activeId); }, 0);
+  // found while shooting the demo, with nimbus's transcript filling a "filtered" frame.
+  // WHICH filter needs this: visibility is a pure function of the views blob, and captureViews asserts the active
+  // tab's peek before applyTabOrder on every tabOrder frame, so a VIEW that excludes the active tab never reaches
+  // here (the peek keeps it in tabInView). The `#only=` filter is not a peek input: it is applied on top of tabInView
+  // right above, so an only-filtered active tab does reach here. The pane then goes UNFOCUSED naming the hidden tab
+  // (T357: never re-pointed at another session); the check at fire time reads the same predicate visibleIds does
+  // (stripShows), and the tab comes back below when the filter shows it again.
+  if (activeId && ids.includes(activeId) && !visibleIds.includes(activeId)) {
+    const hid = activeId;
+    setTimeout(() => { if (activeId === hid && !stripShows(hid)) unfocusHiddenByView(hid); }, 0);
   }
   if (!activeId && vanishedId && vanishedWhy === "hidden" && visibleIds.includes(vanishedId)) {
     const back = vanishedId;
-    setTimeout(() => { if (!activeId && vanishedId === back && tabInView(back)) setActive(back); }, 0);
+    // the reason re-read too: a teardown queued in between must not be undone. And the strip's MEMBERSHIP (stripLists,
+    // the paint's own rule: order and the placeholders, less a closing tab), not only the predicate: a torn-down tab has
+    // left the strip while its reason may still read "hidden", and stripShows knows the view and the filter, not the
+    // strip (the review's low, and the next review's: the schedule and the fire read ONE membership rule)
+    setTimeout(() => { if (!activeId && vanishedId === back && vanishedWhy === "hidden" && stripLists(back) && stripShows(back)) setActive(back); }, 0);
   }
   staleActiveFallback(ids, visibleIds);   // no active tab and none on its way (the chat split): the first visible member, deferred like the re-point
   // TAB SECTIONS (the user 2026-09-04): groups are tags. With sectioning on (per browser — the
@@ -7218,6 +7319,18 @@ window.addEventListener("romp-hosts", () => { renderTabs(); syncComposerPh(); })
 // a dial attempt to a remote host began or ended (federation.ts dialEvent): the host-down foot's swirl
 // spins while one is in flight, as of the last /tunnels poll, so it repaints on this event and on nothing else
 window.addEventListener("romp:hostDial", () => { syncHostOfflineFoot(); repaintEmptyStateIfUnfocused(); });   // the unfocused body's "reconnecting" follows the dial state too (T357)
+// the `#only=` filter is the location hash, so a LIVE edit of the hash repaints the strip at once: the hidden tab's
+// unfocus and its return both run off this repaint, not off the next kernel frame (T357 later lows). On the dashboard
+// this pane is a same-origin iframe of the shell and the filter lives on the SHELL's URL (only-filter.ts reads
+// window.top), so the listener binds to the window onlyTag reads: the shell's there, this pane's own on a top-level
+// page or under a cross-origin top (the review: the pane's own hash never changes on the dashboard)
+const onOnlyHashChange = (): void => renderTabs();
+const onlyHashWindow = onlyWindow();
+onlyHashWindow.addEventListener("hashchange", onOnlyHashChange);
+// a closed split column: the shell removes this pane's iframe, and a listener left on the shell's window would hold the
+// detached pane's document alive for the shell's lifetime (retention is the whole cost: Chromium does not run a removed
+// frame's handler, the review's probe showed): pagehide takes it off again
+window.addEventListener("pagehide", () => onlyHashWindow.removeEventListener("hashchange", onOnlyHashChange));
 window.addEventListener("mousedown", (e) => { if (ctxMenuEl && !ctxMenuEl.contains(e.target as Node)) dismissTabMenu(); }, true);
 // an Escape that closed the menu says so on the event (preventDefault), so the section view's own Escape
 // (installSnapshotEscape, armed at this same capture phase, later in the listener order) yields to it
@@ -10219,9 +10332,10 @@ function renderCommentPopover(): void {
     // EFFECTIVE state the frame carries, so a mailbox the user toggled off since reads as off (the review's low)
     const mailOn = el("div", "cmt-note cmt-mail");
     const held = th.heldMail || 0;
-    mailOn.textContent = th.mailOff
-      ? "Its mailbox is off: the lane's mailbox toggle turns peer mail back on."
-      : "Its mail is on now: peers can reach it and it can send." + (held ? " " + held + (held === 1 ? " held message lands" : " held messages land") + " in a moment." : "");
+    mailOn.textContent = !th.mailOff
+      ? "Its mail is on now: peers can reach it and it can send." + (held ? " " + held + (held === 1 ? " held message lands" : " held messages land") + " in a moment." : "")
+      : th.mailOffWhy === "unreadable" ? "Its mail is held: this session's record cannot be read, and mail flows again once the record is repaired."
+      : "Its mailbox is off: the lane's mailbox toggle turns peer mail back on.";   // the reason rides the frame: a remedy that fits (T356)
     pop.appendChild(mailOn);
     const row = el("div", "cmt-actions");
     const open = el("button", "cmt-act") as HTMLButtonElement;
@@ -12070,12 +12184,56 @@ function fillSnapshotRow(btn: HTMLElement, r: SnapRow, now: number): void {
 // no DOM left to capture from and the emptied box no longer overflows. undefined = capture here.
 // The empty body's line (pane-focus.ts emptyStateParts, T357): which session vanished and why, its name dressed the way
 // the strip dresses it (host prefix, identity colour), "reconnecting" when its host is dialing; or the plain invitation.
+/** The strip's MEMBERSHIP: the ids renderTabs paints a tab for (the kernel's order, plus a pushed tab not yet in it, a
+ *  placeholder), less a tab the user just closed. One rule for the paint and for every restore's fire-time check (the
+ *  review of T357's later lows: the schedule read visibleIds, built over order AND tabMeta, while the timer read order
+ *  alone, so a placeholder-only tab painted while its restore declined). */
+function stripLists(id: string): boolean {
+  return !closingTabs.has(id) && (order.includes(id) || tabMeta.has(id));
+}
+/** The unfocused pane's restore of the tab it names or awaits (T357): only a tab the strip LISTS and SHOWS takes focus
+ *  back. A listed tab the view or the #only= filter hides leaves the pane unfocused with the name-free line (vanished as
+ *  "hidden"), and renderTabs's schedule restores it when the filter shows it again. The review measured the leak this
+ *  closes: applyTabOrder's restore had no visibility predicate, so every routine tabOrder push re-focused a filtered-out
+ *  session for one animation frame, its cached transcript on screen, before renderTabs's deferred unfocus put the body
+ *  back (1 frame of 70 per push). */
+function restoreIfShown(id: string): boolean {
+  if (!stripLists(id)) return false;
+  if (stripShows(id)) { setActive(id); return true; }
+  if (!activeId) { vanishedId = id; vanishedWhy = "hidden"; vanishedName = sessions.get(id)?.name || tabMeta.get(id)?.name || vanishedName || wantActiveName || ""; }
+  return false;
+}
+/** Does the strip show `id` right now: in the tab view (a peek counts) AND matching the `#only=` filter — the one
+ *  predicate renderTabs's visibleIds is built from, read again at fire time so a deferred check judges the strip as
+ *  it is, not as it was scheduled. `only` may be passed by a caller that read the hash once for many ids. */
+function stripShows(id: string, only: string | null = onlyTag()): boolean {
+  if (!tabInView(id)) return false;
+  return !only || matchesOnly(sessions.get(id)?.name ?? tabMeta.get(id)?.name ?? "", only);
+}
+
+// The strip's #only= filter stopped showing the active tab (T357, the review's probe: web persisted, `#only=api`, a
+// reload): the same rule as a dismissal — the pane goes UNFOCUSED naming the session the filter hides, its transcript
+// leaves the screen, and it never re-points itself at another session. renderTabs restores it when the filter shows
+// it again.
+function unfocusHiddenByView(id: string): void {
+  if (activeId !== id) return;
+  stashActiveDraft(id);
+  activeId = null; vanishedId = id; vanishedWhy = "hidden"; vanishedName = sessions.get(id)?.name || tabMeta.get(id)?.name || ""; vanishedByDecline = false;   // the user's own tab: no arrival may adopt over it
+  loadComposerFor(null);
+  renderTabs();
+  showActive();
+}
 function paintEmptyState(empty: HTMLElement): void {
   const awaited = !vanishedId && wantActive ? wantActive : null;   // the persisted tab, not listed yet after a reload
-  const named = vanishedId || awaited;
+  const gone = !vanishedId && !awaited && wantActiveGone ? wantActiveGone : null;   // a persisted id that can never be listed again
+  const named = vanishedId || awaited || gone;
+  // a name over a raw sid on EVERY branch: the name carried, the persisted one, the strip's last known, else "a
+  // session" (the review's low: the dismissal branch fell to the id)
+  const nameOf = (id: string, carried = "") => carried || wantActiveName || tabMeta.get(id)?.name || sessions.get(id)?.name || "a session";
   const v = vanishedId && vanishedWhy && vanishedWhy !== "close"
-    ? { name: vanishedName || tabMeta.get(vanishedId)?.name || vanishedId, why: vanishedWhy, dialing: hostIsDialing(vanishedId) }
-    : awaited ? { name: wantActiveName || tabMeta.get(awaited)?.name || awaited, why: "awaited" as const, dialing: hostIsDialing(awaited) }
+    ? { name: nameOf(vanishedId, vanishedName), why: vanishedWhy, dialing: hostIsDialing(vanishedId), declined: vanishedByDecline }
+    : awaited ? { name: nameOf(awaited), why: "awaited" as const, dialing: hostIsDialing(awaited) }
+    : gone ? { name: nameOf(gone), why: "gone" as const, dialing: false }
     : null;
   const parts = emptyStateParts(v, order.length > 0);
   empty.replaceChildren(document.createTextNode(parts.head));
@@ -12099,17 +12257,6 @@ function repaintEmptyStateIfUnfocused(): void {
   if (e) paintEmptyState(e);
 }
 
-// The tab VIEW stopped showing the active tab (a tag the view selects on was removed; T357, the review): the same
-// rule as a dismissal — the pane goes UNFOCUSED naming the session the view no longer shows, and never re-points
-// itself at another session. renderTabs restores it when the view shows it again.
-function unfocusHiddenByView(id: string): void {
-  if (activeId !== id) return;
-  stashActiveDraft(id);
-  activeId = null; vanishedId = id; vanishedWhy = "hidden"; vanishedName = sessions.get(id)?.name || tabMeta.get(id)?.name || id;
-  loadComposerFor(null);
-  renderTabs();
-  showActive();
-}
 /** From the unfocused pane a keyboard step lands on the first visible tab: a user gesture, allowed (the review's medium:
  *  the cycle and the arrows returned early on no active tab, silently). */
 function pickFirstVisibleTab(): boolean {
@@ -16325,11 +16472,9 @@ function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: s
     clearSeek();
   }
   activeId = id;
-  vanishedId = null; vanishedWhy = null; vanishedName = ""; wantActive = null;   // any activation ends the unfocused state, the awaited tab included (T357)
+  vanishedId = null; vanishedWhy = null; vanishedName = ""; wantActive = null; wantActiveGone = null; vanishedByDecline = false;   // any activation ends the unfocused state (T357)
   updateLivePaused();   // the entering tab's own detached state shows or hides the strip (round 2, item 7)
-  try {   // the name rides beside the id: after a reload the unfocused body names the awaited tab before its host relays (T357)
-    vscodeApi?.setState?.({ ...(vscodeApi.getState?.() || {}), activeId: id, activeName: liveSession(id)?.name || tabMeta.get(id)?.name || "" });
-  } catch { /* ignore */ }
+  persistActive(id);   // the name rides beside the id: after a reload the unfocused body names the awaited tab before its host relays (T357)
   renderTabs();
   showActive();
   schedulePrebuild(); // warm the OTHER tabs in idle (MRU-first) so the next switch is instant
@@ -16492,15 +16637,18 @@ function upsert(msg: any) {
   // since (a click into the box, a tab switch or the ✕ would have retired it), so put them back exactly
   // where they were — its tab active, its kept draft in the box. Merely retiring the note here left the
   // fallback tab active with the box unheld, and the next blind keystroke landed there after all (the
-  // T236 harness, omission path: the tab is re-listed within seconds). setActive clears the note.
-  if (composerNoteSid === msg.id) setActive(msg.id);
-  colSets = readColSets();   // membership for the two adoptions below (the chat split): fresh, not the last render's — a later column's socket carries every session's frames, and only a member may take the box
+  // T236 harness, omission path: the tab is re-listed within seconds). restoreIfShown retires the note through setActive,
+  // and only when the strip shows the tab: a tab the view or the filter hides keeps the box held for it.
+  if (composerNoteSid === msg.id) restoreIfShown(msg.id);   // …through the one restore rule: a tab the view or the filter hides takes no focus (the review's low)
+  colSets = readColSets();   // membership for the restores and the adoption below (the chat split): fresh, not the last render's — a later column's socket carries every session's frames, and only a member may take the box
   // T357: the session the user was on is back (its host re-attached, the relay redialed) → its focus is restored;
   // and while it is away, an arrival of ANY OTHER session adopts nothing — the pane stays unfocused
-  if (vanishedId === msg.id && heldHere(msg.id)) setActive(msg.id);   // …when this column holds it (the chat split)
-  const adopted = !activeId && !vanishedId && !wantActive && heldHere(msg.id);   // …nor while the persisted tab is still awaited after a reload (T357); and only a session this column holds (the chat split, 2026-09-11)
-  if (adopted) { activeId = msg.id; loadComposerFor(msg.id, true); }   // adopted as the only tab → its draft too (T236: the once-per-page restore below never covers a session that LEFT and came back)
-  if (wantActive && msg.id === wantActive && heldHere(msg.id)) { wantActive = null; setActive(msg.id); }   // restore persisted tab on arrival — while this column holds it (a want for a tab moved away is retired by staleActiveFallback)
+  if (vanishedId === msg.id && heldHere(msg.id)) restoreIfShown(msg.id);   // …if the strip shows it: hidden by the view or the filter, the pane stays unfocused (applyTabOrder's rule); and only when this column holds it (the chat split)
+  const wouldAdopt = !activeId && (!vanishedId || vanishedByDecline) && !wantActive && !wantActiveGone && heldHere(msg.id);   // …nor while the persisted tab is awaited after a reload, nor while the body says it is gone: a pick, not an arrival, moves on (T357); and only a session this column holds (the chat split, 2026-09-11): another column's session neither adopts here nor leaves a declined record; membership is the append above
+  const adopted = wouldAdopt && stripShows(msg.id);   // …and never a session the view or the #only= filter hides (the review's low: the adopt wrote activeId past the rule's visibility half; membership is the append above)
+  if (adopted) { activeId = msg.id; assertPeekFor(msg.id); loadComposerFor(msg.id, true); persistActive(msg.id); vanishedId = null; vanishedWhy = null; vanishedName = ""; wantActive = null; wantActiveGone = null; vanishedByDecline = false; }   // persisted like a pick: a restart lands here again; the peek asserted like a pick's, so a view-hidden first arrival has a tab (the review's lows)   // adopted as the only tab → its draft too (T236: the once-per-page restore below never covers a session that LEFT and came back) An adoption ends the unfocused state exactly as setActive does (the review's high: a declined record left standing beside the adopted tab would hand its session to applyTabOrder's restore the moment the filter lifted, and the pane jumped to a session the user never had).
+  else if (wouldAdopt && !vanishedId) { vanishedId = msg.id; vanishedWhy = "hidden"; vanishedName = sessions.get(msg.id)?.name || tabMeta.get(msg.id)?.name || ""; vanishedByDecline = true; }   // a DECLINED adoption records the session as restoreIfShown does, so renderTabs's schedule restores it when the filter shows it (the review's low: under a filter matching no live session the body showed the generic line and lifting the filter restored nothing); the record yields to a later VISIBLE first arrival (vanishedByDecline), since nothing was chosen, and is taken on FIRST sight only: a later hidden arrival never overwrites it, so which session the lift restores does not change between builds (the review's low)
+  if (wantActive && msg.id === wantActive && stripLists(msg.id) && heldHere(msg.id)) { wantActive = null; restoreIfShown(msg.id); }   // restore persisted tab on arrival, if the strip shows it (else unfocused as hidden, restored when shown) — while this column holds it (a want for a tab moved away is retired by staleActiveFallback)
   renderTabs();                                   // a new id appended to `order` above → strip repaints in kernel order
   // Active tab: a content refresh appends + preserves scroll (appendActive); a new tab or a fork
   // lands at the bottom/anchor (showActive). This is what keeps new pushes from snapping to bottom.
@@ -17112,7 +17260,7 @@ function flashComposerNote(): void {
 function dismissSession(id: string, why: DismissWhy, doomed?: ReadonlySet<string>): void {
   if (peekId === id) peekId = null;   // its tab is going — the peek goes with it
   const wasActive = activeId === id;
-  const name = sessions.get(id)?.name || tabMeta.get(id)?.name || id;   // read before the maps forget it
+  const name = sessions.get(id)?.name || tabMeta.get(id)?.name || "a session";   // read before the maps forget it; never a raw sid in a line the user reads (T357)
   if (wasActive) stashActiveDraft(id);   // FIRST: what is on screen belongs to this id, whatever happens next
   sessions.delete(id);
   onDismiss(skeletonTabs, id);   // a tab that left the strip (✕, the kernel's omission, a host drop) has nothing left to load (2026-09-07)
@@ -17134,6 +17282,16 @@ function dismissSession(id: string, why: DismissWhy, doomed?: ReadonlySet<string
   const oi = order.indexOf(id); if (oi >= 0) order.splice(oi, 1);
   const mi = mru.indexOf(id); if (mi >= 0) mru.splice(mi, 1);   // before the fallback read below — never the dead id
   renderTabs();                          // tab removed from `order` above → repaint without it
+  if (!wasActive && vanishedId === id) {
+    // the tab the UNFOCUSED pane names is torn down while not active: the body's line follows the reason (the review's
+    // low: it kept the view's name-free line after the tab was gone; the vanished write below is the active tab's alone).
+    // A DECLINED record's session (never the user's; hidden by a filter meant to keep the frame clean) takes its record
+    // with it instead, so the frame never paints that session's name (the review's medium), and the next hidden arrival
+    // may be recorded on first sight
+    if (vanishedByDecline) { vanishedId = null; vanishedWhy = null; vanishedName = ""; vanishedByDecline = false; }
+    else { vanishedWhy = why; vanishedName = name; }
+    repaintEmptyStateIfUnfocused();
+  }
   if (wasActive) {
     // Where the box goes (pane-focus.ts focusAfterDismiss; T357, the user 2026-09-11): only the user's OWN ✕ hands it
     // to the recency fallback — MRU, then the first tab still on the strip (the dead id left `mru` above; an id `order`
@@ -17147,7 +17305,7 @@ function dismissSession(id: string, why: DismissWhy, doomed?: ReadonlySet<string
     const goingToo = (x: string) => (doomed?.has(x) ?? false) || (why === "hostDrop" && !!home && hostOf(x) === home) || !heldHere(x);   // …nor a tab another column holds (the chat split): it is nobody's fallback here
     const next = focusAfterDismiss(why, mru, order, goingToo);
     activeId = next.activeId;
-    if (next.unfocused) { vanishedId = id; vanishedWhy = why; vanishedName = name; }
+    if (next.unfocused) { vanishedId = id; vanishedWhy = why; vanishedName = name; vanishedByDecline = false; }   // the user's own tab went: no arrival may adopt over it (the review's high)
     loadComposerFor(activeId);   // the strip was showing the CLOSED session's chip/thumbnails/draft — swap in the new active tab's (usually none)
     // The box just changed hands under the user. Their own ✕ is the one case they already know; for every
     // other reason BLUR it — a keystroke a moment later must not land in the survivor's session unnoticed
@@ -17293,6 +17451,10 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   else if (m.type === "update") update(m);
   else if (m.type === "wsup") { onSocketUp(skeletonTabs); skeletonDiagArmed = true; reholdQueuedEditors(); }   // the shim's socket-flip marker, in FRAME order: the dead socket's frames may still be draining from the FIFO when onopen fires (review find 2026-09-07)
   else if (m.type === "status") statusOnly(m);
+  else if (m.type === "glossary" && typeof m.id === "string") {   // the session's glossary index (T351 stage 2): a new one re-links the view
+    glossaries.set(m.id, m as GlossaryIndex);
+    relinkTerms(m.id);
+  }
   else if (m.type === "focus" && !focusIsOurs(m.id)) {
     // another chat column's (split screen): the shell named the column that holds the session. A consumed parked
     // push-tap reveal rides `own` (the kernel sent it to THIS one client, _consume_pending_reveal): it is handed to
@@ -19446,7 +19608,14 @@ setupSettings();
   // so the click — dispatched immediately after pointerup, before the timer — fires against the live node first.
   tabs.addEventListener("pointerdown", () => { tabPointerHeld = true; });
   window.addEventListener("pointerup", releaseTabStrip);
-  window.addEventListener("pointercancel", releaseTabStrip);
+  // pointercancel arrives in TWO shapes. A touch that became a scroll: the press is over, release. The start of a
+  // drag: the browser cancels the pointer the moment a drag-and-drop operation begins (dragstart, then pointercancel,
+  // the same tick), and the press is NOT over — the drag is the press, and the hold must outlive it, as the dragend
+  // handlers (wireTabDrag, makeGroupHead) assume when they release it themselves. Releasing here let any kernel push
+  // that landed mid-drag rebuild #tabs under the gesture (the drag had blanked the strip's signature), detaching the
+  // dragged node: the live reorder stopped, and the drop moved nothing (2026-09-11, a rename pushed mid-drag in the
+  // served lab). The drag state the dragstart handlers set is the tell; a drag of ours in flight keeps the hold.
+  window.addEventListener("pointercancel", () => { if (draggedId || draggedGroup) return; releaseTabStrip(); });
   window.addEventListener("blur", releaseTabStrip);
   // LIVE REORDER (T127, the user 2026-08-27: dragging should push the other tabs into their new
   // locations as you drag, the way browsers do): while a tab drags, its in-flow element moves
@@ -19455,6 +19624,11 @@ setupSettings();
   // pushed past a row's end wraps to the next row mid-drag; siblings FLIP to their new rects
   // (flipTabs). The no-op guard (already sitting immediately before the reference node) is what
   // keeps a pointer resting inside one slot from churning the DOM on every dragover tick.
+  // The tick on which the element under the pointer CHANGES is a dragenter tick, not a dragover one, and Chromium
+  // takes that tick's drop operation from the dragenter — which the live reorder makes happen under a still pointer,
+  // since its insert slides a new element under the cursor. Accepted here while a drag of ours is in flight, so a
+  // release right after a hop drops instead of cancelling (drag-accept.ts has the account; 2026-09-11).
+  acceptDragEnter(tabs, () => !!(draggedId || draggedGroup));
   tabs.addEventListener("dragover", (e) => {
     if (draggedGroup) {
       // a GROUP drag (tab groups): the target is the section under the pointer — its header, or
@@ -19493,9 +19667,14 @@ setupSettings();
     const others = Array.from(tabs.querySelectorAll<HTMLElement>(".tab[data-id], .tab-group-head, .tab-group-sep")).filter((t) => t !== dragged);
     const isBreak = (n: Element | null) => !!n && n.classList.contains("tab-group-break");
     const before = (t: HTMLElement) => { let p = t.previousElementSibling; while (p && p === dragged) p = p.previousElementSibling; return p; };
+    // the row openers: a break itself, and a HEADER a break precedes (the break before a named group is not in
+    // `others`, so its header carries the opening). The trail's first tab follows its break but is not one: the break
+    // (in `others`, zero width) already opened the trail's row, and marking the tab too put two openers on that row —
+    // which the simulation now tolerates (dragslot.ts: a zero-width box fills nothing), but one opener per row is the
+    // strip's own shape (the user 2026-09-11, whose drops on the untagged row all landed at its head in the themed strip)
     const boxes = others.map((t) => ({ id: t.dataset.id || " head:" + (t.dataset.group || ""),
                                        w: isBreak(t) ? 0 : (t.dataset.id ? dragGeom!.widths.get(t.dataset.id) : undefined) ?? t.getBoundingClientRect().width,
-                                       br: isBreak(t) || isBreak(before(t)) }));
+                                       br: isBreak(t) || (t.classList.contains("tab-group-head") && isBreak(before(t))) }));
     const br = tabs.getBoundingClientRect();
     const idx = dragSlotIndex(boxes, dragGeom.containerW, dragGeom.gapX, dragGeom.rowH,
                               e.clientX - br.left, e.clientY - br.top);

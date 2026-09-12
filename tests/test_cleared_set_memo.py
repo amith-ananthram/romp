@@ -19,6 +19,7 @@ import tempfile
 import time
 import unittest
 from romp_load import load_source
+from fs_clock import move_ctime as _move_ctime   # noqa: E402  the shared test helper, on the path the line above put there
 from pathlib import Path
 from unittest.mock import patch
 
@@ -34,21 +35,6 @@ jd = km.jd
 SID = "11111111-2222-3333-4444-888888888802"
 G1, G2, G3 = SID + ":g1", SID + ":g2", SID + ":g3"
 NOW = 1_800_000_000
-
-
-def _move_ctime(path):
-    """Move a file's ctime and nothing else: flip its mode between 0o600 and 0o644, checking the stat after
-    each chmod, until the ctime differs (a coarse filesystem clock can hand two chmods one timestamp). mtime,
-    size and inode stand. Bounded at 5 s: a filesystem that never ticks ctime under chmod fails the test
-    loudly rather than passing it."""
-    before = cur = os.stat(path)
-    deadline = time.monotonic() + 5
-    while cur.st_ctime_ns == before.st_ctime_ns:
-        if time.monotonic() > deadline:
-            raise AssertionError("ctime did not move under chmod within 5 s")
-        os.chmod(path, 0o644 if (cur.st_mode & 0o777) == 0o600 else 0o600)
-        cur = os.stat(path)
-    return cur
 
 
 class _Memo(unittest.TestCase):

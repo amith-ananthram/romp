@@ -19,13 +19,17 @@ test("the popover says the thread's mail is off, and the promoted view says it i
   // the user's ruling (2026-09-11, 3:05 PM PT): the comment box says nothing about mail being off; a line only for held mail
   assert.doesNotMatch(RENDER, /Mail off: this thread neither sends nor receives peer mail/);
   assert.match(RENDER, /if \(th && th\.mailOff && \(th\.heldMail \|\| 0\) > 0\) \{[\s\S]{0,700}?mail\.textContent = held \+ \(held === 1 \? " message waits in its box and lands" : " messages wait in its box and land"\) \+ " at the break-out\.";/);
-  assert.match(RENDER, /note\.textContent = "The discussion continues there\.";\s*\n\s*pop\.appendChild\(note\);[\s\S]{0,600}mailOn\.textContent = th\.mailOff[\s\S]{0,200}: "Its mail is on now: peers can reach it and it can send\."/,
+  assert.match(RENDER, /note\.textContent = "The discussion continues there\.";\s*\n\s*pop\.appendChild\(note\);[\s\S]{0,600}mailOn\.textContent = !th\.mailOff[\s\S]{0,80}\? "Its mail is on now: peers can reach it and it can send\."/,
                "said once, in the promoted view, from the effective state");
   assert.match(CSS, /\.cmt-note\.cmt-mail \{ opacity: 0\.6; font-size: 0\.86em; \}/);
   // the follow-up: the promoted line reads the EFFECTIVE state (a mailbox toggled off since says so), and both lines
   // count the mail held in the box
   assert.match(COMMENTS, /heldMail\?: number;/);
-  assert.match(RENDER, /mailOn\.textContent = th\.mailOff\s*\n\s*\? "Its mailbox is off: the lane's mailbox toggle turns peer mail back on\."/);
+  assert.match(RENDER, /mailOn\.textContent = !th\.mailOff\s*\n\s*\? "Its mail is on now[^\n]*\n\s*: th\.mailOffWhy === "unreadable" \? "Its mail is held: this session's record cannot be read, and mail flows again once the record is repaired\."\s*\n\s*: "Its mailbox is off: the lane's mailbox toggle turns peer mail back on\."/,
+               "the promoted line reads the reason: an unreadable record is no mailbox toggle's to clear");
+  assert.match(COMMENTS, /mailOffWhy\?: string;/);
+  assert.match(KERNEL, /mail_why = _mail_off_why_k\(tsid\)\s*\n\s*threads\.append\(\{/, "the comments frame derives the reason once, before the row");
+  assert.match(KERNEL, /"mailOff": bool\(mail_why\),[^\n]*\n\s*"mailOffWhy": mail_why,/, "…and both fields read that one derivation");
   assert.match(RENDER, /" in a moment\."/);
 });
 
@@ -45,8 +49,9 @@ test("the kernel and the bus derive the same default from the thread's reg and t
   assert.match(KERNEL, /def _mail_off_why_k\(sid\):[\s\S]*?if _reg_unreadable\(sid\):\s*\n\s*return "unreadable"\s*\n\s*if _thread_mail_off\(sid\):\s*\n\s*return "thread"\s*\n\s*return "isolation" if \(_session_flag\(sid, "postalServiceOff"\) or _session_flag\(sid, "postalOff"\)\) else ""/,
                "the kernel's reasons: unreadable first (the bus holds everything for it), then the thread default, then the mailbox flag");
   assert.match(KERNEL, /def _postal_isolated\(sid\):[\s\S]*?return bool\(_mail_off_why_k\(sid\)\)/);
-  assert.match(KERNEL, /"mailOff": bool\(_postal_isolated\(tsid\)\),/, "the comments frame carries it");
-  assert.match(KERNEL, /"postalServiceOff": _postal_isolated\(m\["id"\]\),/, "the Sessions pane rows carry it");
+  assert.match(KERNEL, /"mailOff": bool\(mail_why\),/, "the comments frame carries it (one derivation with the reason)");
+  assert.match(KERNEL, /\*\*_mail_off_fields\(m\["id"\]\),/, "the Sessions pane rows carry it, with the reason, from one derivation (T356 fifth follow-up)");
+  assert.match(KERNEL, /def _mail_off_fields\(sid\):[\s\S]*?why = _mail_off_why_k\(sid\)\s*\n\s*return \{"postalServiceOff": bool\(why\), "mailOffWhy": why\}/, "the one derivation behind both fields");
   assert.match(POSTAL, /t = _thread_of\(sid\)\s*\n\s*if t == THREAD_REG_UNREADABLE:\s*\n\s*return "unreadable"[^\n]*\n\s*if t and not \(isinstance\(f, dict\) and f\.get\("threadMail"\) is True\):\s*\n\s*return "thread"/,
                "an unreadable record is closed under its own reason, then the literal-True key");
   assert.match(POSTAL, /agents, listing_answered = local_agents_checked\(threads=True\)/, "the relay lists thread rows, so a thread recipient bounces instead of retrying forever");

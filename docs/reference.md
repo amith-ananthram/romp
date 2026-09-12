@@ -981,11 +981,45 @@ cursor stood at that count. A fresh kernel verifies the guard bytes on disk,
 reads only the bytes past the offset and resumes each fold from its recorded
 state; a checkpoint that does not verify (its version, its path, a file that
 shrank, a rewrite under the guard, a corrupt document) falls back to a whole
-read, is counted per reason in `/perf` and said once on stderr. A fold whose
-encoded state would exceed 64 KB is left out of the document and counted (a
-state that grows with its file, such as the postal log fold's map of every
-sent row, would make the document a second copy of the file); it cold-folds
-at first touch, while the bounded folds beside it restore. Checkpoints
+read, is counted per reason in `/perf` and said once on stderr. Every fold
+holding a cursor inside the entry's held records is recorded at its own count
+(a fold stepped by builds rather than by the settle may lag the leaf), and the
+document's cut is the lowest of them, so the next kernel's tail read holds what
+a lagging fold has yet to step and its restore is an append. A fold whose
+encoded state would exceed the cap (8 MiB, sized to the machine) is left out
+of the document and counted (a state that grows with its file, such as the
+postal log fold's map of every sent row, would make the document a second
+copy of the file); its cursor stays with the state's size as the reason, and
+it cold-folds at first touch over the tail, while the bounded folds beside it
+restore. A cursor recorded without a state for any other reason (a tail-only
+state a cold fold left, or an older kernel's entry) restarts cold once, says
+so, and is healed by one whole refold: a leaf's folds at the session's next
+settle, before the write, so that write carries their states; another file's
+fold (a states log's) is left out of its next checkpoint write and read whole
+once at the next boot. After that the fold is written whole and every later
+boot restores it warm. A fold that never ran in the process that wrote the
+document has no entry there, and the next kernel reads the file whole for it
+at first touch; the converge pass on the pusher's cycle then writes that
+document (and, over the whole entry the read left, every leaf fold with it),
+independent of settle evidence, so the read is paid once even for a session
+that never settles again; the pass is bounded per cycle (`ROMP_CKPT_CONVERGE_MS`,
+default 150 ms of wall, and `ROMP_CKPT_CONVERGE_MB`, default 8 MB of documents
+written plus leaf bytes read for a heal), heals a legacy bare cursor under the
+same budget, and never rewrites a document that already carries every fold
+that ran. A leaf unchanged for longer than the reader keeps a quiescent
+file's whole entry (two minutes) is refused by the pass and counted under
+`quiescent`: its heal would read the file whole every cycle and the write
+would find no entry (the boot's cold refold or the next settle converges it);
+a path the pass refused or whose write produced nothing is skipped until its
+file changes (`skipped`); `ROMP_CKPT_CONVERGE_MS=0` turns the pass off. Every
+write merges the on-disk document's states for folds the
+writing process never ran (verified by that document's stat and guard as a
+restore would), so a rewrite from one process's cursors strips no state an
+earlier process stored. A fold's count may lag the entry's by 64 records or an
+eighth of the entry, whichever is more, and still be written or carried at its
+own count; further behind, the fold is left out (it refolds whole once when it
+next runs), so a fold that ran early and stopped cannot drag the document's
+cut, and every later boot's tail read, back to its count. Checkpoints
 are written when a session's turn settles or its states log moves, and all of
 them at exit; checkpoints of files that no longer exist are swept at boot. A
 compaction appends records and changes nothing here.
@@ -1006,7 +1040,17 @@ hash, and hands the judges and the display one tree. Since the lazy index
 each pre-cut turn as its identity, its atoms' row indexes, its segments' spans
 and the scalars the kernel's walkers read (the atoms' uuids, the last and
 latest times, the last model, the tool calls), so a restore builds the turns
-without building an atom. The pre-cut rows stay as bytes; a turn's atoms are
+without building an atom. Document version 5 (T358) adds what the per-cycle
+walkers read: each turn's assistant prose chars by uuid and its newest
+genuine-human time, each segment's has-work verdict and postal message ids,
+and on every lazy marker the prose chars and message ids; the caption
+planner, the feed's transcript-side sets and citation gate, the timeline's
+message-id join then read scalars and build no atom for a captioned or
+already-rendered history, and a segment's atoms are a view that builds only
+what is read. The summary anchors read scalars too (no body is hydrated) but
+still build each pre-cut atom they walk on a cold pass, until the document
+carries per-segment anchors. A version 4 document is refused and the
+session parses whole once. The pre-cut rows stay as bytes; a turn's atoms are
 a list whose slots are built one at a time when a consumer reaches for them,
 through a process-wide LRU of 20000 built atoms across every session (eviction
 drops the memo; a consumer's own reference stays whole), counted per consumer
@@ -1383,10 +1427,17 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   folds resumed from one), `restoredFolds` (restores per fold name), `writes`,
   `swept` (checkpoints of vanished files removed at boot), `skippedFolds`
   (fold states the codec could not encode), `oversizeFolds` (per fold name,
-  states over the 64 KB cap: the document keeps that fold's cursor without its
-  state, and the next kernel starts the fold cold at the cut over the tail
-  only), `coldFolds` (per fold name, folds that started cold that way this
-  boot), `coldWrites` (per fold name, writes that kept such a tail-only state
+  states over the cap: the document keeps that fold's cursor without its
+  state, with the state's KB as the reason, and the next kernel starts the fold
+  cold at the cut over the tail only), `coldFolds` (per fold name, folds that
+  started cold this boot, for that reason or for a cursor recorded without a
+  state, which the next settle heals), `converge` (the converge pass: `passes`,
+  `writes`, `bytes`, `heals`, `healBytes`, `primed`, `deferred`, `failed` for a
+  write that wrote nothing, `unhealed` for a cold fold the pass could not rerun,
+  whose cursor it dropped so its next run reads the file whole once, and
+  `docReadBytes`, the documents the pass's writes read for their carry,
+  `quiescent` for leaves refused as quiescent, `skipped` for candidates held
+  off until their file changes), `coldWrites` (per fold name, writes that kept such a tail-only state
   out of the document so no later kernel restores it as complete), `droppedRestores` (a
   restore lost to a read that replaced the entry under it; the reader
   serializes reads per path, so this should stay at zero), `documentBytes`
@@ -1395,6 +1446,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `corrupt`), `dirty` (files whose folds moved since their last write),
   `readBytes` and `readByPath` (what the JSONL reader pulled off disk since
   boot, in total and per file).
+- `stacks`: every thread's last six frames, keyed by the thread's ident and
+  name, when the kernel runs with `ROMP_PERF_STACKS` set (a debugging aid for a
+  served test on a runner nobody can log into); `null` otherwise.
 - `asmCheckpoint`: the assembly documents since boot: `written`, `restored`,
   `fallbacks` per reason (`version`, `session`, `inputs`, `lineage`, `shrunk`,
   `rewrite`, `guard`, `identity`, `corrupt`, `restore`), `skipped` per reason
@@ -1760,7 +1814,8 @@ the same card:
 
 Stage 1 fills it from the slice route (`markdown`, `section`, `code`) and the
 bytes route (`image` at its natural size capped to the card, `pdf` as its first
-page), or with the text-only card. A previewed document renders on the
+page), or with the text-only card; stage 2 fills it with the `term` kind from the
+glossary index below, no fetch. A previewed document renders on the
 sanitizer's inert DOM and is stripped of every remote load there, before its
 nodes join the page: an image's `src` or `srcset`, a picture's sources, a video's
 poster or source, an audio, an SVG image, in any spelling the URL parser
@@ -1777,6 +1832,53 @@ team's glossary format: a per-project glossary file whose headings (and their
 aliases) are linkified in assistant text, mail bodies and cards at render time,
 and a `GET /glossary/<term>` route answering `{title, markdown, source_path,
 anchor}` that fills the `term` kind of the same card.
+
+## The glossary
+
+A team's coinages, linked where they are written. One file per romp tag group,
+`~/.claude/glossaries/<group>.md` (under `CLAUDE_CONFIG_DIR` when set), in the
+grammar of that folder's README: an opening `## Not coinages` list of words never
+linked (each bullet's bold lead, or the text before its colon, read as words), then
+one `## <term>` section per coinage with a definition paragraph and the labelled
+bullets `plain words`, `also` (aliases, spaces allowed), `scope`, `status`
+(unconfirmed, confirmed, retired), `registered` (`<date> by <session>`) and
+`link` (`all`, `first`, `off`; default `all`). A chat message is resolved
+against its author's group: the session's tag group's file, else its own name's;
+a mail body shown in a session's chat links the READER's group (the chat
+session's index; the sender's group is a later refinement). The repo-local
+`docs/glossary.md` is a seam kept for a second source with no file today.
+
+The kernel parses a file once per `(path, mtime)` and ships each session a
+`{type: "glossary"}` frame on the pusher's cycle, on its own dedup slot like the
+comments frame (the stat is the event; no timer, no watcher): `group`, `path`,
+`mtime`, `skip`, `terms` (term, slug, definition, plain words, also, scope,
+status, registered, link) and `truncated`, the count of entries cut by the
+index's byte cap (256 KB) or lying past the heading index's ceiling (256
+headings), counted in `/perf` under `glossary` beside the parses and the frames,
+terms and bytes BUILT per cycle (the dedup slot decides what is shipped). A file
+over the preview route's 2 MB read ceiling is not read; the parsed cache holds
+sixteen files, least recently read out first. Slugs come from the file's headings in order
+through the viewer's own rule, the Not-coinages heading included, so a card opens
+the viewer on the heading the viewer gave that id.
+
+The chat page compiles one matcher per index (`glossary-links.ts`): every form
+(the term, its aliases, and their plurals by the everyday rule; nothing shorter
+than two characters) whole-word and case-insensitive, longest first, minus the
+skip list (a listed word, its plurals and any alias equal to one of them), over
+the prose of assistant and user text and mail bodies; never code, links,
+headings, math, the composer, tool heads, the timeline, nor inside a path-shaped
+or host-shaped token (a path the kernel could not verify stays plain, unsplit).
+A term split across text nodes by an inline element is not matched. Each occurrence becomes a `.term-link` span carrying
+the glossary path and the term's slug, exactly like a path link's absorbed
+section: the same hover card (filled from the index, no fetch) and the same
+click (the viewer at the heading). `link: first` links the first occurrence per
+message; `off` links nothing; a retired term greys and its card says to use the
+plain phrase. A new frame re-links the session's rendered view.
+
+`GET /glossary/<term>?sid=` answers `{title, markdown (the whole section),
+source_path, anchor, group, status, link}` for the lab's own consumers, matching
+the term or an alias whole-word and case-insensitive; 404 with the paths tried
+when the group has no file or the term is absent.
 
 ## Browser-side performance telemetry
 
@@ -2740,13 +2842,27 @@ follows it. A row bearing the signature with no restart instant on record (a
 crash leaves no audit row) is taken as a step only on a chain the session has
 already shown. `--since` is the instant the per-session hosts came on: before
 it every restart killed the CLI, so nothing there is a step. Rows the fixed
-kernel writes (`cumulativeUsd`, `spendBaseline`) are never touched.
+kernel writes (`cumulativeUsd`, `spendBaseline`) are never staircase steps; one
+rule of their own reaches them: a row whose kernel figure equals its cumulative,
+in a session whose `attach-unknown` row precedes it, is the lifetime billed
+once more (the fix's first boot left the watermark at zero after a replayed
+first result) and is corrected by the kernel's own arithmetic to the cumulative
+less the previous same-session row's cumulative (a replayed row with no dollars
+and a rising cumulative counts as that previous row), stamped `repairRule` 5.
+The guard is the kernel's reset comparison, the cumulative above the previous
+row's: the first paid turn after a mid-life `/clear` is written with its
+dollars equal to its cumulative by design, a counter reset, and the rule stands
+down with a note (never a clamp); the chain disarms on the row it judged, on a
+reset and on a fresh or seeded baseline row.
 
 It prints before and after per hour and per session and changes nothing unless
 `--apply` is given. A corrected row keeps the kernel's figure as `usdRecorded`,
 and every run judges a repaired row again on that figure, so a tightened rule
 or a later `--since` restores what an earlier run took, and a run over a
-repaired day changes nothing. Per-session figures fold under the session a row
+repaired day re-judges every correction, staircase and lifetime alike, and
+changes nothing when the judgements stand: a lifetime correction the rule no
+longer believes is restored to `usdRecorded` and its buckets re-folded, the
+same road the staircase rules use. Per-session figures fold under the session a row
 bills (a comment thread's owner, the registry's `threadOf`), and the buckets'
 `key` split moves only for sessions the registry marks as API-key billed; the
 report says how many rows' split was left as recorded. The kernel may be

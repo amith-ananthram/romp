@@ -79,7 +79,7 @@ test("a tab drag resets the signature (its live reorder changes the strip's DOM 
 
 test("the column partition (the chat split, 2026-09-11): the sets are read once at the top, ahead of the filter and the plan, and tabInView reads columnHolds", () => {
   const read = fn.indexOf("colSets = readColSets();");
-  assert.ok(read > 0 && read < fn.indexOf("const inViewIds = ids.filter(tabInView);"), "one cross-window read per render, before the filter");
+  assert.ok(read > 0 && read < fn.indexOf("const visibleIds = ids.filter((id) => stripShows(id, only));"), "one cross-window read per render, before the filter (stripShows reads tabInView, which reads the sets)");
   assert.equal((fn.match(/readColSets\(\)/g) || []).length, 1, "read once");
   assert.ok(read < fn.indexOf("const plan = planStrip("), "before the plan, which reads visibleIds");
   assert.match(RENDER, /function heldHere\(id: string\): boolean \{ return isSubId\(id\) \|\| isProvisionalId\(id\) \|\| columnHolds\(colSets, COL, id\); \}/,

@@ -9,7 +9,9 @@ and its transcript comes back. Screenshots of the unfocused state, dark and ligh
 The reload road (the review's HIGH, the user's actual trigger): the persisted state names a REMOTE tab this kernel never
 lists; after a reload the pane stays unfocused naming it, the local sessions adopt nothing, the remote strip entry
 restores focus to it, and a pick made before the relay wins.
-Synthetic fixtures only: placeholder UUIDs, a hermetic state root, an invented notes-api world."""
+The #only= filter (the review's probe): the persisted active tab hidden by the filter goes unfocused, its transcript off
+screen, named as hidden by the view. Synthetic fixtures only: placeholder UUIDs, a hermetic state root, an invented
+notes-api world."""
 import json
 import os
 import re
@@ -36,6 +38,7 @@ SID_A = "11111111-2222-3333-4444-555555555555"
 SID_B = "aaaaaaaa-1111-2222-3333-444444444444"
 SID_C = "bbbbbbbb-1111-2222-3333-444444444444"   # a session that appears while the user's tab is away: never adopted
 REMOTE = "REMOTEBOX:cccccccc-1111-2222-3333-444444444444"   # a remote host's session this kernel never lists: the reload road's awaited tab
+PROVISIONAL = "new-" + "docs"   # a provisional create's id (ui/webview/provisional.ts): a persisted choice that can never be listed again
 
 
 def _free_port():
@@ -145,6 +148,146 @@ await page.waitForFunction((sid) => { const a = document.querySelector("#tabs .t
 await inject({ type: "tabOrder", order: [cfg.remote, cfg.sidA, cfg.sidB, cfg.sidC], tabs: [R_TAB, A_TAB, B_TAB, C_TAB], live: [cfg.remote, cfg.sidA, cfg.sidB, cfg.sidC], skeleton: [cfg.remote, cfg.sidC] });
 await page.waitForTimeout(500);
 out.pickWins = await state();
+// ---- the follow-up's roads ----
+// (e) an ADOPTED tab (the pane never clicked) is persisted like a pick: clear the choice, reload, the first session
+// adopts the box, and the persisted state names it
+await page.evaluate(() => { const key = Object.keys(localStorage).find((k) => k.startsWith("romp-vscode-state-")); const st = key ? JSON.parse(localStorage.getItem(key) || "{}") : {}; delete st.activeId; delete st.activeName; localStorage.setItem(key, JSON.stringify(st)); });
+await page.reload();
+await page.waitForFunction(() => !!document.querySelector("#tabs .tab.active[data-id]"), null, { timeout: 20000 });
+out.adopted = await page.evaluate(() => { const key = Object.keys(localStorage).find((k) => k.startsWith("romp-vscode-state-")); const st = JSON.parse(localStorage.getItem(key) || "{}"); return { active: document.querySelector("#tabs .tab.active[data-id]").dataset.id, persisted: st.activeId || null, name: st.activeName || "" }; });
+// (c) a persisted state that predates the name: the body never shows a raw sid
+await page.evaluate((remote) => { const key = Object.keys(localStorage).find((k) => k.startsWith("romp-vscode-state-")); const st = JSON.parse(localStorage.getItem(key) || "{}"); st.activeId = remote; delete st.activeName; localStorage.setItem(key, JSON.stringify(st)); }, cfg.remote);
+await page.reload();
+await page.waitForFunction((n) => document.querySelectorAll("#tabs .tab[data-id]").length >= n, 2, { timeout: 20000 });
+await page.waitForTimeout(500);
+out.nameless = await state();
+// (a) the strip EMPTIES under the unfocused pane: the body and the box's placeholder follow
+await inject({ type: "tabOrder", order: [], tabs: [], live: [], skeleton: [] });
+await page.waitForFunction(() => { const e = document.getElementById("empty-state"); return !!e && /No sessions yet/.test(e.textContent || ""); }, null, { timeout: 10000 });
+out.emptied = await state();
+// (b) a persisted id that can never be listed again (a provisional create): gone, not awaited
+await page.evaluate((prov) => { const key = Object.keys(localStorage).find((k) => k.startsWith("romp-vscode-state-")); const st = JSON.parse(localStorage.getItem(key) || "{}"); st.activeId = prov; st.activeName = "docs"; localStorage.setItem(key, JSON.stringify(st)); }, cfg.provisional);
+await page.reload();
+await page.waitForFunction((n) => document.querySelectorAll("#tabs .tab[data-id]").length >= n, 2, { timeout: 20000 });
+await page.waitForTimeout(500);
+out.gone = await state();
+// the #only= filter (the review's probe): web persisted active, the page served at #only=api, a reload: the strip shows
+// only api, and web's transcript must NOT be on screen; the pane is unfocused naming web as hidden by the view
+await page.evaluate((sid) => { const key = Object.keys(localStorage).find((k) => k.startsWith("romp-vscode-state-")); const st = JSON.parse(localStorage.getItem(key) || "{}"); st.activeId = sid; st.activeName = "web"; localStorage.setItem(key, JSON.stringify(st)); }, cfg.sidA);
+await page.goto(cfg.chat + "#only=api");   // a hash-only change is no navigation: the page keeps running, so…
+await page.reload();                        // …reload with the hash in place, the way a restart's reload would find it
+await page.waitForFunction((sid) => { const tabs = Array.from(document.querySelectorAll("#tabs .tab[data-id]")).map((t) => t.dataset.id); return tabs.length >= 1 && !tabs.includes(sid); }, cfg.sidA, { timeout: 20000 });
+await page.waitForTimeout(800);
+out.onlyFiltered = await page.evaluate(() => {
+  const act = document.querySelector("#tabs .tab.active[data-id]");
+  const empty = document.getElementById("empty-state");
+  const turns = Array.from(document.querySelectorAll("#content .turn")).filter((t) => { const r = t.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(t).display !== "none"; });
+  return { active: act ? act.dataset.id : null, tabs: Array.from(document.querySelectorAll("#tabs .tab[data-id]")).map((t) => t.dataset.id),
+           empty: empty && getComputedStyle(empty).display !== "none" ? { text: empty.textContent, vanished: empty.dataset.vanished || "" } : null,
+           visibleTurns: turns.length, composerDisabled: document.getElementById("composer-input").disabled };
+});
+// a ROUTINE push under the filter (the review's leak, pre-existing on main): applyTabOrder's restore re-focused the
+// filtered-out session for one task per push, its CACHED transcript on screen, before renderTabs's deferred unfocus put
+// the body back. The leak needs web's view cached, so web is focused live first (the filter lifted live restores it), the
+// filter is set live again (unfocused, view cached), and a MutationObserver samples every DOM change across a routine
+// tabOrder push listing web: the most transcript rows visible at once, and how often the body was down. A frame
+// recorder saw nothing here (headless Chromium reverts the leak in the same task, before any paint); the observer sees
+// the transient: 4 rows / 1 body-down per push with applyTabOrder's visibility predicate reverted, 0 / 0 with it.
+await page.evaluate(() => { location.hash = ""; });
+await page.waitForFunction((sid) => { const a = document.querySelector("#tabs .tab.active[data-id]"); return !!a && a.dataset.id === sid && document.querySelectorAll("#content .turn").length > 0; }, cfg.sidA, { timeout: 10000 });
+await page.evaluate(() => { location.hash = "#only=api"; });
+await page.waitForFunction((sid) => !document.querySelector("#tabs .tab.active[data-id]") && !Array.from(document.querySelectorAll("#tabs .tab[data-id]")).some((t) => t.dataset.id === sid), cfg.sidA, { timeout: 10000 });
+await page.waitForTimeout(300);
+await page.evaluate(() => {
+  const visibleRows = () => Array.from(document.querySelectorAll("#content .turn")).filter((t) => { const r = t.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(t).display !== "none"; }).length;
+  const empty = document.getElementById("empty-state");
+  window.__mo = { samples: 0, maxRows: 0, bodyDown: 0, focused: 0 };
+  const sample = () => {
+    window.__mo.samples++;
+    window.__mo.maxRows = Math.max(window.__mo.maxRows, visibleRows());
+    if (!empty || getComputedStyle(empty).display === "none") window.__mo.bodyDown++;
+    if (document.querySelector("#tabs .tab.active[data-id]")) window.__mo.focused++;
+  };
+  const obs = new MutationObserver(sample);
+  obs.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ["class", "style", "hidden"] });
+  window.__moStop = () => obs.disconnect();
+});
+await inject({ type: "tabOrder", order: [cfg.sidA, cfg.sidB], tabs: [A_TAB, B_TAB], live: [cfg.sidA, cfg.sidB], skeleton: [] });
+await page.waitForTimeout(600);
+out.pushUnderFilter = await page.evaluate(() => { window.__moStop(); return window.__mo; });
+// the hidden tab torn down while the pane is unfocused (the review's low): the body's line follows the reason
+await inject({ type: "closed", id: cfg.sidA, hostDrop: true });
+await inject({ type: "tabOrder", order: [cfg.sidB], tabs: [B_TAB], live: [cfg.sidB], skeleton: [] });
+await page.waitForFunction((sid) => { const e = document.getElementById("empty-state"); return !!e && (e.textContent || "").includes("host disconnected") && !document.querySelector('#tabs .tab[data-id="' + sid + '"]'); }, cfg.sidA, { timeout: 10000 });
+out.tornDownWhileHidden = await state();
+// a FIRST arrival the filter hides is not adopted (the review's low: the adopt wrote activeId past the rule's visibility
+// half): nothing persisted, the page served under a filter that hides the FIRST-arriving session (api arrives before web in
+// this world) and shows a later one, the sessions arrive: the pane adopts the first VISIBLE one, never the hidden first
+const clearState = () => page.evaluate(() => { for (const k of Object.keys(localStorage)) if (k.startsWith("romp-vscode-state-")) localStorage.removeItem(k); });
+await clearState();
+await page.goto(cfg.chat + "#only=web");
+await page.reload();
+await page.waitForFunction(() => document.querySelectorAll("#tabs .tab[data-id]").length >= 1, null, { timeout: 20000 });
+await page.waitForTimeout(800);
+out.firstArrivalUnderFilter = await state();
+// …and the adoption ended the unfocused state (the review's high): with the filter lifted live, one routine tabOrder push
+// must leave the pane on web; a declined record left standing would have handed api to applyTabOrder's restore
+await page.evaluate(() => { location.hash = ""; });
+await page.waitForTimeout(300);
+await inject({ type: "tabOrder", order: [cfg.sidA, cfg.sidB], tabs: [A_TAB, B_TAB], live: [cfg.sidA, cfg.sidB], skeleton: [] });
+await page.waitForTimeout(400);
+out.afterLiftAndPush = await state();
+// a filter matching NO live session: every adoption is declined, and the declined first arrival is RECORDED (the review's
+// low: the body showed the generic line and lifting the filter restored nothing), so the body wears the view's line and
+// lifting the filter live restores that session through renderTabs's schedule
+await clearState();
+await page.goto(cfg.chat + "#only=nomatch-zz");
+await page.reload();
+await page.waitForFunction(() => document.getElementById("empty-state") && getComputedStyle(document.getElementById("empty-state")).display !== "none" && (document.getElementById("empty-state").dataset.vanished || "") !== "", null, { timeout: 20000 });
+await page.waitForTimeout(300);
+out.noMatchFilter = await state();
+await page.evaluate(() => { location.hash = ""; });
+await page.waitForFunction(() => !!document.querySelector("#tabs .tab.active[data-id]"), null, { timeout: 10000 });
+out.noMatchLifted = await state();
+// a declined record's session torn down (its host dropped, the kernel stopped listing it): the record goes with it and the
+// frame stays NAME-FREE (the review's medium: the teardown's reason painted the session's name in bold in its colour on a
+// frame the filter is meant to keep clean)
+await clearState();
+await page.goto(cfg.chat + "#only=nomatch-zz");
+await page.reload();
+await page.waitForFunction(() => document.getElementById("empty-state") && (document.getElementById("empty-state").dataset.vanished || "") !== "", null, { timeout: 20000 });
+const recorded = await page.evaluate(() => document.getElementById("empty-state").dataset.vanished);
+const other = recorded === cfg.sidA ? cfg.sidB : cfg.sidA;
+await inject({ type: "closed", id: recorded, hostDrop: true });
+await inject({ type: "tabOrder", order: [other], tabs: [other === cfg.sidA ? A_TAB : B_TAB], live: [other], skeleton: [] });
+await page.waitForTimeout(400);
+out.declinedTornDown = Object.assign(await state(), { recorded });
+// the SHELL road (the review's medium): on the dashboard the chat pane is a same-origin iframe of the shell and the
+// filter lives on the SHELL's URL (only-filter.ts reads window.top), so a live edit of the shell's hash must reach the
+// framed pane, whose own hash never changes: the pane unfocuses at once and restores when the filter shows the tab again
+await page.evaluate((sid) => { const key = Object.keys(localStorage).find((k) => k.startsWith("romp-vscode-state-")); const st = JSON.parse(localStorage.getItem(key) || "{}"); st.activeId = sid; st.activeName = "web"; localStorage.setItem(key, JSON.stringify(st)); }, cfg.sidA);
+await page.goto(cfg.shell);
+await page.waitForSelector("#f-chat", { timeout: 20000 });
+const fr = await (await page.$("#f-chat")).contentFrame();
+await fr.waitForFunction((sid) => { const a = document.querySelector("#tabs .tab.active[data-id]"); return !!a && a.dataset.id === sid; }, cfg.sidA, { timeout: 20000 });
+await fr.waitForFunction(() => document.querySelectorAll("#content .turn").length > 0, null, { timeout: 20000 });
+const frameState = () => fr.evaluate(() => {
+  const act = document.querySelector("#tabs .tab.active[data-id]");
+  const empty = document.getElementById("empty-state");
+  const turns = Array.from(document.querySelectorAll("#content .turn")).filter((t) => { const r = t.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(t).display !== "none"; });
+  let topHash = null; try { topHash = window.top.location.hash; } catch (e) { topHash = "cross-origin"; }
+  return { active: act ? act.dataset.id : null, tabs: Array.from(document.querySelectorAll("#tabs .tab[data-id]")).map((t) => t.dataset.id),
+           empty: empty && getComputedStyle(empty).display !== "none" ? { text: empty.textContent, vanished: empty.dataset.vanished || "" } : null,
+           visibleTurns: turns.length, paneHash: location.hash, topHash };
+});
+const t0 = Date.now();
+await page.evaluate(() => { location.hash = "#only=api"; });   // the SHELL's hash; the pane's own URL is untouched
+await fr.waitForFunction((sid) => !document.querySelector("#tabs .tab.active[data-id]") && !Array.from(document.querySelectorAll("#tabs .tab[data-id]")).some((t) => t.dataset.id === sid), cfg.sidA, { timeout: 5000 });
+out.shellHidden = Object.assign(await frameState(), { ms: Date.now() - t0 });
+await page.evaluate(() => { location.hash = "#only="; });      // the filter lifted, on the shell again
+await fr.waitForFunction((sid) => { const a = document.querySelector("#tabs .tab.active[data-id]"); return !!a && a.dataset.id === sid; }, cfg.sidA, { timeout: 5000 });
+await fr.waitForFunction(() => document.querySelectorAll("#content .turn").length > 0, null, { timeout: 5000 });
+out.shellRestored = await frameState();
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
 process.exit(0);
@@ -180,6 +323,7 @@ class ServedUnfocusedPane(unittest.TestCase):
         cwd = os.path.join(cls.lab, "proj")
         for d in ("names", "sdk", "states"):
             os.makedirs(os.path.join(state, d), exist_ok=True)
+        Path(state, "session-hosts").write_text("off\n")   # a lab root writes its own session-hosts off (the conftest rule), or a connect would spawn a real host
         os.makedirs(cwd, exist_ok=True)
         claude = os.path.join(cls.lab, "claude")
         proj = os.path.join(claude, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(cwd)))
@@ -214,7 +358,7 @@ class ServedUnfocusedPane(unittest.TestCase):
     def test_the_focused_tab_leaving_on_its_own_unfocuses_the_pane_and_its_return_restores_it(self):
         cfg = os.path.join(self.lab, "cfg.json")
         with open(cfg, "w") as f:
-            json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "sidA": SID_A, "sidB": SID_B, "sidC": SID_C, "remote": REMOTE,
+            json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "shell": "http://127.0.0.1:%d/?token=%s" % (self.port, self.token), "sidA": SID_A, "sidB": SID_B, "sidC": SID_C, "remote": REMOTE, "provisional": PROVISIONAL,
                        "shots": os.environ.get("PV_SHOTS", "")}, f)
         driver = os.path.join(self.lab, "driver.mjs")
         with open(driver, "w") as f:
@@ -265,6 +409,65 @@ class ServedUnfocusedPane(unittest.TestCase):
         self.assertTrue(a["composer"]["disabled"]); self.assertEqual(a["statusline"], "")
         self.assertEqual(r["reloadRestored"]["active"], REMOTE, "the remote host relays its strip: focus goes to the remembered tab")
         self.assertEqual(r["pickWins"]["active"], SID_B, "a pick before the relay wins; the relay changes nothing: %r" % r["pickWins"])
+        # the follow-up's roads
+        ad = r["adopted"]
+        self.assertEqual(ad["persisted"], ad["active"], "an adopted tab is persisted like a pick: %r" % ad); self.assertIn(ad["name"], ("web", "api"))
+        nl = r["nameless"]
+        self.assertIsNone(nl["active"]); self.assertIn("a session is not listed yet", nl["empty"]["text"], "no raw sid in the body: %r" % nl["empty"])
+        self.assertNotIn("cccccccc", nl["empty"]["text"])
+        em = r["emptied"]
+        self.assertIsNone(em["active"]); self.assertEqual(em["tabs"], [], "the strip emptied")
+        self.assertIn("No sessions yet.", em["empty"]["text"]); self.assertEqual(em["composer"]["placeholder"], "Click + to add a session", "the box's placeholder followed the strip: %r" % em["composer"])
+        g = r["gone"]
+        self.assertIsNone(g["active"], "a provisional id is never awaited or adopted: %r" % g)
+        self.assertIn("docs", g["empty"]["text"]); self.assertIn("is no longer on the strip. Pick a tab.", g["empty"]["text"])
+        # the #only= filter: the hidden active tab's transcript leaves the screen; the pane is unfocused naming it
+        of = r["onlyFiltered"]
+        self.assertIsNone(of["active"], "no tab active under the filter: %r" % of); self.assertNotIn(SID_A, of["tabs"]); self.assertIn(SID_B, of["tabs"])
+        self.assertEqual(of["visibleTurns"], 0, "the filtered session's transcript is NOT on screen (the demo leak): %r" % of)
+        self.assertIsNotNone(of["empty"]); self.assertEqual(of["empty"]["vanished"], SID_A)
+        self.assertEqual(of["empty"]["text"], "This tab view shows no session. Change the view, or pick a tab.", "name-free: a clean recording frame")
+        self.assertTrue(of["composerDisabled"])
+        # a routine push under the filter never re-focuses the hidden tab, not for one animation frame (the review's leak:
+        # 1 frame of 70 with the body down and four transcript rows visible per push)
+        pu = r["pushUnderFilter"]
+        self.assertGreater(pu["samples"], 0, "the push mutated the strip, so the observer sampled: %r" % pu)
+        self.assertEqual((pu["maxRows"], pu["bodyDown"], pu["focused"]), (0, 0, 0), "no transient with a transcript row visible, the body down or a tab focused (4 rows and 1 body-down per push with applyTabOrder's predicate reverted): %r" % pu)
+        fa = r["firstArrivalUnderFilter"]
+        self.assertNotIn(SID_B, fa["tabs"]); self.assertNotEqual(fa["active"], SID_B, "the first arrival (api), hidden by #only=web, is never adopted: %r" % fa)
+        self.assertEqual(fa["active"], SID_A, "…the first VISIBLE arrival (web) is, over the declined record: %r" % fa)
+        lp = r["afterLiftAndPush"]
+        self.assertEqual(lp["active"], SID_A, "the adoption ended the unfocused state: the filter lifted and one routine push later the pane is still on web, never handed api (the review's high): %r" % lp)
+        nm = r["noMatchFilter"]
+        self.assertIsNone(nm["active"]); self.assertEqual(nm["tabs"], [], "no tab shows under a filter matching nothing: %r" % nm)
+        self.assertEqual(nm["empty"]["vanished"], SID_B, "the declined FIRST arrival (api arrives first in this world) is recorded, and a later hidden arrival never overwrites it: %r" % nm)
+        self.assertEqual(nm["empty"]["text"], "The first session to arrive is hidden by this view. Pick a tab, or change the view.", "the declined record's own head, name-free")
+        nl = r["noMatchLifted"]
+        self.assertEqual(nl["active"], nm["empty"]["vanished"], "lifting the filter restores the recorded session through the schedule: %r" % nl)
+        dt = r["declinedTornDown"]
+        # the durable claims (the surviving hidden session's next frame re-records it by design, so `vanished` may be empty
+        # or the survivor): no active tab, and the line name-free with no bold name, whichever head stands
+        self.assertIsNone(dt["active"])
+        self.assertIn(dt["empty"]["text"], ("No session selected. Pick a tab to start.", "No session open — click + to add one.",
+                                            "The first session to arrive is hidden by this view. Pick a tab, or change the view."), "a name-free head after a declined record's teardown: %r" % dt)
+        for nm_ in ("web", "api"):
+            self.assertNotIn(nm_, dt["empty"]["text"], "the frame stays name-free after a declined record's teardown (the review's medium): %r" % dt)
+        # the hidden tab torn down while the pane is unfocused: the line follows the reason, naming the tab
+        td = r["tornDownWhileHidden"]
+        self.assertIsNone(td["active"]); self.assertEqual(td["empty"]["vanished"], SID_A); self.assertNotIn(SID_A, td["tabs"])
+        self.assertIn("web", td["empty"]["text"]); self.assertIn("host disconnected", td["empty"]["text"], "no longer the view's name-free line once the tab is gone: %r" % td)
+        # the SHELL road (the review's medium): the pane framed on the dashboard, the filter edited on the SHELL's URL
+        # (where only-filter.ts reads it): the pane's own hash never changes, yet the framed pane unfocuses off the live
+        # edit and restores when the filter lifts
+        sh = r["shellHidden"]
+        self.assertEqual((sh["paneHash"], sh["topHash"]), ("", "#only=api"), "the edit was the shell's; the pane's own URL carries no hash: %r" % sh)
+        self.assertIsNone(sh["active"]); self.assertNotIn(SID_A, sh["tabs"]); self.assertIn(SID_B, sh["tabs"])
+        self.assertEqual(sh["visibleTurns"], 0, "the filtered session's transcript left the framed pane: %r" % sh)
+        self.assertEqual(sh["empty"]["text"], "This tab view shows no session. Change the view, or pick a tab.")
+        self.assertLess(sh["ms"], 2000, "off the live edit, not a later kernel frame: %r" % sh)
+        sr = r["shellRestored"]
+        self.assertEqual(sr["active"], SID_A, "the filter lifted on the shell: the hidden tab takes focus back: %r" % sr)
+        self.assertGreater(sr["visibleTurns"], 0); self.assertIsNone(sr["empty"])
 
 
 if __name__ == "__main__":

@@ -497,7 +497,8 @@ test("the tab drag's virtual layout wraps where the strip wraps: headers after a
   assert.match(over, /const before = \(t: HTMLElement\) => \{ let p = t\.previousElementSibling; while \(p && p === dragged\) p = p\.previousElementSibling; return p; \};/,
     "the box before, skipping the dragged tab (it is out of the virtual layout)");
   assert.match(over, /w: isBreak\(t\) \? 0 : /, "the trail's break is a zero-width row opener, not a full-row box");
-  assert.match(over, /br: isBreak\(t\) \|\| isBreak\(before\(t\)\) \}\)\);/, "a header after a break, and the break itself, open a row");
+  assert.match(over, /br: isBreak\(t\) \|\| \(t\.classList\.contains\("tab-group-head"\) && isBreak\(before\(t\)\)\) \}\)\);/,
+    "a header after a break, and the break itself, open a row; the trail's first tab after its break does not (the break did)");
   assert.match(over, /if \(ref && ref\.classList\.contains\("tab-group-head"\) && isBreak\(before\(ref as HTMLElement\)\)\) ref = before\(ref as HTMLElement\);/,
     "the slot before a header is the end of the previous row — never between the break and the chip");
   const DS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "dragslot.ts"), "utf8");

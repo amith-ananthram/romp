@@ -54,7 +54,9 @@ TOP_KEYS = {"now", "since", "uptime_s", "log", "process", "pusher", "stages_ms",
             "recordCache",                                 # recordCache: the shared reader's byte budget and evictions (2026-09-11)
             "chatPages",                                   # chatPages: the pre-floor history pages cache (T323 stage 4b)
             "skillLoadIndex",                              # skillLoadIndex: the judge's skill-load boot pass, its raw reads (T333)
-            "fileSlice"}                                   # fileSlice: the file preview popover's slice cache: hit / miss / bytes / warm (T351)
+            "fileSlice",                                   # fileSlice: the file preview popover's slice cache: hit / miss / bytes / warm (T351)
+            "glossary",                                    # glossary: files parsed, frames / terms / bytes built per cycle, entries cut, files refused (T351 stage 2)
+            "stacks"}                                      # stacks: every thread's last frames under ROMP_PERF_STACKS, else None (T358)
 
 
 def _burn_cpu(seconds):
@@ -154,7 +156,7 @@ class Collector(unittest.TestCase):
         self.assertEqual(set(snap["memos"]["chatLedger"]), {"hit", "miss", "bypass_live", "bypass_hold", "bypass_empty", "evict", "entries"})
         self.assertEqual(set(snap["memos"]["chatFoldTasks"]), {"hit", "miss", "entries"})
         self.assertEqual(set(snap["memos"]["plannerSkip"]), {"skipped", "planned", "recorded"})
-        self.assertEqual(set(snap["memos"]["captions"]), {"served", "parsed"})
+        self.assertEqual(set(snap["memos"]["captions"]), {"served", "parsed", "unstatable"})
         self.assertEqual(set(snap["memos"]["goalArchive"]), {"served", "loaded"})
         self.assertEqual(set(snap["memos"]["backref"]), {"served", "built"},
                          "the sender-board walk behind the courier link repair: built once per input state (2026-09-09)")
@@ -508,7 +510,7 @@ class PusherRecords(unittest.TestCase):
             "_auto_pause_on_limit", "_usage_poll_tick", "_auto_pause_on_spend_limit", "_auto_resume_retry",
             "_auto_resume_session_retry", "_auto_retry_tick", "_idle_queue_drive_tick",
             "_clear_done_working_notes", "_spend_guard_tick", "_push_all",
-            "_api_health_frame", "_api_health_push")   # the bottom bar's API cell; the spend guard (T350)
+            "_api_health_frame", "_api_health_push")   # the bottom bar's API cell; the spend guard (T350, "_converge_checkpoints")
 
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
@@ -625,7 +627,8 @@ class PusherRecords(unittest.TestCase):
         push, jobs = after["push"] - before["push"], after["jobs"] - before["jobs"]
         self.assertGreaterEqual(push, 5.0)
         self.assertGreaterEqual(jobs, 0.0, "jobs is the function minus the push, never negative")
-        self.assertLess(jobs, push, "no-op jobs cost less than a 5 ms push")
+        self.assertLess(jobs, 2 * push, "no-op jobs cost less than two 5 ms pushes (a 4 percent margin on a 5 ms measurement was a coin toss "
+                                         "on a shared runner: 5.26 ms against 5.07 ms on Python 3.10, 2026-09-12)")
         before = km._PERF_STATS.snapshot()["stages_ms"]
         km._pusher_cycle_jobs(int(time.time()), {}, False)   # no client: no push, the jobs still run
         after = km._PERF_STATS.snapshot()["stages_ms"]
@@ -978,6 +981,33 @@ class PerfRoutes(unittest.TestCase):
         self.assertEqual(after["count"], before["count"] + 1, "and not a second time in the finally")
         self.assertEqual(after["ms"], before["ms"], "a socket's lifetime is not a request time")
 
+
+
+class StacksField(unittest.TestCase):
+    """The perf route's `stacks` (T358, a debugging aid behind ROMP_PERF_STACKS): every thread's last frames, keyed by the
+    thread's ident WITH its name, so two workers sharing a name stay two entries (the duplicate-worker case the aid is for);
+    None without the switch."""
+    def test_two_threads_sharing_a_name_are_two_entries(self):
+        import threading
+        from unittest import mock
+        gate = threading.Event()
+        ths = [threading.Thread(target=gate.wait, name="same-name-worker", daemon=True) for _ in range(2)]
+        for t in ths:
+            t.start()
+        try:
+            with mock.patch.dict(os.environ, {"ROMP_PERF_STACKS": "1"}):
+                snap = km._PerfStats().snapshot()
+            keys = [k for k in (snap.get("stacks") or {}) if k.endswith(" same-name-worker")]
+            self.assertEqual(len(keys), 2, "one entry per thread, the name carried: %s" % sorted(snap.get("stacks") or {}))
+            self.assertEqual(len(set(keys)), 2, "keyed by ident: distinct")
+            self.assertTrue(all(str(t.ident) in k for t, k in zip(sorted(ths, key=lambda t: t.ident), sorted(keys, key=lambda k: int(k.split()[0])))))
+        finally:
+            gate.set()
+            for t in ths:
+                t.join(timeout=5)
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ROMP_PERF_STACKS", None)
+            self.assertIsNone(km._PerfStats().snapshot()["stacks"], "None without the switch")
 
 if __name__ == "__main__":
     unittest.main()

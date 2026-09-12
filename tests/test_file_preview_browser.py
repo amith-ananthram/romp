@@ -136,9 +136,14 @@ const hoverCard = async (path, frag) => {
 };
 const shot = async (name) => { if (!cfg.shots) return; fs.mkdirSync(cfg.shots, { recursive: true }); const b = await (await page.$(CARD)).boundingBox(); await page.screenshot({ path: cfg.shots + "/" + name + ".png", clip: { x: Math.max(0, b.x - 40), y: Math.max(0, b.y - 60), width: Math.min(1100, b.width + 80), height: Math.min(760, b.height + 100) } }); };
 const leave = async () => { await page.mouse.move(900, 720); await page.waitForTimeout(400); return await shown(); };
-// the cold read: the build warmed docs/cold.md, so its time is rewritten before each hover (a new mtime is a new cache key)
+// the cold read: the build warmed docs/cold.md, so its time is rewritten before each hover (a new mtime is a new cache key).
+// Whether the hover then reads COLD is the pusher's timing, not this driver's: a message build between the rewrite and
+// the hover re-warms the new key (kernel.py _slice_warm, one `warm` per load), and under a slow full serial run one does
+// slip in (a full run read a hit where CI and a run alone read a miss). So the kernel's own warm counter is sampled
+// around the rewrite and the hover, and the assertion is keyed on it: a warm in between means a hit, none means a miss.
 let coldBump = 0;
 const bumpCold = () => { coldBump += 1; const s = Date.now() / 1000 + 5 * coldBump; fs.utimesSync(cfg.cold, s, s); };
+const perfNow = async () => page.evaluate(async () => { const r = await fetch("/perf", { credentials: "same-origin" }); const j = await r.json(); return j.fileSlice || { warm: 0 }; });
 const out = { links, themes: {} };
 for (const theme of ["dark", "light"]) {
   if (theme === "light") { await page.evaluate(() => document.body.classList.add("theme-light")); await page.waitForTimeout(200); }
@@ -148,7 +153,7 @@ for (const theme of ["dark", "light"]) {
   t.missing = await hoverCard("docs/guide.md", "no-such-section"); t.missingHidden = await leave();
   t.image = await hoverCard("plots/figure.png", null); await shot("romp_chat-file-preview-image-" + theme); t.imageHidden = await leave();
   t.code = await hoverCard("src/app.py", null); await shot("romp_chat-file-preview-code-" + theme); t.codeHidden = await leave();
-  bumpCold(); t.cold = await hoverCard("docs/cold.md", null); t.coldHidden = await leave();
+  const warmBefore = (await perfNow()).warm; bumpCold(); t.cold = await hoverCard("docs/cold.md", null); t.coldWarmedAhead = (await perfNow()).warm > warmBefore; t.coldHidden = await leave();
   t.outside = await hoverCard(cfg.outside, null); await shot("romp_chat-file-preview-textonly-" + theme); t.outsideHidden = await leave();
   t.secret = await hoverCard("docs/.env", null); t.secretHidden = await leave();
   out.themes[theme] = t;
@@ -332,7 +337,10 @@ class ServedFilePreview(unittest.TestCase):
             cold = t["cold"]["card"]
             self.assertIn("fp-markdown", cold["kind"]); self.assertIn("later note", cold["text"])
             self.assertEqual(head["sliceHit"], "1", "%s: the guide's slice came from the cache" % theme)
-            self.assertEqual(cold["sliceHit"], "0", "%s: the rewritten file was read cold" % theme)
+            if t["coldWarmedAhead"]:   # a pusher cycle re-warmed the rewritten key before the hover (the kernel's warm counter moved): a hit, honestly
+                self.assertEqual(cold["sliceHit"], "1", "%s: the pusher warmed the rewritten file ahead of the hover, so the slice was a hit" % theme)
+            else:
+                self.assertEqual(cold["sliceHit"], "0", "%s: no warm between the rewrite and the hover, so the rewritten file was read cold" % theme)
             self.assertIsNotNone(head["renderMs"]); self.assertIsNotNone(cold["renderMs"])
             # the remote loads in the cold file: stripped on the inert DOM, so the card shows alt text and nothing else
             self.assertNotIn("remote.invalid", cold["html"], "%s: no remote URL reaches the card: %r" % (theme, cold["html"]))

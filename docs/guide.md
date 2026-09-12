@@ -419,10 +419,11 @@ session name in it. When that same session's tab returns, the pane goes back
 to it. After a kernel restart the page reloads and remembers the tab you were
 on: until that session is listed again the pane stays blank and names it as not
 listed yet, and it never settles on another session meanwhile; if it never
-returns, the blank body stays until you pick a tab. A tab view that stops
-showing your session (a tag removed) blanks the pane the same way and comes back
-to it when the view shows it again. From the blank pane an arrow key or Next Tab
-lands on the first visible tab. Focus moves to a different session only when
+returns, the blank body stays until you pick a tab (a remembered tab that can
+never return, a subagent's viewer or a session still being created, says so at
+once). A tab view that stops showing your session keeps it on the strip as the
+peek. From the blank pane an arrow key or Next Tab lands on the first visible
+tab. Focus moves to a different session only when
 you pick a tab, or when you close the active tab yourself (then the pane returns
 to the tab you used before it).
 
@@ -437,6 +438,13 @@ and acted as the manager). Only peer mail is gated: what you type into the threa
 box yourself, and plain text the kernel's own send route carries, is yours and
 still goes through; that is the human channel, by design, not a hole in the
 gate.
+
+Words your team coined wear a quiet dotted underline wherever a session writes
+them: hover for the definition and the plain phrase, click to open the group's
+glossary at that entry. The glossary is a plain file per tag group,
+`~/.claude/glossaries/<group>.md`; its README gives the grammar, and a `link`
+line per entry sets how often a word is underlined (every time, first mention
+per message, or never) for headwords that are also everyday words.
 
 A session started from another one joins its tags. Forking a session, breaking
 a comment thread out into its own session, and running `romp new` inside a

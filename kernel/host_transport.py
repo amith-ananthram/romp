@@ -394,10 +394,11 @@ class HostTransport(_Base):
         try:
             off = int(offset)
         except (TypeError, ValueError):
-            off = -1
+            off = None                                    # a frame with no offset (no host writes one; a protocol change)
         if replay is None:
-            replay = self.replay_end is not None and off < self.replay_end
-        self.result_tags.append({"offset": off, "replay": bool(replay)})
+            replay = off is not None and self.replay_end is not None and off < self.replay_end   # unknown position: live,
+            #                                                                                       never a replay that folds nothing
+        self.result_tags.append({"offset": off if off is not None else -1, "replay": bool(replay)})
 
     def _answers_mine(self, data) -> bool:
         if not isinstance(data, dict) or data.get("type") != "control_response":

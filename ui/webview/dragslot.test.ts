@@ -64,3 +64,24 @@ test("a `br` box opens a row even when it would have fit — the line-per-group 
   // br on the FIRST box is a no-op (nothing to break from)
   assert.equal(dragSlotIndex([{ id: "\0head:web", w: 40, br: true }, { id: "a", w: 50 }], 400, 0, 20, 100, 5), 2);
 });
+
+test("a `br` box right after the zero-width break shares the break's row under a themed gap (the user 2026-09-11)", () => {
+  // The strip's dragover used to mark the box AFTER any break as a row opener too, so the untagged trail's first TAB wore
+  // `br` beside the break's own (it marks only a header after a break now, but the simulation must hold for two openers
+  // in a row regardless). The break is a row opener with no width, and the guard that keeps a `br` box from opening an
+  // EMPTY row reads the row's fill so far (`cx > 0`) — a fill the zero-width break used to add the column gap to. The
+  // classic strip's gap is 0 and the guard held; the yatharth strip's is 3px (styles.css `body.chat-theme-yatharth #tabs
+  // { gap: 0 3px }`), the fill was 3 after the break, the first tab opened a row of its own, and the break sat alone on
+  // the row the pointer's y resolves the trail to, with one midpoint at 0: every x on the trail's row was past it and the
+  // slot fell to the next row's head, the trail's first tab. The user (2026-09-11) could drag a trail tab to the first
+  // slot and nowhere else. The boxes are the grouped strip's own: a header row (head, three tabs), the break, the trail
+  // (its first tab br, as the strip marked it), gap 3, one tab row high.
+  const strip = (gap: number) => [{ id: "\0head:infra", w: 81 }, { id: "g1", w: 86 }, { id: "g2", w: 70 }, { id: "g3", w: 62 },
+                                  { id: "\0sep", w: 0, br: true }, { id: "u1", w: 89, br: true }, { id: "u2", w: 90 }, { id: "u3", w: 86 }, { id: "u4", w: 88 }];
+  // the pointer on the trail's row (y inside the second row of 32px), over the right part of u3 (u1 at 3, u2 at 96, u3 at 189..275)
+  assert.equal(dragSlotIndex(strip(0), 1884, 0, 32.1, 249, 48), 8, "classic (gap 0): after u3, the slot before u4");
+  assert.equal(dragSlotIndex(strip(3), 1884, 3, 32.1, 249, 48), 8, "yatharth (gap 3): the same slot — not the trail's head");
+  // …and the left part of u2 is the slot before u2 in both
+  assert.equal(dragSlotIndex(strip(0), 1884, 0, 32.1, 110, 48), 6);
+  assert.equal(dragSlotIndex(strip(3), 1884, 3, 32.1, 110, 48), 6, "gap 3: before u2, not the trail's head");
+});
