@@ -9009,20 +9009,26 @@ function applyCommentMarks(sid: string): void {
   if (sid === activeId) updateReplyChips();
 }
 
-/** ONE outline around the WHOLE highlighted passage of an unread open thread (the user 2026-09-10), in the scroll
- *  notch's yellow (var(--cmt-hl)) — in place of the dashed ring each line fragment wore (an outline on the inline
- *  mark paints per fragment, so a wrapped passage read as a stack of dashed boxes). CSS cannot merge the fragments,
- *  so the box is an absolutely positioned child of the TURN (.cmt-outline, one per thread), sized to the union of the
- *  thread's mark fragments' client rects, turn-relative: it scrolls with the text and needs no repaint on scroll.
- *  Each fragment is first cut to every scrolling ancestor between its mark and the turn (a notice body, a wide formula):
- *  the box sits outside those containers, so an unclipped fragment scrolled out of one would draw over the content
- *  below. Repainted where the geometry can move — after every marks pass (each transcript rebuild and comments frame),
- *  on the rail's rAF scheduler (a re-render, the view's resize observer, every scroll in the pane, inner containers'
- *  included through the capture-phase listener) and on window resize — those two only while the session has an unread
- *  open thread (hasUnreadOpenThread: a store read, so a scroll frame with nothing to move walks no DOM); the same measure-then-write
- *  pass either way, writing only what changed. pointer-events: none, so hover and click land on the marks beneath.
- *  A box goes with its unread bit (styleCommentMark drops the class when the popover opens or the thread resolves)
- *  and with its marks (a windowed-out turn, a deleted thread); a hidden view has no boxes to measure and keeps none. */
+/** The needs-you cue on an unread open thread's passage, in the tab strip's idiom (the user 2026-09-12): a dashed stroke
+ *  in var(--st-awaiting-bg), in one of two shapes by the passage's LINE COUNT. One or two rows: a ring on each unread mark
+ *  itself (the .cmt-ring class; it hugs the text, where a box over two lines takes in the first line's un-highlighted head
+ *  and the second's tail). Three or more: ONE box around the WHOLE passage (T310, the user 2026-09-10 — an outline on the
+ *  inline mark paints per fragment, so a wrapped passage read as a stack of dashed boxes, and CSS cannot merge the
+ *  fragments), an absolutely positioned child of the TURN (.cmt-outline, one per thread) sized to the union of the
+ *  thread's mark fragments' client rects, turn-relative: it scrolls with the text and needs no repaint on scroll. Each
+ *  fragment is first cut to every scrolling ancestor between its mark and the turn (a notice body, a wide formula): the
+ *  box sits outside those containers, so an unclipped fragment scrolled out of one would draw over the content below.
+ *  The rows are counted from those same rects, before the clip, so the shape is the passage's and never flips with a
+ *  container's scroll. Repainted where the geometry can move — after every marks pass (each transcript rebuild and
+ *  comments frame), on the rail's rAF scheduler (a re-render, the view's resize observer, every scroll in the pane, inner
+ *  containers' included through the capture-phase listener) and on window resize (which can carry a passage across the
+ *  two-row line: that hook is what swaps the shape) — those two only while the session has an unread open thread
+ *  (hasUnreadOpenThread: a store read, so a scroll frame with nothing to move walks no DOM). The row rule added no hook
+ *  and no layout read: one pass over the rects the union already needs (the user 2026-09-12: zero new machinery). The
+ *  same measure-then-write pass either way, writing only what changed. pointer-events: none on the box, so hover and
+ *  click land on the marks beneath. Both shapes go with the unread bit (styleCommentMark drops the class, and the ring
+ *  with it, when the popover opens or the thread resolves) and with the marks (a windowed-out turn, a deleted thread); a
+ *  hidden view has no boxes to measure and keeps none. */
 /** The cheap gate for the geometry hooks (the rail scheduler fires on every scroll frame, the resize listener on every
  *  resize): a session with no unread open thread has no box to move, so those paths never walk its DOM (review find,
  *  T310). Read from the thread store, no DOM. The marks pass calls the painter unconditionally: it is the removal path
@@ -9053,6 +9059,12 @@ function paintCommentOutlines(sid: string): void {
     const turn = marks[0].closest(".turn") as HTMLElement | null;
     if (!turn) continue;
     let l = Infinity, t = Infinity, r = -Infinity, b = -Infinity;
+    // the LINE ROWS the passage spans, from the same rects (the user 2026-09-12): a fragment opens a new row when its top
+    // sits at least half the shorter height from the current row's — fragments split across an inline-code or KaTeX host
+    // share a line, their tops a padding apart; consecutive lines sit a line-height apart — a fraction of the rect's own
+    // height, never a magic pixel count. Counted on every fragment BEFORE the clip: the passage's shape is a fact of its
+    // layout, not of a container's scroll, so the cue never swaps while a notice body scrolls under it.
+    let rows = 0, rowTop = 0, rowH = 0;
     for (const m of marks) {
       // a fragment counts only where it can be SEEN: the box lives on the turn, outside any scrolling container between
       // the mark and the turn (a notice body at its max height, a wide formula), whose clip the fragment's own rect
@@ -9067,13 +9079,19 @@ function paintCommentOutlines(sid: string): void {
       }
       for (const q of Array.from(m.getClientRects())) {
         if (!q.width && !q.height) continue;
+        if (!rows || Math.abs(q.top - rowTop) >= Math.min(q.height, rowH) / 2) { rows++; rowTop = q.top; rowH = q.height; }
         const ql = Math.max(q.left, cl), qt = Math.max(q.top, ct), qr = Math.min(q.right, cr), qb = Math.min(q.bottom, cb);
         if (qr <= ql || qb <= qt) continue;              // clipped away by a scrolling ancestor
         l = Math.min(l, ql); t = Math.min(t, qt); r = Math.max(r, qr); b = Math.max(b, qb);
       }
     }
+    // ONE or TWO rows: the ring on each fragment (mark.cmt-hl.unread.cmt-ring) hugs the text, where a box would enclose the
+    // first line's un-highlighted head and the second's tail; THREE or more: one box reads as one thing where a stack of
+    // rings reads as many. No visible fragment at all: neither, until a paint that sees one decides.
+    const ring = rows > 0 && rows <= 2;
+    for (const m of marks) m.classList.toggle("cmt-ring", ring);
     let box = turn.querySelector(`:scope > .cmt-outline[data-tid="${cssEscape(tid)}"]`) as HTMLElement | null;
-    if (!isFinite(l)) { box?.remove(); continue; }        // no visible fragment (a display:none ancestor, or all scrolled out)
+    if (ring || !isFinite(l)) { box?.remove(); continue; }   // ringed, or no visible fragment (a display:none ancestor, or all scrolled out)
     if (!box) { box = el("div", "cmt-outline"); box.dataset.tid = tid; turn.appendChild(box); }
     const tr = turn.getBoundingClientRect();
     const css = { left: (l - tr.left - PAD) + "px", top: (t - tr.top - PAD) + "px", width: (r - l + 2 * PAD) + "px", height: (b - t + 2 * PAD) + "px" };
@@ -9291,6 +9309,7 @@ function ensureCommentMark(turn: HTMLElement, th: CommentThread): void {
 function styleCommentMark(m: HTMLElement, th: CommentThread): void {
   m.classList.toggle("resolved", th.status === "resolved" || th.status === "merged");
   m.classList.toggle("unread", !!th.unread && th.status === "open");
+  if (!(th.unread && th.status === "open")) m.classList.toggle("cmt-ring", false);   // the ring is the painter's call on an UNREAD mark (paintCommentOutlines, by row count): it goes with the bit, on this same pass
   m.classList.toggle("busy", commentInFlight(th));
   m.title = th.status === "promoted" ? "thread, now the session '" + th.promotedName + "'"
     : th.status === "merged" ? "relayed thread: its discussion was sent back into the session"

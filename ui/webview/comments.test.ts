@@ -99,14 +99,18 @@ test("an unread thread wears ONE outline box around its whole passage and a shou
   // the user 2026-08-23: the 45% unread tint alone was too subtle — a thread that replied while the
   // box was closed needs a visible element. That element was a yellow corner dot on the run's last
   // segment until 2026-09-08 (then the tab strip's dashed needs-you ring on the mark), and since
-  // 2026-09-10 it is ONE solid outline in the notch's yellow around the WHOLE highlighted area: the
-  // ring was an outline on the inline mark and painted once per line fragment, a dashed box per line.
-  // The box is a positioned child of the turn that render.ts measures from the marks (its pins live in
-  // comment-outline.test.ts). The rail tick still grows and double-rings. Both clear with the unread
-  // flag on open.
+  // 2026-09-10 it is ONE outline around the WHOLE highlighted area: the ring was an outline on the
+  // inline mark and painted once per line fragment, a dashed box per line. Since 2026-09-12 the box is
+  // dashed in the needs-you red again (the user wanted the tab strip's idiom back; matching the notch
+  // had made it solid yellow), and a passage of one or two rows wears the per-fragment ring instead —
+  // the painter's call, by row count. The box is a positioned child of the turn that render.ts measures
+  // from the marks (its pins live in comment-outline.test.ts). The rail tick still grows and
+  // double-rings, its halo in the same red. All clear with the unread flag on open.
   assert.doesNotMatch(CSS, /mark\.cmt-hl\.unread\.hl-last::after/, "the corner dot is gone");
-  assert.doesNotMatch(CSS, /mark\.cmt-hl\.unread \{ outline/, "no outline on the mark itself: it would paint per line fragment");
-  assert.match(CSS, /\.cmt-outline \{ position: absolute; pointer-events: none;[^}]*outline: 1\.5px solid var\(--cmt-hl-outline\);/s, "one box, the notch's ink");
+  assert.doesNotMatch(CSS, /mark\.cmt-hl\.unread \{ outline/, "no outline on the mark by unread alone: it would paint per line fragment");
+  assert.match(CSS, /\.cmt-outline \{ position: absolute; pointer-events: none;[^}]*outline: 1\.5px dashed var\(--st-awaiting-bg\);/s, "one box, the needs-you ring");
+  assert.match(CSS, /mark\.cmt-hl\.unread\.cmt-ring \{ outline: 1\.5px dashed var\(--st-awaiting-bg\); outline-offset: 1px; \}/, "the one- or two-row ring, the same stroke");
+  assert.match(CSS, /\.cmt-tick\.unread \{[^}]*0 0 0 3px var\(--st-awaiting-bg\); \}/s, "the tick's halo agrees by colour");
   assert.match(UI, /function paintCommentOutlines\(sid: string\): void \{/);
   assert.doesNotMatch(CSS, /mark\.cmt-hl \{[^}]*position: relative;/s, "nothing left for the mark to anchor");
   assert.match(CSS, /\.cmt-tick\.unread \{ width: 10px; height: 6px; right: 0; opacity: 1;/);
