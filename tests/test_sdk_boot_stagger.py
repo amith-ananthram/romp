@@ -486,5 +486,36 @@ class BootBudget(unittest.TestCase):
         self.assertLess(rows[0]["durationS"], 5.0)
 
 
+class AttachSetFrozenWithTheCount(unittest.TestCase):
+    """Two boots of 2026-09-11 said attachTimedOut with every host hello landed: a session a send started ahead of the
+    reconcile loop had its hello discard its sid from _boot_attach_sids, the loop's membership test then saw no attach
+    for it, parked no callback, and the count never reached zero. The set the phase waits for is frozen with the count."""
+
+    def test_a_hello_landing_mid_loop_does_not_strand_the_count(self):
+        d = tempfile.mkdtemp(); phases = []
+        be = sb.SdkBackend(d, "/bin/true", lambda *a, **k: None, log=lambda *a, **k: None, boot_phase=phases.append)
+        attach_sids = ["22222222-bbbb-0000-0000-%012d" % i for i in range(3)]
+        regs = []; alive = {}
+        for i, sid in enumerate(attach_sids):
+            regs.append(_reg(d, sid)); cli, host = 910000000 + 2 * i, 910000001 + 2 * i
+            sb.write_lease(d, {"sid": sid, "fsid": sid, "pid": cli, "start": "1", "holder": {"pid": host, "start": "2", "kind": "host"},
+                               "version": "", "t": __import__("time").time()})
+            alive[cli] = "1"; alive[host] = "2"
+        settles = {}
+        def fake_ensure(sid, on_boot_settled=None):
+            settles[sid] = on_boot_settled
+            be._boot_attach_sids.discard(attach_sids[-1])   # the last attach's hello lands (a send started it) while an earlier one is ensured
+            return object()
+        with mock.patch.dict(sys.modules, {"romp_sdk_backend": sb}), \
+             mock.patch.object(sb, "proc_start", lambda p, run=None: alive.get(p)), \
+             mock.patch.object(be, "_ensure", fake_ensure):
+            be._boot_reconcile(regs)
+        self.assertEqual(phases, ["censusDone"])
+        self.assertTrue(all(callable(settles.get(s)) for s in attach_sids), "every attach counted in the phase parked a callback")
+        for sid in attach_sids:
+            settles[sid]()
+        self.assertEqual(phases, ["censusDone", "attachDone"], "the count reaches zero: the set was frozen with it")
+
+
 if __name__ == "__main__":
     unittest.main()

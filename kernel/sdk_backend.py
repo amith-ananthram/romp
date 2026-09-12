@@ -10249,12 +10249,16 @@ class SdkBackend:
             # option that did what the card said. Context is managed by hand for now. Every cut/queued
             # session resumes here, exactly as it did before the gate.
             to_start = [s for s in to_start if s in self._boot_attach_sids] + [s for s in to_start if s not in self._boot_attach_sids]
+            # the attaches this phase waits for, FROZEN with the count: a session a send started ahead of this loop has its
+            # hello discard its sid from _boot_attach_sids, and a per-iteration membership test then saw no attach, parked no
+            # callback, and the count never reached zero (two boots of 2026-09-11 said attachTimedOut with every hello landed)
+            attach_set = {s for s in to_start if s in self._boot_attach_sids}
             with self._boot_attach_lock:
-                self._boot_attach_pending = sum(1 for s in to_start if s in self._boot_attach_sids)
+                self._boot_attach_pending = len(attach_set)
             if not self._boot_attach_pending:
                 self._boot_milestone("attachDone")       # nothing to attach: the phase is over before it began
             for sid in to_start:                         # re-attaches first, then the cold launches
-                attach = sid in self._boot_attach_sids
+                attach = sid in attach_set
                 # a RE-ATTACH (a live host holds the CLI) is a socket connect, first and on its own wider bound; a
                 # cold launch keeps the spawn stagger (the CPU burst the stagger exists for)
                 sem = self._attach_sem if attach else self._spawn_sem

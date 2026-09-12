@@ -22668,9 +22668,17 @@ def _kernel_sample_tick(now=None):
         return False
 
 
-EXIT_PRIME_BUDGET_S = float(os.environ.get("ROMP_EXIT_PRIME_BUDGET_S", "0.5"))       # the exit's fold priming
-EXIT_CKPT_WRITE_BUDGET_S = float(os.environ.get("ROMP_EXIT_CKPT_WRITE_BUDGET_S", "1.0"))   # its fold checkpoint writes
-EXIT_ASM_BUDGET_S = float(os.environ.get("ROMP_EXIT_ASM_BUDGET_S", "1.0"))   # the exit's assembly-document writes, bounded
+# The exit's budgets are shares of the manager's SIGTERM grace (ROMP_SHUTDOWN_GRACE_MS, which the manager passes to the
+# kernel it spawns; 5 s when absent) less a 0.5 s margin for the cut row and one slow file: priming 10 %, checkpoint
+# writes 35 %, assembly documents 20 %, the SDK drain 35 %. 2026-09-11: fixed budgets summed to 4.5 s against a 5 s
+# grace and the exit met the SIGKILL twice behind a pusher cycle holding the interpreter lock; the checkpoint budget left
+# 21 to 34 files dirty at every exit. An explicit ROMP_EXIT_*_BUDGET_S still sets one outright.
+EXIT_GRACE_S = float(os.environ.get("ROMP_SHUTDOWN_GRACE_MS", "5000")) / 1000.0
+_EXIT_SHARE_S = max(1.0, EXIT_GRACE_S - 0.5)
+EXIT_PRIME_BUDGET_S = float(os.environ.get("ROMP_EXIT_PRIME_BUDGET_S", "%.3f" % (0.10 * _EXIT_SHARE_S)))       # the exit's fold priming
+EXIT_CKPT_WRITE_BUDGET_S = float(os.environ.get("ROMP_EXIT_CKPT_WRITE_BUDGET_S", "%.3f" % (0.35 * _EXIT_SHARE_S)))   # its fold checkpoint writes
+EXIT_ASM_BUDGET_S = float(os.environ.get("ROMP_EXIT_ASM_BUDGET_S", "%.3f" % (0.20 * _EXIT_SHARE_S)))   # the exit's assembly-document writes, bounded
+EXIT_DRAIN_BUDGET_S = float(os.environ.get("ROMP_EXIT_DRAIN_BUDGET_S", "%.3f" % (0.35 * _EXIT_SHARE_S)))   # the SDK drain (0.1 to 0.9 s measured with session hosts on)
 # the three above plus the 2 s SDK drain stay under the manager's 5 s SIGTERM grace with margin for one slow file:
 # the first exit under the bounded path (2026-09-11, 1:19 PM Pacific) still met the SIGKILL, its checkpoint writes unbounded,
 # and the restart lost its cut row
@@ -22777,9 +22785,9 @@ def _append_boot_settled(first_serve, reconcile_done):
             row["attachTimedOut"] = True       # the backstop wrote the row: an attach never settled in time
             be = _sdk_backend or None          # and WHICH attaches (2026-09-11: 23 hellos landed, the mark never came)
             pend = getattr(be, "_boot_attach_unsettled", None)
+            row["attachPending"] = getattr(be, "_boot_attach_pending", None)   # always: an empty set with a count left is its own clue
             if pend:
                 row["attachUnsettled"] = sorted(str(x)[:8] for x in pend)[:40]
-                row["attachPending"] = getattr(be, "_boot_attach_pending", None)
         row.update(_kernel_process_sample())   # T304: the just-born kernel's size, the series' other bookend
         if prev_cut and isinstance(prev_cut.get("t"), int) and first_serve >= prev_cut["t"]:
             row["prevCutT"] = prev_cut["t"]
@@ -22819,6 +22827,34 @@ def _boot_row_due_locked():
         _BOOT_MARKS["_row"] = True             # exactly one row per boot, whichever thread wins
         return True
     return False
+
+
+BOOT_FIRST_CYCLE_BOUND_S = float(os.environ.get("ROMP_BOOT_FIRST_CYCLE_BOUND_S", "10"))
+_BOOT_HEALTH_DONE = [False]
+
+
+def _boot_health_first_cycle(dt):
+    """The pusher's first cycle after a boot is what gates sessions and cards appearing (the user, 2026-09-11: 84 s
+    cycles read as romp unusable and nothing said so). One row in the restart ledger per boot with the cycle's wall
+    seconds and whether it crossed the bound, and a loud stderr line when it did, naming where to look. Returns the
+    row the first time, None after."""
+    if _BOOT_HEALTH_DONE[0]:
+        return None
+    _BOOT_HEALTH_DONE[0] = True
+    row = {"t": int(time.time()), "pid": os.getpid(), "bootHealth": True, "firstCycleS": round(dt, 2),
+           "boundS": BOOT_FIRST_CYCLE_BOUND_S, "slow": dt > BOOT_FIRST_CYCLE_BOUND_S}
+    if row["slow"]:
+        try:
+            sys.stderr.write("boot health: the first pusher cycle took %.1f s (bound %.0f s): sessions and cards waited behind it; "
+                             "read /perf builds, checkpoints.coldFolds, asmIndex.evictions and recordCache.budgetEvictions\n"
+                             % (dt, BOOT_FIRST_CYCLE_BOUND_S))
+        except Exception:
+            pass
+    try:
+        _append_restart_cut(row)
+    except Exception:
+        pass
+    return row
 
 
 def _boot_row_backstop(now=None):
@@ -48177,6 +48213,7 @@ def _pusher_cycle():
         _live_scope.msgsum = None
         _PERF_STATS.cycle(time.monotonic() - _t_cycle, time.thread_time() - _c_cycle,
                           idle=(_PERF_STATS.marks(), jd._GOAL_IO["saves"], jd._GOAL_IO["writes"]) == _m_cycle)
+        _boot_health_first_cycle(time.monotonic() - _t_cycle)   # the boot's first cycle, on the record (a no-op after)
 
 
 def _pusher_cycle_jobs(now, live_map, any_client):
@@ -58521,7 +58558,7 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None):
     _drain_t0 = time.monotonic()
     try:
         if be is not None and hasattr(be, "drain"):
-            res = be.drain(2.0)
+            res = be.drain(EXIT_DRAIN_BUDGET_S)
     except Exception:
         # log-and-record, never die recordless (T143: a raising drain lost 2 of 18 restarts' rows)
         err = traceback.format_exc()
