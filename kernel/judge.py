@@ -2688,7 +2688,10 @@ def _ready_tasks(session, store=None, done=()):
             want_w = seg["id"] not in done or (single and not turn_open and turn["id"] not in done)
             if not want_p and not want_w:
                 continue                               # captioned at every grain: no atom of it is built or read
-            if want_p and seg.get("hp") is not False:      # a restored segment stores whether its message is human-authored (hp)
+            em.hydrate(seg["atoms"])                   # ONE read per planned segment: the prompt and unit texts below then hit the
+            if want_p and seg.get("hp") is not False:      # memo, so the judge thread takes the leaf's read lock once per segment, not
+                                                       # once per prompt and once per unit (the base's granularity; T358 CI red)
+                                                       # a restored segment stores whether its message is human-authored (hp)
                 trig = em.seg_prompt_atom(seg)
                 if trig and trig.get("author") == "human":   # MESSAGE caption — ready now, even mid-work
                     tasks.append({"kind": "prompt", "atoms": [trig],

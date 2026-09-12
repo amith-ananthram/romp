@@ -157,7 +157,7 @@ class ScalarReadersReadNoBody(unittest.TestCase):
     def test_segment_readers_read_no_body(self):
         for name, fns in (("kernel.py", ["_atom_prose_chars", "_seg_anchors", "_seg_jump", "_seg_last_text", "_seg_mids",
                                          "_human_turn_floor", "_merge_tx_sets"]),
-                          ("judge.py", ["_has_asst_work", "_ready_tasks", "_seg_work", "_turn_work"])):
+                          ("judge.py", ["_has_asst_work", "_seg_work", "_turn_work"])):   # _ready_tasks hydrates a planned segment once, on purpose
             defs = self._defs(name)
             for fn in fns:
                 body = "\n".join(l.split("#", 1)[0] for l in defs[fn].split("\n") if '"""' not in l)
