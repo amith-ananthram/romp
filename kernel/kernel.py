@@ -9827,16 +9827,15 @@ def _heal_cold_folds(leaf):
     that follows carries its complete state and the next boot restores it warm (T359: the kernel's background-task view stayed
     a tail-only state boot after boot, each write recording the cursor alone and every boot blaming the cap). An over-the-cap
     fold is left cold: a heal would only be written cursor-only again. Returns the names healed."""
-    reasons = em.cold_fold_reasons(leaf)
-    if not reasons:
+    dropped = set(em.drop_cold_cursors(leaf))   # no cursor: the fold reads the leaf whole once and is complete again
+    if not dropped:
         return []
     names = {id(c): n for n, c in em._FOLD_REG.items()}
     healed = []
     for fn, cache in _LEAF_FOLDS():
         name = names.get(id(cache))
-        if reasons.get(name) != "cold":
+        if name not in dropped:
             continue
-        cache.pop(str(leaf), None)            # no cursor: the fold reads the leaf whole once and is complete again
         try:
             fn(leaf); healed.append(name)
         except Exception:
@@ -9898,6 +9897,9 @@ def _persist_checkpoints(now):
         _prime_leaf_folds(leaf)
         dirty = set(em.checkpoint_dirty())
         mine = _session_fold_files(sid, leaf) & dirty
+        for _p in mine:                        # a tail-only fold of the session's OTHER files (its states log): its cursor is
+            if _p != leaf:                     #  dropped so the write leaves it out and the next boot reads that small file
+                em.drop_cold_cursors(_p)       #  whole once, complete again (T359 review, low 3; the leaf's folds heal above)
         if mine:
             written += em.checkpoint_write_dirty(sorted(mine))
         try:                                   # the assembly document for the leaf (T323 stage 4a): from a whole entry

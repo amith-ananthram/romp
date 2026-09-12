@@ -14,6 +14,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -427,15 +428,15 @@ class GenericFold(Base):
         # review find (2026-09-11, third round): the tail-only state is small now; a write must not record it as complete
         self.assertEqual(self.fold(), list(range(401)))               # the bounded fold steps to the witness too
         self.assertTrue(em.checkpoint_write(self.p))
-        self.assertEqual(self.doc(self.p)["folds"]["big"], {"count": 401, "cold": 1}, "a fold that began cold stays a cursor without state, "
-                                                                                  "marked as a tail-only one (T359)")
+        self.assertEqual(self.doc(self.p)["folds"]["big"], {"count": 401, "over": d["folds"]["big"]["over"]},
+                         "a fold that began cold stays a cursor without state, its reason (over the cap, the KB) carried (T359)")
         self.assertEqual(em.checkpoint_stats()["coldWrites"], {"big": 1})
         self.assertIn("state", self.doc(self.p)["folds"]["t"], "the bounded fold beside it is written whole")
         self.fresh_process(); big.clear()
         got = em.fold_records(big, self.p, self.__class__._noop_init, lambda st, o: st + [o], on=self.kinds.append, ckpt="big")
         self.assertEqual((got, self.kinds[-1]), ([], "cold"), "the third process restores it cold again, not as a complete state")
         self.assertEqual(em.checkpoint_stats()["restoredFolds"].get("big", 0), 0)
-        self.assertEqual(em.cold_fold_reasons(self.p), {"big": "cold"}, "...and knows why: a tail-only state, which a settle heals")
+        self.assertEqual(em.cold_fold_reasons(self.p), {"big": "over"}, "...and knows why: over the cap, which no settle heals")
         big.clear(); em._TRAILING_CACHE.clear()
         with em._JSONL_CACHE_LOCK:
             em._JSONL_CACHE.clear()
@@ -477,7 +478,7 @@ class GenericFold(Base):
             self.fold()
         self.assertEqual(self.kinds[-1], "cold")
         self.assertIn("carries its cursor without a state", err.getvalue())
-        self.assertIn("heals", err.getvalue())
+        self.assertIn("one whole refold heals it", err.getvalue())
         self.assertNotIn("KB cap", err.getvalue(), "the cap is not blamed for a state that never met it")
 
     @staticmethod
@@ -770,6 +771,8 @@ class KernelFolds(Base):
         self.assertLess(em.read_bytes_report().get(self.leaf, 0), size / 2, "and reads no leaf whole")
         src = open(os.path.join(BIN, "romp-kernel")).read()
         self.assertIn("_prime_leaf_folds(_s[\"path\"])", src, "the exit drain primes every session's leaf before its write")
+        drain = src[src.index("def _drain_and_exit("):]; drain = drain[:drain.index("\ndef ", 1)]
+        self.assertNotIn("_heal_cold_folds", drain, "...and never heals there: a whole read per leaf would blow the exit's budget (T359)")
 
     def test_a_tail_only_fold_is_healed_at_the_settle_by_one_whole_refold_and_the_next_boot_restores_it_warm(self):
         """T359: the devbox's leaves carried the kernel's background-task view as a cursor without a state (written under the
@@ -822,6 +825,82 @@ class KernelFolds(Base):
         self.assertIn("_persist_checkpoints(now)", src)
         self.assertIn("em.checkpoint_sweep()", src)
 
+
+
+class ReviewProbes(Base):
+    """T359 review (2026-09-12): the cut's guard, the over-cap reason through a cold write, the heal of any file's fold.
+    GenericFold's helpers over a plain JSONL file, without inheriting its tests."""
+    _step = staticmethod(GenericFold._step)
+    _noop_init = staticmethod(GenericFold._noop_init)
+    fold = GenericFold.fold
+
+    def setUp(self):
+        super().setUp()
+        self.p = str(self.td / "t.jsonl")
+        self.cache = {}
+        self.kinds = []
+    def test_a_leaf_rewritten_whole_between_the_read_and_the_write_gets_no_cut_document(self):
+        """Medium 1: the cut path read fresh guard bytes at write time; a leaf rewritten whole (and larger) between the entry's
+        read and the write paired the entry's counts and states with the new file's bytes, and the next boot restored every
+        fold onto a prefix that no longer existed. The read is gated on the entry's stat: a changed file writes the witness
+        form, which the rewrite then fails to verify, as the merge-base did."""
+        _write(self.p, [{"n": i} for i in range(12)])
+        lo = {}
+        em.fold_records(lo, self.p, list, self._step, ckpt="lo")          # lo at 12
+        _append(self.p, {"n": 12}, {"n": 13})
+        self.fold()                                                        # "t" at 14, lo lags at 12
+        os.utime(self.p, (0, 0)); time.sleep(0.01)
+        _write(self.p, [{"n": 1000 + i, "pad": "y" * 8} for i in range(20)])   # rewritten whole, larger, another mtime
+        self.assertTrue(em.checkpoint_write(self.p))
+        d = self.doc(self.p)
+        self.assertEqual(d["count"], 14, "no cut move: the witness form")
+        self.assertEqual(sorted(d["folds"]), ["t"], "the lagging fold is left out of this write")
+        self.fresh_process()
+        got = em.fold_records({}, self.p, list, self._step, on=self.kinds.append, ckpt="t")
+        self.assertEqual(got, [1000 + i for i in range(20)], "the next process folds the file as it is")
+        self.assertEqual(self.kinds[-1], "refold"); self.assertTrue(em.checkpoint_stats()["fallbacks"], "the document was refused")
+
+    def test_an_over_cap_fold_stays_over_through_a_cold_write_across_three_boots(self):
+        """Medium 2: a fold that restored cold because its state was over the cap was written {count, cold} at the next write,
+        so the following boot promised a heal and refolded it WHOLE (the unbounded read), then wrote it over again: alternating
+        boots. The reason and its KB carry through the cold write."""
+        saved_cap = em._CKPT_FOLD_CAP; em._CKPT_FOLD_CAP = 64 * 1024
+        self.addCleanup(setattr, em, "_CKPT_FOLD_CAP", saved_cap)
+        _write(self.p, [{"n": i, "pad": "x" * 400} for i in range(400)])
+        big = {}
+        em.fold_records(big, self.p, list, lambda st, o: st + [o], ckpt="big")
+        self.assertTrue(em.checkpoint_write(self.p, force=True))
+        kb = self.doc(self.p)["folds"]["big"]["over"]; self.assertGreater(kb, 64)
+        size = os.path.getsize(self.p)
+        for boot in (2, 3):
+            self.fresh_process(); big.clear()
+            em.fold_records(big, self.p, self.__class__._noop_init, lambda st, o: st + [o], on=self.kinds.append, ckpt="big")
+            self.assertEqual(self.kinds[-1], "cold", "boot %d: cold" % boot)
+            self.assertEqual(em.cold_fold_reasons(self.p), {"big": "over"}, "boot %d: for the cap's reason" % boot)
+            self.assertEqual(em.drop_cold_cursors(self.p), [], "boot %d: nothing to heal: over stays over" % boot)
+            _append(self.p, {"n": 400 + boot})
+            em.fold_records(big, self.p, self.__class__._noop_init, lambda st, o: st + [o], on=self.kinds.append, ckpt="big")
+            self.assertTrue(em.checkpoint_write(self.p, force=True))
+            self.assertEqual(self.doc(self.p)["folds"]["big"], {"count": 400 + boot - 1, "over": kb}, "boot %d: the cold write carries the reason and its KB" % boot)
+            self.assertLess(em.read_bytes_report().get(self.p, 0), size / 2, "boot %d: no whole read" % boot)
+
+    def test_any_files_tail_only_fold_heals_by_a_cursor_drop_before_the_write(self):
+        """Low 3: the heal walked the five leaf folds only; another file's fold with a cursor-only document said the line every
+        boot and never healed. em.drop_cold_cursors drops such cursors for any file: the write leaves them out and the next run
+        of the fold reads the file whole once, complete again."""
+        _write(self.p, [{"n": i} for i in range(6)])
+        self.fold(); self.assertTrue(em.checkpoint_write(self.p))
+        d = self.doc(self.p); d["folds"]["t"] = {"count": 6}                # an older kernel's cursor-only entry
+        em._ckpt_file(self.p).write_text(json.dumps(d))
+        self.fresh_process()
+        self.assertEqual(self.fold(), []); self.assertEqual(self.kinds[-1], "cold")
+        self.assertEqual(em.drop_cold_cursors(self.p), ["t"])
+        self.assertTrue(em.checkpoint_write(self.p, force=True))
+        self.assertNotIn("t", self.doc(self.p)["folds"], "left out of the write")
+        self.assertEqual(self.fold(), list(range(6))); self.assertEqual(self.kinds[-1], "refold", "the next run reads the file whole once")
+        self.assertEqual(em.cold_fold_reasons(self.p), {}, "complete again")
+        self.assertTrue(em.checkpoint_write(self.p))
+        self.assertIn("state", self.doc(self.p)["folds"]["t"], "and written whole")
 
 if __name__ == "__main__":
     unittest.main()

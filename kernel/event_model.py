@@ -767,6 +767,7 @@ _CKPT_STATS = {"restored": 0, "writes": 0, "swept": 0, "skippedFolds": 0, "fallb
                "oversizeFolds": {}, "coldFolds": {}, "coldWrites": {}}
 _COLD = object()                  # a restored cursor with no state (its fold was oversize): fold_records inits it and steps the tail
 _COLD_FOLDS = set()               # (path, fold name) whose state in this process began cold at a cut: a TAIL-ONLY state, written as a
+_COLD_OVER_KB = {}                # (path, fold name) -> the KB an over-the-cap state measured, carried through a cold write (T359)
 _COLD_REASONS = {}                # (path, fold name) -> why it restarts cold: "over" (its state was over the cap: by design, every
 #                                   boot) or "cold" (its document carried a cursor without a state: a tail-only state written by
 #                                   a process where it began cold, or an older kernel's entry; the settle's primer heals it once)
@@ -835,6 +836,20 @@ def _next_gen():
         _GEN[0] += 1
         return _GEN[0]
 _FOLD_NAME_OF = {}                # id(cursor dict) -> checkpoint name, for callers that name their cache once (name_fold_cache)
+
+
+def drop_cold_cursors(path):
+    """Drop the cursors of the folds over `path` that began cold for want of a state (reason "cold", never "over"), so each
+    is refolded whole at its next run and complete again (T359). Returns the names. For a leaf the kernel reruns its folds
+    at the settle before the write; for another file the write leaves them out and the next boot reads the file whole once."""
+    key = str(path)
+    with _CKPT_LOCK:
+        names = [n for k, n in _COLD_FOLDS if k == key and _COLD_REASONS.get((k, n), "cold") == "cold"]
+    for n in names:
+        cache = _FOLD_REG.get(n)
+        if cache is not None:
+            cache.pop(key, None)
+    return names
 
 
 def cold_fold_reasons(path):
@@ -1074,13 +1089,15 @@ def _restored_cursor(key, name, ent):
             with _CKPT_LOCK:                              # a cursor without a state: the fold starts cold at the cut, for the reason
                 _CKPT_STATS["coldFolds"][name] = _CKPT_STATS["coldFolds"].get(name, 0) + 1   #  the document names (T359: the line
                 _COLD_REASONS[(key, name)] = reason       #  blamed the cap whatever the reason)
+                if reason == "over":
+                    _COLD_OVER_KB[(key, name)] = int(f["over"])   # carried through this process's cold writes: over stays over
             if reason == "over":
                 _say_once("checkpoint: fold %s of %s restarts cold over the tail: its state was %d KB, over the %d KB cap"
                           % (name, key, int(f["over"]), _CKPT_FOLD_CAP // 1024))
             else:
                 _say_once("checkpoint: fold %s of %s restarts cold over the tail: its document carries its cursor without a state "
-                          "(a tail-only state, or an older kernel's cursor-only entry); the session's next settle heals it with one "
-                          "whole refold" % (name, key))
+                          "(a tail-only state, or an older kernel's cursor-only entry); one whole refold heals it, at the session's "
+                          "next settle for a leaf's folds, at the file's next checkpoint write otherwise" % (name, key))
             return (count, ent[6], _COLD)
         state = _ckpt_decode(f["state"])
         with _CKPT_LOCK:
@@ -1114,7 +1131,11 @@ def checkpoint_write(path, force=False):
         if cold:                                          # a state that began cold at a cut covers the tail only: it must not
             with _CKPT_LOCK:                              #  be written as a complete one (the next process would restore it
                 _CKPT_STATS["coldWrites"][name] = _CKPT_STATS["coldWrites"].get(name, 0) + 1   #  as whole and say nothing)
-            folds[name] = {"count": fcount, "cold": 1}    # marked: the next process says why, and its settle heals it
+                over_kb = _COLD_OVER_KB.get((key, name)) if _COLD_REASONS.get((key, name)) == "over" else None
+            if over_kb is not None:                       # cold BECAUSE over the cap: the reason and its KB carry through, so the
+                folds[name] = {"count": fcount, "over": over_kb}   #  next boot neither promises a heal nor refolds it whole
+            else:
+                folds[name] = {"count": fcount, "cold": 1}   # a true tail-only state: the next process says why, and heals it
             continue
         try:
             enc = _ckpt_encode(cur[2])
@@ -1131,18 +1152,29 @@ def checkpoint_write(path, force=False):
     if not folds and not force:
         return False
     cut = min([f["count"] for f in folds.values()] or [count])   # the document's cut: the LOWEST written cursor (T359), so the
-    if cut < count:                                       #  next process's tail read holds every record a lagging fold has
-        if len(ent) < 8 or not ent[7]:                    #  yet to step (its append), bounded by the records this entry holds
-            return False                                  # (an entry without record locations: written at the witness only)
-        offset = int(ent[7][(cut - base) * 2])            # the cut record's byte offset, and the 64 bytes before it as the guard
-        try:
-            with open(key, "rb") as fh:
-                fh.seek(max(0, offset - 64)); tail = fh.read(min(64, offset))
+    moved = None                                          #  next process's tail read holds every record a lagging fold has
+    if cut < count and len(ent) >= 8 and ent[7]:          #  yet to step (its append), bounded by the records this entry holds
+        off_cut = int(ent[7][(cut - base) * 2])           # the cut record's byte offset; the 64 bytes before it are the guard.
+        try:                                              # The entry holds records, not bytes, so the guard is read from the file,
+            st = os.stat(key)                             #  gated on the entry's own stat before and after the read: a leaf rewritten
+            if (st.st_mtime, st.st_size) != (mtime, size):   #  whole meanwhile (review, medium 1) would pair the entry's counts and
+                raise OSError("the file moved under the entry")   #  states with the new file's bytes, and the next boot would restore
+            with open(key, "rb") as fh:                   #  every fold onto a prefix that no longer exists; a changed stat writes
+                fh.seek(max(0, off_cut - 64)); guard_cut = fh.read(min(64, off_cut))   #  the witness form instead (the entry's guard,
+            st = os.stat(key)                             #  captured with its records), which such a rewrite then fails to verify
+            if (st.st_mtime, st.st_size) != (mtime, size) or (off_cut and not guard_cut.endswith(b"\n")):
+                raise OSError("the file moved under the entry")
         except OSError:
-            return False
-        last = records[cut - base - 1] if cut > base else None
-        count = cut
+            guard_cut = None
+        if guard_cut is not None:
+            moved = (off_cut, guard_cut, records[cut - base - 1] if cut > base else None, cut)
+    if moved is not None:
+        offset, tail, last, count = moved
     else:
+        if cut < count:                                   # no cut move: the folds at the witness only (the lagging ones stay dirty)
+            folds = {n: f for n, f in folds.items() if f["count"] == count}
+            if not folds and not force:
+                return False
         last = records[-1] if records else None
     with _CKPT_LOCK:
         seq = _CKPT_SEQ.get(key, 0) + 1
@@ -1528,7 +1560,7 @@ def fold_records(cache, path, init, step, on=None, ckpt=None, drop_after=None):
         if ckpt is not None:
             with _CKPT_LOCK:
                 _COLD_FOLDS.discard((key, ckpt))          # every record stepped: the state is complete again
-                _COLD_REASONS.pop((key, ckpt), None)
+                _COLD_REASONS.pop((key, ckpt), None); _COLD_OVER_KB.pop((key, ckpt), None)
     for r in recs[start:]:
         if isinstance(r, dict):
             state = step(state, r)
