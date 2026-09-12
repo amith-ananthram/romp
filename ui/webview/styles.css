@@ -186,7 +186,7 @@ body.scheme-solarized-dark {
      stroke, DISTINCT from both the accent blue (selection/chrome) and the working-status yellow
      chip. Text-highlight use only — comment chrome (badge, buttons, chips) stays var(--accent). */
   --cmt-hl: #ffd54a;
-  --cmt-hl-outline: #ffd54a;   /* the ink of the comment notch and the unread box: the fill's yellow here, darker on cream (T310) */
+  --cmt-hl-outline: #ffd54a;   /* the ink of the comment notch (the rail tick's fill): the fill's yellow here, darker on cream (T310) */
   /* fast mode ON — the CLI's own fastMode orange, a STATUS color (means "this session runs fast
      mode"), so the badge reads the same here as in the Claude Code TUI. Not the accent. */
   --fast: #ff6a00;
@@ -3551,21 +3551,27 @@ mark.cmt-hl {
   cursor: pointer;
 }
 mark.cmt-hl.unread { background: color-mix(in srgb, var(--cmt-hl) 45%, transparent); }
-/* UNREAD = ONE outline around the WHOLE passage (the user 2026-09-10): a landed reply you have not opened draws a
-   single solid box in the scroll notch's ink — var(--cmt-hl-outline), the colour .cmt-tick wears for the same thread:
-   the highlighter yellow itself in the dark theme, a darker amber on the cream page, where the yellow reads as a fill
-   but not as a line — around the union of the highlight's line fragments, clipped to any scrolling container between
-   the marks and the turn (a notice body, a wide formula). The 2026-09-08 dashed ring was an outline on the inline
-   mark, which Chromium paints once per line fragment, so a wrapped passage wore a stack of dashed boxes. CSS
-   cannot merge a mark's fragments (box-decoration-break: clone keeps them apart), so the box is a positioned
-   child of the TURN that render.ts's paintCommentOutlines measures from the marks' client rects — turn-relative,
-   so it scrolls with the text and needs no repaint on scroll; repainted after every marks pass, on the rail's
-   rAF scheduler (a re-render, the view's resize) and on window resize. An OUTLINE on an empty box, so nothing
-   reflows when it comes and goes; 1px clear of the glyphs; transparent to the pointer, so hover and click land
-   on the marks beneath. The fill still says pending vs landed exactly as before (the 45% tier above, .busy's
-   green below); read marks have no box. */
+/* UNREAD = the needs-you cue on the passage: a landed reply you have not opened. Since 2026-09-12 (the user) the stroke
+   is the one the tab strip wears for a session that waits on you — .tab.tab-awaiting's dashed ring, in the same red,
+   var(--st-awaiting-bg) — and which of TWO shapes carries it follows the passage's LINE COUNT, decided by render.ts's
+   paintCommentOutlines from the marks' client rects:
+   · ONE or TWO rows: a dashed ring on each unread mark itself (mark.cmt-hl.unread.cmt-ring below), which hugs exactly
+     the highlighted text. A box over two lines would enclose the first line's un-highlighted head and the second's tail.
+   · THREE or more rows: ONE box around the WHOLE passage (T310, the user 2026-09-10) — a ring per fragment there reads
+     as a stack of many things, one box as one. An outline on the inline mark paints once per line fragment and CSS
+     cannot merge them (box-decoration-break: clone keeps them apart), so the box is a positioned child of the TURN that
+     the painter sizes to the union of the fragments' client rects, each cut to any scrolling container between the
+     marks and the turn (a notice body, a wide formula); turn-relative, so it scrolls with the text and needs no repaint
+     on scroll; repainted after every marks pass, on the rail's rAF scheduler (a re-render, the view's resize) and on
+     window resize — a resize can carry a passage across the two-row line, and that hook is what swaps the shape. An
+     OUTLINE on an empty box, so nothing reflows when it comes and goes; 1px clear of the glyphs; transparent to the
+     pointer, so hover and click land on the marks beneath.
+   The 2026-09-10 change had made the box SOLID in the scroll notch's ink (var(--cmt-hl-outline)) as a side effect of
+   matching the notch; the notch keeps that ink (.cmt-tick below) and only its UNREAD halo joins this red. The fill still
+   says pending vs landed exactly as before (the 45% tier above, .busy's green below); read marks wear neither shape. */
 .cmt-outline { position: absolute; pointer-events: none; user-select: none; box-sizing: border-box;
-  outline: 1.5px solid var(--cmt-hl-outline); border-radius: 3px; }
+  outline: 1.5px dashed var(--st-awaiting-bg); border-radius: 3px; }
+mark.cmt-hl.unread.cmt-ring { outline: 1.5px dashed var(--st-awaiting-bg); outline-offset: 1px; }
 /* the turn's rail segment shouts an unread thread (the user 2026-08-23): the identity line's own
    segment tints the comment yellow — wider and fully opaque so it reads from across the pane — and
    the rail-hit strip over it opens the thread on click. applyCommentMarks clears the class the
@@ -3818,16 +3824,20 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
 .cmt-tick {
   position: absolute; right: 1px; width: 8px; height: 4px;
   border: 0; border-radius: 2px; padding: 0;
-  background: var(--cmt-hl-outline); opacity: 0.75; pointer-events: auto; cursor: pointer;   /* the ink the unread box shares (T310) */
+  background: var(--cmt-hl-outline); opacity: 0.75; pointer-events: auto; cursor: pointer;   /* the notch's own ink (T310); the unread halo below is the needs-you red */
 }
 .cmt-tick:hover { opacity: 1; }
 .cmt-tick.resolved { opacity: 0.3; }
 /* an UNREAD thread's tick shouts (the user 2026-08-23): full width, taller, double-ringed — the old
-   faint glow read as a rendering artifact, not as "new here". It also stacks ABOVE its read siblings:
-   two threads on one passage share a `top`, and the later-painted read tick covered the unread one
+   faint glow read as a rendering artifact, not as "new here". The outer ring is the needs-you red the
+   passage's box and ring wear (the user 2026-09-12 wanted the rail to agree with the box's cue; a 10×6
+   tick cannot show a dash, so it agrees by colour), past a 1.5px gap in the page colour; the fill stays
+   the notch's ink, so the tick still says "a comment here" and the halo "it waits on you" — the same
+   pattern as .cmt-tick.busy wearing the await green. It also stacks ABOVE its read siblings: two
+   threads on one passage share a `top`, and the later-painted read tick covered the unread one
    (the user 2026-09-10) */
 .cmt-tick.unread { width: 10px; height: 6px; right: 0; opacity: 1; z-index: 1;
-  box-shadow: 0 0 0 1.5px var(--bg), 0 0 0 3px color-mix(in srgb, var(--cmt-hl-outline) 85%, transparent); }
+  box-shadow: 0 0 0 1.5px var(--bg), 0 0 0 3px var(--st-awaiting-bg); }
 /* a WRITING thread's tick wears the same await-green as the passage (the user 2026-08-24: the
    marching-ants crawl — the "spinning dots" — is retired; the state COLOR is the in-flight cue,
    here as everywhere on the rail) */
