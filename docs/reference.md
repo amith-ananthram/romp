@@ -2740,13 +2740,27 @@ follows it. A row bearing the signature with no restart instant on record (a
 crash leaves no audit row) is taken as a step only on a chain the session has
 already shown. `--since` is the instant the per-session hosts came on: before
 it every restart killed the CLI, so nothing there is a step. Rows the fixed
-kernel writes (`cumulativeUsd`, `spendBaseline`) are never touched.
+kernel writes (`cumulativeUsd`, `spendBaseline`) are never staircase steps; one
+rule of their own reaches them: a row whose kernel figure equals its cumulative,
+in a session whose `attach-unknown` row precedes it, is the lifetime billed
+once more (the fix's first boot left the watermark at zero after a replayed
+first result) and is corrected by the kernel's own arithmetic to the cumulative
+less the previous same-session row's cumulative (a replayed row with no dollars
+and a rising cumulative counts as that previous row), stamped `repairRule` 5.
+The guard is the kernel's reset comparison, the cumulative above the previous
+row's: the first paid turn after a mid-life `/clear` is written with its
+dollars equal to its cumulative by design, a counter reset, and the rule stands
+down with a note (never a clamp); the chain disarms on the row it judged, on a
+reset and on a fresh or seeded baseline row.
 
 It prints before and after per hour and per session and changes nothing unless
 `--apply` is given. A corrected row keeps the kernel's figure as `usdRecorded`,
 and every run judges a repaired row again on that figure, so a tightened rule
 or a later `--since` restores what an earlier run took, and a run over a
-repaired day changes nothing. Per-session figures fold under the session a row
+repaired day re-judges every correction, staircase and lifetime alike, and
+changes nothing when the judgements stand: a lifetime correction the rule no
+longer believes is restored to `usdRecorded` and its buckets re-folded, the
+same road the staircase rules use. Per-session figures fold under the session a row
 bills (a comment thread's owner, the registry's `threadOf`), and the buckets'
 `key` split moves only for sessions the registry marks as API-key billed; the
 report says how many rows' split was left as recorded. The kernel may be
