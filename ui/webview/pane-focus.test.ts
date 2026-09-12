@@ -70,7 +70,7 @@ test("the wiring: the dismiss branch, the unfocused body, the composer, the rest
   assert.match(paint, /empty\.classList\.toggle\("unfocused", !!v\);\s*\n\s*empty\.dataset\.vanished = named \|\| "";/, "the body names the vanished or the awaited id");
   assert.doesNotMatch(RENDER, /empty\.textContent = "No session open/, "the one writer of the empty body is paintEmptyState");
   // the return: the session frame, or the strip re-listing it; no other arrival adopts the box meanwhile
-  assert.match(RENDER, /if \(vanishedId === msg\.id\) restoreIfShown\(msg\.id\);[^\n]*\n\s*const wouldAdopt = !activeId && \(!vanishedId \|\| vanishedByDecline\) && !wantActive && !wantActiveGone;[^\n]*\n\s*const adopted = wouldAdopt && stripShows\(msg\.id\);/, "an adoption reads the rule's visibility half: a first arrival the filter hides is not adopted (the review's low)");
+  assert.match(RENDER, /if \(vanishedId === msg\.id && heldHere\(msg\.id\)\) restoreIfShown\(msg\.id\);[^\n]*\n\s*const wouldAdopt = !activeId && \(!vanishedId \|\| vanishedByDecline\) && !wantActive && !wantActiveGone && heldHere\(msg\.id\);[^\n]*\n\s*const adopted = wouldAdopt && stripShows\(msg\.id\);/, "an adoption reads the rule's visibility half: a first arrival the filter hides is not adopted (the review's low); both the return and the adoption are gated on the column holding the session (the chat split, 2026-09-11)");
   // a DECLINED adoption is recorded like restoreIfShown's hidden case, so the schedule restores it when the filter shows
   // it; the record yields to a later visible first arrival (nothing was chosen), and any activation clears the mark
   assert.match(RENDER, /else if \(wouldAdopt && !vanishedId\) \{ vanishedId = msg\.id; vanishedWhy = "hidden"; vanishedName = sessions\.get\(msg\.id\)\?\.name \|\| tabMeta\.get\(msg\.id\)\?\.name \|\| ""; vanishedByDecline = true; \}/, "…on FIRST sight only (the review's low: the last hidden arrival overwrote it)");
@@ -82,13 +82,13 @@ test("the wiring: the dismiss branch, the unfocused body, the composer, the rest
   assert.match(RENDER, /if \(composerNoteSid === msg\.id\) restoreIfShown\(msg\.id\);/, "the composer note's restore goes through the rule too");
   assert.equal((RENDER.match(/\bsetActive\(msg\.id\)/g) || []).length, 0, "no frame-reachable direct setActive(msg.id) is left in the arrival path");
   assert.ok(RENDER.indexOf("/** Does the strip show `id` right now:") > RENDER.indexOf("function restoreIfShown("), "stripShows's docstring sits above its own function, after restoreIfShown");
-  assert.match(fn("applyTabOrder"), /for \(const id of kernelOrder\) kernelListed\.add\(id\);[\s\S]{0,500}?const back = vanishedId \|\| wantActive;[^\n]*\n\s*if \(back && restoreIfShown\(back\)\)/);
+  assert.match(fn("applyTabOrder"), /for \(const id of kernelOrder\) kernelListed\.add\(id\);[\s\S]{0,500}?const back = vanishedId \|\| wantActive;[^\n]*\n\s*colSets = readColSets\(\);[^\n]*\n\s*if \(back && heldHere\(back\) && restoreIfShown\(back\)\)/);   // …membership fresh, and only when this column holds it (the chat split)
   // every restore reads ONE rule (the review's leak: applyTabOrder's had no visibility predicate, so a routine push
   // re-focused a filtered-out session for one frame): listed AND shown takes focus back; listed but hidden leaves the
   // pane unfocused as "hidden", for renderTabs's schedule to restore when the filter shows it
   assert.match(fn("restoreIfShown"), /if \(!stripLists\(id\)\) return false;\s*\n\s*if \(stripShows\(id\)\) \{ setActive\(id\); return true; \}\s*\n\s*if \(!activeId\) \{ vanishedId = id; vanishedWhy = "hidden";/);
   assert.match(fn("stripLists"), /return !closingTabs\.has\(id\) && \(order\.includes\(id\) \|\| tabMeta\.has\(id\)\);/, "the paint's membership rule, shared with every restore");
-  assert.match(RENDER, /if \(wantActive && msg\.id === wantActive && stripLists\(msg\.id\)\) \{ wantActive = null; restoreIfShown\(msg\.id\); \}/, "the persisted tab's arrival restores only if shown");
+  assert.match(RENDER, /if \(wantActive && msg\.id === wantActive && stripLists\(msg\.id\) && heldHere\(msg\.id\)\) \{ wantActive = null; restoreIfShown\(msg\.id\); \}/, "the persisted tab's arrival restores only if shown, and only while this column holds it (the chat split)");
   assert.equal((RENDER.match(/\bsetActive\(back\)/g) || []).length, 1, "the one direct setActive(back) left is renderTabs's own fire-time restore, behind stripLists and stripShows");
   // a hidden tab torn down while the pane is unfocused: the body's line follows the reason (the review's low)
   assert.match(fn("dismissSession"), /if \(!wasActive && vanishedId === id\) \{[\s\S]{0,700}?if \(vanishedByDecline\) \{ vanishedId = null; vanishedWhy = null; vanishedName = ""; vanishedByDecline = false; \}\s*\n\s*else \{ vanishedWhy = why; vanishedName = name; \}\s*\n\s*repaintEmptyStateIfUnfocused\(\);\s*\n\s*\}/, "the user's tab's teardown writes its reason; a declined record's takes the record with it, name-free (the review's medium)");
@@ -100,7 +100,7 @@ test("the wiring: the dismiss branch, the unfocused body, the composer, the rest
   assert.match(fn("paintEmptyState"), /const nameOf = \(id: string, carried = ""\) => carried \|\| wantActiveName \|\| tabMeta\.get\(id\)\?\.name \|\| sessions\.get\(id\)\?\.name \|\| "a session";/, "never a raw sid in the body, on any branch");
   assert.match(RENDER, /if \(wantActive && \(isSubId\(wantActive\) \|\| isProvisionalId\(wantActive\)\)\) \{ wantActiveGone = wantActive; wantActive = null; \}/, "an id that can never be listed again is not awaited");
   assert.match(fn("paintEmptyState"), /gone \? \{ name: nameOf\(gone\), why: "gone" as const, dialing: false \}/);
-  assert.match(fn("applyTabOrder"), /if \(back && restoreIfShown\(back\)\) \{[^\n]*\}\s*\n\s*else if \(!activeId\) showActive\(\);/, "the strip changing under an unfocused pane repaints the body (an emptied strip, or the named tab listed but hidden)");
+  assert.match(fn("applyTabOrder"), /if \(back && heldHere\(back\) && restoreIfShown\(back\)\) \{[^\n]*\}\s*\n\s*else if \(!activeId\) showActive\(\);/, "the strip changing under an unfocused pane repaints the body (an emptied strip, or the named tab listed but hidden, or held by another column)");
   // the body repaints on the dial event; the view filter routes through the same rule; the keyboard picks the first tab
   assert.match(RENDER, /window\.addEventListener\("romp:hostDial", \(\) => \{ syncHostOfflineFoot\(\); repaintEmptyStateIfUnfocused\(\); \}\);/);
   assert.match(fn("repaintEmptyStateIfUnfocused"), /if \(activeId\) return;[\s\S]*?if \(e\) paintEmptyState\(e\);/);

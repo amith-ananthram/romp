@@ -32,7 +32,7 @@ test("executable: the union joins local and remote tags BY NAME — one group, l
   assert.equal(ops.remotes[0].host, "TESTHOST");
 });
 
-test("the Tags row sits with the session controls ABOVE the divider; Browse stays last", () => {
+test("the Tags row opens the second section (where the session belongs); Browse stays last", () => {
   const at = RENDER.indexOf("function showTabMenu");
   const body = RENDER.slice(at, RENDER.indexOf("document.body.appendChild(menu);", at));
   const tagsAt = body.indexOf('l.textContent = "Tags"');
@@ -101,9 +101,10 @@ test("one-click MOVE between groups (tab groups, 2026-09-04): 'Move to <name>' a
     "editUnion and moveUnion share the one edit — never a forked implementation");
 });
 
-test("the menu groups BY KIND: [Rename+colors] / [toggles+billing+Tags] / [Browse] (the user 2026-08-24, final ruling)", () => {
-  // supersedes 644's single top section: aesthetic controls together at the top, the
-  // behavior/membership controls as the middle section, Browse alone at the bottom
+test("the menu groups by what each item changes: [Rename+colours] / [Tags, Move] / [switches+Billing] / [Browse] (the user 2026-09-11)", () => {
+  // supersedes the 2026-08-24 three-section ruling: membership and location (Tags, Move to folder…) leave
+  // the switches for a section of their own. tab-menu-sections.test.ts is the one pin of the whole grouping;
+  // this pins Rename's dress and the two dividers around the Tags section
   const at = RENDER.indexOf("function showTabMenu");
   const body = RENDER.slice(at, RENDER.indexOf("document.body.appendChild(menu);", at));
   const renameAt = body.indexOf('l.textContent = "Rename"');
@@ -112,15 +113,16 @@ test("the menu groups BY KIND: [Rename+colors] / [toggles+billing+Tags] / [Brows
   assert.match(body, /sb\.textContent = "the name is a label — mail, goals and history follow the session";/,
     "…and a sub-line saying what a rename preserves (uuid-keyed truth)");
   const colorsAt = body.indexOf('el("div", "ctx-colors")');
-  const firstToggleAt = body.indexOf('toggle("feed"');
   const tagsAt = body.indexOf('l.textContent = "Tags"');
+  const moveAt = body.indexOf('l.textContent = "Move to folder…"');
+  const firstToggleAt = body.indexOf('toggle("feed"');
   const browseAt = body.indexOf('l.textContent = "Browse files"');
-  assert.ok(renameAt < colorsAt && colorsAt < firstToggleAt && firstToggleAt < tagsAt && tagsAt < browseAt,
-    "order: Rename, colors, toggles, Tags, Browse");
-  // one divider between colors and the toggles; NONE inside section 1 or section 2
-  assert.ok(!body.slice(renameAt, colorsAt).includes('el("div", "ctx-sep")'), "Rename+colors are one section");
-  assert.ok(body.slice(colorsAt, firstToggleAt).includes('menu.appendChild(el("div", "ctx-sep"));'), "a divider splits sections 1/2");
-  assert.ok(!body.slice(firstToggleAt, tagsAt).includes('el("div", "ctx-sep")'),
-    "toggles, billing and Tags are ONE behavior section — no inner dividers");
-  assert.ok(body.slice(tagsAt, browseAt).includes('menu.appendChild(el("div", "ctx-sep"));'), "a divider splits sections 2/3 — Browse alone at the bottom");
+  assert.ok(renameAt < colorsAt && colorsAt < tagsAt && tagsAt < moveAt && moveAt < firstToggleAt && firstToggleAt < browseAt,
+    "order: Rename, colours, Tags, Move, switches, Browse");
+  // the MENU's dividers (the Tags flyout appends its own to `sub`, which never counts)
+  const SEP = 'menu.appendChild(el("div", "ctx-sep"));';
+  assert.ok(!body.slice(renameAt, colorsAt).includes(SEP), "Rename+colours are one section");
+  assert.ok(body.slice(colorsAt, tagsAt).includes(SEP), "a divider splits sections 1/2");
+  assert.ok(!body.slice(tagsAt, moveAt).includes(SEP), "Tags and Move to folder… are ONE section — where the session belongs");
+  assert.ok(body.slice(moveAt, firstToggleAt).includes(SEP), "a divider splits sections 2/3 — the switches start a section of their own");
 });

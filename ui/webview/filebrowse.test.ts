@@ -213,7 +213,13 @@ test("Browse files sits at the BOTTOM of the tab menu, behind a divider, wearing
   assert.match(menuBody, /sb\.textContent = "the session's working tree, " \+ \(where === "pane" \? "in the Files pane" : "in a viewer over this chat"\);/,
     "the standard sub-description line, naming where the listing will open (browse-route.test.ts)");
   // …and the Billing submenu (the previous last item) now sits ABOVE it
-  assert.ok(menuBody.indexOf('l.textContent = "Billing"') < browseAt, "Browse is last");
+  const billingAt = menuBody.indexOf('l.textContent = "Billing"');
+  assert.ok(billingAt > 0 && billingAt < browseAt, "Browse is last");
+  // the divider before Browse follows Billing directly (2026-09-11: Tags moved up into the where-it-belongs
+  // section, so the switches section ends on Billing and nothing else is appended before Browse's divider)
+  const between = menuBody.slice(billingAt, browseAt);
+  assert.ok(between.includes('menu.appendChild(el("div", "ctx-sep"));'), "the divider sits between Billing and Browse");
+  assert.doesNotMatch(between, /l\.textContent = "(Tags|Move to folder…|Move to a new column|Rename)"/, "no other item between them");
 });
 
 // ── the viewer's veto, run FOR REAL: a browse click while the discard confirm keeps the viewer ──────────

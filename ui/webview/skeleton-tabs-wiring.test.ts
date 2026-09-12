@@ -13,6 +13,7 @@ import { createRequire } from "node:module";
 import { atBottomDist } from "./scroll-keep";
 import { isReplyReady } from "./reply-ready";
 import { hostOf } from "./host-prefix";
+import { isProvisionalId } from "./provisional";   // the loading branch's one "opening" gate (2026-09-11): the real module
 
 const requireCjs = createRequire(__filename);
 const WEBVIEW = path.resolve(process.cwd(), "..", "ui", "webview");
@@ -26,7 +27,7 @@ const fn = (name: string): string => {
 };
 
 test("render.ts holds ONE skeleton set, declared beside tabMeta, and reads the active session through liveSession", () => {
-  assert.match(RENDER, /import \{ newSkeletonState, applyTabOrderSkeleton, onStatus, onFull, onDismiss, onSocketUp, nextPrefetch, renderKind \} from "\.\/skeleton-tabs";/);
+  assert.match(RENDER, /import \{ newSkeletonState, applyTabOrderSkeleton, onStatus, holdStatus, onFull, onDismiss, onSocketUp, nextPrefetch, renderKind \} from "\.\/skeleton-tabs";/);
   // beside tabMeta / closingTabs / pendingTabMeta (below them: tab-close-optimistic.test.ts wants closingTabs within
   // 900 characters of tabMeta) — renderTabs reads it and can run before the module finishes evaluating
   assert.match(RENDER, /const pendingTabMeta = new Map<string, PendingTabMeta>\(\);\n(?:\/\/[^\n]*\n)*const skeletonTabs = newSkeletonState\(\);/);
@@ -105,12 +106,16 @@ test("makeSkeletonTab: the loaded-tab chrome minus what it does not know — no 
   for (const f of ["applyTabStatus", "wireTabDrag", "makeSkeletonTab", "appendTabCtxGauge"]) assert.ok(RENDER.indexOf(`function ${f}(`) < ph, f + " above the placeholder builder");
 });
 
-test("statusOnly begins with the skeleton branch: store + scheduleRenderTabs (one frame for a burst), never renderTabs or the no-base ask", () => {
+test("statusOnly begins with the skeleton branch: store + scheduleRenderTabs (one frame for a burst), never renderTabs; a status for a session the page holds nothing of is HELD for its strip, never the no-base ask", () => {
   const body = RENDER.split("function statusOnly(msg: any) {")[1].split("\n}")[0];
   const first = body.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("//"))[0];
   assert.equal(first, 'if (onStatus(skeletonTabs, msg.id, msg.status) === "skeleton") { scheduleRenderTabs(); return; }');
-  assert.ok(body.indexOf("onStatus(skeletonTabs") < body.indexOf('if (!s) { requestFullSession(msg.id, "nobase"); return; }'),
-    "the no-base repair still follows, unchanged, for every non-skeleton sid");
+  // The shim's FIFO carries a newer strip to the END of a burst, so a skeleton's statuses can land ahead of the strip that
+  // names the set (a later chat column's open sends two strips, 2026-09-11): the status waits for the strip. The ask that
+  // stood here loaded the whole board into a column opened as a view of one session, one ask per withheld tab.
+  assert.match(body, /const s = sessions\.get\(msg\.id\);\s*\n\s*if \(!s\) \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*holdStatus\(skeletonTabs, msg\.id, msg\.status\); return;\s*\n\s*\}/,
+    "no session and not a skeleton: the status is held for the strip");
+  assert.doesNotMatch(body, /"nobase"/, "statusOnly never asks for a full: a status frame is only ever a skeleton tab's");
   const skel = body.slice(0, body.indexOf("const s = sessions.get(msg.id);"));
   assert.doesNotMatch(skel, /\brenderTabs\(\)/, "sixteen status frames land in one burst — one animation frame, not sixteen synchronous repaints");
 });
@@ -125,8 +130,8 @@ test("chatTail and update ask for the full on a skeleton id BEFORE their no-base
 test("showActive gates the active session on the set, shows the loader with LOADING copy, and asks after notifyActive", () => {
   const sa = fn("showActive");
   assert.match(sa, /const s = activeId \? liveSession\(activeId\) : null;\s*\n\s*if \(!s\) \{/, "a skeleton active takes the existing !s branch");
-  assert.match(sa, /const skeleton = skeletonTabs\.ids\.has\(activeId\);\s*\n\s*skeletonLoading = skeleton \? activeId : null;[^\n]*\n\s*if \(skeleton\) wait\.appendChild\(rompLoaderInner\("loading " \+ what \+ "…"\)\);\s*\n\s*else wait\.appendChild\(rompLoaderInner\("opening " \+ what \+ "…"\)\);/,
-    "a running session is LOADING; 'opening' would claim a start that is not happening (the placeholder keeps its line)");
+  assert.match(sa, /const skeleton = skeletonTabs\.ids\.has\(activeId\);\s*\n\s*skeletonLoading = skeleton \? activeId : null;[^\n]*\n\s*if \(isProvisionalId\(activeId\)\) wait\.appendChild\(rompLoaderInner\("opening " \+ what \+ "…"\)\);\s*\n\s*else wait\.appendChild\(rompLoaderInner\("loading " \+ what \+ "…"\)\);/,
+    "a running session is LOADING, a skeleton or not; 'opening' is the provisional's alone — a new split column's session on its way said 'opening' and read as a create (2026-09-11)");
   assert.match(sa, /if \(skeleton\) requestFullSession\(activeId, "skeleton-click"\);/);
   // activeTab (notifyActive) precedes needFull on the wire → the kernel builds the new active first
   assert.ok(sa.indexOf("notifyActive();") < sa.indexOf('requestFullSession(activeId, "skeleton-click")'));
@@ -195,10 +200,10 @@ test("requestFullSession(id, why): every ask names its why, from the fixed vocab
   assert.match(RENDER, /type NeedFullWhy = "gap" \| "nobase" \| "skeleton-click" \| "prefetch" \| "skeleton-delta" \| "reattach";/);   // reattach: a proto-2 window back at the tail (T323 stage 4b)
   assert.match(RENDER, /function requestFullSession\(id: string, why: NeedFullWhy\): void \{\s*\n\s*if \(!id \|\| awaitingFull\.has\(id\)\) return;\s*\n\s*awaitingFull\.add\(id\);\s*\n\s*vscodeApi\?\.postMessage\(\{ type: "needFull", id, why \}\);/);
   const calls = [...RENDER.matchAll(/requestFullSession\(([^()]*?)\)/g)].map((m) => m[1]).filter((a) => !a.startsWith("id: string"));
-  assert.ok(calls.length >= 9, "the gap ×4, no-base ×3, skeleton-delta ×2, skeleton-click, prefetch and reattach sites");
+  assert.ok(calls.length >= 11, "the gap ×4, no-base ×2 (chatTail and update; statusOnly holds a status for its strip instead, 2026-09-11), skeleton-delta ×2, skeleton-click, prefetch and reattach sites");
   for (const c of calls) assert.match(c, /, "(gap|nobase|skeleton-click|prefetch|skeleton-delta|reattach)"$/, `call site without a why: requestFullSession(${c})`);
   const why = (w: string) => RENDER.split(`, "${w}")`).length - 1;
-  assert.equal(why("gap"), 4); assert.equal(why("nobase"), 3); assert.equal(why("skeleton-delta"), 2); assert.equal(why("reattach"), 1);   // gap ×4: the index tail's, the uuid tail's, a missing chatHead's and a missing chatMore's (an anchor gone from the transcript)
+  assert.equal(why("gap"), 4); assert.equal(why("nobase"), 2); assert.equal(why("skeleton-delta"), 2); assert.equal(why("reattach"), 1);   // gap ×4: the index tail's, the uuid tail's, a missing chatHead's and a missing chatMore's (an anchor gone from the transcript); nobase ×2: chatTail and update (statusOnly holds a status for its strip instead)
   assert.equal(why("skeleton-click"), 1); assert.equal(why("prefetch"), 1);
 });
 
@@ -239,7 +244,8 @@ test("the click path's loader latch: showActive latches the skeleton it is loadi
 
 test("the statusline over a skeleton tab says Loading, the word its loader uses, not Opening", () => {
   const usl = fn("updateStatusline");
-  assert.match(usl, /const loading = skeletonTabs\.ids\.has\(activeId\) \|\| skeletonLoading === activeId;\s*\n\s*sl\.replaceChildren\(openingLine\(loading \? "Loading session" : "Opening session"\)\);/);
+  assert.match(usl, /sl\.replaceChildren\(openingLine\(isProvisionalId\(activeId\) \? "Opening session" : "Loading session"\)\);/,
+    "Loading for every id whose payload has not landed, a skeleton or not; Opening only for a provisional (2026-09-11: a new split column's session on its way is not being created)");
   assert.match(RENDER, /function openingLine\(text = "Opening session"\): HTMLElement \{/);
 });
 
@@ -310,13 +316,13 @@ function chipWorld(opts: { clientHeight: number; innerHeight: number; transcript
     // B's stale copy carries an unread open reply: with its view kept and a ready thread, the liveSession read is
     // the ONE clause of updateReplyChips' gate that hides the chips over the skeleton (the read #1226 narrowed)
     commentThreads: new Map<string, unknown[]>([["B", [{ tid: "t1", anchorUuid: "22222222-3333-4444-5555-666666666666", status: "open", unread: true }]]]),
-    jumpBtn, replyChips, atBottomDist, isReplyReady, hostOf, HOOKS,
+    jumpBtn, replyChips, atBottomDist, isReplyReady, hostOf, isProvisionalId, HOOKS,
     el: (_tag: string, cls?: string): ChipEl => new ChipEl(cls || "", cls === "tab-loading-wait" ? Math.round(LOADER_VH / 100 * win.innerHeight) : 0),
     rompLoaderInner: (caption: string): ChipEl => { HOOKS.captions.push(caption); return new ChipEl("romp-loader", 0); },
   };
   const js = requireCjs("esbuild").transformSync(["liveSession", "atBottom", "showActive", "updateJumpBtn", "updateReplyChips"].map(fn).join("\n"), { loader: "ts" }).code;
   const prelude = `
-    const { sessions, views, tabMeta, skeletonTabs, commentThreads, jumpBtn, replyChips, atBottomDist, isReplyReady, hostOf, el, rompLoaderInner, HOOKS } = W;
+    const { sessions, views, tabMeta, skeletonTabs, commentThreads, jumpBtn, replyChips, atBottomDist, isReplyReady, hostOf, isProvisionalId, el, rompLoaderInner, HOOKS } = W;
     let activeId = null, skeletonLoading = null, replyChipSig = "";
     const placeReviveLoader = () => {}, notifyActive = () => {}, renderLedger = () => {}, renderLiveAsk = () => {}, renderBgTasks = () => {}, renderSubHead = () => {}, updateStatusline = () => {};
     // the unfocused body's painter and the box's name overlay (T357): inert here, the strip test is about the chips

@@ -232,16 +232,24 @@ it also shrinks the tabs and group headers; on a phone the session picker stands
 there the setting tightens the panel alone. Like the other chat settings, it is per browser.
 
 **Several sessions at once.** The chat can be split into columns, so two or three sessions
-sit side by side instead of behind each other's tabs. Right-click a tab and pick **Open in
-new split**, and a new chat column opens to the right on that session; **⌘** / **Ctrl**
-with the backslash key, or **Split the chat** in the command palette, opens an empty one. Each column is a full chat, with its own tab strip,
-its own composer and its own place in each transcript; drag the gutter between two columns
-to resize them. A column remembers which session it was on, and its width, across reloads,
-and the set of open columns is remembered per browser. The **×** in a column's top-right
-corner closes it; **Close this chat split** in the palette closes the column you are in, or
-the last one when you are in the first. When a card in the feed or a notification jumps to
-a session, the jump lands in the column already showing it, else in the column you last
-worked in. Four columns at most; the phone shows one pane at a time and never splits.
+sit side by side instead of behind each other's tabs. Every column is one full chat with its
+own tab strip and its own composer, and each session lives in exactly one column: the first
+column holds every session not shown elsewhere. Drag a tab to the right edge of the chat and a
+new column opens there on that session; drag a tab onto another column and the session moves
+to it. Without the mouse, **⌘** / **Ctrl** with the backslash key, or **Move this session to a
+new column** in the command palette, moves the session you are on to a new column at the right;
+**Move this session to the next column** and **Move this session to the previous column** in
+the palette walk it across the columns you have. Your unsent draft travels with the session.
+Drag the gutter between two columns to resize them. The **×** in a column's top-right corner
+closes it and returns its sessions to the first column, as does **Close this column** in the
+palette (the column you are in, or the last one when you are in the first); a column whose last
+tab leaves, whether moved away or ended, closes on its own (a column with a session still being
+created in it waits for that session to open). Clicking a card in the feed or a
+notification, or picking a session from the **+** picker, the switcher, an at-mention or a link
+in a transcript when it is shown in another column, lands you in the column that holds it, so
+no session is ever shown twice. The arrangement, each column's sessions and widths, is
+remembered per browser across reloads. Four columns at most; the phone shows one pane at a time
+and never splits.
 
 ### The feed
 

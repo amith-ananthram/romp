@@ -61,8 +61,8 @@ class ChatEmptyPane(unittest.TestCase):
 
     def test_it_runs_on_every_push_and_is_idempotent(self):
         """renderTabs runs on every kernel push (0.5-3s). Appending each time would pile up copies."""
-        self.assertRegex(RENDER, r"syncNoSessionsPlaceholder\(visibleIds\.length, ids\.length\)",
-                         "renderTabs must drive it from the visible session count")
+        self.assertRegex(RENDER, r"syncNoSessionsPlaceholder\(visibleIds\.length, ids\.length, ids\.filter\(heldHere\)\.length\)",
+                         "renderTabs must drive it from the visible session count (and, since the chat split, how many this column holds)")
         fn = re.search(r"function syncNoSessionsPlaceholder\(.*?\n\}", RENDER, re.S).group(0)
         self.assertIn("if (existing) { existing.textContent = txt; return; }", fn, "must not append a second placeholder per push")
 

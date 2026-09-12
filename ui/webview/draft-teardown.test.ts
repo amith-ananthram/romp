@@ -306,9 +306,10 @@ test("an active tab torn down under the user: stash first, prune the fallback, b
   // the dismissed id leaves the recency stack BEFORE the fallback is read
   assert.ok(fn.indexOf("mru.splice(mi, 1)") < fn.indexOf("focusAfterDismiss(why, mru, order, goingToo)"), "pin (iv): fallback never the dismissed id");
   // …and never an id the strip no longer shows: the re-bound box loads the fallback's own draft through the shared loader
+  // (…nor, since the chat split of 2026-09-11, a tab another column holds: heldHere joins the fallback's exclusions)
   // (T357: the fallback itself moved to pane-focus.ts focusAfterDismiss and runs for the user's own ✕ alone; every
   // other departure leaves the pane unfocused — pane-focus.test.ts executes both)
-  assert.match(fn, /const home = hostOf\(id\);[^\n]*\n\s*const goingToo = \(x: string\) => \(doomed\?\.has\(x\) \?\? false\) \|\| \(why === "hostDrop" && !!home && hostOf\(x\) === home\);\s*\n\s*const next = focusAfterDismiss\(why, mru, order, goingToo\);\s*\n\s*activeId = next\.activeId;[\s\S]*?loadComposerFor\(activeId\);/);
+  assert.match(fn, /const home = hostOf\(id\);[^\n]*\n\s*const goingToo = \(x: string\) => \(doomed\?\.has\(x\) \?\? false\) \|\| \(why === "hostDrop" && !!home && hostOf\(x\) === home\) \|\| !heldHere\(x\);[^\n]*\n\s*const next = focusAfterDismiss\(why, mru, order, goingToo\);\s*\n\s*activeId = next\.activeId;[\s\S]*?loadComposerFor\(activeId\);/);
   // …and, unless the user themself clicked ✕, the box is blurred and the note names what went away
   assert.match(fn, /if \(why !== "close"\) \{[\s\S]*?ta\.blur\(\);[\s\S]*?renderComposerNote\(id, why, name\);/);
 });
@@ -345,7 +346,7 @@ test("the note retires on the exact events: an explicit switch, the session's re
 });
 
 test("the `!activeId` adoption loads the adopted session's draft (once-per-page restore is not enough)", () => {
-  assert.match(RENDER, /const wouldAdopt = !activeId && \(!vanishedId \|\| vanishedByDecline\) && !wantActive && !wantActiveGone;[^\n]*\n\s*const adopted = wouldAdopt && stripShows\(msg\.id\);[^\n]*\n\s*if \(adopted\) \{ activeId = msg\.id; assertPeekFor\(msg\.id\); loadComposerFor\(msg\.id, true\); persistActive\(msg\.id\); vanishedId = null;/, "…and never while the user's own tab is away, awaited after a reload, or shown as gone (T357); an adoption asserts the peek and persists like a pick");
+  assert.match(RENDER, /const wouldAdopt = !activeId && \(!vanishedId \|\| vanishedByDecline\) && !wantActive && !wantActiveGone && heldHere\(msg\.id\);[^\n]*\n\s*const adopted = wouldAdopt && stripShows\(msg\.id\);[^\n]*\n\s*if \(adopted\) \{ activeId = msg\.id; assertPeekFor\(msg\.id\); loadComposerFor\(msg\.id, true\); persistActive\(msg\.id\); vanishedId = null;/, "…and never while the user's own tab is away, awaited after a reload, or shown as gone (T357); an adoption asserts the peek and persists like a pick; and only a session this column holds (the chat split, 2026-09-11)");
   // …and the adoption is a first SHOW even for a payload the page already held (the append path never re-reveals a hidden view)
   assert.match(RENDER, /if \(existed && !forked && !firstBuild && !adopted\) \{\s*\n\s*appendActive\(\);/);
   // the loader: box ← drafts.get(id), chips, thumbnails, staged stack — the same set setActive paints
