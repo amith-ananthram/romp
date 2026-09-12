@@ -45,13 +45,13 @@ test("emptyStateParts: the body names the session that vanished and why; reconne
 test("the wiring: the dismiss branch, the unfocused body, the composer, the restore on return, no adoption meanwhile", () => {
   assert.match(RENDER, /^let vanishedId: string \| null = null;\s*\nlet vanishedWhy: VanishWhy \| null = null;\s*\nlet vanishedName = "";/m);
   const dismiss = fn("dismissSession");
-  assert.match(dismiss, /const next = focusAfterDismiss\(why, mru, order, goingToo\);\s*\n\s*activeId = next\.activeId;\s*\n\s*if \(next\.unfocused\) \{ vanishedId = id; vanishedWhy = why; vanishedName = name; \}/);
+  assert.match(dismiss, /const next = focusAfterDismiss\(why, mru, order, goingToo\);\s*\n\s*activeId = next\.activeId;\s*\n\s*if \(next\.unfocused\) \{ vanishedId = id; vanishedWhy = why; vanishedName = name; vanishedByDecline = false; \}/);
   assert.match(dismiss, /if \(why !== "close"\) \{[\s\S]*?ta\.blur\(\);[\s\S]*?renderComposerNote\(id, why, name\);/, "the T236 note above the box still says whose box went away");
   // the pick (and the restore) end the unfocused state
   assert.match(fn("setActive"), /activeId = id;\s*\n\s*vanishedId = null; vanishedWhy = null; vanishedName = ""; wantActive = null; wantActiveGone = null;/, "a pick ends the unfocused state AND the awaited tab");
   assert.match(fn("setActive"), /persistActive\(id\);/, "the pick persists id and name");
   assert.match(fn("persistActive"), /activeId: id, activeName: liveSession\(id\)\?\.name \|\| tabMeta\.get\(id\)\?\.name \|\| ""/, "the name persists beside the id for the reload's body");
-  assert.match(RENDER, /if \(adopted\) \{ activeId = msg\.id; assertPeekFor\(msg\.id\); loadComposerFor\(msg\.id, true\); persistActive\(msg\.id\); \}/, "an adopted tab asserts its peek and is persisted like a pick (the review's lows)");
+  assert.match(RENDER, /if \(adopted\) \{ activeId = msg\.id; assertPeekFor\(msg\.id\); loadComposerFor\(msg\.id, true\); persistActive\(msg\.id\); vanishedId = null; vanishedWhy = null; vanishedName = ""; wantActive = null; wantActiveGone = null; vanishedByDecline = false; \}/, "an adopted tab asserts its peek and is persisted like a pick (the review's lows)");
   // the empty body: pane-focus's words, the name dressed as the strip dresses it, the composer disabled and nameless
   const show = fn("showActive");
   assert.match(show, /paintEmptyState\(empty\);\s*\n\s*empty\.style\.display = "";\s*\n[\s\S]{0,200}?ta\.disabled = true; ta\.placeholder = order\.length \? "Pick a tab to start" : "Click \+ to add a session"; syncComposerPh\(\);/);
@@ -62,7 +62,15 @@ test("the wiring: the dismiss branch, the unfocused body, the composer, the rest
   assert.match(paint, /empty\.classList\.toggle\("unfocused", !!v\);\s*\n\s*empty\.dataset\.vanished = named \|\| "";/, "the body names the vanished or the awaited id");
   assert.doesNotMatch(RENDER, /empty\.textContent = "No session open/, "the one writer of the empty body is paintEmptyState");
   // the return: the session frame, or the strip re-listing it; no other arrival adopts the box meanwhile
-  assert.match(RENDER, /if \(vanishedId === msg\.id\) restoreIfShown\(msg\.id\);[^\n]*\n\s*const adopted = !activeId && !vanishedId && !wantActive && !wantActiveGone && stripShows\(msg\.id\);/, "an adoption reads the rule's visibility half: a first arrival the filter hides is not adopted (the review's low)");
+  assert.match(RENDER, /if \(vanishedId === msg\.id\) restoreIfShown\(msg\.id\);[^\n]*\n\s*const wouldAdopt = !activeId && \(!vanishedId \|\| vanishedByDecline\) && !wantActive && !wantActiveGone;[^\n]*\n\s*const adopted = wouldAdopt && stripShows\(msg\.id\);/, "an adoption reads the rule's visibility half: a first arrival the filter hides is not adopted (the review's low)");
+  // a DECLINED adoption is recorded like restoreIfShown's hidden case, so the schedule restores it when the filter shows
+  // it; the record yields to a later visible first arrival (nothing was chosen), and any activation clears the mark
+  assert.match(RENDER, /else if \(wouldAdopt && !vanishedId\) \{ vanishedId = msg\.id; vanishedWhy = "hidden"; vanishedName = sessions\.get\(msg\.id\)\?\.name \|\| tabMeta\.get\(msg\.id\)\?\.name \|\| ""; vanishedByDecline = true; \}/, "…on FIRST sight only (the review's low: the last hidden arrival overwrote it)");
+  // the adoption over a declined record ends the unfocused state as setActive does (the review's high: a record left beside
+  // an active tab handed its session to applyTabOrder's restore when the filter lifted); the mark clears on every other unfocus
+  assert.match(fn("unfocusHiddenByView"), /vanishedName = sessions\.get\(id\)\?\.name \|\| tabMeta\.get\(id\)\?\.name \|\| ""; vanishedByDecline = false;/);
+  assert.match(fn("dismissSession"), /if \(next\.unfocused\) \{ vanishedId = id; vanishedWhy = why; vanishedName = name; vanishedByDecline = false; \}/);
+  assert.match(fn("setActive"), /wantActiveGone = null; vanishedByDecline = false;/, "…cleared with the rest of the unfocused state (on the same line: chat-window.test.ts bounds the distance from the activation to the paused strip's re-evaluation)");
   assert.match(RENDER, /if \(composerNoteSid === msg\.id\) restoreIfShown\(msg\.id\);/, "the composer note's restore goes through the rule too");
   assert.equal((RENDER.match(/\bsetActive\(msg\.id\)/g) || []).length, 0, "no frame-reachable direct setActive(msg.id) is left in the arrival path");
   assert.ok(RENDER.indexOf("/** Does the strip show `id` right now:") > RENDER.indexOf("function restoreIfShown("), "stripShows's docstring sits above its own function, after restoreIfShown");
@@ -75,7 +83,7 @@ test("the wiring: the dismiss branch, the unfocused body, the composer, the rest
   assert.match(RENDER, /if \(wantActive && msg\.id === wantActive && stripLists\(msg\.id\)\) \{ wantActive = null; restoreIfShown\(msg\.id\); \}/, "the persisted tab's arrival restores only if shown");
   assert.equal((RENDER.match(/\bsetActive\(back\)/g) || []).length, 1, "the one direct setActive(back) left is renderTabs's own fire-time restore, behind stripLists and stripShows");
   // a hidden tab torn down while the pane is unfocused: the body's line follows the reason (the review's low)
-  assert.match(fn("dismissSession"), /if \(!wasActive && vanishedId === id\) \{[\s\S]{0,400}?vanishedWhy = why; vanishedName = name;\s*\n\s*repaintEmptyStateIfUnfocused\(\);\s*\n\s*\}/);
+  assert.match(fn("dismissSession"), /if \(!wasActive && vanishedId === id\) \{[\s\S]{0,700}?if \(vanishedByDecline\) \{ vanishedId = null; vanishedWhy = null; vanishedName = ""; vanishedByDecline = false; \}\s*\n\s*else \{ vanishedWhy = why; vanishedName = name; \}\s*\n\s*repaintEmptyStateIfUnfocused\(\);\s*\n\s*\}/, "the user's tab's teardown writes its reason; a declined record's takes the record with it, name-free (the review's medium)");
   // the reload road (the review's HIGH): the persisted tab is awaited at boot, the body names it, nothing adopts
   assert.match(RENDER, /^let wantActiveName: string = /m);
   assert.match(fn("paintEmptyState"), /const awaited = !vanishedId && wantActive \? wantActive : null;/);
@@ -103,7 +111,7 @@ test("the wiring: the dismiss branch, the unfocused body, the composer, the rest
   assert.doesNotMatch(RENDER, /visibleIds\.includes\(activeId\) && visibleIds\.length/, "no first-visible-tab RE-POINT");
   assert.match(fn("unfocusHiddenByView"), /activeId = null; vanishedId = id; vanishedWhy = "hidden";/);
   assert.match(fn("assertPeekFor"), /const next = chatVisible\(id\) \? null : id;/, "the peek rule, over the views blob alone");
-  assert.match(RENDER, /if \(adopted\) \{ activeId = msg\.id; assertPeekFor\(msg\.id\); loadComposerFor\(msg\.id, true\); persistActive\(msg\.id\); \}/, "an adoption asserts the peek like a pick");
+  assert.match(RENDER, /if \(adopted\) \{ activeId = msg\.id; assertPeekFor\(msg\.id\); loadComposerFor\(msg\.id, true\); persistActive\(msg\.id\); vanishedId = null;/, "an adoption asserts the peek like a pick");
   assert.match(fn("paintEmptyState"), /name: nameOf\(vanishedId, vanishedName\), why: vanishedWhy/, "no raw sid on the dismissal branch either");
   assert.match(fn("dismissSession"), /const name = sessions\.get\(id\)\?\.name \|\| tabMeta\.get\(id\)\?\.name \|\| "a session";/);
   assert.match(fn("cycleTab"), /if \(pickFirstVisibleTab\(\)\) return;/);
