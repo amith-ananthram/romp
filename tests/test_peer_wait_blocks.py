@@ -216,6 +216,7 @@ class CloserBlocks(_Peer):
         self.ask(MANAGER, WORKER, T0 - 100, kind="delegate")
         st, top, step = self.store()
         st["nodes"][top]["askAnchor"] = "machine"
+        st["nodes"][top]["promptMsgId"] = self.rows[-1]["id"]   # the anchor names the dispatch (the latch's stamp)
         nd = self._close(st, step, "cannot move further without you")
         self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER])
         self.assertEqual(nd["relayWanted"]["peer"], MANAGER)
@@ -1156,8 +1157,9 @@ class TwoDelegators(_Peer):
         self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER], "web's mail anchored it, though tests wrote later")
         st2, top2, step2 = self.store()
         st2["nodes"][top2]["askAnchor"] = "machine"; st2["nodes"][top2]["promptMsgId"] = ""
+        self._dispatch_top(st2, "m-tests-1")               # tests' dispatch anchored a top of this session, still open
         nd2 = self._close_block(st2, step2, "cannot move further without you")
-        self.assertEqual(list(nd2.get("awaitingPeers") or ()), [OTHER], "no mail id on the anchor: the latest delegate")
+        self.assertEqual(list(nd2.get("awaitingPeers") or ()), [OTHER], "no mail id on the anchor: the latest delegate whose top is open")
 
     def test_the_planner_pass_latches_the_anchors_mail_id_from_the_parse(self):
         self.rows.append(mail(MANAGER, WORKER, T0 - 200, kind="delegate", mid="m-web-1"))
@@ -1184,17 +1186,90 @@ class TwoDelegators(_Peer):
         nd = self._close_block(st, step, "cannot move further without you")
         self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER])
 
-    def test_a_delivery_with_no_delegate_marker_leaves_the_fallback_to_the_latest_delegate(self):
-        self.rows.append(mail(MANAGER, WORKER, T0 - 200, kind="delegate", mid="m-web-1"))
-        self._write_mail()
-        st, top, step = self.store()
+    def _dispatch_top(self, st, mid, t=T0 - 150, done_at=None):
+        """A top this session minted from the dispatch `mid` (its anchor latched machine, promptMsgId the mail's id), open
+        unless `done_at` says when romp completed it."""
+        tid = WORKER + ":g0"
+        st["nodes"][tid] = node(tid, "Land the exporter's login check", t=t, askAnchor="machine", promptMsgId=mid)
+        if done_at is not None:
+            st["nodes"][tid]["nodeComplete"] = True
+            st["nodes"][tid]["log"] = [{"kind": "done", "src": "closer", "ev_t": done_at, "at": done_at, "why": "landed"}]
+        return tid
+
+    def _coordinate_only_top(self, st, top):
+        """The fixture's top, minted from a delivery holding only a peer's heads-up: anchored machine, no dispatch."""
         text = "Heads up\n<!-- romp-msg-id: m-tests-c -->\n<!-- romp-msg-kind: coordinate -->"
         session = {"turns": [{"atoms": [{"uuid": "u1", "type": "user", "message": {"role": "user", "content": [{"type": "text", "text": text}]}}]}]}
         st["nodes"][top]["promptUuid"] = "u1"; st["nodes"][top]["askAnchor"] = "machine"
         jd._latch_prompt_msg_ids(session, st)
         self.assertEqual(st["nodes"][top]["promptMsgId"], "", "no delegate in the delivery")
+
+    def test_a_delivery_with_no_delegate_marker_falls_back_only_while_the_dispatchs_top_is_open(self):
+        # the worker case kept: the manager's dispatch anchored a top of this session still open at the mint, so a
+        # later top the worker minted from a peer's heads-up is still the manager's work, its block relayed there
+        self.rows.append(mail(MANAGER, WORKER, T0 - 200, kind="delegate", mid="m-web-1"))
+        self._write_mail()
+        st, top, step = self.store()
+        self._dispatch_top(st, "m-web-1")
+        self._coordinate_only_top(st, top)
         nd = self._close_block(st, step, "cannot move further without you")
-        self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER], "the latest delegate at or before the mint")
+        self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER], "the dispatch's top is open: the relation stands")
+        self.assertTrue(nd.get("relayWanted"), "and the question is relayed to the manager")
+
+    def test_a_delegate_whose_top_is_complete_is_no_standing_relation(self):
+        # the live case: a dispatch handled and finished hours earlier; a top minted later from a post-compaction record
+        # holds a decision only the user can make, and its block must stay theirs
+        self.rows.append(mail(MANAGER, WORKER, T0 - 200, kind="delegate", mid="m-web-1"))
+        self._write_mail()
+        st, top, step = self.store()
+        self._dispatch_top(st, "m-web-1", done_at=T0 - 50)   # finished before the later top was minted at T0
+        self._coordinate_only_top(st, top)
+        nd = self._close_block(st, step, "did the real-token login check pass?")
+        self.assertEqual(list(nd.get("awaitingPeers") or ()), [], "the user's decision, never the peer's")
+        self.assertTrue(nd["blocked"], "filed as the user's block")
+        self.assertNotIn("relayWanted", nd, "nothing is asked on the session's behalf")
+
+    def test_a_delegate_that_anchored_no_top_is_no_standing_relation(self):
+        self.rows.append(mail(MANAGER, WORKER, T0 - 200, kind="delegate", mid="m-web-1"))
+        self._write_mail()
+        st, top, step = self.store()                       # the dispatch was handled without a goal: no top names it
+        self._coordinate_only_top(st, top)
+        nd = self._close_block(st, step, "did the real-token login check pass?")
+        self.assertEqual(list(nd.get("awaitingPeers") or ()), [], "no top ever carried that dispatch: no relation")
+        self.assertTrue(nd["blocked"])
+        self.assertNotIn("relayWanted", nd)
+
+    def test_a_dispatchs_top_completed_after_the_mint_was_open_at_the_mint(self):
+        self.rows.append(mail(MANAGER, WORKER, T0 - 200, kind="delegate", mid="m-web-1"))
+        self._write_mail()
+        st, top, step = self.store()
+        self._dispatch_top(st, "m-web-1", done_at=T0 + 30)   # completed after the later top's mint (T0) and before its block
+        self._coordinate_only_top(st, top)
+        nd = self._close_block(st, step, "cannot move further without you")
+        self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER], "the relation stood when the top was born: judged at the mint, not at the block")
+
+    def test_a_top_split_out_of_a_human_anchored_top_stays_the_users(self):
+        # the second observation: three decisions were split out of a top the user typed, and the split children were
+        # re-latched from their own mint record (a system record after a compaction) as machine, then attributed
+        self.rows.append(mail(MANAGER, WORKER, T0 - 200, kind="delegate", mid="m-web-1"))
+        self._write_mail()
+        st, top, step = self.store()
+        self._dispatch_top(st, "m-web-1")                  # a standing relation exists...
+        st["nodes"][top]["askAnchor"] = "human"; st["nodes"][top]["promptUuid"] = "u-typed"   # ...but this top the user typed
+        st["nodes"][step]["promptUuid"] = "u-sys"          # the step's own mint turn: a system record
+        menu = [st["nodes"][top], st["nodes"][step]]
+        self.assertEqual(jd.apply_group(st, menu, [{"do": "split", "goal": 2, "why": "a thread of its own"}], T0 + 100), 1)
+        self.assertIsNone(st["nodes"][step]["parentId"], "split out as a top of its own")
+        self.assertEqual(st["nodes"][step].get("askAnchor"), "human", "the split-born top inherits the parent's anchor")
+        session = {"turns": [{"atoms": [{"uuid": "u-sys", "type": "user", "author": "system",
+                                         "message": {"role": "user", "content": [{"type": "text", "text": "<!-- romp-note: bookkeeping -->"}]}}]}]}
+        jd._latch_ask_anchors(WORKER, session, st)         # a later latch pass over the parse
+        jd._latch_prompt_msg_ids(session, st)
+        self.assertEqual(st["nodes"][step].get("askAnchor"), "human", "…and is not re-latched from its own mint record")
+        nd = self._close_block(st, step, "pick the glossary design?")
+        self.assertEqual(list(nd.get("awaitingPeers") or ()), [], "the user's call, never the peer's")
+        self.assertTrue(nd["blocked"])
+        self.assertNotIn("relayWanted", nd)
 
     def _close_block(self, st, step, why):
         with contextlib.redirect_stderr(io.StringIO()):
@@ -1235,8 +1310,9 @@ class TwoDelegators(_Peer):
         self._write_mail()
         st, top, step = self.store()
         st["nodes"][top]["askAnchor"] = "machine"; st["nodes"][top]["promptMsgId"] = "m-tests-c"   # an older stamp (the first-marker rule)
+        self._dispatch_top(st, "m-web-1")                  # the manager's dispatch anchored a top of this session, still open
         nd = self._close_block(st, step, "cannot move further without you")
-        self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER], "as for an anchor that names none: the latest delegate")
+        self.assertEqual(list(nd.get("awaitingPeers") or ()), [MANAGER], "as for an anchor that names none: the latest delegate whose top is open")
 
 
 class MoreRules(_Peer):
