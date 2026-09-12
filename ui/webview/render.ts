@@ -12104,7 +12104,7 @@ function paintEmptyState(empty: HTMLElement): void {
   // session" (the review's low: the dismissal branch fell to the id)
   const nameOf = (id: string, carried = "") => carried || wantActiveName || tabMeta.get(id)?.name || sessions.get(id)?.name || "a session";
   const v = vanishedId && vanishedWhy && vanishedWhy !== "close"
-    ? { name: nameOf(vanishedId, vanishedName), why: vanishedWhy, dialing: hostIsDialing(vanishedId) }
+    ? { name: nameOf(vanishedId, vanishedName), why: vanishedWhy, dialing: hostIsDialing(vanishedId), declined: vanishedByDecline }
     : awaited ? { name: nameOf(awaited), why: "awaited" as const, dialing: hostIsDialing(awaited) }
     : gone ? { name: nameOf(gone), why: "gone" as const, dialing: false }
     : null;
