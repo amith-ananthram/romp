@@ -70,7 +70,7 @@ test("the tabOrder frame carries the blob and the strip filters on it, composing
   // #only= filter is applied on top of tabInView and is no peek input, so an only-filtered active tab reaches the
   // check below and the pane goes UNFOCUSED naming it, never re-pointed at another session
   assert.match(RENDER, /if \(activeId && ids\.includes\(activeId\) && !visibleIds\.includes\(activeId\)\) \{/);
-  assert.match(RENDER, /function tabInView\(id: string\): boolean \{ return id === peekId \|\| chatVisible\(id\); \}/);
+  assert.match(RENDER, /function tabInView\(id: string\): boolean \{ return \(id === peekId \|\| chatVisible\(id\)\) && heldHere\(id\); \}/);   // …and held by this column (the chat split, 2026-09-11; chat-columns.ts)
   assert.match(RENDER, /captureViews\(m\.views \|\| null\);\s*\n\s*applyTabOrder\(/, "the peek is asserted before the strip is applied, on every tabOrder frame");
 });
 

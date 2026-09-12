@@ -77,8 +77,25 @@ test("a tab drag resets the signature (its live reorder changes the strip's DOM 
   assert.match(drag, /if \(draggedGroup\) \{[^]*?No live reorder of headers[^]*?return;\s*\n\s*\}/);
 });
 
+test("the column partition (the chat split, 2026-09-11): the sets are read once at the top, ahead of the filter and the plan, and tabInView reads columnHolds", () => {
+  const read = fn.indexOf("colSets = readColSets();");
+  assert.ok(read > 0 && read < fn.indexOf("const visibleIds = ids.filter((id) => stripShows(id, only));"), "one cross-window read per render, before the filter (stripShows reads tabInView, which reads the sets)");
+  assert.equal((fn.match(/readColSets\(\)/g) || []).length, 1, "read once");
+  assert.ok(read < fn.indexOf("const plan = planStrip("), "before the plan, which reads visibleIds");
+  assert.match(RENDER, /function heldHere\(id: string\): boolean \{ return isSubId\(id\) \|\| isProvisionalId\(id\) \|\| columnHolds\(colSets, COL, id\); \}/,
+    "a sub-agent viewer and a provisional tab are the page's own; every other id is the shell's sets' to place");
+  assert.match(RENDER, /function tabInView\(id: string\): boolean \{ return \(id === peekId \|\| chatVisible\(id\)\) && heldHere\(id\); \}/);
+  assert.match(RENDER, /^import \{ colFromSearch, columnHolds, type ColSets \} from "\.\/chat-columns";/m);
+  assert.match(RENDER, /^const COL = colFromSearch\(location\.search\);/m);
+  // the skip line and the signature list are unchanged: the partition reaches the signature through ids and visibleIds
+  assert.match(fn, /if \(stripSig === tabStripSig && !\(mslotEl && !mslotEl\.firstChild\)\) \{ stripAftermath\(visibleIds, ids\); return; \}/);
+  assert.ok(!sig.includes("colSets"), "the sets are not a signature input of their own: visibleIds already carries the filter");
+  // …and the shell's write of the sets re-renders through the storage event (the tab-groups idiom)
+  assert.match(RENDER, /window\.addEventListener\("storage", \(e\) => \{ if \(e\.key === "romp-chat-cols"\) renderTabs\(\); \}\);/);
+});
+
 test("what follows a render runs on both paths: the placeholder and the all-hidden blank", () => {
-  assert.match(RENDER, /function stripAftermath\(visibleIds: readonly string\[\], ids: readonly string\[\]\): void \{\s*\n\s*syncNoSessionsPlaceholder\(visibleIds\.length, ids\.length\);/);
+  assert.match(RENDER, /function stripAftermath\(visibleIds: readonly string\[\], ids: readonly string\[\]\): void \{\s*\n\s*syncNoSessionsPlaceholder\(visibleIds\.length, ids\.length, ids\.filter\(heldHere\)\.length\);/);   // + how many this column holds (the chat split's copy, 2026-09-11)
   assert.equal((fn.match(/stripAftermath\(visibleIds, ids\)/g) || []).length, 2, "the skip path and the rebuild path");
   // the all-hidden blank reads the active view, which is built lazily and can appear between two equal
   // strips: it lives in the aftermath, not behind the skip (session-views pins the block's shape)

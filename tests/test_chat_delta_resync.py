@@ -236,6 +236,7 @@ def test_ready_branch_is_wired_to_the_reset():
     src = inspect.getsource(km)
     i = src.find('msg.get("type") == "ready"')
     assert i > 0
-    body = src[i:i + 2400]   # the arm grew past 1600 on 2026-09-11 (the focused-session send, the connect-time reads landing together)
+    body = src[i:i + 3000]   # the arm grew past 1600 on 2026-09-11 (the focused-session send, the connect-time reads and the skeleton client's re-arm landing together): the connect push sits near 2400 now; the window follows tests/test_chat_skeleton_reconnect.py's
     assert "_client_reset_chat_base(client)" in body, "ready must reset BEFORE its push"
+    assert "_push_one(client)" in body, "the connect push is in the arm"
     assert body.find("_client_reset_chat_base(client)") < body.find("_push_one(client)")

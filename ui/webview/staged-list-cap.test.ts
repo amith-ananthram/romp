@@ -377,7 +377,7 @@ test("the composer closure's call sites: deliver sends only through flushStaged 
   assert.equal((RENDER.match(/stagedCollapsed\.(add|delete|clear)\(/g) || []).length, 3, "the renderer never collapses or expands a list on its own");
   // one routing loop over the module's post list; the composition and its exceptions are decided there,
   // and quoteReplyBody lives there too (one function for the send, the release and the chip preview)
-  assert.match(RENDER, /import \{ StagedStack, quoteReplyBody, stagedPosts \} from "\.\/staged-messages";/);
+  assert.match(RENDER, /import \{ StagedStack, quoteReplyBody, stagedPosts, type StagedMsg \} from "\.\/staged-messages";/);   // + the type: a moved tab's staged messages travel with it (the chat split, 2026-09-11)
   assert.match(FLUSH, /for \(const p of stagedPosts\(run, typed\)\) routeUserMessage\(sid, p\.text, p\.cites as Citation\[\] \| undefined, p\.imgPaths\);/);
   assert.equal((FLUSH.match(/routeUserMessage\(/g) || []).length, 1, "no send outside the post list");
   assert.doesNotMatch(FLUSH, /stagedRunBody|itemId|isSlashCommand/, "not re-derived here");

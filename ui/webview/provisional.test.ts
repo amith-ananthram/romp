@@ -72,7 +72,7 @@ test("executed: a focus on a RUNNING session under the requested name resolves t
 
 test("the focus handler retires the provisional QUIETLY when the kernel answered the create by focusing a running session; a warn after that toasts", () => {
   const focus = RENDER.slice(RENDER.indexOf('else if (m.type === "focus") {'), RENDER.indexOf('else if (m.type === "dropCitation"'));
-  assert.match(focus, /if \(focusResolvesProvisional\(m\.id, sessions\.get\(m\.id\)\?\.name, pendingNewSession, provisionalId\)\) resolveProvisionalToExisting\(m\.id\);/);
+  assert.match(focus, /if \(focusResolvesProvisional\(m\.id, tabName\(m\.id\), pendingNewSession, provisionalId\)\) resolveProvisionalToExisting\(m\.id\);/);   // tabName: the loaded session's name, else the strip's (a skeleton tab has no session entry; the chat split, 2026-09-11)
   assert.ok(focus.indexOf("resolveProvisionalToExisting(m.id)") < focus.indexOf("setActive(m.id"),
     "retired BEFORE the switch, so dropProvisional's reselect cannot outrank the focus and the real tab is what stays active");
   assert.ok(focus.indexOf("closingTabs.delete(m.id);") < focus.indexOf("resolveProvisionalToExisting(m.id)"),

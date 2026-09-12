@@ -164,6 +164,27 @@ window.__rompUnregisterPane('chat-pane-3');
 //    unregistered fallback keys (key('chat-pane') → chat, key('feed-pane') → feed)
 delete window.__rompLastChatPane;
 out.dragGvB = drag('gv-b', 500, 480);
+// 8) a NEW chat column takes HALF the rightmost column (the chat split, 2026-09-11): __rompSplitGrow normalises every
+//    SHOWN pane to its pixels first (the hidden outline and files panes are not written), then the left pane's key and
+//    the new key each take half the left pane's width, persisted; a hidden or missing left pane writes nothing
+resetDom();
+STORE['romp-pane-grow'] = JSON.stringify({ chat: 60, fleet: 34, feed: 40, chat2: 25 });
+BOOT();
+window.__rompRegisterPane('chat-pane-2', 'chat2');
+out.splitGrow = { wrote: window.__rompSplitGrow('chat-pane-2', 'chat3'), grows: grows(), store: store(),
+                  hidden: window.__rompSplitGrow('fleet-pane', 'chat9'), missing: window.__rompSplitGrow('chat-pane-77', 'chat9'), after: grows() };
+// 9) a CLOSING column hands its width to the column on its LEFT (review find 2026-09-11, the halving's twin): every shown
+//    pane to its pixels first, then the left pane's key takes the closing pane's width plus the 7 px gutter that goes with
+//    it (the row keeps its width: one gutter fewer); the hidden panes are not written; a hidden or missing pane on either
+//    side writes nothing; the closing pane's own key is dropped by the unregister that follows
+resetDom();
+STORE['romp-pane-grow'] = JSON.stringify({ chat: 60, fleet: 34, feed: 40, chat2: 25 });
+BOOT();
+window.__rompRegisterPane('chat-pane-2', 'chat2');
+out.splitShrink = { wrote: window.__rompSplitShrink('chat-pane', 'chat-pane-2'), grows: grows(), store: store(),
+                    hiddenLeft: window.__rompSplitShrink('fleet-pane', 'chat-pane-2'), missingGone: window.__rompSplitShrink('chat-pane', 'chat-pane-77'), after: grows() };
+window.__rompUnregisterPane('chat-pane-2');
+out.splitShrink.unregistered = { grows: grows(), store: store() };
 console.log(JSON.stringify(out));
 """
 
@@ -259,6 +280,34 @@ class PaneGuttersExecute(unittest.TestCase):
         self.assertEqual(a["afterUp"]["--g-feed"], 420)
         self.assertEqual(a["afterUp"]["--g-fleet"], 240)
         self.assertEqual(a["store"], {"chat": 580, "fleet": 240, "feed": 420, "files": 40})
+
+    def test_8_a_new_column_takes_half_the_rightmost_column_after_every_shown_pane_is_normalised(self):
+        # the chat split's honest half-width (2026-09-11): the stub panes report chat 600, chat2 500, feed 400 (the outline
+        # and files panes hidden), so the grab-style normalisation writes those three first — never a mixed scale — and
+        # then chat2 and the new chat3 each take 250; the hidden panes keep their stored grows
+        a = self.out["splitGrow"]
+        self.assertTrue(a["wrote"])
+        self.assertEqual(a["grows"], {"--g-chat": 600, "--g-chat2": 250, "--g-chat3": 250, "--g-feed": 400, "--g-fleet": 34, "--g-files": 40})
+        self.assertEqual(a["store"], {"chat": 600, "fleet": 34, "feed": 400, "files": 40, "chat2": 250, "chat3": 250}, "persisted, so __rompGrowFairIfNew keeps it when the column is made")
+        self.assertFalse(a["hidden"], "a hidden left pane is never written")
+        self.assertFalse(a["missing"], "nor a missing one")
+        self.assertEqual(a["after"], a["grows"], "…and the refusals changed nothing")
+
+    def test_9_a_closing_column_hands_its_width_to_the_column_on_its_left(self):
+        # the halving's twin (review find 2026-09-11): with only the closing column's key deleted, flex gave its pixels to
+        # EVERY pane by weight, so a tab dragged out and back narrowed the chat by a third per round trip. The stub panes
+        # report chat 600, chat2 500, feed 400 (the outline and files panes hidden): the normalisation writes those three,
+        # then chat takes 600 + 500 + the 7 px gutter that goes with the closing column
+        a = self.out["splitShrink"]
+        self.assertTrue(a["wrote"])
+        self.assertEqual(a["grows"], {"--g-chat": 1107, "--g-chat2": 500, "--g-feed": 400, "--g-fleet": 34, "--g-files": 40})
+        self.assertEqual(a["store"], {"chat": 1107, "fleet": 34, "feed": 400, "files": 40, "chat2": 500}, "persisted: the width survives a reload")
+        self.assertFalse(a["hiddenLeft"], "a hidden left pane is never written")
+        self.assertFalse(a["missingGone"], "nor for a missing closing pane")
+        self.assertEqual(a["after"], a["grows"], "…and the refusals changed nothing")
+        u = a["unregistered"]
+        self.assertEqual(u["grows"], {"--g-chat": 1107, "--g-feed": 400, "--g-fleet": 34, "--g-files": 40}, "the unregister that follows drops the closing column's key alone")
+        self.assertEqual(u["store"], {"chat": 1107, "fleet": 34, "feed": 400, "files": 40})
 
 
 if __name__ == "__main__":

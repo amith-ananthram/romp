@@ -103,6 +103,9 @@ function lift(): (hooks: Hooks) => Api {
       createTextNode: (t) => { const n = new H.FakeEl("#text"); n.textContent = t; return n; } };
     const auditTabOrder = () => {}; const onlyTag = () => H.only; const matchesOnly = (name, only) => name.includes(only);
     const tabInView = (id) => id === peekId || !H.hidden.has(id);
+    // the chat split's partition (2026-09-11), inert: no shell here, so the sets are null and every id is held
+    let colSets = null; const readColSets = () => null; const heldHere = () => true; const noteColumnEmptiness = () => {}; const noteOrphanState = () => {}; const staleActiveFallback = () => {};
+    const isProvisionalId = (id) => typeof id === "string" && id.startsWith("new-");   // the draggable flag's third clause (a create in flight is not draggable, 2026-09-11): provisional.ts's shape
     // the one visibility predicate renderTabs builds visibleIds from (T357 later lows): the view, then the #only= filter
     const stripShows = (id, only) => tabInView(id) && (!only || matchesOnly(sessions.get(id)?.name ?? tabMeta.get(id)?.name ?? "", only));
     const stripLists = (id) => !closingTabs.has(id) && (order.includes(id) || tabMeta.has(id));   // the strip's one membership rule (T357 fix)
@@ -131,7 +134,7 @@ function lift(): (hooks: Hooks) => Api {
       H.heads.push({ name: sec.name, color: sec.color, ids: sec.ids.slice(), folded, active, hidden: hidden.slice() });
       return h;
     }
-    const onTabKey = () => {}; const dragImageBlank = () => el("div"); const hideTabTip = () => {}; const syncComposerPh = () => {}; const hideFilePreview = () => {}; const snapshotDragGeometry = () => {};   // syncComposerPh: the rebuild re-syncs the composer's name overlay (T335), inert here
+    const onTabKey = () => {}; const dragImageBlank = () => el("div"); const hideTabTip = () => {}; const syncComposerPh = () => {}; const hideFilePreview = () => {}; const snapshotDragGeometry = () => {}; const inRompShell = () => false;   // inRompShell: postTabDrag (lifted with wireTabDrag, the chat split 2026-09-11) tells no shell here; syncComposerPh: the rebuild re-syncs the composer's name overlay (T335), inert here
     const flipTabs = (f) => f(); const applyCompactSweep = () => {};
     const hostNameNodes = (name) => [document.createTextNode(name)]; const fadedColor = (h) => h;
     const tabCtxGauge = () => el("span", "tab-ctx"); const pickTone = (a, b) => b ?? a;

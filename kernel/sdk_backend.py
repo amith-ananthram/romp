@@ -3255,6 +3255,23 @@ def fed_text_opener(text: str) -> str:
     return "injected" if "<!-- romp-injected -->" in (text or "") else "human"
 
 
+# The bus banner's per-message marker, event_model's one detector (its POSTAL_RE; the fallback is the same pattern
+# for a stand-in event_model in tests).
+_POSTAL_MID_RE = getattr(_em, "POSTAL_RE", None) or re.compile(r"<!--\s*romp-msg-id:\s*(\S+?)\s*-->")
+
+
+def postal_mids(text) -> list[str]:
+    """The postal message ids a fed text carries — its `<!-- romp-msg-id: <id> -->` markers, in order, deduped. A
+    non-empty answer says the text is a bus BANNER (SdkBackend.deliver): peer mail, whose only durable copy is the
+    bus's maildir and which has no input echo, so a loss of it has nothing to flag and must go back to the bus by
+    these ids (SdkSession._return_stranded_mail, 2026-09-12)."""
+    out: list[str] = []
+    for m in _POSTAL_MID_RE.findall(text or ""):
+        if m not in out:
+            out.append(m)
+    return out
+
+
 # A CLI that cannot even START says so on the way out — and the ONE cause that reliably does this is the
 # account being out of usage: `claude` refuses the handshake and exits with the limit in its own words
 # ("You've hit your session limit · resets 1:10pm (America/Los_Angeles)"). romp used to swallow that
@@ -5805,8 +5822,92 @@ class SdkSession:
                 self._q_prepend(stranded, self._unfeed_locked(stranded))   # back at the head under their own ids
             self._persist_queue()                  # the fresh inputs() drains _pending on its first pass
         elif stranded:
+            # Peer mail FIRST (2026-09-12): a bus banner has no echo for the flag path below to flip
+            # (SdkBackend.deliver: it is not composer input), so on this branch it was DROPPED outright — no
+            # queue entry, no flag, no log line, no word to the bus, whose only durable copy had been retired on
+            # `injected: true` (which means "queued in kernel memory", nothing more). Fifteen messages to two
+            # sessions vanished that way in twenty minutes, each fed to a client that a model-pin rebuild tore
+            # down before the turn resulted, every sender told "delivered". The banner names its messages; hand
+            # them back to the bus by id — _return_stranded_mail. Everything else fed keeps the flag path.
+            self._return_stranded_mail(stranded)
             self.backend._mark_dropped_echoes(self.sid, self.pending_meta() or self.pending(), refeed=False)
         self.backend._poke()
+
+    def _return_stranded_mail(self, stranded) -> None:
+        """Hand every POSTAL banner in `stranded` (fed to the abandoned client, never resulted) back to the bus by
+        message id, so the mail re-delivers under its ORIGINAL identity instead of vanishing (2026-09-12).
+
+        The bus's put-back is its `restore` — the roll-back its not-injected push already takes: cur/<mid> moves
+        back to new/, the exec row is retracted, the session is woken. It is reached through
+        SdkBackend.postal_restore, which the kernel installs (a POST to the bus's /restore). The answer is the set
+        of ids the bus put back, and it is AUTHORITATIVE about the bus's own files: a PARTIAL answer names the ids
+        gone from the bus's box (recalled by its sender, swept), which are never re-fed on this side's say-so. An
+        answer that put back NONE of them means this bus never held the banner: nothing removes a live session's
+        cur/ file (recall reads new/ only; the orphan sweep skips live boxes), so the ids are a session's whose
+        maildir sits on another host's bus, the wake-router having forwarded the banner here, and the banner text
+        is the last copy of the mail. That banner is RE-HEADED in the queue under its own id, the same as one the
+        bus could not take back at all (no hook installed, a bus that could not be reached, refused, or gave no
+        answer): the not-resumable branch's path. The resumable branch refuses re-feeds because a duplicate of the
+        person's own words is a visible defect; a banner landing twice in the resumed conversation beats a peer
+        told "delivered" for mail nobody read, and the duplicate is accepted only when the transcript scan cannot
+        rule it out: a banner _text_landed FINDS in the transcript (the CLI wrote its user record before the
+        teardown) is left where it is, since the resumed conversation carries it and a put-back would deliver the
+        same mail twice; a False or None answer proceeds, a miss being no proof of loss. Never raises; one log line
+        per banner names its ids and their fate."""
+        mail = [(t, postal_mids(t)) for t in stranded if isinstance(t, str)]
+        mail = [(t, mids) for t, mids in mail if mids]
+        if not mail:
+            return
+        hook = getattr(self.backend, "postal_restore", None)
+        rehead = []
+        for text, mids in mail:
+            # Landed before the teardown? A stream error or timeout can tear the client down AFTER the CLI wrote
+            # the banner's user record; the resumed conversation then carries it, and a put-back would deliver the
+            # same mail twice. True is definitive (the banner keys to itself, markers included, under
+            # echo_text_key); False or None proceeds, a miss being no proof of loss (the abandoned client may
+            # still have been flushing the record). Review fix, 2026-09-12.
+            seen = self.backend._text_landed(self.sid, text)
+            if seen is True:
+                self.backend._log("stranded mail (%s): a banner fed to the abandoned client landed in the transcript "
+                                  "before the teardown; the resumed conversation carries it, not handed back (%s)"
+                                  % (self.name, ", ".join(mids)))
+                continue
+            back, why = None, "no bus hook is installed"
+            if callable(hook):
+                try:
+                    res = hook(self.sid, list(mids))
+                    if res is None:
+                        why = "the bus gave no answer"
+                    else:
+                        back = set(res)
+                except Exception as e:
+                    why = "the bus could not be asked (%r)" % (e,)
+            if back is None:
+                rehead.append(text)
+                self.backend._log("stranded mail (%s): a banner fed to the abandoned client never resulted, and %s; "
+                                  "re-heading it (%s) so the new client is fed it"
+                                  % (self.name, why, ", ".join(mids)), problem=True)
+                continue
+            gone = [m for m in mids if m not in back]
+            if len(gone) == len(mids):
+                # The bus put back NONE of them. Nothing removes a live session's cur/ file (recall reads new/
+                # only; the orphan sweep skips live boxes and touches new/ only), so this bus never held them:
+                # a session whose maildir sits on another host's bus (the wake-router forwarded the banner
+                # here). The banner text is the last copy of the mail; re-head it, the no-answer path.
+                rehead.append(text)
+                self.backend._log("stranded mail (%s): a banner fed to the abandoned client never resulted, and the "
+                                  "bus holds none of its ids (%s); re-heading it so the new client is fed it"
+                                  % (self.name, ", ".join(mids)), problem=True)
+                continue
+            self.backend._log("stranded mail (%s): a banner fed to the abandoned client never resulted; handed back "
+                              "to the bus by id for re-delivery (%s)%s"
+                              % (self.name, ", ".join(m for m in mids if m in back),
+                                 ("; no longer in the bus's box, not re-fed: %s" % ", ".join(gone)) if gone else ""),
+                              problem=False)
+        if rehead:
+            with self._lock:
+                self._q_prepend(rehead, self._unfeed_locked(rehead))   # back at the head under their own ids
+            self._persist_queue()
 
     # ---- async internals (run inside the quarantined loop) ----
 
@@ -9302,6 +9403,11 @@ class SdkBackend:
         self.thread_wake_model = None      # kernel-installed: model_id -> replacement or None, consulted
         #                                    ONLY when a comment THREAD is explicitly woken (T223 rider) —
         #                                    the catalog lives in the kernel; the backend never imports it
+        self.postal_restore = None         # kernel-installed: (sid, [mid, ...]) -> the set of ids the bus put back in
+        #                                    the session's new/ (kernel._bus_restore_mail → the bus's POST /restore);
+        #                                    raises when the bus could not be asked. Consulted ONLY by a resumable
+        #                                    reconnect that stranded a fed postal banner (_return_stranded_mail,
+        #                                    2026-09-12); None (a stand-in, an older kernel) → the banner is re-headed
         self._notify = notify              # notify(app, msg) -> push to clients (kernel._send_to_app)
         self._poke_cb = poke               # wake the kernel's producer/judges (optional)
         self._owns_memo: dict = {}         # sid -> ((reg mtime_ns, size), owns?) — see owns()
