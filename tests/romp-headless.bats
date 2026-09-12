@@ -272,3 +272,25 @@ PY
     run "$ROMP_SCRIPT" compact --wait
     [ "$status" -eq 2 ]
 }
+
+@test "romp send --tag ahead of the session name tags the send instead of addressing a session called --tag" {
+    # 2026-09-12: a timer's `romp send --tag <label> <session> <text>` read `--tag` AS the session name four
+    # times in one night and the kernel refused a paste to a target that does not exist, while the timer read
+    # "sent". A verb's own flag is never a session name; the leading form tags and addresses like the trailing one.
+    start_fake_kernel '{"ok": true}'
+    run "$ROMP_SCRIPT" send --tag wake helper 'the ten-minute pulse'
+    [ "$status" -eq 0 ]
+    python3 - "$TEST_DIR/req" <<'PY'
+import json, sys
+body = open(sys.argv[1]).read().split("\n", 1)[1]
+d = json.loads(body)
+assert d["name"] == "helper", d
+assert d["text"] == "the ten-minute pulse\n\n<!-- romp-tag: wake -->", d
+PY
+    run "$ROMP_SCRIPT" send --tag
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"usage: romp send"* ]]
+    run "$ROMP_SCRIPT" send --tag wake
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"usage: romp send"* ]]
+}

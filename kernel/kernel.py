@@ -3081,6 +3081,27 @@ def _bus_recall_relay(sid, mid):
         return "unknown"
 
 
+def _bus_restore_mail(sid, mids):
+    """POST /restore to the local bus for a postal banner the SDK backend fed and a connection rebuild stranded
+    (SdkSession._return_stranded_mail, 2026-09-12): the bus puts each named message back into the session's new/
+    under its ORIGINAL id (its `restore`) and wakes the session, so the mail re-delivers as itself. Returns the set
+    of ids the bus put back — authoritative about the bus's files (an id missing from it is gone from cur/) — and
+    RAISES when the bus could not be asked or refused, so the caller re-heads the banner rather than drop it: a
+    quiet False here would be the loss this exists to end."""
+    conn = http.client.HTTPConnection("127.0.0.1", BUS_PORT, timeout=5)
+    try:
+        conn.request("POST", "/restore", json.dumps({"id": sid, "mids": list(mids)}),
+                     {"Content-Type": "application/json", "X-Romp-Token": TOKEN})
+        resp = conn.getresponse()
+        data = resp.read()
+    finally:
+        conn.close()
+    body = json.loads(data.decode("utf-8", "replace") or "{}") if resp.status == 200 else None
+    if not isinstance(body, dict) or not body.get("ok"):
+        raise RuntimeError("bus /restore answered %d: %s" % (resp.status, data[:200].decode("utf-8", "replace")))
+    return set(m for m in (body.get("restored") or []) if isinstance(m, str))
+
+
 ROMP_VOICE_WORDS = ("romp", "card", "board", "goal", "cleared", "dismissal", "status check", "nudge")
 #   the vocabulary an injected body must never speak to a session (CLAUDE.md, "Messages we inject into a session");
 #   tests/test_injected_voice.py's list of the same words, with the why of each, is pinned to this one
@@ -15973,6 +15994,9 @@ def _sdk_locked():
             # pick can never sit in the UI as applied fact on a box that demonstrably cannot apply it
             _sdk_backend.login_ok = lambda: (None if _claude_account_state() == "unreadable" else bool(_claude_account()))
             #   None = cannot tell (the account file is mid-rewrite or unreadable): no launch falls on it (2026-09-09)
+            # a postal banner the backend fed and a connection rebuild stranded goes BACK to the bus by message id
+            # (SdkSession._return_stranded_mail → the bus's POST /restore), never dropped (2026-09-12)
+            _sdk_backend.postal_restore = _bus_restore_mail
             # NO thread-wake model remap. The T223 rider installed _family_newest_model as the
             # backend's wake hook, so a dormant comment thread registered on a superseded full id came
             # up on its family's newest at its next explicit wake — built for the artefact where a

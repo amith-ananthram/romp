@@ -858,6 +858,29 @@ def restore(sid, mid):
     _mark_pending(sid)                   # new/ is non-empty again -> raise the marker
     return True
 
+def restore_stranded(data):
+    """POST /restore {id, mids} — the kernel handing back mail it FED and LOST (SdkSession._return_stranded_mail,
+    2026-09-12): a banner fed to a session's client that was torn down before the turn resulted was dropped on the
+    kernel's side, while this bus had retired its durable copy on `injected: true` (which only ever meant "queued
+    in kernel memory"). Each named message goes back to new/ under its ORIGINAL id (restore, the same roll-back the
+    not-injected push takes), and the session is woken so it re-delivers now; the retry pass covers a session that
+    cannot take the wake yet. Answers {ok, restored: [...], missing: [...]}: `missing` are ids no longer in cur/
+    (recalled, swept, never claimed, or unsafe as a path) — the caller's cue NOT to re-feed them on its own. 400
+    for a malformed ask (no safe session id, mids not a list of strings)."""
+    sid = str(data.get("id") or "")
+    mids = data.get("mids")
+    if not sid or not _safe_id(sid) or not isinstance(mids, list) or not mids \
+            or not all(isinstance(m, str) and m for m in mids):
+        return {"ok": False, "error": "id and a list of message ids required"}, 400
+    restored, missing = [], []
+    for mid in mids:
+        (restored if _safe_id(mid) and restore(sid, mid) else missing).append(mid)
+    if restored:
+        _log("restore for %s: %d message(s) the kernel fed and lost (a connection rebuild stranded the turn) put back "
+             "in new/ under their own ids for re-delivery: %s" % (sid, len(restored), ", ".join(restored)))
+        threading.Thread(target=_wake_when_ready, args=(sid,), daemon=True).start()
+    return {"ok": True, "restored": restored, "missing": missing}, 200
+
 def _queue_read_receipt(meta, unread=False, dmid=""):
     """Cross-host read backflow: mail delivered over the peer bus carries X-Peer-Mid/X-Peer-Via
     (see deliver); consuming it queues {mid, t} into the readbox for the DIRECT peer it arrived
@@ -2600,6 +2623,9 @@ class Handler(BaseHTTPRequestHandler):
             text = data.get("text")                # optional human-edited body for approve
             ok, err = quarantine_decide(mid, action, text, feedback=data.get("feedback"))
             return self._send({"ok": ok} if ok else {"ok": False, "error": err}, 200 if ok else 400)
+        if u.path == "/restore":                   # the kernel handing back fed-and-lost mail by id (restore_stranded)
+            payload, status = restore_stranded(data)
+            return self._send(payload, status)
         self._send({"error": "not found"}, 404)
 
 def _log(msg):

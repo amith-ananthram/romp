@@ -1517,6 +1517,17 @@ fi
 # unknown session fails LOUDLY, never silently.
 if [[ "${1:-}" =~ ^(--)?(send|interrupt|end)$ ]]; then
     _verb="${1#--}"; shift
+    # `romp send --tag <label> <session> <text>` — the render hint AHEAD of the session name (2026-09-12). Until
+    # this line the word `--tag` was taken AS the session name and its label as the text: a timer's ten-minute
+    # send went to a session called `--tag` four times in one night, refused into nowhere while the timer read
+    # "sent". A verb's own flag is never a session name; the label is checked and appended below with the
+    # documented trailing form (`romp send <session> --tag <label> <text>`), which still works.
+    _tag=""
+    if [[ "$_verb" == "send" && "${1:-}" == "--tag" ]]; then
+        _tag="${2:-}"
+        [[ -n "$_tag" ]] || { echo "usage: romp send <session> [--tag <label>] <text>" >&2; exit 2; }
+        shift 2
+    fi
     _who="${1:-}"
     if [[ -z "$_who" ]]; then echo "usage: romp $_verb <session> $([[ "$_verb" == send ]] && echo '<text>')" >&2; exit 2; fi
     shift
@@ -1540,8 +1551,7 @@ if [[ "${1:-}" =~ ^(--)?(send|interrupt|end)$ ]]; then
         # brief): the chat shows a tagged message as machine-sent under that label instead of posing
         # it as the user's typed words (the user 2026-08-15). Sugar for appending the marker comment
         # `<!-- romp-tag: <label> -->` yourself; the label is one word, letters/digits/dashes.
-        _tag=""
-        if [[ "${1:-}" == "--tag" ]]; then
+        if [[ "${1:-}" == "--tag" ]]; then       # …or trailing the session name (the leading form set _tag above)
             _tag="${2:-}"
             shift 2 || { echo "usage: romp send <session> [--tag <label>] <text>" >&2; exit 2; }
         fi
