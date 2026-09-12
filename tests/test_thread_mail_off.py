@@ -7,12 +7,12 @@ the one way on short of a break-out (never an old key re-read); promotion clears
 returns. Synthetic fixtures only: placeholder UUIDs, a hermetic state root."""
 import inspect
 import json
-import time
 import os
 import shutil
 import tempfile
 import unittest
 from romp_load import load_source
+from fs_clock import move_ctime   # noqa: E402  the shared test helper, on the path the line above put there
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -153,8 +153,7 @@ class UnreadableRecordOnTheKernelSide(unittest.TestCase):
         p = Path(self.td) / "sdk" / (PLAIN + ".json"); p.write_text(json.dumps({"sid": PLAIN}))
         before = km._chat_ident(p)
         self.assertEqual(len(before), 4); self.assertEqual(before[3], p.stat().st_ctime_ns, "ctime is the fourth component")
-        time.sleep(0.02)   # past the filesystem clock's granularity, so the repair's ctime differs
-        os.chmod(p, 0o600)
+        move_ctime(p)   # forced until the clock ticked (fs_clock: a coarse filesystem clock can hand two chmods one timestamp)
         after = km._chat_ident(p)
         self.assertEqual(after[:3], before[:3], "inode, mtime and size stand across a chmod"); self.assertNotEqual(after, before, "…and the identity moved on ctime alone")
         self.assertIsNone(km._chat_ident(Path(self.td) / "sdk" / "nonesuch.json"))
