@@ -1,0 +1,85 @@
+{
+ "text": "# notes-api team glossary\n\nSynthetic: invented headwords; only the SHAPES are borrowed from the grammar's README.\n\n## Not coinages\n\n- **green, CI, auto-merge**: the trade's own words.\n- tessel (kernel sense): the kernel's own chat tessel, not the team's.\n- T followed by a number: a task id, bookkeeping.\n\n## tessel\n\nThe fixes from a review, tesselled into the pull request as new commits; \"the tessel\" is that set.\nDistinct from the kernel's chat tessel.\n\n- plain words: the fixes from a review\n- also: tesselled, tessel head, review tessel\n- scope: notes-api team mail\n- status: unconfirmed\n- registered: 2026-09-11 by web\n\n## quill\n\nOne angle a verifier reads a change through.\n\n- plain words: one review angle\n- status: confirmed\n- registered: 2026-09-10 by api\n- link: first\n\n## spar\n\nA source assertion that fails when a branch shape changes.\n\n- plain words: a source assertion\n- also: spars, sparred\n- status: retired\n- registered: 2026-09-09 by docs\n- link: off\n\n## tessel head\n\nThe head a review's fixes land on.\n\n- plain words: the head after the fixes\n- status: nonsense-value\n- registered: sometime\n",
+ "expect": {
+  "skip": [
+   "green",
+   "ci",
+   "auto-merge",
+   "tessel (kernel sense)",
+   "t followed by a number"
+  ],
+  "slugs": [
+   "notes-api-team-glossary",
+   "not-coinages",
+   "tessel",
+   "quill",
+   "spar",
+   "tessel-head"
+  ],
+  "terms": [
+   {
+    "term": "tessel",
+    "slug": "tessel",
+    "definition": "The fixes from a review, tesselled into the pull request as new commits; \"the tessel\" is that set. Distinct from the kernel's chat tessel.",
+    "plainWords": "the fixes from a review",
+    "also": [
+     "tesselled",
+     "tessel head",
+     "review tessel"
+    ],
+    "scope": "notes-api team mail",
+    "status": "unconfirmed",
+    "registered": {
+     "date": "2026-09-11",
+     "by": "web"
+    },
+    "link": "all"
+   },
+   {
+    "term": "quill",
+    "slug": "quill",
+    "definition": "One angle a verifier reads a change through.",
+    "plainWords": "one review angle",
+    "also": [],
+    "scope": "",
+    "status": "confirmed",
+    "registered": {
+     "date": "2026-09-10",
+     "by": "api"
+    },
+    "link": "first"
+   },
+   {
+    "term": "spar",
+    "slug": "spar",
+    "definition": "A source assertion that fails when a branch shape changes.",
+    "plainWords": "a source assertion",
+    "also": [
+     "spars",
+     "sparred"
+    ],
+    "scope": "",
+    "status": "retired",
+    "registered": {
+     "date": "2026-09-09",
+     "by": "docs"
+    },
+    "link": "off"
+   },
+   {
+    "term": "tessel head",
+    "slug": "tessel-head",
+    "definition": "The head a review's fixes land on.",
+    "plainWords": "the head after the fixes",
+    "also": [],
+    "scope": "",
+    "status": "unconfirmed",
+    "registered": {
+     "date": "sometime",
+     "by": ""
+    },
+    "link": "all"
+   }
+  ]
+ }
+}

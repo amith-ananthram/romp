@@ -471,5 +471,78 @@ class PassFrame(unittest.TestCase):
                          "normal-path end after the join AND the leak-proof finally")
 
 
+
+class PlannerSkipsCaptioned(PassFrame):
+    """T358: tasks_for plans the UNCAPTIONED units only and reads no unit text for a captioned one; its memo file keys on
+    the captions file beside the transcript pair, so a caption filed since misses it with no transcript change, while a
+    strike (which files no caption) leaves the memo, and the unit, in place."""
+    def _finish(self):
+        self._append(aline(T0 + 60, "All done: shipped and verified.", "a2", "a1", stop="end_turn"))
+        self._states_row(T0 + 61, "idle")
+
+    def test_a_caption_filed_after_the_memo_drops_the_unit_with_no_transcript_change(self):
+        self._finish()
+        v1 = jd.tasks_for(SID, str(self.path), [str(self.path)], T0 + 100)
+        work = self._ended_work_tasks(v1)
+        self.assertTrue(work, "the ended turn's work caption is planned")
+        o1 = json.loads((jd.PCACHE / (SID + ".json")).read_text())
+        for w in work[0]["writes"]:
+            jd.append_caption(SID, w["id"], w["grain"], w["t"], "Shipped the fix.")
+        v2 = jd.tasks_for(SID, str(self.path), [str(self.path)], T0 + 100)
+        self.assertEqual(self._ended_work_tasks(v2), [], "the captioned unit is gone from the plan")
+        self.assertEqual([t["kind"] for t in v2], ["prompt"], "the uncaptioned prompt unit stays")
+        o2 = json.loads((jd.PCACHE / (SID + ".json")).read_text())
+        self.assertEqual(o2["key"], o1["key"], "the transcript pair did not change")
+        self.assertNotEqual(o2["capKey"], o1["capKey"], "the captions file did: the memo was rewritten")
+
+    def test_a_strike_after_the_memo_keeps_the_unit_planned(self):
+        self._finish()
+        v1 = jd.tasks_for(SID, str(self.path), [str(self.path)], T0 + 100)
+        work = self._ended_work_tasks(v1); self.assertTrue(work)
+        task = {"fsid": SID, "writes": work[0]["writes"]}
+        jd._caption_strike(task, set(), {})                        # one empty capture: no caption filed
+        v2 = jd.tasks_for(SID, str(self.path), [str(self.path)], T0 + 100)
+        self.assertEqual([t["writes"] for t in self._ended_work_tasks(v2)], [work[0]["writes"]], "still planned, from the memo")
+        for _ in range(jd.CAPTION_FAIL_CAP):
+            jd._caption_strike(task, set(), {})                    # ...until the cap files the tombstone caption
+        v3 = jd.tasks_for(SID, str(self.path), [str(self.path)], T0 + 100)
+        self.assertEqual(self._ended_work_tasks(v3), [], "a tombstoned unit is captioned: dropped from the plan")
+
+    def test_an_unreadable_captions_file_plans_nothing_for_that_session_and_raises_nothing(self):
+        """The captions file exists but will not stat (EACCES, ENOTDIR, EIO): _file_key's sentinel is no key; tasks_for answers []
+        for that session instead of raising out of the whole pass (every other session's captions proceed)."""
+        self._finish()
+        cap = jd.CAPDIR / (SID + ".jsonl")
+        real = jd._file_key
+        jd._file_key = lambda p: object() if p == str(cap) else real(p)
+        n0 = jd._CAPTIONS_STATS["unstatable"]; jd._SAID_ONCE.clear()
+        import contextlib, io
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(jd.tasks_for(SID, str(self.path), [str(self.path)], T0 + 100), [])
+                self.assertEqual(jd.tasks_for(SID, str(self.path), [str(self.path)], T0 + 100), [])
+        finally:
+            jd._file_key = real
+        self.assertEqual(jd._CAPTIONS_STATS["unstatable"], n0 + 2, "counted per pass")
+        self.assertEqual(err.getvalue().count("cannot be stat'ed"), 1, "said once, loudly")
+        self.assertFalse((jd.PCACHE / (SID + ".json")).exists(), "no memo for a pass that planned nothing")
+        self.assertTrue(self._ended_work_tasks(jd.tasks_for(SID, str(self.path), [str(self.path)], T0 + 100)), "the next pass plans")
+
+    def test_a_captioned_unit_is_skipped_before_its_text_is_read(self):
+        self._finish()
+        v1 = jd.tasks_for(SID, str(self.path), [str(self.path)], T0 + 100)
+        done = {w["id"] for t in v1 for w in t["writes"]}
+        calls = []
+        saved = jd._unit_text, jd._prompt_text
+        jd._unit_text = lambda atoms, *a, **k: calls.append("work") or ""
+        jd._prompt_text = lambda atoms, *a, **k: calls.append("prompt") or ""
+        try:
+            (jd.PCACHE / (SID + ".json")).unlink()
+            self.assertEqual(jd.tasks_for(SID, str(self.path), [str(self.path)], T0 + 100, done=done), [])
+        finally:
+            jd._unit_text, jd._prompt_text = saved
+        self.assertEqual(calls, [], "no unit text was built for a captioned unit")
+
 if __name__ == "__main__":
     unittest.main()

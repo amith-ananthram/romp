@@ -107,7 +107,7 @@ class CaptionsMemo(_Memo):
         self.assertEqual(got[1], {SID + ":s2": 8})
         self.assertEqual(got[2], ["An earlier turn.", "The banner reconnects."], "oldest first")
         self.assertEqual(reads, [SID + ".jsonl"], "one read of the file for three readers")
-        self.assertEqual(jd._CAPTIONS_STATS, {"served": 2, "parsed": 1})
+        self.assertEqual(jd._CAPTIONS_STATS, {"served": 2, "parsed": 1, "unstatable": 0})
 
     def test_an_append_re_derives_even_when_the_file_clock_does_not_move(self):
         self.append(*self.ROWS[:2])
@@ -144,11 +144,11 @@ class CaptionsMemo(_Memo):
         self.assertEqual(first, {SID + ":s1"}, "what the read saw")
         self.assertTrue(landed)
         self.assertEqual(jd.captioned_ids(SID), {SID + ":s1", SID + ":t1"}, "the write moved the stat the second call took")
-        self.assertEqual(jd._CAPTIONS_STATS, {"served": 0, "parsed": 2})
+        self.assertEqual(jd._CAPTIONS_STATS, {"served": 0, "parsed": 2, "unstatable": 0})
 
     def test_an_absent_file_is_empty_and_never_cached(self):
         self.assertEqual((jd.captioned_ids(SID), jd._live_natoms(SID), jd.session_turn_captions(SID)), (set(), {}, []))
-        self.assertEqual(jd._CAPTIONS_STATS, {"served": 0, "parsed": 0})
+        self.assertEqual(jd._CAPTIONS_STATS, {"served": 0, "parsed": 0, "unstatable": 0})
         self.assertNotIn(SID, jd._CAPTIONS_MEMO)
         self.append(*self.ROWS[:1])
         self.assertEqual(jd.captioned_ids(SID), {SID + ":s1"}, "the first row is seen at once")
