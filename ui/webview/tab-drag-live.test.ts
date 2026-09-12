@@ -47,7 +47,9 @@ test("the slot comes from the VIRTUAL layout — boundaries that cannot move und
   // the boxes are measured by getBoundingClientRect, which excludes margins — so no strip member
   // may carry a horizontal margin, or the virtual row holds more than the real one and the slot
   // hops in a band at every wrap boundary (the separator's 6px gutters were margin: a 12px drift)
-  assert.match(body, /\?\? t\.getBoundingClientRect\(\)\.width,\s*\n\s*br: isBreak\(t\) \|\| isBreak\(before\(t\)\) \}\)\);/);
+  // the row openers are the breaks and the header a break precedes; the trail's first tab, which follows its break, is
+  // not one (the break already opened its row — two openers on one row is what the themed-gap bug rode, 2026-09-11)
+  assert.match(body, /\?\? t\.getBoundingClientRect\(\)\.width,\s*\n\s*br: isBreak\(t\) \|\| \(t\.classList\.contains\("tab-group-head"\) && isBreak\(before\(t\)\)\) \}\)\);/);
   // T264 (under the one-group-per-row setting, on by default): the untagged trail's boundary is a zero-height
   // ROW BREAK, not a box in the real layout, so it joins the virtual one as a zero-width row opener (w: 0, br),
   // and a header after a break opens a row too; the simulation then wraps exactly where the strip does

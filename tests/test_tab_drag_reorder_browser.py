@@ -100,6 +100,14 @@ await page.addInitScript(() => {
     tgt: e && e.target ? String(e.target.className || e.target.nodeName) + (e.target.dataset && e.target.dataset.id ? "#" + e.target.dataset.id.slice(0, 8) : "") : null,
     prevented: e ? e.defaultPrevented : null });
   for (const k of ["dragstart", "dragover", "dragenter", "dragleave", "drop", "dragend", "pointercancel"]) window.addEventListener(k, (e) => L(k, e));
+  // the kernel's frames, watched for a marker (a renamed session's new name): the event that says a push has LANDED on the
+  // page, whatever the strip does with it
+  window.__wsMarker = null; window.__wsMarkerSeen = false;
+  const OrigWS = window.WebSocket;
+  window.WebSocket = function (...a) { const ws = new OrigWS(...a);
+    ws.addEventListener("message", (m) => { if (window.__wsMarker && typeof m.data === "string" && m.data.includes(window.__wsMarker)) { window.__wsMarkerSeen = true; L("push:" + window.__wsMarker, null); } });
+    return ws; };
+  window.WebSocket.prototype = OrigWS.prototype; Object.assign(window.WebSocket, OrigWS);
   const watch = () => { const bar = document.getElementById("tabs"); if (!bar) { setTimeout(watch, 50); return; }
     new MutationObserver((muts) => { const removed = muts.reduce((n, m) => n + m.removedNodes.length, 0);
       if (removed > 2) L("rebuild:-" + removed, null); }).observe(bar, { childList: true }); };
@@ -140,6 +148,7 @@ async function record(label, pre, src, tgt, tx, ty) {
   const log = await page.evaluate(() => window.__log);
   const post = await layout();
   const nameOf = (id) => (pre.tabs.find((t) => t.id === id) || { name: id }).name;
+  post.tabs.forEach((t) => { t.name = nameOf(t.id); });   // one name per tab across the gesture, by id (a push may have renamed one)
   const cx = r1(tx - pre.bar.left), cy = r1(ty - pre.bar.top);
   const gap = parseFloat(pre.bar.gap) || 0;
   const others = pre.tabs.filter((t) => t.id !== src.id);
@@ -186,6 +195,44 @@ async function drag(label, fromRow, fromIdx, toRow, toIdx, frac) {
   await page.mouse.move(900, 700);                        // off the strip: no hover tip in the next measurement
   await record(label, pre, src, tgt, tx, ty);
 }
+// the tab at rows[fromRow][fromIdx] dragged to rows[toRow][toIdx] with a REAL kernel push landing mid-drag: partway across,
+// the driver renames another session through the kernel's headless POST /rename (the names file is what the pusher
+// watches, so the new name re-pushes to the page), waits for the frame carrying the new name to reach the page, then
+// finishes the gesture. The browser fires pointercancel at dragstart (a drag cancels the pointer); the strip's click-safe
+// hold used to release on it, so the push rebuilt #tabs under the drag, detached the dragged node, and the drop moved
+// nothing. Held through the drag, the push's render waits for dragend: no rebuild between dragstart and drop, the drop
+// lands under the cursor, and the new name shows once the gesture is over.
+async function dragAcrossPush(label, fromRow, fromIdx, toRow, toIdx, frac, renameFrom, renameTo) {
+  const pre = await layout();
+  const src = pre.rows[fromRow] && pre.rows[fromRow][fromIdx], tgt = pre.rows[toRow] && pre.rows[toRow][toIdx];
+  if (!src || !tgt) { cases.push({ label, skipped: "no such tab: rows=" + JSON.stringify(pre.rows.map((r) => r.map((t) => t.name))) }); return; }
+  const sx = pre.bar.left + src.left + src.w / 2, sy = pre.bar.top + src.top + src.h / 2;
+  const tx = pre.bar.left + tgt.left + tgt.w * frac, ty = pre.bar.top + tgt.top + tgt.h / 2;
+  const mx = (sx + tx) / 2;
+  await page.evaluate((m) => { window.__log = []; window.__wsMarker = m; window.__wsMarkerSeen = false; }, renameTo);
+  await page.mouse.move(sx, sy);
+  await page.mouse.down();
+  await page.mouse.move(sx + 4, sy + 1, { steps: 2 });
+  await page.mouse.move(mx, ty, { steps: 8 });            // halfway: the drag is live
+  const resp = await fetch(cfg.rename, { method: "POST", headers: { "Content-Type": "application/json" },
+                                         body: JSON.stringify({ target: renameFrom, name: renameTo }) });
+  const ans = await resp.json();
+  const pushed = await page.waitForFunction(() => window.__wsMarkerSeen, null, { timeout: 15000 }).then(() => true).catch(() => false);
+  await page.waitForTimeout(300);                          // whatever the page does with the frame has had its turn
+  const shownDuring = await page.evaluate((n) => Array.from(document.querySelectorAll("#tabs .tab-label")).some((l) => l.textContent.trim() === n), renameTo).catch(() => null);
+  await page.mouse.move(tx, ty, { steps: 8 });            // …and the gesture goes on to the target
+  for (let i = 0; i < 3; i++) await page.mouse.move(tx, ty);
+  await page.mouse.up();
+  await page.waitForTimeout(500);
+  await page.mouse.move(900, 700);
+  const shownAfter = await page.waitForFunction((n) => Array.from(document.querySelectorAll("#tabs .tab-label")).some((l) => l.textContent.trim() === n), renameTo, { timeout: 10000 })
+    .then(() => true).catch(() => false);
+  await record(label, pre, src, tgt, tx, ty);
+  const log = await page.evaluate(() => window.__log);
+  const t0 = (log.find((e) => e.k === "dragstart") || {}).t, t1 = (log.find((e) => e.k === "drop" || e.k === "dragend") || {}).t;
+  const rebuiltMidDrag = log.some((e) => e.k.startsWith("rebuild") && e.t > t0 && e.t < t1);
+  Object.assign(cases[cases.length - 1], { rename: ans, pushed, shownDuring, shownAfter, rebuiltMidDrag });
+}
 const out = { grouped: null, yatharth: null };
 // 1. the CLASSIC theme, the control: row 0 = the infra group, the last row = the untagged trail
 let L = await layout();
@@ -210,6 +257,10 @@ await drag("yatharth: trail, 1st tab to the 3rd slot (right part of the 3rd)", t
 await drag("yatharth: trail, 4th tab to the 2nd slot (left part of the 2nd)", trail, 3, trail, 1, 0.25);
 await drag("yatharth: trail, 2nd tab to the 5th slot (right part of the 5th)", trail, 1, trail, 4, 0.75);
 await drag("yatharth: group row, 1st tab to the 3rd slot (right part of the 3rd)", 0, 0, 0, 2, 0.75);
+// 3. a kernel push mid-drag (the trail's last tab is renamed while the trail's 2nd tab is on its way to the 6th slot)
+L = await layout();
+const lastName = L.rows[trail][L.rows[trail].length - 1].name;
+await dragAcrossPush("push mid-drag: trail, 2nd tab to the 6th slot (right part of the 6th)", trail, 1, trail, 5, 0.75, lastName, lastName + "-renamed");
 out.cases = cases;
 fs.writeFileSync(cfg.out, JSON.stringify(out));   // a file, not stdout: the per-case logs outgrow one pipe write
 fs.writeSync(1, "RESULT:" + cfg.out + "\n");
@@ -316,7 +367,8 @@ class ServedTabDragReorder(unittest.TestCase):
         cfg = os.path.join(cls.lab, "cfg.json")
         out = os.path.join(cls.lab, "result.json")
         with open(cfg, "w") as f:
-            json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (cls.port, cls.token), "count": len(NAMES), "out": out}, f)
+            json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (cls.port, cls.token), "count": len(NAMES), "out": out,
+                       "rename": "http://127.0.0.1:%d/rename?token=%s" % (cls.port, cls.token)}, f)
         driver = os.path.join(cls.lab, "driver.mjs")
         with open(driver, "w") as f:
             f.write(DRIVER)
@@ -403,6 +455,16 @@ class ServedTabDragReorder(unittest.TestCase):
 
     def test_yatharth_group_row_drag_1st_to_3rd(self):
         self._assert_landed_under_cursor(self._case("yatharth: group row, 1st tab to the 3rd"))
+
+    # ── a kernel push mid-drag: the strip's hold must outlive the browser's pointercancel at dragstart ──
+    def test_a_drag_survives_a_kernel_push_that_lands_mid_drag(self):
+        c = self._case("push mid-drag: trail, 2nd tab to the 6th")
+        table = self._table(c)
+        self.assertTrue(c["rename"].get("ok"), "the kernel accepted the headless rename: %r" % c["rename"])
+        self.assertTrue(c["pushed"], "the frame carrying the new name reached the page while the drag was in flight" + table)
+        self.assertFalse(c["rebuiltMidDrag"], "the strip was rebuilt under the drag: the hold did not outlive the browser's pointercancel" + table)
+        self._assert_landed_under_cursor(c)
+        self.assertTrue(c["shownAfter"], "the push's render, held through the drag, lands once the gesture is over: the new name shows" + table)
 
 
 if __name__ == "__main__":
