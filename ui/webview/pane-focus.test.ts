@@ -66,7 +66,7 @@ test("the wiring: the dismiss branch, the unfocused body, the composer, the rest
   // a DECLINED adoption is recorded like restoreIfShown's hidden case, so the schedule restores it when the filter shows
   // it; the record yields to a later visible first arrival (nothing was chosen), and any activation clears the mark
   assert.match(RENDER, /else if \(wouldAdopt\) \{ vanishedId = msg\.id; vanishedWhy = "hidden"; vanishedName = sessions\.get\(msg\.id\)\?\.name \|\| tabMeta\.get\(msg\.id\)\?\.name \|\| ""; vanishedByDecline = true; \}/);
-  assert.match(fn("setActive"), /wantActiveGone = null;[^\n]*\n\s*vanishedByDecline = false;/, "…cleared with the rest of the unfocused state");
+  assert.match(fn("setActive"), /wantActiveGone = null; vanishedByDecline = false;/, "…cleared with the rest of the unfocused state (on the same line: chat-window.test.ts bounds the distance from the activation to the paused strip's re-evaluation)");
   assert.match(RENDER, /if \(composerNoteSid === msg\.id\) restoreIfShown\(msg\.id\);/, "the composer note's restore goes through the rule too");
   assert.equal((RENDER.match(/\bsetActive\(msg\.id\)/g) || []).length, 0, "no frame-reachable direct setActive(msg.id) is left in the arrival path");
   assert.ok(RENDER.indexOf("/** Does the strip show `id` right now:") > RENDER.indexOf("function restoreIfShown("), "stripShows's docstring sits above its own function, after restoreIfShown");
