@@ -50,7 +50,8 @@ test("the kernel and the bus derive the same default from the thread's reg and t
                "the kernel's reasons: unreadable first (the bus holds everything for it), then the thread default, then the mailbox flag");
   assert.match(KERNEL, /def _postal_isolated\(sid\):[\s\S]*?return bool\(_mail_off_why_k\(sid\)\)/);
   assert.match(KERNEL, /"mailOff": bool\(mail_why\),/, "the comments frame carries it (one derivation with the reason)");
-  assert.match(KERNEL, /"postalServiceOff": _postal_isolated\(m\["id"\]\),/, "the Sessions pane rows carry it");
+  assert.match(KERNEL, /\*\*_mail_off_fields\(m\["id"\]\),/, "the Sessions pane rows carry it, with the reason, from one derivation (T356 fifth follow-up)");
+  assert.match(KERNEL, /def _mail_off_fields\(sid\):[\s\S]*?why = _mail_off_why_k\(sid\)\s*\n\s*return \{"postalServiceOff": bool\(why\), "mailOffWhy": why\}/, "the one derivation behind both fields");
   assert.match(POSTAL, /t = _thread_of\(sid\)\s*\n\s*if t == THREAD_REG_UNREADABLE:\s*\n\s*return "unreadable"[^\n]*\n\s*if t and not \(isinstance\(f, dict\) and f\.get\("threadMail"\) is True\):\s*\n\s*return "thread"/,
                "an unreadable record is closed under its own reason, then the literal-True key");
   assert.match(POSTAL, /agents, listing_answered = local_agents_checked\(threads=True\)/, "the relay lists thread rows, so a thread recipient bounces instead of retrying forever");

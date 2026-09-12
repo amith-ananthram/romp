@@ -14363,7 +14363,7 @@ def _comment_msg_text(rec):
     return "\n".join(p for p in parts if p).strip()
 
 
-_thread_reg_memo = {}   # tsid -> ((mtime_ns, size), reg dict) — see _thread_reg
+_thread_reg_memo = {}   # tsid -> ((mtime_ns, size, inode, ctime_ns), state, dict): one stat per read, the outcome memoized too — see _thread_reg_read
 
 
 # the stat errors Path.exists() reads as "no such file" (the bus's rule for a record): a record behind one of these is
@@ -23599,10 +23599,9 @@ def _thread_rows():
                     "dir": _cwd_of(tsid), "thread": True, "parent": parent,
                     "lastSid": jd._sdk_last_sid(tsid) or tsid,
                     "working": "", "backend": "sdk",
-                    # a thread's mail is off until the user breaks it out (T356): the row says so, so a listing
-                    # consumer never has to derive it
-                    "postalServiceOff": _postal_isolated(tsid),
-                    "mailOffWhy": _mail_off_why_k(tsid)})
+                    # a thread's mail is off until the user breaks it out (T356): the row says so and why, so a listing
+                    # consumer never has to derive it; both fields from one derivation (_mail_off_fields)
+                    **_mail_off_fields(tsid)})
     return out
 
 
@@ -24229,6 +24228,15 @@ def _mail_off_why_k(sid):
     if _thread_mail_off(sid):
         return "thread"
     return "isolation" if (_session_flag(sid, "postalServiceOff") or _session_flag(sid, "postalOff")) else ""
+
+
+def _mail_off_fields(sid):
+    """The two row fields every listing carries for a session's mailbox, from ONE derivation of the reason (the review of
+    T356's follow-ups: the chat row, the thread rows and the Sessions pane ledgers each derived it twice, _postal_isolated
+    then _mail_off_why_k, a whole sweep each): postalServiceOff (EFFECTIVE: a comment thread reads off until broken out)
+    and mailOffWhy (thread, isolation, an unreadable record, or "")."""
+    why = _mail_off_why_k(sid)
+    return {"postalServiceOff": bool(why), "mailOffWhy": why}
 
 
 def _postal_isolated(sid):
@@ -28576,15 +28584,18 @@ def _chat_diff(prev, cur):
 
 
 def _chat_ident(path):
-    """(ino, mtime_ns, size) of a file, or None when it is missing: the identity the chat-build signature
-    folds for a file it names by path (the jd._store_identity shape). Every writer of the files it is used
+    """(ino, mtime_ns, size, ctime_ns) of a file, or None when it is missing: the identity the chat-build signature
+    folds for a file it names by path (the jd._store_identity shape, plus ctime). Every writer of the files it is used
     on publishes by rename, so the bytes under an inode never change once it is at its path, and a rewrite
-    that keeps the mtime still moves the inode."""
+    that keeps the mtime still moves the inode. ctime is folded for the one change that rewrites nothing: a
+    permissions repair (a chmod that clears an unreadable record's door) moves ctime alone, and without it the cached
+    chat payload kept the tab hover saying the record could not be read until an unrelated input moved (the review of
+    T356's follow-ups)."""
     try:
         st = os.stat(str(path))
     except OSError:
         return None
-    return (st.st_ino, st.st_mtime_ns, st.st_size)
+    return (st.st_ino, st.st_mtime_ns, st.st_size, st.st_ctime_ns)
 
 
 def _names_digest(snap):
@@ -34471,8 +34482,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
             # per-session view flags (the user 2026-06-26): the tab right-click menu toggles these too, mirroring
             # the timeline lane's feed checkbox + postal mailbox. Same flags + legacy fallback as build_timeline.
             "hideFromFeed": _session_flag(sid, "hideFromFeed"),
-            "postalServiceOff": _postal_isolated(sid),    # EFFECTIVE: a comment thread reads off until broken out (T356)
-            "mailOffWhy": _mail_off_why_k(sid),             # …and why (thread, isolation, an unreadable record), for the tab hover's words
+            **_mail_off_fields(sid),                    # postalServiceOff (EFFECTIVE: a comment thread reads off until broken out, T356) and mailOffWhy (thread, isolation, an unreadable record) for the tab hover's words, from one derivation
             "notify": _notify_session_effective(sid),   # session-level bell, EFFECTIVE (override, else the master default): OS notification when its work blocks on you / completes (the user 2026-07-28)
             # NEVER `now`. This rides the chat payload, and _send_client dedups by comparing the
             # SERIALIZED payload against what that client last received — so a firstSeen that ticked
@@ -45513,8 +45523,7 @@ def _push(targets, connect=False, live_map=None):
             if chat_sessions or want_fleet:
                 feed["ledgers"] = [{"sid": m["id"], "name": m["name"], "color": m.get("color"),
                                     "status": m.get("status"),
-                                    "postalServiceOff": _postal_isolated(m["id"]),   # the Sessions pane shows a mail-off session (T356)
-                                    "mailOffWhy": _mail_off_why_k(m["id"]),
+                                    **_mail_off_fields(m["id"]),   # the Sessions pane shows a mail-off session and why (T356), from one derivation
                                     # attach the archived-completed TOP tasks so the Fleet's "Show completed"
                                     # can surface a finished+archived session (the user 2026-06-27); cached, so
                                     # ~free. The client renders them only when the toggle is on.
