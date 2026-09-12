@@ -15,9 +15,12 @@ The fix: a banner names its own messages (`<!-- romp-msg-id: <id> -->`), and the
 claimed message back under its original id (restore, the roll-back the not-injected push takes). On the resumable
 branch a stranded banner's ids are handed back to the bus (SdkBackend.postal_restore, the kernel-installed hook that
 POSTs the bus's /restore), which puts them back in new/ and wakes the session, so the mail re-delivers under the same
-identity. A banner the bus could not take back (no bus, a refusal) is re-headed in the queue instead: a banner landing
-twice in the resumed conversation beats a peer told "delivered" for mail nobody read. Every OTHER fed text keeps the
-flag-only path exactly as before (ReconnectStrandIsFlagOnly in test_sdk_echo_durability pins it).
+identity. A banner the bus could not take back (no bus, a refusal), or whose ids it holds NONE of (another host's bus
+does: the wake-router forwarded it here), is re-headed in the queue instead: a banner landing twice in the resumed
+conversation beats a peer told "delivered" for mail nobody read. The duplicate is accepted only when the transcript
+scan (_text_landed) cannot rule it out: a banner that already landed before the teardown stays where it is. Every
+OTHER fed text keeps the flag-only path exactly as before (ReconnectStrandIsFlagOnly in test_sdk_echo_durability
+pins it).
 
 SYNTHETIC fixtures only: invented text, placeholder uuids, no real session names or message ids."""
 import json
@@ -127,13 +130,63 @@ class StrandedMailGoesBackToTheBus(_StrandWorld):
                         "the log names the id and says it was re-headed: %r" % (self.logged,))
 
     def test_an_id_the_bus_no_longer_holds_is_not_re_fed(self):
-        # The bus's answer is authoritative about its own files: an id it did not put back is gone from cur/
-        # (recalled by its sender, or swept) and must not come back through the queue on the kernel's say-so.
+        # The bus's answer is authoritative about its own files: in a PARTIAL answer, an id it did not put back is
+        # gone from its box (recalled by its sender, or swept) and must not come back through the queue on the
+        # kernel's say-so. (An answer holding none of the ids is another matter: the next case.)
         s = self._sess()
         self.be.postal_restore = lambda sid, mids: {MID1}            # MID2 was recalled meanwhile
         self._strand(s, _banner(MID1, MID2))
         self.assertEqual(s.pending(), [], "the bus answered: what it holds re-delivers, what it lost is gone")
         self.assertTrue(any(MID2 in ln for ln in self.logged), "the missing id is named: %r" % (self.logged,))
+
+    def test_a_bus_that_holds_none_of_the_ids_gets_the_banner_re_headed(self):
+        # The wake-router case: the banner was forwarded from another host, whose bus holds the claimed file;
+        # the local bus answers with nothing put back. Nothing else removes a live session's cur/ file, so an
+        # empty answer is "never held", not "gone", and the banner text is the last copy of the mail.
+        s = self._sess()
+        self.be.postal_restore = lambda sid, mids: set()
+        banner = _banner(MID1, MID2)
+        self._strand(s, banner)
+        self.assertEqual(s.pending(), [banner], "re-headed for the new client, not dropped")
+        self.assertEqual((sb.read_reg(self.be.state_dir, SID) or {}).get("queue") or [], [banner], "and persisted")
+        self.assertTrue(any(MID1 in ln and MID2 in ln and "re-head" in ln for ln in self.logged),
+                        "a problem line names both ids and says it was re-headed: %r" % (self.logged,))
+
+    def test_a_banner_that_landed_before_the_teardown_is_not_handed_back(self):
+        # The teardown can come AFTER the CLI wrote the banner's user record (a stream error or timeout mid-turn,
+        # the record written before the model call). The resumed conversation already carries the mail; the bus
+        # re-delivering it under the same id would put the delegate in front of the agent twice. The transcript
+        # scan answers True here, which is definitive, so the banner is left where it is.
+        s = self._sess()
+        banner = _banner(MID1)
+        with open(sb.transcript_path(self.cwd, SID), "a") as f:
+            f.write(json.dumps({"type": "user", "timestamp": "2026-01-01T00:00:00.000Z",
+                                "message": {"role": "user", "content": [{"type": "text", "text": banner}]}}) + "\n")
+        self.assertIs(self.be._text_landed(SID, banner), True)
+        called = []
+        self.be.postal_restore = lambda sid, mids: called.append(list(mids)) or set(mids)
+        self._strand(s, banner)
+        self.assertEqual(called, [], "the bus is not asked to put back mail the conversation already carries")
+        self.assertEqual(s.pending(), [], "and nothing is re-fed")
+        self.assertEqual((sb.read_reg(self.be.state_dir, SID) or {}).get("queue") or [], [])
+        self.assertEqual(len([ln for ln in self.logged if MID1 in ln and "landed" in ln]), 1,
+                         "one log line names the id and says it landed: %r" % (self.logged,))
+
+    def test_a_banner_the_scan_cannot_place_is_still_handed_back(self):
+        # The skip needs a DEFINITIVE answer. The harness's empty transcript reads False (readable, nothing landed:
+        # the incident's shape) and a transcript that cannot be read reads None; neither proves the banner landed,
+        # since the abandoned client may still have been flushing its record, so both hand back as before.
+        handed = []
+        self.be.postal_restore = lambda sid, mids: handed.append(list(mids)) or set(mids)
+        s = self._sess()
+        self.assertIs(self.be._text_landed(SID, _banner(MID1)), False)
+        self._strand(s, _banner(MID1))
+        os.remove(sb.transcript_path(self.cwd, SID))
+        s = self._sess()
+        self.assertIsNone(self.be._text_landed(SID, _banner(MID2)))
+        self._strand(s, _banner(MID2))
+        self.assertEqual(handed, [[MID1], [MID2]], "False and None both proceed to the bus; only True skips")
+        self.assertEqual(s.pending(), [])
 
     def test_without_a_hook_installed_the_banner_is_still_not_lost(self):
         # A stand-in backend (older kernels, tests) with no postal_restore: the fallback is the re-head.

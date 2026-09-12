@@ -5840,13 +5840,20 @@ class SdkSession:
         The bus's put-back is its `restore` — the roll-back its not-injected push already takes: cur/<mid> moves
         back to new/, the exec row is retracted, the session is woken. It is reached through
         SdkBackend.postal_restore, which the kernel installs (a POST to the bus's /restore). The answer is the set
-        of ids the bus put back, and it is AUTHORITATIVE about the bus's own files: an id it did not put back is
-        gone from cur/ (recalled by its sender, swept) — named in the log, never re-fed on this side's say-so. A
-        banner the bus could not take back at all (no hook installed, a bus that could not be reached, refused, or
-        gave no answer) is RE-HEADED in the queue under its own id instead — the not-resumable branch's path. The
-        resumable branch refuses re-feeds because a duplicate of the person's own words is a visible defect; a
-        banner landing twice in the resumed conversation beats a peer told "delivered" for mail nobody read, and
-        the bus's copy is the one that is gone. Never raises; one log line per banner names its ids and their fate."""
+        of ids the bus put back, and it is AUTHORITATIVE about the bus's own files: a PARTIAL answer names the ids
+        gone from the bus's box (recalled by its sender, swept), which are never re-fed on this side's say-so. An
+        answer that put back NONE of them means this bus never held the banner: nothing removes a live session's
+        cur/ file (recall reads new/ only; the orphan sweep skips live boxes), so the ids are a session's whose
+        maildir sits on another host's bus, the wake-router having forwarded the banner here, and the banner text
+        is the last copy of the mail. That banner is RE-HEADED in the queue under its own id, the same as one the
+        bus could not take back at all (no hook installed, a bus that could not be reached, refused, or gave no
+        answer): the not-resumable branch's path. The resumable branch refuses re-feeds because a duplicate of the
+        person's own words is a visible defect; a banner landing twice in the resumed conversation beats a peer
+        told "delivered" for mail nobody read, and the duplicate is accepted only when the transcript scan cannot
+        rule it out: a banner _text_landed FINDS in the transcript (the CLI wrote its user record before the
+        teardown) is left where it is, since the resumed conversation carries it and a put-back would deliver the
+        same mail twice; a False or None answer proceeds, a miss being no proof of loss. Never raises; one log line
+        per banner names its ids and their fate."""
         mail = [(t, postal_mids(t)) for t in stranded if isinstance(t, str)]
         mail = [(t, mids) for t, mids in mail if mids]
         if not mail:
@@ -5854,6 +5861,17 @@ class SdkSession:
         hook = getattr(self.backend, "postal_restore", None)
         rehead = []
         for text, mids in mail:
+            # Landed before the teardown? A stream error or timeout can tear the client down AFTER the CLI wrote
+            # the banner's user record; the resumed conversation then carries it, and a put-back would deliver the
+            # same mail twice. True is definitive (the banner keys to itself, markers included, under
+            # echo_text_key); False or None proceeds, a miss being no proof of loss (the abandoned client may
+            # still have been flushing the record). Review fix, 2026-09-12.
+            seen = self.backend._text_landed(self.sid, text)
+            if seen is True:
+                self.backend._log("stranded mail (%s): a banner fed to the abandoned client landed in the transcript "
+                                  "before the teardown; the resumed conversation carries it, not handed back (%s)"
+                                  % (self.name, ", ".join(mids)))
+                continue
             back, why = None, "no bus hook is installed"
             if callable(hook):
                 try:
@@ -5871,9 +5889,19 @@ class SdkSession:
                                   % (self.name, why, ", ".join(mids)), problem=True)
                 continue
             gone = [m for m in mids if m not in back]
+            if len(gone) == len(mids):
+                # The bus put back NONE of them. Nothing removes a live session's cur/ file (recall reads new/
+                # only; the orphan sweep skips live boxes and touches new/ only), so this bus never held them:
+                # a session whose maildir sits on another host's bus (the wake-router forwarded the banner
+                # here). The banner text is the last copy of the mail; re-head it, the no-answer path.
+                rehead.append(text)
+                self.backend._log("stranded mail (%s): a banner fed to the abandoned client never resulted, and the "
+                                  "bus holds none of its ids (%s); re-heading it so the new client is fed it"
+                                  % (self.name, ", ".join(mids)), problem=True)
+                continue
             self.backend._log("stranded mail (%s): a banner fed to the abandoned client never resulted; handed back "
                               "to the bus by id for re-delivery (%s)%s"
-                              % (self.name, ", ".join(m for m in mids if m in back) or "none",
+                              % (self.name, ", ".join(m for m in mids if m in back),
                                  ("; no longer in the bus's box, not re-fed: %s" % ", ".join(gone)) if gone else ""),
                               problem=False)
         if rehead:
