@@ -767,6 +767,9 @@ _CKPT_STATS = {"restored": 0, "writes": 0, "swept": 0, "skippedFolds": 0, "fallb
                "oversizeFolds": {}, "coldFolds": {}, "coldWrites": {}}
 _COLD = object()                  # a restored cursor with no state (its fold was oversize): fold_records inits it and steps the tail
 _COLD_FOLDS = set()               # (path, fold name) whose state in this process began cold at a cut: a TAIL-ONLY state, written as a
+_COLD_REASONS = {}                # (path, fold name) -> why it restarts cold: "over" (its state was over the cap: by design, every
+#                                   boot) or "cold" (its document carried a cursor without a state: a tail-only state written by
+#                                   a process where it began cold, or an older kernel's entry; the settle's primer heals it once)
                                   #  cursor without state until a whole refold, never as a complete one (review find, 2026-09-11)
 _SAID = set()
 
@@ -832,6 +835,14 @@ def _next_gen():
         _GEN[0] += 1
         return _GEN[0]
 _FOLD_NAME_OF = {}                # id(cursor dict) -> checkpoint name, for callers that name their cache once (name_fold_cache)
+
+
+def cold_fold_reasons(path):
+    """{fold name: reason} for the folds over `path` that began cold in this process ("over": its state is over the cap, by
+    design; "cold": its document carried a cursor without a state, which one whole refold heals). The settle's primer asks."""
+    key = str(path)
+    with _CKPT_LOCK:
+        return {n: _COLD_REASONS.get((k, n), "cold") for k, n in _COLD_FOLDS if k == key}
 
 
 def entry_whole_resident(path):
@@ -1056,13 +1067,20 @@ def _restored_cursor(key, name, ent):
             except Exception:
                 pass
             return None
-        if count != pend["count"] or count < base or count > base + len(ent[4]):
-            return None
-        if "state" not in f:                              # an oversize fold's cursor: the fold starts cold at the cut
-            with _CKPT_LOCK:
-                _CKPT_STATS["coldFolds"][name] = _CKPT_STATS["coldFolds"].get(name, 0) + 1
-            _say_once("checkpoint: fold %s of %s restarts cold over the tail (its state was over the %d KB cap)"
-                      % (name, key, _CKPT_FOLD_CAP // 1024))
+        if count < base or count > base + len(ent[4]):
+            return None                                   # a fold's count may differ from the document's cut (T359: the cut is the
+        if "state" not in f:                              #  lowest written cursor): inside the entry's held records it is an append
+            reason = "over" if f.get("over") else "cold"  #  from there; outside them it is nothing to resume from
+            with _CKPT_LOCK:                              # a cursor without a state: the fold starts cold at the cut, for the reason
+                _CKPT_STATS["coldFolds"][name] = _CKPT_STATS["coldFolds"].get(name, 0) + 1   #  the document names (T359: the line
+                _COLD_REASONS[(key, name)] = reason       #  blamed the cap whatever the reason)
+            if reason == "over":
+                _say_once("checkpoint: fold %s of %s restarts cold over the tail: its state was %d KB, over the %d KB cap"
+                          % (name, key, int(f["over"]), _CKPT_FOLD_CAP // 1024))
+            else:
+                _say_once("checkpoint: fold %s of %s restarts cold over the tail: its document carries its cursor without a state "
+                          "(a tail-only state, or an older kernel's cursor-only entry); the session's next settle heals it with one "
+                          "whole refold" % (name, key))
             return (count, ent[6], _COLD)
         state = _ckpt_decode(f["state"])
         with _CKPT_LOCK:
@@ -1088,29 +1106,44 @@ def checkpoint_write(path, force=False):
     folds = {}
     for name, cache in list(_FOLD_REG.items()):
         cur = cache.get(key)
-        if cur is None or cur[0] != count or cur[1] != gen:
-            continue
-        with _CKPT_LOCK:
-            cold = (key, name) in _COLD_FOLDS
+        if cur is None or cur[1] != gen or not base <= cur[0] <= count:
+            continue                                      # no cursor at this entry, or one outside its held records
+        fcount = cur[0]                                   # the fold's OWN count (T359): a fold stepped by builds, not by the settle,
+        with _CKPT_LOCK:                                  #  lags the entry and was left out silently before, to read the leaf whole
+            cold = (key, name) in _COLD_FOLDS             #  at the next boot; the restore steps the held tail from its count
         if cold:                                          # a state that began cold at a cut covers the tail only: it must not
             with _CKPT_LOCK:                              #  be written as a complete one (the next process would restore it
                 _CKPT_STATS["coldWrites"][name] = _CKPT_STATS["coldWrites"].get(name, 0) + 1   #  as whole and say nothing)
-            folds[name] = {"count": count}
+            folds[name] = {"count": fcount, "cold": 1}    # marked: the next process says why, and its settle heals it
             continue
         try:
             enc = _ckpt_encode(cur[2])
-            if len(json.dumps(enc, separators=(",", ":"))) > _CKPT_FOLD_CAP:
+            n_enc = len(json.dumps(enc, separators=(",", ":")))
+            if n_enc > _CKPT_FOLD_CAP:
                 with _CKPT_LOCK:                          # a state the size of its file: the document must not become the file
                     _CKPT_STATS["oversizeFolds"][name] = _CKPT_STATS["oversizeFolds"].get(name, 0) + 1
-                folds[name] = {"count": count}            # the cursor without its state: the next process starts this fold
-                continue                                  #  cold over the tail instead of reading the file whole (counted)
-            folds[name] = {"count": count, "state": enc}
+                folds[name] = {"count": fcount, "over": -(-n_enc // 1024)}   # the cursor without its state, with the reason (its KB):
+                continue                                  #  the next process starts this fold cold over the tail (counted)
+            folds[name] = {"count": fcount, "state": enc}
         except TypeError:
             with _CKPT_LOCK:
                 _CKPT_STATS["skippedFolds"] += 1
     if not folds and not force:
         return False
-    last = records[-1] if records else None
+    cut = min([f["count"] for f in folds.values()] or [count])   # the document's cut: the LOWEST written cursor (T359), so the
+    if cut < count:                                       #  next process's tail read holds every record a lagging fold has
+        if len(ent) < 8 or not ent[7]:                    #  yet to step (its append), bounded by the records this entry holds
+            return False                                  # (an entry without record locations: written at the witness only)
+        offset = int(ent[7][(cut - base) * 2])            # the cut record's byte offset, and the 64 bytes before it as the guard
+        try:
+            with open(key, "rb") as fh:
+                fh.seek(max(0, offset - 64)); tail = fh.read(min(64, offset))
+        except OSError:
+            return False
+        last = records[cut - base - 1] if cut > base else None
+        count = cut
+    else:
+        last = records[-1] if records else None
     with _CKPT_LOCK:
         seq = _CKPT_SEQ.get(key, 0) + 1
     doc = {"v": _CKPT_V, "path": os.path.realpath(key), "size": int(size), "mtime": float(mtime), "offset": int(offset),
@@ -1495,6 +1528,7 @@ def fold_records(cache, path, init, step, on=None, ckpt=None, drop_after=None):
         if ckpt is not None:
             with _CKPT_LOCK:
                 _COLD_FOLDS.discard((key, ckpt))          # every record stepped: the state is complete again
+                _COLD_REASONS.pop((key, ckpt), None)
     for r in recs[start:]:
         if isinstance(r, dict):
             state = step(state, r)

@@ -9,6 +9,7 @@ every fallback (rewrite under the guard, shrink, version, path, corrupt) reads w
 a cold fold; the bytes the reader pulls after a restore are the tail plus the guard; a fold behind the witness is left
 out and cold-folds; the boot sweep removes checkpoints of vanished files; the kernel writes at a session's settle or
 states-log move and never otherwise; /perf carries the counters. Hermetic: synthetic records under a temp root."""
+import contextlib
 import json
 import os
 import tempfile
@@ -88,7 +89,8 @@ class Base(unittest.TestCase):
         (jd.STATE / "states").mkdir(parents=True, exist_ok=True)
         (jd.STATE / "timeline").mkdir(parents=True, exist_ok=True)
         self.fresh_process()
-        em._CKPT_STATS.update(restored=0, writes=0, swept=0, skippedFolds=0, fallbacks={}, restoredFolds={}, droppedRestores=0, oversizeFolds={})
+        em._CKPT_STATS.update(restored=0, writes=0, swept=0, skippedFolds=0, fallbacks={}, restoredFolds={}, droppedRestores=0, oversizeFolds={},
+                              coldFolds={}, coldWrites={})
 
     def tearDown(self):
         jd._rebind_state(self.saved_state)
@@ -256,22 +258,56 @@ class GenericFold(Base):
                 self.assertEqual(got, self.cold(), reason)
                 self.assertEqual(self.kinds[-1], "refold")
 
-    def test_a_fold_behind_the_witness_is_left_out_and_cold_folds_while_the_other_restores(self):
+    def test_a_fold_behind_the_witness_is_written_with_its_own_count_and_restores_warm(self):
+        """T359 (romp_perf's boot finding, 2026-09-12): a fold whose cursor lagged the entry's record count (the kernel's
+        background-task view is stepped by builds, so at a settle or exit write it stands behind the leaf) was left out of
+        the document silently, and the next boot read the leaf whole for it, every boot. The writer records such a fold at
+        ITS count with its state; the restore takes a count inside the entry's held records and steps the tail from there
+        (the append path every live fold takes), so the fold is warm and the read is the tail's."""
         _write(self.p, [{"n": 0}, {"n": 1}])
         other = {}
         self.fold(); self.fold("u", other)
         _append(self.p, {"n": 2})
         self.fold()                                               # "t" stands at 3, "u" still at 2
         self.assertTrue(em.checkpoint_write(self.p))
-        self.assertEqual(sorted(self.doc(self.p)["folds"]), ["t"], "only the fold at the witness is recorded")
+        d = self.doc(self.p)
+        self.assertEqual(sorted(d["folds"]), ["t", "u"], "the lagging fold is recorded beside the one at the witness")
+        self.assertEqual((d["folds"]["t"]["count"], d["folds"]["u"]["count"], d["count"]), (3, 2, 2),
+                         "each at its own count; the document's cut is the lowest, so the next tail read holds what the lagging fold needs")
+        self.assertIn("state", d["folds"]["u"])
+        self.assertEqual(d["lastUuid"], None); self.assertEqual(bytes.fromhex(d["guard"]), open(self.p, "rb").read()[max(0, d["offset"] - 64):d["offset"]])
         self.fresh_process()
         _append(self.p, {"n": 3})
         self.assertEqual(self.fold(), [0, 1, 2, 3]); self.assertEqual(self.kinds[-1], "restore")
+        size = os.path.getsize(self.p)
         self.assertEqual(em.fold_records({}, self.p, list, self._step, on=self.kinds.append, ckpt="u"), [0, 1, 2, 3])
-        self.assertEqual(self.kinds[-1], "refold", "a fold with no recorded state reads the whole file")
+        self.assertEqual(self.kinds[-1], "restore", "the lagging fold restores from its own count and steps the two records since")
         with em._JSONL_CACHE_LOCK:
-            self.assertEqual(em._JSONL_CACHE[self.p][5], 0, "the entry was upgraded to the whole file for it")
+            self.assertEqual(em._JSONL_CACHE[self.p][5], 2, "the entry is a tail from the cut: nothing was read whole")
+        self.assertEqual(em.read_bytes_report().get(self.p, 0), (size - d["offset"]) + min(64, d["offset"]) + min(64, size),
+                         "the tail from the cut, the guard check before it and the guard captured after it: nothing of the prefix")
+        self.assertEqual(em.checkpoint_stats()["restoredFolds"], {"t": 1, "u": 1})
         self.assertEqual(self.fold(), [0, 1, 2, 3]); self.assertEqual(self.kinds[-1], "hit", "the restored fold still stands")
+
+    def test_a_lagging_cursor_outside_the_entrys_records_is_not_written_and_a_document_count_ahead_of_the_entry_is_refused(self):
+        """The bound on the incremental tail: a lagging fold is written only when its count sits inside the entry's held
+        records (the tail the reader holds), and a restore takes a fold's count only up to the document's own; anything
+        else is the whole refold it always was."""
+        _write(self.p, [{"n": i} for i in range(5)])
+        self.fold()                                               # "t" at 5 over a whole entry
+        self.assertTrue(em.checkpoint_write(self.p))
+        d = self.doc(self.p); d["folds"]["t"]["count"] = 99      # a document claiming a count past its own and the entry's
+        em._ckpt_file(self.p).write_text(json.dumps(d))
+        self.fresh_process()
+        _append(self.p, {"n": 5})
+        self.assertEqual(self.fold(), list(range(6)))
+        self.assertEqual(self.kinds[-1], "refold", "a count the entry cannot hold is refused: the whole file, as before")
+        d = self.doc(self.p); d["folds"]["t"]["count"] = 2; d["count"] = 6   # a lagging count BELOW the tail entry's base
+        em._ckpt_file(self.p).write_text(json.dumps(d))
+        self.fresh_process(); self.cache.clear()
+        _append(self.p, {"n": 6})
+        self.assertEqual(self.fold(), list(range(7)))
+        self.assertEqual(self.kinds[-1], "refold", "a count below the records the entry holds is refused too")
 
     def test_an_evicted_reader_entry_never_lets_a_rewritten_file_pass_as_an_append(self):
         """Review find (2026-09-11): a from-zero read after an eviction (the reader cache runs at its cap on a busy box) or
@@ -374,7 +410,8 @@ class GenericFold(Base):
         self.assertTrue(em.checkpoint_write(self.p))
         d = self.doc(self.p)
         self.assertEqual(sorted(d["folds"]), ["big", "t"], "the oversize fold's cursor is in the document")
-        self.assertEqual(d["folds"]["big"], {"count": 400}, "without its state")
+        self.assertEqual((d["folds"]["big"]["count"], "state" in d["folds"]["big"]), (400, False), "without its state")
+        self.assertGreater(d["folds"]["big"].get("over", 0), 64, "and with the reason: its encoded size in KB, over the cap")
         self.assertLess(em._ckpt_file(self.p).stat().st_size, em._CKPT_FOLD_CAP, "and the document stays small")
         self.assertEqual(em.checkpoint_stats()["oversizeFolds"], {"big": 1})
         self.fresh_process(); big.clear()
@@ -390,13 +427,15 @@ class GenericFold(Base):
         # review find (2026-09-11, third round): the tail-only state is small now; a write must not record it as complete
         self.assertEqual(self.fold(), list(range(401)))               # the bounded fold steps to the witness too
         self.assertTrue(em.checkpoint_write(self.p))
-        self.assertEqual(self.doc(self.p)["folds"]["big"], {"count": 401}, "a fold that began cold stays a cursor without state")
+        self.assertEqual(self.doc(self.p)["folds"]["big"], {"count": 401, "cold": 1}, "a fold that began cold stays a cursor without state, "
+                                                                                  "marked as a tail-only one (T359)")
         self.assertEqual(em.checkpoint_stats()["coldWrites"], {"big": 1})
         self.assertIn("state", self.doc(self.p)["folds"]["t"], "the bounded fold beside it is written whole")
         self.fresh_process(); big.clear()
         got = em.fold_records(big, self.p, self.__class__._noop_init, lambda st, o: st + [o], on=self.kinds.append, ckpt="big")
         self.assertEqual((got, self.kinds[-1]), ([], "cold"), "the third process restores it cold again, not as a complete state")
         self.assertEqual(em.checkpoint_stats()["restoredFolds"].get("big", 0), 0)
+        self.assertEqual(em.cold_fold_reasons(self.p), {"big": "cold"}, "...and knows why: a tail-only state, which a settle heals")
         big.clear(); em._TRAILING_CACHE.clear()
         with em._JSONL_CACHE_LOCK:
             em._JSONL_CACHE.clear()
@@ -407,8 +446,39 @@ class GenericFold(Base):
             self.assertNotIn((self.p, "big"), em._COLD_FOLDS, "and the fold is no longer cold")
         self.assertTrue(em.checkpoint_write(self.p, force=True))
         self.assertEqual(sorted(self.doc(self.p)["folds"]), ["big"], "the state is oversize again: written as a cursor for that reason")
-        self.assertEqual(self.doc(self.p)["folds"]["big"], {"count": 401})
+        self.assertEqual((self.doc(self.p)["folds"]["big"]["count"], "over" in self.doc(self.p)["folds"]["big"]), (401, True))
         self.assertEqual(em.checkpoint_stats()["coldWrites"], {"big": 1}, "not as a cold write")
+        self.fresh_process(); big.clear()
+        em.fold_records(big, self.p, self.__class__._noop_init, lambda st, o: st + [o], on=self.kinds.append, ckpt="big")
+        self.assertEqual(em.cold_fold_reasons(self.p), {"big": "over"}, "an over-the-cap cursor restores cold for that reason, and no settle heals it")
+
+    def test_the_boot_line_names_the_real_reason_a_fold_restarts_cold(self):
+        """The line blamed the size cap whatever the reason (romp_perf, 2026-09-12: 68 lines about an 8 MB cap at a boot whose
+        oversizeFolds was empty). Over the cap: the state's KB against the cap. A cursor without a state and without a reason
+        (a tail-only state, or an older kernel's cursor-only entry): says so, and that a settle heals it."""
+        import io
+        _write(self.p, [{"n": i, "pad": "x" * 400} for i in range(400)])
+        self.fold()
+        self.assertTrue(em.checkpoint_write(self.p))
+        d = self.doc(self.p)
+        d["folds"]["t"] = {"count": 400, "over": 170}                 # an oversize cursor, as the writer marks it
+        em._ckpt_file(self.p).write_text(json.dumps(d))
+        self.fresh_process(); em._SAID.clear()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.fold()
+        self.assertEqual(self.kinds[-1], "cold")
+        self.assertIn("its state was 170 KB, over the %d KB cap" % (em._CKPT_FOLD_CAP // 1024), err.getvalue())
+        d["folds"]["t"] = {"count": 400}                               # an older kernel's cursor-only entry: no reason recorded
+        em._ckpt_file(self.p).write_text(json.dumps(d))
+        self.fresh_process(); em._SAID.clear(); self.cache.clear()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.fold()
+        self.assertEqual(self.kinds[-1], "cold")
+        self.assertIn("carries its cursor without a state", err.getvalue())
+        self.assertIn("heals", err.getvalue())
+        self.assertNotIn("KB cap", err.getvalue(), "the cap is not blamed for a state that never met it")
 
     @staticmethod
     def _noop_init():
@@ -700,6 +770,47 @@ class KernelFolds(Base):
         self.assertLess(em.read_bytes_report().get(self.leaf, 0), size / 2, "and reads no leaf whole")
         src = open(os.path.join(BIN, "romp-kernel")).read()
         self.assertIn("_prime_leaf_folds(_s[\"path\"])", src, "the exit drain primes every session's leaf before its write")
+
+    def test_a_tail_only_fold_is_healed_at_the_settle_by_one_whole_refold_and_the_next_boot_restores_it_warm(self):
+        """T359: the devbox's leaves carried the kernel's background-task view as a cursor without a state (written under the
+        64 KB cap, then perpetuated: a fold that began cold is written cursor-only, so every boot since restarted it cold over
+        the tail and answered from the tail alone). The settle's primer now refolds such a fold whole once (the leaf read, once,
+        at a settle, never at boot), the write carries its state, and the next boot restores it warm."""
+        self.write_all(tail=False)
+        self.answers()
+        for p in self.files:
+            em.checkpoint_write(p)
+        d = self.doc(self.leaf)
+        d["folds"]["bgAll"] = {"count": d["folds"]["bgAll"]["count"]}        # the document an older kernel left: cursor only
+        em._ckpt_file(self.leaf).write_text(json.dumps(d))
+        self.fresh_process()
+        km._session_meta(self.leaf)                                         # a restored tail entry
+        size = os.path.getsize(self.leaf)
+        km._bg_scan_all_cached(self.leaf)
+        self.assertEqual(em.checkpoint_stats()["coldFolds"], {"bgAll": 1}, "the boot restores it cold over the tail (cheap)")
+        self.assertEqual(em.cold_fold_reasons(self.leaf), {"bgAll": "cold"})
+        self.assertLess(em.read_bytes_report().get(self.leaf, 0), size / 2, "no whole read at boot")
+        rows = [{"sid": SID, "path": self.leaf}]
+        saved_sessions, saved_turn = km._sessions, km._turn_end_key
+        turn_end = [TS0]
+        km._sessions = lambda now: rows
+        km._turn_end_key = lambda sid, reg=None: turn_end[0]
+        try:
+            self.assertEqual(km._persist_checkpoints(TS0 + 499), 0, "first sight: recorded, nothing written")
+            turn_end[0] = TS0 + 500
+            self.assertGreaterEqual(km._persist_checkpoints(TS0 + 501), 1, "the settle writes")
+        finally:
+            km._sessions, km._turn_end_key = saved_sessions, saved_turn
+        self.assertGreaterEqual(em.read_bytes_report().get(self.leaf, 0), size, "the settle's primer read the leaf whole ONCE for the heal")
+        self.assertEqual(em.cold_fold_reasons(self.leaf), {}, "the fold is complete again")
+        self.assertIn("state", self.doc(self.leaf)["folds"]["bgAll"], "and written whole")
+        self.assertEqual(km._bg_scan_all_cached(self.leaf), self.answers()["bgAll"], "the healed view equals a whole fold's")
+        self.fresh_process()
+        before = em.checkpoint_stats()["restoredFolds"].get("bgAll", 0); cold_before = em.checkpoint_stats()["coldFolds"].get("bgAll", 0)
+        km._bg_scan_all_cached(self.leaf)
+        self.assertEqual(em.checkpoint_stats()["restoredFolds"].get("bgAll", 0), before + 1, "the next boot restores it warm")
+        self.assertEqual(em.checkpoint_stats()["coldFolds"].get("bgAll", 0), cold_before, "and not cold")
+        self.assertLess(em.read_bytes_report().get(self.leaf, 0), size / 2, "and reads no leaf whole")
 
     def test_perf_carries_the_checkpoint_counters_and_the_kernel_wires_the_three_events(self):
         snap = km._PERF_STATS.snapshot()
