@@ -136,9 +136,11 @@ class RestartOverACheckpointedSession(unittest.TestCase):
             while not stop.wait(1.0):                                     # loop-ok: bounded by the frame's own 60 s wait
                 try:
                     perf = self._get(port, "/perf")
-                    timeline.append({"t": round(time.time() - t0, 1), "asmIndex": perf.get("asmIndex"),
+                    ai = perf.get("asmIndex") or {}
+                    timeline.append({"t": round(time.time() - t0, 1), "built": ai.get("materialized"), "builtBy": ai.get("materializedBy"),
                                      "hydratedBy": (perf.get("asmCheckpoint") or {}).get("hydratedBy"),
-                                     "recordCache": perf.get("recordCache"), "memos": perf.get("memos")})
+                                     "process": perf.get("process"), "pusher": perf.get("pusher"), "stagesMs": perf.get("stages_ms"),
+                                     "builds": perf.get("builds"), "judge": perf.get("judge")})
                 except Exception as e:
                     timeline.append({"t": round(time.time() - t0, 1), "error": repr(e)[:120]})
         th = threading.Thread(target=sample, daemon=True) if timeline is not None else None
@@ -222,8 +224,9 @@ class RestartOverACheckpointedSession(unittest.TestCase):
                                        "would take over 20 s on this %d-record one; asmIndex=%s hydratedBy=%s; while the frame was awaited:%s; "
                                        "at boot: %s; the kernel's last lines:%s"
                                        % (dt2, sum(1 for _ in open(self.leaf)), perf.get("asmIndex"), asm.get("hydratedBy"),
-                                          "".join("\n  " + json.dumps(x, sort_keys=True) for x in timeline),
-                                          json.dumps({k: perf_boot.get(k) for k in ("asmIndex", "asmCheckpoint", "recordCache")}, sort_keys=True),
+                                          "".join("\n  " + json.dumps(x, sort_keys=True, default=str) for x in timeline),
+                                          json.dumps({k: perf_boot.get(k) for k in ("asmIndex", "asmCheckpoint", "process", "pusher", "stages_ms", "judge")},
+                                                     sort_keys=True, default=str),
                                           self._log_tail(log2)))
             n_lazy = sum(1 for row in doc["atoms"] if row.get("lz") is not None)   # the atoms with a body to read (not a boundary)
             self.assertGreater(asm["hydratedAtoms"], 0, "the frame hydrated the pre-cut atoms it rendered")
