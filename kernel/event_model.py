@@ -764,7 +764,11 @@ def read_bytes_report():
 _CKPT_V = 1
 _CKPT_DIR_FN = None               # () -> Path of the checkpoint directory; None = checkpoints off
 _CKPT_STATS = {"restored": 0, "writes": 0, "swept": 0, "skippedFolds": 0, "fallbacks": {}, "restoredFolds": {}, "droppedRestores": 0,
-               "oversizeFolds": {}, "coldFolds": {}, "coldWrites": {}}
+               "oversizeFolds": {}, "coldFolds": {}, "coldWrites": {},
+               "converge": {"passes": 0, "writes": 0, "bytes": 0, "heals": 0, "healBytes": 0, "primed": 0, "deferred": 0,
+                            "failed": 0, "unhealed": 0, "docReadBytes": 0}}   # T360
+_CKPT_DOC_FOLDS = {}              # path -> {fold name: "state" | "over" | "cold" | "bare"}: the document on disk as last written or
+#                                   loaded in this process, so the converge pass can tell a document lacking a state without a read
 _COLD = object()                  # a restored cursor with no state (its fold was oversize): fold_records inits it and steps the tail
 _COLD_FOLDS = set()               # (path, fold name) whose state in this process began cold at a cut: a TAIL-ONLY state, written as a
 _COLD_OVER_KB = {}                # (path, fold name) -> the KB an over-the-cap state measured, carried through a cold write (T359)
@@ -845,8 +849,10 @@ def drop_cold_cursors(path):
     key = str(path)
     with _CKPT_LOCK:
         names = [n for k, n in _COLD_FOLDS if k == key and _COLD_REASONS.get((k, n), "cold") == "cold"]
-    for n in names:
-        cache = _FOLD_REG.get(n)
+        for n in names:                                   # the cold marks go with the cursor: the fold's next run is a whole refold,
+            _COLD_FOLDS.discard((key, n)); _COLD_REASONS.pop((key, n), None); _COLD_OVER_KB.pop((key, n), None)   #  and until then
+    for n in names:                                       #  the path is no candidate for it (review: an unhealable cold fold kept a
+        cache = _FOLD_REG.get(n)                          #  document being written every cycle)
         if cache is not None:
             cache.pop(key, None)
     return names
@@ -891,7 +897,7 @@ def set_checkpoint_dir(fn):
     global _CKPT_DIR_FN
     _CKPT_DIR_FN = fn
     with _CKPT_LOCK:
-        _CKPT_PENDING.clear(); _CKPT_SEQ.clear(); _FOLD_DIRTY.clear()
+        _CKPT_PENDING.clear(); _CKPT_SEQ.clear(); _FOLD_DIRTY.clear(); _CKPT_DOC_FOLDS.clear()
 
 
 def _ckpt_dir():
@@ -912,6 +918,7 @@ def _ckpt_fallback(path, reason, detail=""):
     with _CKPT_LOCK:
         _CKPT_STATS["fallbacks"][reason] = _CKPT_STATS["fallbacks"].get(reason, 0) + 1
         _CKPT_PENDING.pop(str(path), None)
+        _CKPT_DOC_FOLDS.pop(str(path), None)              # the document is gone: the converge pass must not believe it whole
     try:
         sys.stderr.write("checkpoint fallback (%s) for %s%s\n" % (reason, path, (": " + detail) if detail else ""))
     except Exception:
@@ -1004,6 +1011,7 @@ def _checkpoint_entry(path, st):
     guard bytes are verified by the reader against the file; here the document and the size are: a file shorter than
     the recorded offset is a shrink."""
     doc = _ckpt_load(path)
+    _CKPT_DOC_FOLDS[str(path)] = _doc_fold_shapes(doc.get("folds")) if isinstance(doc, dict) else {}   # what the disk holds (T360)
     if doc is None:
         return None
     offset, count = int(doc["offset"]), int(doc["count"])
@@ -1032,6 +1040,7 @@ def _ckpt_pending(path, ent):
         if key in _CKPT_SEQ:                          # already consulted (or written) in this process: nothing new
             return None
     doc = _ckpt_load(path)
+    _CKPT_DOC_FOLDS[str(path)] = _doc_fold_shapes(doc.get("folds")) if isinstance(doc, dict) else {}   # what the disk holds (T360)
     if doc is None:
         with _CKPT_LOCK:
             _CKPT_SEQ.setdefault(key, 0)
@@ -1107,6 +1116,59 @@ def _restored_cursor(key, name, ent):
         _ckpt_fallback(key, "corrupt", "fold %s: %s" % (name, e)); return None
 
 
+_CKPT_LAG_FLOOR = 64                # a fold's count may lag the entry's by this many records, or an eighth of the entry, whichever
+#                                     is more, and still be written (or carried) at its own count; further behind it is left out,
+#                                     so a fold that ran early and stopped (a skipped wake-tail, a cursor dropped at quiescence)
+#                                     cannot drag the document's cut, and with it every later boot's tail read, back to its count
+
+
+def _lag_ok(count, c):
+    return count - c <= max(_CKPT_LAG_FLOOR, count // 8)
+
+
+def _carry_forward_states(key, folds, base, count, size, mtime):
+    """The on-disk document's entries for folds this process holds no cursor for (a fold that never ran here, such as the
+    transcript's wake-tail or queue-ledger folds beside the five leaf folds), carried into the next write so a write from
+    this process's cursors alone does not strip states an earlier process stored (T360 review, medium 2: before the
+    converge pass an idle session's document was never rewritten, so they survived). Only entries with a state, or an
+    over-the-cap cursor, at a count inside this entry's held records, and only when the document's own guard still
+    stands on disk (a file rewritten since voids its states); a bare or tail-only cursor is not carried: the next boot reads
+    the file whole for that fold once and the write after carries its state."""
+    cp = _ckpt_file(key)
+    if cp is None or not cp.exists():
+        return {}
+    try:
+        text = cp.read_bytes(); _count_read(str(cp), len(text))    # the carry's reads are the write's I/O: counted like the rest
+        doc = json.loads(text.decode("utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(doc, dict) or doc.get("v") != _CKPT_V or doc.get("path") != os.path.realpath(key):
+        return {}
+    try:
+        if _ckpt_verdict(doc, size, mtime):                   # the entry's stat against the document, as the restore paths ask: a
+            return {}                                         #  same-size edit under another mtime is a rewrite, and carries nothing
+        off, guard = int(doc["offset"]), bytes.fromhex(doc.get("guard") or "")
+        with open(key, "rb") as fh:
+            fh.seek(max(0, off - len(guard)))
+            ok = fh.read(len(guard)) == guard
+        _count_read(key, len(guard))
+        if not ok:
+            return {}
+    except (OSError, ValueError, TypeError, KeyError):
+        return {}
+    out = {}
+    for name, f in (doc.get("folds") or {}).items():
+        if name in folds or not isinstance(f, dict) or not ("state" in f or f.get("over")):
+            continue
+        try:
+            c = int(f["count"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if base <= c <= count and _lag_ok(count, c):          # a carried count too far behind would drag the cut (the bound above)
+            out[name] = f
+    return out
+
+
 def checkpoint_write(path, force=False):
     """Write `path`'s checkpoint from the reader's entry and every registered fold whose cursor stands at the entry's
     record count. False when there is nothing to write (no entry, or no fold at the witness and not `force`)."""
@@ -1123,8 +1185,9 @@ def checkpoint_write(path, force=False):
     folds = {}
     for name, cache in list(_FOLD_REG.items()):
         cur = cache.get(key)
-        if cur is None or cur[1] != gen or not base <= cur[0] <= count:
-            continue                                      # no cursor at this entry, or one outside its held records
+        if cur is None or cur[1] != gen or not base <= cur[0] <= count or not _lag_ok(count, cur[0]):
+            continue                                      # no cursor at this entry, one outside its held records, or one too far
+        #                                                   behind to be written at its count without dragging the cut (_lag_ok)
         fcount = cur[0]                                   # the fold's OWN count (T359): a fold stepped by builds, not by the settle,
         with _CKPT_LOCK:                                  #  lags the entry and was left out silently before, to read the leaf whole
             cold = (key, name) in _COLD_FOLDS             #  at the next boot; the restore steps the held tail from its count
@@ -1151,6 +1214,7 @@ def checkpoint_write(path, force=False):
                 _CKPT_STATS["skippedFolds"] += 1
     if not folds and not force:
         return False
+    folds.update(_carry_forward_states(key, folds, base, count, size, mtime))   # the disk document's states for folds this process never ran
     cut = min([f["count"] for f in folds.values()] or [count])   # the document's cut: the LOWEST written cursor (T359), so the
     moved = None                                          #  next process's tail read holds every record a lagging fold has
     if cut < count and len(ent) >= 8 and ent[7]:          #  yet to step (its append), bounded by the records this entry holds
@@ -1192,6 +1256,7 @@ def checkpoint_write(path, force=False):
     with _CKPT_LOCK:
         _CKPT_SEQ[key] = seq
         _CKPT_STATS["writes"] += 1
+        _CKPT_DOC_FOLDS[key] = _doc_fold_shapes(folds)
         if left_out:
             _FOLD_DIRTY.add(key)                          # a lagging fold has no cursor in this document yet
         else:
@@ -1205,19 +1270,64 @@ def checkpoint_dirty():
         return sorted(_FOLD_DIRTY)
 
 
+def _doc_fold_shapes(folds):
+    return {n: ("state" if "state" in f else "over" if f.get("over") else "cold" if f.get("cold") else "bare")
+            for n, f in (folds or {}).items() if isinstance(f, dict)}
+
+
+def checkpoint_converge_candidates():
+    """The dirty paths whose document on disk lacks a complete state for a fold this process holds a cursor for at the
+    current entry (the fold is missing from it, or recorded as a bare or tail-only cursor), or whose fold began cold for
+    want of a state: the writes that make a boot's whole reads pay ONCE (T360). Before them a fold that never ran in the
+    writing process had no entry, the next boot read the leaf whole for it, and an idle session, which never settles,
+    paid that at every boot. A dirty path whose document already carries every fold that ran is not one: a live session's
+    leaf is dirty every turn and is written at its settle, never here (no steady stream of writes)."""
+    out = []
+    with _CKPT_LOCK:
+        cold = {(k, n) for k, n in _COLD_FOLDS if _COLD_REASONS.get((k, n), "cold") == "cold"}
+        paths = sorted(_FOLD_DIRTY | {k for k, n in cold})   # a cold cursor at the witness steps nothing and marks nothing dirty
+    for key in paths:
+        with _JSONL_CACHE_LOCK:
+            ent = _JSONL_CACHE.get(key)
+        if ent is None:
+            continue
+        shapes = _CKPT_DOC_FOLDS.get(key, {})
+        total = ent[5] + len(ent[4])
+        for name, cache in list(_FOLD_REG.items()):
+            if (key, name) in cold:
+                out.append(key); break
+            cur = cache.get(key)
+            if cur is None or cur[1] != ent[6] or not ent[5] <= cur[0] <= total or not _lag_ok(total, cur[0]):
+                continue                                  # no cursor the writer would record: a fold stopped beyond the lag bound
+            if shapes.get(name) not in ("state", "over"):   #  is left out by the writer and refused by the carry, so it is no
+                out.append(key); break                    #  candidate either (it refolds once when it runs, then is written current)
+    return out
+
+
+def converge_stat(name, n=1):
+    """Count a converge pass's work under checkpoints.converge (the kernel's pass reports through here)."""
+    with _CKPT_LOCK:
+        _CKPT_STATS["converge"][name] = _CKPT_STATS["converge"].get(name, 0) + n
+
+
 def checkpoint_write_dirty(paths=None, budget_s=None):
     """Write the checkpoints of `paths` (default: every dirty path); returns how many were written. `budget_s`
     bounds the pass (the exit path, 2026-09-11: an unbounded write over a kernel life's dirty files outran the
     manager's 5 s grace and the SIGKILL lost the cut row): the first file always writes, the pass stops once the
     budget has passed, and what is left stays dirty for the next writer."""
-    n = 0
+    return len(checkpoint_write_dirty_paths(paths, budget_s))
+
+
+def checkpoint_write_dirty_paths(paths=None, budget_s=None):
+    """checkpoint_write_dirty, returning the paths written (the settle's converge pass skips them that cycle)."""
+    out = []
     t0 = time.monotonic()
     for p in (checkpoint_dirty() if paths is None else [str(p) for p in paths]):
-        if budget_s is not None and n and time.monotonic() - t0 > budget_s:
+        if budget_s is not None and out and time.monotonic() - t0 > budget_s:
             break
         if checkpoint_write(p):
-            n += 1
-    return n
+            out.append(p)
+    return out
 
 
 def checkpoint_sweep():
@@ -1258,7 +1368,7 @@ def checkpoint_stats():
     with _CKPT_LOCK:
         out = dict(_CKPT_STATS); out["fallbacks"] = dict(_CKPT_STATS["fallbacks"]); out["restoredFolds"] = dict(_CKPT_STATS["restoredFolds"])
         out["oversizeFolds"] = dict(_CKPT_STATS["oversizeFolds"]); out["coldFolds"] = dict(_CKPT_STATS["coldFolds"])
-        out["coldWrites"] = dict(_CKPT_STATS["coldWrites"])
+        out["coldWrites"] = dict(_CKPT_STATS["coldWrites"]); out["converge"] = dict(_CKPT_STATS["converge"])
     d = _ckpt_dir()
     with _READ_BYTES_LOCK:
         out["documentBytes"] = sum(n for p_, n in _READ_BYTES.items() if d is not None and p_.startswith(str(d) + os.sep))

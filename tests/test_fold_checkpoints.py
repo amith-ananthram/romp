@@ -92,6 +92,8 @@ class Base(unittest.TestCase):
         self.fresh_process()
         em._CKPT_STATS.update(restored=0, writes=0, swept=0, skippedFolds=0, fallbacks={}, restoredFolds={}, droppedRestores=0, oversizeFolds={},
                               coldFolds={}, coldWrites={})
+        if "converge" in em._CKPT_STATS:                          # reset, never injected: the /perf key pin tests the production default
+            em._CKPT_STATS["converge"] = {k: 0 for k in em._CKPT_STATS["converge"]}
 
     def tearDown(self):
         jd._rebind_state(self.saved_state)
@@ -816,10 +818,283 @@ class KernelFolds(Base):
         self.assertEqual(em.checkpoint_stats()["coldFolds"].get("bgAll", 0), cold_before, "and not cold")
         self.assertLess(em.read_bytes_report().get(self.leaf, 0), size / 2, "and reads no leaf whole")
 
+    def _converge_world(self, strip, extra=()):
+        """Documents for every file, then the leaf's document with `strip`'s folds removed or reduced to bare cursors (what an
+        older kernel, or a kernel where the fold never ran, left behind), then a fresh process. `extra` names generic folds
+        run over the leaf beside the five leaf folds (the transcript's wake-tail and queue-ledger folds in production)."""
+        self.write_all(tail=False)
+        self.answers()
+        for name in extra:
+            em.fold_records({}, self.leaf, list, lambda st, o: st + [1], ckpt=name)
+        for p in self.files:
+            em.checkpoint_write(p)
+        d = self.doc(self.leaf)
+        for name, how in strip.items():
+            if how == "missing":
+                d["folds"].pop(name, None)
+            else:
+                d["folds"][name] = {"count": d["folds"][name]["count"]}
+        em._ckpt_file(self.leaf).write_text(json.dumps(d))
+        self.fresh_process()
+        rows = [{"sid": SID, "path": self.leaf}]
+        self._saved_sessions = km._sessions
+        km._sessions = lambda now, **kw: rows
+        self.addCleanup(setattr, km, "_sessions", self._saved_sessions)
+
+    def test_converge_writes_the_folds_a_boot_ran_whole_and_the_next_boot_restores_them(self):
+        """T360: a fold missing from a document (it never ran in the writing process) is read whole at the next boot, and that
+        cost was paid at EVERY boot because an idle session never settles, so its document was never rewritten (the devbox:
+        the judges' pairing missing from 39 of 60 documents, 2.4 GB per boot). The converge pass, on the pusher's cycle, writes
+        a dirty document that lacks a state this process now holds; over the whole entry the boot's read left, every leaf
+        fold is primed first, so one write carries all five and the next boot restores them."""
+        self._converge_world({"bgJudge": "missing", "agentLaunches": "missing"})
+        size = os.path.getsize(self.leaf)
+        jd._bg_scan(self.leaf)                                        # the judges' first pass: no document entry, a whole refold
+        self.assertGreaterEqual(em.read_bytes_report().get(self.leaf, 0), size, "the boot paid the whole read")
+        self.assertEqual(em.checkpoint_converge_candidates(), [self.leaf], "a dirty document lacking a fold this process holds")
+        self.assertEqual(km._converge_checkpoints(TS0 + 600), 1)
+        self.assertEqual(sorted(self.doc(self.leaf)["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgRunning", "sessionMeta"],
+                         "the write carries every leaf fold: the four others primed over the whole entry")
+        self.assertTrue(all("state" in f for f in self.doc(self.leaf)["folds"].values()))
+        cv = em.checkpoint_stats()["converge"]
+        self.assertEqual((cv["writes"], cv["primed"]), (1, 1)); self.assertGreater(cv["bytes"], 0)
+        self.assertEqual(em.checkpoint_converge_candidates(), [], "nothing left to converge")
+        self.assertEqual(km._converge_checkpoints(TS0 + 601), 0, "idempotent: the second pass writes nothing")
+        self.assertEqual(em.checkpoint_stats()["converge"]["writes"], 1)
+        self.fresh_process()
+        before = em.checkpoint_stats()["restoredFolds"].get("bgJudge", 0)
+        jd._bg_scan(self.leaf)
+        self.assertEqual(em.checkpoint_stats()["restoredFolds"].get("bgJudge", 0), before + 1, "the next boot restores the pairing warm")
+        self.assertLess(em.read_bytes_report().get(self.leaf, 0), size / 2, "and reads no leaf whole")
+
+    def test_converge_leaves_a_document_that_carries_every_fold_alone(self):
+        """Idempotence on a live session: its leaf is dirty every turn, but its document carries every fold that ran, so the
+        converge pass never rewrites it (the settle does); no steady stream of writes."""
+        self._converge_world({})
+        km._session_meta(self.leaf)                                   # a restore: not dirty
+        _append(self.leaf, _user("another prompt", "u_more", "a3", TS0 + 700))
+        km._session_meta(self.leaf); km._bg_scan_all_cached(self.leaf)   # appends: dirty, the document's folds all present
+        self.assertIn(self.leaf, em.checkpoint_dirty())
+        self.assertEqual(em.checkpoint_converge_candidates(), [], "a document carrying every fold that ran is not a candidate")
+        self.assertEqual(km._converge_checkpoints(TS0 + 701), 0)
+        self.assertEqual(em.checkpoint_stats()["converge"]["writes"], 0)
+        self.assertIn(self.leaf, em.checkpoint_dirty(), "...and stays dirty for the settle")
+
+    def test_converge_heals_an_idle_sessions_legacy_bare_cursor_once(self):
+        """T360 (2): the legacy bare cursors of idle sessions (18 on the devbox), which no settle reaches: the converge pass heals
+        the fold with one whole refold under its budget and writes the state; the next boot restores it warm."""
+        self._converge_world({"bgAll": "bare"})
+        size = os.path.getsize(self.leaf)
+        km._session_meta(self.leaf); km._bg_scan_all_cached(self.leaf)
+        self.assertEqual(em.cold_fold_reasons(self.leaf), {"bgAll": "cold"})
+        self.assertLess(em.read_bytes_report().get(self.leaf, 0), size / 2, "the boot itself read the tail only")
+        self.assertEqual(em.checkpoint_converge_candidates(), [self.leaf])
+        self.assertEqual(km._converge_checkpoints(TS0 + 600), 1)
+        cv = em.checkpoint_stats()["converge"]
+        self.assertEqual(cv["heals"], 1); self.assertGreaterEqual(cv["healBytes"], size, "the heal's whole read is counted against the budget")
+        self.assertIn("state", self.doc(self.leaf)["folds"]["bgAll"]); self.assertEqual(em.cold_fold_reasons(self.leaf), {})
+        self.assertEqual(km._converge_checkpoints(TS0 + 601), 0)
+        self.fresh_process()
+        before = em.checkpoint_stats()["restoredFolds"].get("bgAll", 0)
+        km._bg_scan_all_cached(self.leaf)
+        self.assertEqual(em.checkpoint_stats()["restoredFolds"].get("bgAll", 0), before + 1)
+        self.assertLess(em.read_bytes_report().get(self.leaf, 0), size / 2)
+
+    def test_converge_is_bounded_per_cycle_in_bytes_and_defers_the_rest(self):
+        """The budget: a second leaf (a copy) with the same gap; with a one-byte budget the pass writes the first candidate and
+        defers the second (counted), the next pass takes it. The knobs: CKPT_CONVERGE_MS and CKPT_CONVERGE_BYTES."""
+        self._converge_world({"bgJudge": "missing"})
+        leaf2 = str(self.proj / ("bbbbbbbb-2222-3333-4444-555555555555.jsonl"))
+        import shutil; shutil.copy(self.leaf, leaf2)
+        rows = [{"sid": SID, "path": self.leaf}, {"sid": "bbbbbbbb-2222-3333-4444-555555555555", "path": leaf2}]
+        km._sessions = lambda now, **kw: rows
+        jd._bg_scan(self.leaf); jd._bg_scan(leaf2)                    # both read whole, both dirty, both lacking the pairing
+        self.assertEqual(sorted(em.checkpoint_converge_candidates()), sorted([self.leaf, leaf2]))
+        saved = km.CKPT_CONVERGE_BYTES; km.CKPT_CONVERGE_BYTES = 1
+        self.addCleanup(setattr, km, "CKPT_CONVERGE_BYTES", saved)
+        self.assertEqual(km._converge_checkpoints(TS0 + 600), 1, "the first always writes; the budget stops the second")
+        self.assertEqual(em.checkpoint_stats()["converge"]["deferred"], 1)
+        self.assertEqual(len(em.checkpoint_converge_candidates()), 1)
+        self.assertEqual(km._converge_checkpoints(TS0 + 601), 1, "the next pass takes it")
+        self.assertEqual(em.checkpoint_converge_candidates(), [])
+
+    def test_converge_budget_holds_when_the_first_candidate_writes_nothing(self):
+        """Review, medium 1: the budget was gated on documents WRITTEN, so a first candidate that wrote nothing (a non-leaf whose
+        only cold cursor was dropped, a failed write) let the pass heal every remaining leaf whole. Gated on candidates
+        processed now, and the empty write is counted."""
+        self._converge_world({"bgJudge": "missing"})
+        a = str(self.td / "aaa.jsonl")                                # sorts before the leaves: the first candidate
+        _write(a, [{"n": 0}, {"n": 1}])
+        em.fold_records({}, a, list, lambda st, o: st + [o["n"]], ckpt="gen")
+        em.checkpoint_write(a, force=True)
+        d = self.doc(a); d["folds"]["gen"] = {"count": d["folds"]["gen"]["count"]}; em._ckpt_file(a).write_text(json.dumps(d))
+        leaf2 = str(self.proj / ("bbbbbbbb-2222-3333-4444-555555555555.jsonl"))
+        import shutil; shutil.copy(self.leaf, leaf2)
+        self.fresh_process()
+        km._sessions = lambda now, **kw: [{"sid": SID, "path": self.leaf}, {"sid": "bbbbbbbb-2222-3333-4444-555555555555", "path": leaf2}]
+        em.fold_records({}, a, list, lambda st, o: st + [o["n"]], ckpt="gen")   # cold: the first candidate, writing nothing
+        jd._bg_scan(self.leaf); jd._bg_scan(leaf2)
+        self.assertEqual(em.checkpoint_converge_candidates(), [a, self.leaf, leaf2])
+        saved = (km.CKPT_CONVERGE_MS, km.CKPT_CONVERGE_BYTES); km.CKPT_CONVERGE_MS, km.CKPT_CONVERGE_BYTES = 0.0, 1
+        self.addCleanup(lambda: setattr(km, "CKPT_CONVERGE_MS", saved[0])); self.addCleanup(lambda: setattr(km, "CKPT_CONVERGE_BYTES", saved[1]))
+        self.assertEqual(km._converge_checkpoints(TS0 + 600), 0, "the empty first candidate, then the budget")
+        cv = em.checkpoint_stats()["converge"]
+        self.assertEqual((cv["deferred"], cv["heals"], cv["failed"], cv["unhealed"]), (2, 0, 1, 1), "nothing healed past the budget: %s" % cv)
+
+    def test_converge_keeps_the_states_of_folds_this_process_never_ran(self):
+        """Review, medium 2: a converge write rebuilt the document from this process's cursors, stripping the states of folds it
+        never ran (the transcript's wake-tail and queue-ledger folds beside the five leaf folds), and the next boot read the
+        leaf whole for them. Every write merges the on-disk document's states for such folds (verified by its guard)."""
+        self._converge_world({"bgJudge": "missing"}, extra=("extraA", "extraB"))
+        self.assertEqual(len(self.doc(self.leaf)["folds"]), 6, "five leaf folds less the stripped one, plus two extra")
+        jd._bg_scan(self.leaf)
+        self.assertEqual(km._converge_checkpoints(TS0 + 600), 1)
+        d = self.doc(self.leaf)
+        self.assertEqual(sorted(d["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgRunning", "extraA", "extraB", "sessionMeta"], "seven: the two carried")
+        self.assertTrue(all("state" in f for f in d["folds"].values()))
+        self.fresh_process()
+        self.assertEqual(em.fold_records({}, self.leaf, list, lambda st, o: st + [1], on=self.kinds_sink(), ckpt="extraA"), [1] * 4)
+        self.assertEqual(self._kinds[-1], "restore", "the next boot restores the carried fold")
+
+    def kinds_sink(self):
+        self._kinds = []
+        return self._kinds.append
+
+    def test_converge_drops_an_unhealable_cold_fold_once_and_the_next_boot_completes_it(self):
+        """Review, medium 3: a cold fold the heal cannot rerun (not one of the leaf's five) kept its path a candidate for the
+        kernel's life, one write every cycle. Its cursor and cold mark are dropped (counted unhealed), the write leaves it out,
+        the pass writes once, and the next boot reads the leaf whole for that fold and writes its state."""
+        self._converge_world({}, extra=("extraA",))
+        d = self.doc(self.leaf); d["folds"]["extraA"] = {"count": d["folds"]["extraA"]["count"]}; em._ckpt_file(self.leaf).write_text(json.dumps(d))
+        self.fresh_process()
+        km._session_meta(self.leaf)
+        em.fold_records({}, self.leaf, list, lambda st, o: st + [1], on=self.kinds_sink(), ckpt="extraA")
+        self.assertEqual(self._kinds[-1], "cold"); self.assertEqual(em.cold_fold_reasons(self.leaf), {"extraA": "cold"})
+        self.assertEqual(em.checkpoint_converge_candidates(), [self.leaf])
+        self.assertEqual(km._converge_checkpoints(TS0 + 600), 1)
+        self.assertEqual(em.checkpoint_stats()["converge"]["unhealed"], 1)
+        self.assertNotIn("extraA", self.doc(self.leaf)["folds"]); self.assertEqual(em.cold_fold_reasons(self.leaf), {})
+        self.assertEqual(em.checkpoint_converge_candidates(), []); self.assertEqual(km._converge_checkpoints(TS0 + 601), 0, "once")
+        self.fresh_process()
+        em.fold_records({}, self.leaf, list, lambda st, o: st + [1], on=self.kinds_sink(), ckpt="extraA")
+        self.assertEqual(self._kinds[-1], "refold", "the next boot reads the leaf whole for it, once")
+        self.assertEqual(km._converge_checkpoints(TS0 + 700), 1)
+        self.assertIn("state", self.doc(self.leaf)["folds"]["extraA"], "...and the pass writes its state")
+
+    def test_a_path_the_settle_wrote_is_not_written_again_by_the_pass_in_the_same_cycle(self):
+        """Review, low 4: a settling session's states log whose fold began cold (a legacy bare cursor) while the log's other folds
+        hold cursors was written twice in one cycle: the settle write (dropping the cold cursor), then the pass again for the
+        cold mark that survived the drop (seq 2 to 3, identical documents). The drop clears the mark and the pass skips the
+        paths the settle just wrote."""
+        self._converge_world({})
+        d = self.doc(self.states); d["folds"]["lastState"] = {"count": d["folds"]["lastState"]["count"]}   # the log's legacy cursor
+        em._ckpt_file(self.states).write_text(json.dumps(d))
+        self.fresh_process()
+        km._states_notes(SID); km._last_state(SID)                 # one fold restored at the witness, one cold
+        self.assertEqual(em.cold_fold_reasons(self.states), {"lastState": "cold"})
+        with open(self.states, "a") as f:                            # the settle's evidence: a states-log row, and a fold over it
+            f.write(json.dumps({"t": TS0 + 480, "state": "idle"}) + "\n")
+        km._states_notes(SID)                                        # ...stepped, so the log is dirty for the settle write
+        self.assertIn(self.states, em.checkpoint_dirty())
+        saved_turn = km._turn_end_key; turn_end = [TS0]
+        km._turn_end_key = lambda sid, reg=None: turn_end[0]
+        self.addCleanup(setattr, km, "_turn_end_key", saved_turn)
+        self.assertEqual(km._persist_checkpoints(TS0 + 499), 0, "first sight")
+        turn_end[0] = TS0 + 500
+        self.assertGreaterEqual(km._persist_checkpoints(TS0 + 501), 1, "the settle writes the session's files")
+        seq = self.doc(self.states)["seq"]
+        self.assertNotIn("lastState", self.doc(self.states)["folds"], "the cold cursor dropped: left out, to refold whole at its next run")
+        self.assertEqual(km._converge_checkpoints(TS0 + 501), 0, "the pass writes nothing for it this cycle")
+        self.assertEqual(self.doc(self.states)["seq"], seq, "one write per path per cycle")
+
+    def test_a_fold_far_behind_the_entry_is_left_out_so_it_cannot_drag_the_cut(self):
+        """Review: a carried (or lagging) fold at a low count moved the document's cut back to it, and every later boot read from
+        that count to the end and held those records resident (a 2000-record leaf carrying one fold at count 1: the next boot
+        read the file whole where it had read 128 bytes). Both the writer's own lagging cursors and the carry stop at 64 records
+        or an eighth of the entry behind; further behind the fold is left out and refolds whole once when it next runs."""
+        _write(self.leaf, [_user("p%d" % i, "u%d" % i, None, TS0 + i) for i in range(2000)])
+        early = {}
+        em.fold_records(early, self.leaf, list, lambda st, o: st + [1], ckpt="early")   # runs over 1 record...
+        early[self.leaf] = (1, early[self.leaf][1], [1])                                 # ...and stopped at count 1 (a skipped fold)
+        self.fold_leaf = lambda: em.fold_records({}, self.leaf, list, lambda st, o: st + [1], ckpt="whole")
+        self.fold_leaf()
+        self.assertTrue(em.checkpoint_write(self.leaf, force=True))
+        d = self.doc(self.leaf)
+        self.assertEqual((d["count"], sorted(d["folds"])), (2000, ["whole"]), "the fold 1999 behind is left out, the cut stays at the witness")
+        d["folds"]["early"] = {"count": 1, "state": em._ckpt_encode([1])}                  # the same fold carried from an older document
+        em._ckpt_file(self.leaf).write_text(json.dumps(d))
+        self.fresh_process()
+        self.fold_leaf()                                                                    # a restore; the write must not carry count 1
+        self.assertTrue(em.checkpoint_write(self.leaf, force=True))
+        d = self.doc(self.leaf)
+        self.assertEqual((d["count"], sorted(d["folds"])), (2000, ["whole"]), "the carry stops at the bound too")
+        self.fresh_process()
+        size = os.path.getsize(self.leaf)
+        self.fold_leaf()
+        self.assertLess(em.read_bytes_report().get(self.leaf, 0), 512, "the next boot reads the tail only: %d of %d bytes" % (em.read_bytes_report().get(self.leaf, 0), size))
+        near = {}
+        em.fold_records(near, self.leaf, list, lambda st, o: st + [1], ckpt="near")
+        near[self.leaf] = (1990, near[self.leaf][1], [1] * 1990)                           # ten behind: inside the bound
+        self.assertTrue(em.checkpoint_write(self.leaf, force=True))
+        self.assertEqual((self.doc(self.leaf)["count"], sorted(self.doc(self.leaf)["folds"])), (1990, ["near", "whole"]), "a small lag is written at its count")
+
+    def test_a_fold_stopped_beyond_the_bound_on_a_dirty_leaf_does_not_keep_the_pass_writing(self):
+        """Round three: a fold stopped more than the bound behind on a path dirty without a settle (the leaf mid-turn) was left out
+        by the writer and refused by the carry, its shape read None, and the pass rewrote the identical document every dirty
+        cycle. The candidate check knows the bound: such a fold is no candidate (it refolds once when it runs)."""
+        self._converge_world({"bgJudge": "missing"})
+        _write(self.leaf, [json.loads(l) for l in open(self.leaf)] + [_user("p%d" % i, "ux%d" % i, None, TS0 + 1000 + i) for i in range(400)])
+        stopped = {}
+        em.fold_records(stopped, self.leaf, list, lambda st, o: st + [1], ckpt="stopped")   # a sixth fold, run over the whole leaf...
+        stopped[self.leaf] = (2, stopped[self.leaf][1], [1, 1])                              # ...and stopped at count 2 (skipped since)
+        jd._bg_scan(self.leaf)                                                                 # the missing pairing: a real candidate
+        self.assertEqual(km._converge_checkpoints(TS0 + 600), 1, "one write, for the pairing")
+        self.assertNotIn("stopped", self.doc(self.leaf)["folds"])
+        seq = self.doc(self.leaf)["seq"]
+        for k in range(3):                                                                     # three dirty cycles: an append and a fold each
+            _write(self.leaf, [json.loads(l) for l in open(self.leaf)] + [_user("q%d" % k, "uq%d" % k, None, TS0 + 2000 + k)])
+            km._session_meta(self.leaf)
+            self.assertIn(self.leaf, em.checkpoint_dirty())
+            self.assertEqual(em.checkpoint_converge_candidates(), [], "a fold beyond the bound is no candidate")
+            self.assertEqual(km._converge_checkpoints(TS0 + 601 + k), 0)
+        self.assertEqual(self.doc(self.leaf)["seq"], seq, "no write over three dirty cycles")
+
+    def test_a_fallback_forgets_the_documents_shape(self):
+        """Review, low 4: _ckpt_fallback removed the document but left the pass believing it still carried every state."""
+        self._converge_world({})
+        self.assertNotIn(self.leaf, em._CKPT_DOC_FOLDS, "a fresh process knows no shapes until it consults a document")
+        km._session_meta(self.leaf)                                       # the restore consults the document: its shape is known
+        self.assertTrue(em._CKPT_DOC_FOLDS.get(self.leaf))
+        em._ckpt_fallback(self.leaf, "guard", "test")
+        self.assertNotIn(self.leaf, em._CKPT_DOC_FOLDS)
+        self.assertEqual(em.checkpoint_stats()["fallbacks"].get("guard"), 1)
+
+    def test_the_carry_refuses_a_same_size_edit_under_another_mtime(self):
+        """Review, low 3: the carry checked the guard bytes alone, so an in-place edit outside them (a same-size rewrite under
+        another mtime) was laundered into a fresh document the restore then trusted. The carry asks the restore's verdict first.
+        The gate is driven directly: the reader's entry is a plain whole read that consulted no document (so no restore fallback
+        removed it first), a cursor is planted at that entry, and the write's carry meets the document over the edited file. In
+        production the restore usually falls back before a write can carry, so this path is defensive."""
+        self._converge_world({}, extra=("extraA",))
+        recs = [json.loads(l) for l in open(self.leaf)]
+        recs[1] = dict(recs[1], text="X" * len(recs[1].get("text", "")))   # a same-size edit inside the prefix, outside the guard
+        _write(self.leaf, recs); os.utime(self.leaf, ns=(os.stat(self.leaf).st_atime_ns, os.stat(self.leaf).st_mtime_ns + 10 ** 9))
+        self.fresh_process()
+        ent = em._read_jsonl_entry(self.leaf)                              # a whole read, no document consulted
+        self.assertEqual(ent[5], 0)
+        em._FOLD_REG["planted"] = {self.leaf: (ent[5] + len(ent[4]), ent[6], [1])}   # a cursor at that entry
+        self.addCleanup(em._FOLD_REG.pop, "planted", None)
+        self.assertTrue(os.path.exists(em._ckpt_file(self.leaf)), "the older document is still on disk when the write runs")
+        self.assertEqual(em.checkpoint_stats()["fallbacks"], {}, "no restore refused it first: the carry's own gate decides")
+        self.assertTrue(em.checkpoint_write(self.leaf, force=True))
+        self.assertEqual(sorted(self.doc(self.leaf)["folds"]), ["planted"], "the write carries nothing from a document the verdict calls a rewrite")
+        self.assertEqual(em.checkpoint_stats()["fallbacks"], {})
+
     def test_perf_carries_the_checkpoint_counters_and_the_kernel_wires_the_three_events(self):
         snap = km._PERF_STATS.snapshot()
-        self.assertEqual(sorted(snap["checkpoints"]), ["coldFolds", "coldWrites", "dirty", "documentBytes", "droppedRestores", "fallbacks", "oversizeFolds", "readByPath",
-                                                        "readBytes", "restored", "restoredFolds", "skippedFolds", "swept", "writes"])
+        self.assertIn("converge", em._CKPT_STATS, "the production default carries the converge counters (the fixture injects nothing)")
+        self.assertEqual(sorted(snap["checkpoints"]), ["coldFolds", "coldWrites", "converge", "dirty", "documentBytes", "droppedRestores", "fallbacks", "oversizeFolds",
+                                                        "readByPath", "readBytes", "restored", "restoredFolds", "skippedFolds", "swept", "writes"])
         src = open(os.path.join(BIN, "romp-kernel")).read()
         self.assertIn("em.checkpoint_write_dirty(budget_s=EXIT_CKPT_WRITE_BUDGET_S)", src,
                       "exit writes the dirty checkpoints in _drain_and_exit, bounded (2026-09-11: unbounded, it met the manager's SIGKILL)")

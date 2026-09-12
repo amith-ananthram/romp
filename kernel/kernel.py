@@ -9802,6 +9802,8 @@ except Exception:
 _CKPT_SETTLE_SEEN = {}          # sid -> (turn-end key, states-log stat) at the last checkpoint write of its files
 _CKPT_PERIODIC_SEEN = {}        # sid -> (leaf stat, monotonic time) at the last PERIODIC write (see _persist_checkpoints)
 CKPT_PERIOD_S = float(os.environ.get("ROMP_CKPT_PERIOD_S", "30"))   # a session mid-turn for hours writes at least this often
+CKPT_CONVERGE_MS = float(os.environ.get("ROMP_CKPT_CONVERGE_MS", "150"))          # the converge pass's wall budget per pusher cycle (T360)
+CKPT_CONVERGE_BYTES = int(float(os.environ.get("ROMP_CKPT_CONVERGE_MB", "8")) * 1024 * 1024)   # ...and its bytes (documents written plus leaves read for a heal)
 
 
 def _session_fold_files(sid, leaf):
@@ -9882,6 +9884,63 @@ def _stored_tree(path, sid):
     return hit[1] if hit else None
 
 
+_CKPT_JUST_WRITTEN = set()          # the paths the settle write took this cycle; the converge pass skips them (T360 review, low 4)
+
+
+def _converge_checkpoints(now):
+    """The converge pass (T360), one per pusher cycle after the settle writes: the dirty documents that lack a complete
+    state this process now holds (em.checkpoint_converge_candidates: a fold missing from the document because it never ran
+    in the writing process, a legacy bare cursor, a tail-only one) are written now, independent of settle evidence, so a
+    boot's whole reads pay once and the next boot restores every fold that ran. Bounded per cycle by CKPT_CONVERGE_MS of
+    wall and CKPT_CONVERGE_BYTES of documents written plus leaf bytes read for a heal (the first candidate always goes; the
+    rest wait for the next cycle, counted as deferred). For a leaf: a fold cold for want of a state is healed first (one
+    whole read, its bytes counted), and over a whole-resident entry every leaf fold is primed (a step over records in hand,
+    no read), so one write carries all five. For another file a tail-only cursor is dropped so the write leaves it out and
+    its next run reads the small file whole once. A document already carrying every fold that ran is never a candidate,
+    so an idle session's document is written once and then left alone. Returns the documents written."""
+    just_written = set(_CKPT_JUST_WRITTEN); _CKPT_JUST_WRITTEN.clear()   # the settle's writes this cycle: one write per path per cycle
+    cands = [p for p in em.checkpoint_converge_candidates() if p not in just_written]
+    if not cands:
+        return 0
+    em.converge_stat("passes")
+    leaves = {str(s.get("path")) for s in _sessions(now) if s.get("path")}
+    t0 = time.monotonic(); spent = 0; n = 0
+    for i, p in enumerate(cands):
+        if i and (time.monotonic() - t0 > CKPT_CONVERGE_MS / 1000.0 or spent > CKPT_CONVERGE_BYTES):
+            em.converge_stat("deferred", len(cands) - i)   # gated on candidates PROCESSED, not documents written: a first
+            break                                          #  candidate that writes nothing must not lift the budget (review)
+        cold = [k for k, r in em.cold_fold_reasons(p).items() if r == "cold"]
+        if p in leaves:
+            before = em.read_bytes_report().get(p, 0)
+            healed = _heal_cold_folds(p)                   # drops every tail-only cursor, reruns the five leaf folds
+            if healed:
+                got = em.read_bytes_report().get(p, 0) - before
+                em.converge_stat("heals", len(healed)); em.converge_stat("healBytes", got); spent += got
+            unhealed = [k for k in cold if k not in healed]
+            if em.entry_whole_resident(p) and _prime_leaf_folds(p):
+                em.converge_stat("primed")
+        else:
+            unhealed = em.drop_cold_cursors(p)
+        if unhealed:                                       # a fold the heal cannot rerun here (not one of the leaf's five): its
+            em.converge_stat("unhealed", len(unhealed))    #  cursor and cold mark are dropped, the write leaves it out, its next
+        try:                                               # the write reads the document on disk for its carry: that read is the
+            pre = em._ckpt_file(p).stat().st_size          #  pass's I/O too, so it counts against the budget (review, round 3)
+        except (OSError, AttributeError):
+            pre = 0
+        if pre:
+            em.converge_stat("docReadBytes", pre); spent += pre
+        if em.checkpoint_write(p):                         #  run reads the file whole once, and the path is no candidate for it
+            n += 1
+            try:
+                size = em._ckpt_file(p).stat().st_size
+            except OSError:
+                size = 0
+            em.converge_stat("writes"); em.converge_stat("bytes", size); spent += size
+        else:
+            em.converge_stat("failed")                     # nothing to write, or the write failed (a full or read-only disk)
+    return n
+
+
 def _persist_checkpoints(now):
     """Write the fold checkpoints whose files belong to a session with NEW settle evidence: its turn-end key (the
     Stop hook's lastStopAt, else a stopped states transition) or its states log's stat moved since the last write for
@@ -9928,7 +9987,8 @@ def _persist_checkpoints(now):
             if _p != leaf:                     #  dropped so the write leaves it out and the next boot reads that small file
                 em.drop_cold_cursors(_p)       #  whole once, complete again (T359 review, low 3; the leaf's folds heal above)
         if mine:
-            written += em.checkpoint_write_dirty(sorted(mine))
+            wrote = em.checkpoint_write_dirty_paths(sorted(mine))
+            written += len(wrote); _CKPT_JUST_WRITTEN.update(wrote)
         try:                                   # the assembly document for the leaf (T323 stage 4a): from a whole entry
             if em.asm_checkpoint_write(leaf, sid, _display_sdk_human(sid), tree=_stored_tree(leaf, sid)):   # with a compaction
                 written += 1                   #  boundary, else a counted skip; the store's tree, when it holds one, gives the
@@ -48531,6 +48591,7 @@ def _pusher_cycle_jobs(now, live_map, any_client):
         sys.stderr.write("tick-seen: %s\n" % traceback.format_exc())
     try:                                  # the folds' checkpoints, written for a session at its settle or a states-log
         _persist_checkpoints(now)         # move (T323 stage 3): the next kernel folds the tails, not the files
+        _converge_checkpoints(now)        # ...and the documents a boot's whole reads left dirty, bounded per cycle (T360)
     except Exception:
         sys.stderr.write("checkpoints: %s\n" % traceback.format_exc())
     try:                                  # the boot row's backstop: written without attachDone once the bound has passed
