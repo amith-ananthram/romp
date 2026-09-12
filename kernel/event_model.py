@@ -918,6 +918,7 @@ def _ckpt_fallback(path, reason, detail=""):
     with _CKPT_LOCK:
         _CKPT_STATS["fallbacks"][reason] = _CKPT_STATS["fallbacks"].get(reason, 0) + 1
         _CKPT_PENDING.pop(str(path), None)
+        _CKPT_DOC_FOLDS.pop(str(path), None)              # the document is gone: the converge pass must not believe it whole
     try:
         sys.stderr.write("checkpoint fallback (%s) for %s%s\n" % (reason, path, (": " + detail) if detail else ""))
     except Exception:
@@ -1115,7 +1116,17 @@ def _restored_cursor(key, name, ent):
         _ckpt_fallback(key, "corrupt", "fold %s: %s" % (name, e)); return None
 
 
-def _carry_forward_states(key, folds, base, count):
+_CKPT_LAG_FLOOR = 64                # a fold's count may lag the entry's by this many records, or an eighth of the entry, whichever
+#                                     is more, and still be written (or carried) at its own count; further behind it is left out,
+#                                     so a fold that ran early and stopped (a skipped wake-tail, a cursor dropped at quiescence)
+#                                     cannot drag the document's cut, and with it every later boot's tail read, back to its count
+
+
+def _lag_ok(count, c):
+    return count - c <= max(_CKPT_LAG_FLOOR, count // 8)
+
+
+def _carry_forward_states(key, folds, base, count, size, mtime):
     """The on-disk document's entries for folds this process holds no cursor for (a fold that never ran here, such as the
     transcript's wake-tail or queue-ledger folds beside the five leaf folds), carried into the next write so a write from
     this process's cursors alone does not strip states an earlier process stored (T360 review, medium 2: before the
@@ -1127,17 +1138,22 @@ def _carry_forward_states(key, folds, base, count):
     if cp is None or not cp.exists():
         return {}
     try:
-        doc = json.loads(cp.read_bytes().decode("utf-8"))
+        text = cp.read_bytes(); _count_read(str(cp), len(text))    # the carry's reads are the write's I/O: counted like the rest
+        doc = json.loads(text.decode("utf-8"))
     except (OSError, ValueError):
         return {}
     if not isinstance(doc, dict) or doc.get("v") != _CKPT_V or doc.get("path") != os.path.realpath(key):
         return {}
     try:
+        if _ckpt_verdict(doc, size, mtime):                   # the entry's stat against the document, as the restore paths ask: a
+            return {}                                         #  same-size edit under another mtime is a rewrite, and carries nothing
         off, guard = int(doc["offset"]), bytes.fromhex(doc.get("guard") or "")
         with open(key, "rb") as fh:
             fh.seek(max(0, off - len(guard)))
-            if fh.read(len(guard)) != guard:
-                return {}
+            ok = fh.read(len(guard)) == guard
+        _count_read(key, len(guard))
+        if not ok:
+            return {}
     except (OSError, ValueError, TypeError, KeyError):
         return {}
     out = {}
@@ -1148,7 +1164,7 @@ def _carry_forward_states(key, folds, base, count):
             c = int(f["count"])
         except (KeyError, TypeError, ValueError):
             continue
-        if base <= c <= count:
+        if base <= c <= count and _lag_ok(count, c):          # a carried count too far behind would drag the cut (the bound above)
             out[name] = f
     return out
 
@@ -1169,8 +1185,9 @@ def checkpoint_write(path, force=False):
     folds = {}
     for name, cache in list(_FOLD_REG.items()):
         cur = cache.get(key)
-        if cur is None or cur[1] != gen or not base <= cur[0] <= count:
-            continue                                      # no cursor at this entry, or one outside its held records
+        if cur is None or cur[1] != gen or not base <= cur[0] <= count or not _lag_ok(count, cur[0]):
+            continue                                      # no cursor at this entry, one outside its held records, or one too far
+        #                                                   behind to be written at its count without dragging the cut (_lag_ok)
         fcount = cur[0]                                   # the fold's OWN count (T359): a fold stepped by builds, not by the settle,
         with _CKPT_LOCK:                                  #  lags the entry and was left out silently before, to read the leaf whole
             cold = (key, name) in _COLD_FOLDS             #  at the next boot; the restore steps the held tail from its count
@@ -1197,7 +1214,7 @@ def checkpoint_write(path, force=False):
                 _CKPT_STATS["skippedFolds"] += 1
     if not folds and not force:
         return False
-    folds.update(_carry_forward_states(key, folds, base, count))   # the disk document's states for folds this process never ran
+    folds.update(_carry_forward_states(key, folds, base, count, size, mtime))   # the disk document's states for folds this process never ran
     cut = min([f["count"] for f in folds.values()] or [count])   # the document's cut: the LOWEST written cursor (T359), so the
     moved = None                                          #  next process's tail read holds every record a lagging fold has
     if cut < count and len(ent) >= 8 and ent[7]:          #  yet to step (its append), bounded by the records this entry holds

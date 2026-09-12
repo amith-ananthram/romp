@@ -1007,8 +1007,13 @@ default 150 ms of wall, and `ROMP_CKPT_CONVERGE_MB`, default 8 MB of documents
 written plus leaf bytes read for a heal), heals a legacy bare cursor under the
 same budget, and never rewrites a document that already carries every fold
 that ran. Every write merges the on-disk document's states for folds the
-writing process never ran (verified by that document's guard), so a rewrite
-from one process's cursors strips no state an earlier process stored. Checkpoints
+writing process never ran (verified by that document's stat and guard as a
+restore would), so a rewrite from one process's cursors strips no state an
+earlier process stored. A fold's count may lag the entry's by 64 records or an
+eighth of the entry, whichever is more, and still be written or carried at its
+own count; further behind, the fold is left out (it refolds whole once when it
+next runs), so a fold that ran early and stopped cannot drag the document's
+cut, and every later boot's tail read, back to its count. Checkpoints
 are written when a session's turn settles or its states log moves, and all of
 them at exit; checkpoints of files that no longer exist are swept at boot. A
 compaction appends records and changes nothing here.
