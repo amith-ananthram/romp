@@ -3026,7 +3026,7 @@ def _delegated_to(manager, worker):
         if nd.get("parentId") is None and isinstance(o, dict) and str(o.get("peer") or "") == str(manager):
             return True
     try:                                               # the primary record: a delegate mail from the manager to the worker
-        return any(f == str(manager) for _t, f in jd._delegates_to().get(str(worker), []))
+        return any(r[1] == str(manager) for r in jd._delegates_to().get(str(worker), []))
     except Exception as e:
         sys.stderr.write("delegated-to (%s -> %s): %r\n" % (manager, worker, e))
         return False
