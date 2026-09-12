@@ -1029,3 +1029,35 @@ test("a header re-mints its name nodes when its host's link goes down or comes b
   mock.timers.tick(700);
   mock.timers.reset();
 });
+
+test("a far host's parked-question note shows on its own line with no brief, in collapsed mode and on a working card, and clears on the next push", async () => {
+  mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: T0 * 1000 });
+  const note = "a question to api is still parked on PEERHOST: it went on before it could be withdrawn";
+  // a blocked card with NO brief yet (the distiller still running): the section logic chooses "none" and hides the distill line
+  const g4 = cardOf("g4", WEB, "web", "#3366cc", "Decide the exporter's client", "needs_input", { distillState: "blocked", relayNote: note });
+  await dispatch(frame([g1, g4]));
+  const rn = () => card("g4")._relayNote;
+  assert.equal(card("g4")._distill.style.display, "none", "the distill line is hidden without a brief");
+  assert.equal(rn().textContent, note, "the note is the card's own line");
+  assert.equal(rn().style.display, "", "…and shows (appended inside the distill element it was hidden with it)");
+  assert.equal(rn().parentNode, card("g4")._secs.parentNode, "beside the sections, not inside them");
+  // collapsed mode: every section closed by default, the brief's included
+  const setPrefs = (v: string) => { stores.local.set("romp:settings", v); win.dispatchEvent(Object.assign(new Event("storage"), { key: "romp:settings", newValue: v })); };
+  setPrefs(JSON.stringify({ collapsed: true }));
+  await dispatch(frame([g1, { ...g4, blockSummary: "Pick the client the exporter targets." }]));
+  assert.equal(card("g4")._distill.style.display, "none", "collapsed: the brief's section is closed");
+  assert.equal(rn().style.display, "", "the note still shows");
+  assert.equal(rn().textContent, note);
+  setPrefs(JSON.stringify({}));
+  // a working-column card, where the brief is withheld: the note shows all the same
+  await dispatch(frame([{ ...g1, relayNote: note }, g4], { working: ["web"] }));
+  assert.equal(card("g1")._distill.style.display, "none", "working: no distill line");
+  assert.equal(card("g1")._relayNote.style.display, "", "the note shows on a working card");
+  assert.equal(card("g1")._relayNote.textContent, note);
+  // the next push without the record clears it
+  await dispatch(frame([g1, { ...g4, blockSummary: "Pick the client the exporter targets.", relayNote: null }]));
+  assert.equal(rn().style.display, "none", "cleared when the kernel stops sending it");
+  assert.equal(rn().textContent, "");
+  assert.equal(card("g1")._relayNote.style.display, "none");
+  mock.timers.reset();
+});
