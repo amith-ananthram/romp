@@ -1006,7 +1006,9 @@ that never settles again; the pass is bounded per cycle (`ROMP_CKPT_CONVERGE_MS`
 default 150 ms of wall, and `ROMP_CKPT_CONVERGE_MB`, default 8 MB of documents
 written plus leaf bytes read for a heal), heals a legacy bare cursor under the
 same budget, and never rewrites a document that already carries every fold
-that ran. Checkpoints
+that ran. Every write merges the on-disk document's states for folds the
+writing process never ran (verified by that document's guard), so a rewrite
+from one process's cursors strips no state an earlier process stored. Checkpoints
 are written when a session's turn settles or its states log moves, and all of
 them at exit; checkpoints of files that no longer exist are swept at boot. A
 compaction appends records and changes nothing here.
@@ -1419,7 +1421,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   cold at the cut over the tail only), `coldFolds` (per fold name, folds that
   started cold this boot, for that reason or for a cursor recorded without a
   state, which the next settle heals), `converge` (the converge pass: `passes`,
-  `writes`, `bytes`, `heals`, `healBytes`, `primed`, `deferred`), `coldWrites` (per fold name, writes that kept such a tail-only state
+  `writes`, `bytes`, `heals`, `healBytes`, `primed`, `deferred`, `failed` for a
+  write that wrote nothing, `unhealed` for a cold fold the pass could not rerun,
+  whose cursor it dropped so its next run reads the file whole once), `coldWrites` (per fold name, writes that kept such a tail-only state
   out of the document so no later kernel restores it as complete), `droppedRestores` (a
   restore lost to a read that replaced the entry under it; the reader
   serializes reads per path, so this should stay at zero), `documentBytes`
