@@ -553,7 +553,13 @@ class _PerfStats:
         memos["nudgeGate"] = dict(_NUDGE_GATE_STATS)   # the nudge walk's placement gate: served vs re-derived (2026-09-09)
         memos["cleared"] = dict(_CLEARED_STATS)       # the clear set: parsed once per file state, served while it stands (2026-09-09)
         now = time.time()
-        return {"now": now, "since": since, "uptime_s": now - _STARTED, "log": _PERF,
+        stacks = None
+        if os.environ.get("ROMP_PERF_STACKS"):     # a debugging aid (T358): every thread's last frames, named, for a served test that
+            import traceback                        #  has to say where a kernel sits while a client waits on a runner nobody can log into
+            names = {t.ident: t.name for t in threading.enumerate()}
+            stacks = {names.get(tid, str(tid)): [l.strip() for l in traceback.format_stack(f)[-6:]]
+                      for tid, f in sys._current_frames().items()}
+        return {"now": now, "since": since, "uptime_s": now - _STARTED, "log": _PERF, "stacks": stacks,
                 "process": _process_stats(), "pusher": pusher, "stages_ms": stages,
                 "builds": builds, "sends": sends, "goals": goals, "memos": memos, "judge": judge, "skillLoadIndex": skill_idx, "http": http,
                 "fileSlice": file_slice,                   # T351: the preview popover's slice cache (hit / miss / bytes / warm)

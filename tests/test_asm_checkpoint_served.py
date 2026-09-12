@@ -57,6 +57,29 @@ def transcript(t0, turns=4000, compact_every=150):
     return recs
 
 
+def _children(pid):
+    """The kernel's child processes, with their command lines, from /proc (a pusher blocked on a subprocess shows here)."""
+    out = []
+    try:
+        for d in os.listdir("/proc"):
+            if not d.isdigit():
+                continue
+            try:
+                with open("/proc/%s/stat" % d) as f:
+                    st = f.read()
+                ppid = int(st[st.rindex(")") + 2:].split()[1])
+                if ppid != pid:
+                    continue
+                with open("/proc/%s/cmdline" % d, "rb") as f:
+                    cmd = f.read().replace(b"\0", b" ").decode("utf-8", "replace").strip()
+                out.append("%s: %s" % (d, cmd[:160]))
+            except (OSError, ValueError, IndexError):
+                continue
+    except OSError:
+        return None
+    return out
+
+
 class RestartOverACheckpointedSession(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -99,7 +122,8 @@ class RestartOverACheckpointedSession(unittest.TestCase):
     def _boot(self):
         port = _free_port()
         env = _lab.kernel_env(self.lab, self.claude, self.dist, port, self.token, ROMP_HOST_NAME="TESTHOST",
-                              ROMP_READER_TRACE="1")   # one stderr line per byte-pulling read, quoted when a bound fails
+                              ROMP_READER_TRACE="1",   # one stderr line per byte-pulling read, quoted when a bound fails
+                              ROMP_PERF_STACKS="1")    # /perf carries every thread's last frames, sampled while a frame is awaited
         logp = os.path.join(self.lab, "kernel-%d.log" % port)
         k = subprocess.Popen([os.path.join(BIN, "romp-kernel")], stdout=open(logp, "w"), stderr=subprocess.STDOUT, env=env)
         for _ in range(200):
@@ -125,7 +149,7 @@ class RestartOverACheckpointedSession(unittest.TestCase):
         with urllib.request.urlopen(req, timeout=30) as r:
             return json.loads(r.read().decode())
 
-    def _open_tab(self, port, timeline=None):
+    def _open_tab(self, port, timeline=None, pid=None):
         """A chat client looks at web; returns the seconds from the ready frame to web's session frame. `timeline`, a list,
         receives one /perf sample per second while the frame is awaited (the assembly counters, for a failure message
         that has to say what the kernel did while a client waited on a runner nobody can log into)."""
@@ -137,10 +161,13 @@ class RestartOverACheckpointedSession(unittest.TestCase):
                 try:
                     perf = self._get(port, "/perf")
                     ai = perf.get("asmIndex") or {}
+                    stacks = {n: fr for n, fr in (perf.get("stacks") or {}).items()
+                              if not any("stop.wait" in l or "waiter.acquire" in l or "selector" in l for l in fr[-1:])}   # the idle ones aside
                     timeline.append({"t": round(time.time() - t0, 1), "built": ai.get("materialized"), "builtBy": ai.get("materializedBy"),
                                      "hydratedBy": (perf.get("asmCheckpoint") or {}).get("hydratedBy"),
                                      "process": perf.get("process"), "pusher": perf.get("pusher"), "stagesMs": perf.get("stages_ms"),
-                                     "builds": perf.get("builds"), "judge": perf.get("judge")})
+                                     "builds": perf.get("builds"), "judge": perf.get("judge"), "stacks": stacks,
+                                     "children": _children(pid) if pid else None})
                 except Exception as e:
                     timeline.append({"t": round(time.time() - t0, 1), "error": repr(e)[:120]})
         th = threading.Thread(target=sample, daemon=True) if timeline is not None else None
@@ -205,7 +232,7 @@ class RestartOverACheckpointedSession(unittest.TestCase):
         try:
             perf_boot = self._get(p2, "/perf")
             timeline = []
-            dt2, frame = self._open_tab(p2, timeline)
+            dt2, frame = self._open_tab(p2, timeline, k2.pid)
             time.sleep(1.0)
             perf = self._get(p2, "/perf")
             asm = perf["asmCheckpoint"]
