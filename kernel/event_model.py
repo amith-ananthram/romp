@@ -4322,16 +4322,26 @@ class LazyAtoms(list):
 
 
 class _LazyView(LazyAtoms):
-    """A contiguous slice of a LazyAtoms (a segment's atoms, T358) that builds nothing until read: every read goes to the
-    parent's slot, so a build here is the parent's build under the parent's LRU key and an eviction there is seen here.
-    Its own storage holds placeholders only (json's encoder is refused the same way); slicing a view is a view of the
-    parent."""
+    """A contiguous slice of a LazyAtoms (a segment's atoms, T358) that builds nothing until read: a first read of a slot
+    goes to the parent's slot (a build there is the parent's build under the parent's LRU key), and the view KEEPS what it
+    read in its own slot for its lifetime, as the plain-list slice it replaces did, so a second reader of the same segment
+    (the anchors after the ids, the jump after the anchors) touches no lock: with two builders at once (the pusher's cycle
+    and a client's ready frame both building the same chat) every locked access convoyed on the index lock at about one
+    atom per scheduler switch, and a restored session's first frame took 20 s on a four-core runner (T358 CI, 2026-09-12).
+    A view is per build and short-lived, so what it holds is bounded by the build; an eviction in the parent is not seen by
+    a slot the view already read. json's encoder is refused while the parent's slots are unbuilt; slicing a view is a
+    view of the parent."""
     def __init__(self, parent, start, stop):
         list.__init__(self, [_UNMAT] * (stop - start))
         self._parent, self._off = parent, start
         self._index, self._rows = parent._index, parent._rows[start:stop]
     def _at(self, i):
-        return self._parent._at(self._off + i)
+        a = list.__getitem__(self, i)
+        if a is not _UNMAT:
+            return a
+        a = self._parent._at(self._off + i)
+        list.__setitem__(self, i, a)
+        return a
     def _unbuilt(self):
         return any(list.__getitem__(self._parent, self._off + j) is _UNMAT for j in range(len(self)))
     def __getitem__(self, i):

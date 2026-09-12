@@ -424,11 +424,17 @@ class ScalarWalkers(Restored):
         self.assertEqual(view.uuids(), pre["uuids"][pre["segs"][0][4]:pre["segs"][0][4] + len(view)])
         self.assertIsInstance(view[0:1], em.LazyAtoms, "a slice of a view is a view")
         self.assertEqual([a["uuid"] for a in view], view.uuids())
-        with em._MAT_LOCK:                                        # an eviction in the parent is seen by the view
-            for key in list(em._MAT_LRU):
-                lz, j = em._MAT_LRU.pop(key); list.__setitem__(lz, j, em._UNMAT)
-        self.assertTrue(view._unbuilt())
-        self.assertEqual(view[0]["uuid"], a0["uuid"], "a rebuilt atom equals the first")
+        n_built = em.asm_index_stats()["materialized"]
+        self.assertEqual([a["uuid"] for a in view], view.uuids(), "a second pass over the view")
+        self.assertEqual(em.asm_index_stats()["materialized"], n_built, "...builds nothing and, holding what it read, asks the parent nothing")
+        with em._MAT_LOCK:                                        # an eviction in the parent: the view keeps what it read (its build's
+            for key in list(em._MAT_LRU):                         # lifetime), as the plain-list slice it replaces did; a slot it never
+                lz, j = em._MAT_LRU.pop(key); list.__setitem__(lz, j, em._UNMAT)   # read is rebuilt from the parent
+        self.assertTrue(view._unbuilt(), "the json guard reads the parent's slots")
+        self.assertIs(view[0], a0, "a slot the view read stays")
+        fresh = em.segments(pre)[0]["atoms"]
+        self.assertEqual(fresh[0]["uuid"], a0["uuid"], "a new view rebuilds from the parent: a rebuilt atom equals the first")
+        self.assertEqual(em.asm_index_stats()["materialized"], n_built + 1)
 
     def test_the_planner_skips_captioned_units_before_any_atom_is_built(self):
         path, whole, tree = self.restored_tree()
