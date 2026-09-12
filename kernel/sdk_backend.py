@@ -5153,6 +5153,10 @@ class SdkSession:
         #   total when the deltas were written (`usage: this.totalUsage`) and is the TURN's own total
         #   on the current CLI — diffing it under-counted every turn but the first (the user
         #   2026-09-06). Which counter is which, and the measurement: _turn_usage.
+        self._spend_unknown_open = False   # True from an attach-unknown seed until the first LIVE result: every replayed
+        #                                    record meanwhile is the lifetime so far and advances the watermarks (T354)
+        self._spend_seed_epoch_seen = False   # an orphan drain: a record of the watermark's own epoch has been replayed, so
+        #                                       a different epoch from here on is a NEWER one (_spend_redelivered)
         self._spend_baseline = "fresh"     # what the watermarks stand on: "fresh" (a new CLI process: zero, or the
         #                                    resumed transcript's cost-state record), "attach-pending" (a host attach:
         #                                    the surviving CLI's watermark is read from the registry at the first
@@ -6881,6 +6885,9 @@ class SdkSession:
         self._last_usage_totals = {}  # and its cumulative token counters
         self._spend_first_result = True
         self._spend_baseline = "fresh"
+        self._spend_unknown_open = False   # no unknown window on a fresh seed (the follow-up's second round, low 3)
+        self._spend_seed_epoch_seen = False
+        self._spend_seed_session = ""
         self._replay_cli = ""         # a dead CLI's replay is over once a connect seeds
         if getattr(self, "_host_is_attach", False) and getattr(self, "_host", None) is not None:
             # a host ATTACH (T315), and only with the host transport in hand (the flag alone is not trusted, M1 of
@@ -6925,6 +6932,8 @@ class SdkSession:
         self._last_usage_totals = {}
         self._spend_first_result = True
         self._spend_baseline = "attach-pending"
+        self._spend_seed_session = ""
+        self._spend_seed_epoch_seen = False
         self._replay_cli = str(cli or "")
         self._seed_from_reg_cost_state(cli=cli, dead=True)
 
@@ -6944,11 +6953,14 @@ class SdkSession:
             toks = cs.get("tokens") if isinstance(cs.get("tokens"), dict) else {}
             self._last_usage_totals = {k: int(v) for k, v in toks.items() if isinstance(v, (int, float))}
             self._spend_baseline = "seeded"
+            self._spend_unknown_open = False
+            self._spend_seed_session = str(cs.get("session") or "")   # the epoch the watermark's totals belong to
             self.backend._log("spend: %s %s (%s): watermarks seeded at the registry's "
                               "cumulative $%.2f so the first result records only this turn" % (self.name, how, cli, cs["total"]),
                               problem=False)
             return True
         self._spend_baseline = "attach-unknown"
+        self._spend_unknown_open = True
         self.backend._log("spend: %s %s (%s) with no matching watermark on record (%s): its "
                           "first result's total is the process lifetime's, so that result records no spend; the "
                           "watermark is written from it" % (self.name, how.replace("its surviving", "a surviving").replace("its dead", "a dead"), cli or "unnamed",
@@ -6971,7 +6983,7 @@ class SdkSession:
         except (IndexError, AttributeError):
             return None
 
-    def _spend_redelivered(self, tag, total) -> bool:
+    def _spend_redelivered(self, tag, total, session_id="") -> bool:
         """Is this result one an earlier kernel already folded? From the record's own journal position (round four of
         1450's review): a replayed record (its offset before the journal's next at the attach) folds nothing, moves no
         watermark and marks its row, WHATEVER its total, since the kernel that died folded what it saw and the ack it
@@ -6986,6 +6998,24 @@ class SdkSession:
         t = getattr(self, "_host", None)
         orphan = getattr(t, "journal_dir", None) is not None and getattr(t, "hello", None) is None
         if orphan:
+            # the dead CLI's watermark is the line, with two exceptions (the lows of the fix's round five): a seed that
+            # named no watermark (attach-unknown) knows no line, so every replayed record folds nothing rather than
+            # every ascending step after the first folding its delta (the watermark advances with each, the fix's
+            # second round); and a record from another session epoch is not comparable to the watermark's totals, so
+            # it is judged by its POSITION in the tail (the follow-up's second round): before the watermark epoch's own
+            # records it is OLDER (a /clear the dead kernel bracketed, its post-clear watermark on record: folded, so
+            # it folds nothing); after them it is NEWER (a /clear the dead kernel never folded past: live, and a total
+            # below the watermark folds whole as the counter reset it is, the new epoch's watermark from there)
+            if getattr(self, "_spend_baseline", "") == "attach-unknown":
+                return True
+            seed_epoch = str(getattr(self, "_spend_seed_session", "") or "")
+            if seed_epoch and session_id:
+                if str(session_id) == seed_epoch:
+                    self._spend_seed_epoch_seen = True
+                elif getattr(self, "_spend_seed_epoch_seen", False):
+                    return False                     # a newer epoch: live
+                else:
+                    return True                      # an older epoch: folded before the dead kernel's /clear
             return float(total) <= float(self._last_cost_total)
         return True
 
@@ -6996,7 +7026,11 @@ class SdkSession:
         try:
             self.backend._update_reg(self.sid, costState={"total": float(total), "tokens": dict(self._last_usage_totals),
                                                            "cli": self._cli_ident(), "t": int(time.time()),
-                                                           "session": str(getattr(self, "_spend_session_id", "") or "")})
+                                                           # the epoch a live result named, else the watermark's own (a drain
+                                                           # of duplicates alone must not erase the epoch the next drain's
+                                                           # guard compares against: the follow-up's second round, low b)
+                                                           "session": str(getattr(self, "_spend_session_id", "") or
+                                                                          getattr(self, "_spend_seed_session", "") or "")})
         except Exception as e:
             self.backend._log("spend (%s): costState write failed: %s" % (self.name, e), problem=False)
 
@@ -7505,7 +7539,6 @@ class SdkSession:
                         # registry's watermark for that process can be read (T354)
                         self._seed_from_reg_cost_state()
                         baseline = self._spend_baseline
-                    unknown = first and baseline == "attach-unknown"
                     # a REDELIVERED result (M2 of 1450's review, reshaped by its round two): hostAck is written at
                     # most once a second while the watermark moves per result, so a kernel death leaves processed
                     # results past the acknowledged offset and the attach's replay hands them over again (the whole
@@ -7517,14 +7550,32 @@ class SdkSession:
                     # the kernel did not see, a resumed cost-state seed against a print-mode CLI) and folds whole, as
                     # it always did; read from the total alone, a reset latched the session at $0 for the process's life
                     tag = getattr(self, "_result_tag", None)          # popped at the top of _on_message for every result
-                    duplicate = self._spend_redelivered(tag, total)
-                    if not duplicate:                                  # a replayed record names the replayed epoch: not the watermark's
-                        self._spend_session_id = str(getattr(msg, "session_id", "") or "")   # the CLI's session epoch (a /clear moves it)
+                    duplicate = self._spend_redelivered(tag, total, str(getattr(msg, "session_id", "") or ""))
+                    # the UNKNOWN window (the fix's second round): with no watermark on record, every replayed record is
+                    # the lifetime so far and advances the watermarks to its total (a whole-journal replay, the attach
+                    # whose hostAck names another host, hands over several); the first LIVE result closes the window and
+                    # records its own delta. Keyed on the connect's first result alone, the watermark stayed at the first
+                    # replay's total and the next live result folded the span
+                    unknown = baseline == "attach-unknown" and (first or (duplicate and getattr(self, "_spend_unknown_open", False)))
+                    if not duplicate:
+                        self._spend_unknown_open = False
+                    epoch = str(getattr(msg, "session_id", "") or "")
+                    seed_epoch = str(getattr(self, "_spend_seed_session", "") or "")
+                    if not duplicate or unknown or (epoch and epoch == seed_epoch):
+                        # the CLI's session epoch (a /clear moves it): a live record names it; a replayed record names the
+                        # replayed epoch, which is the watermark's only when the replay IS its source (the unknown window)
+                        # or when it is the seed's own (the seeded road: persisted, so the next drain's guard has it;
+                        # an OLDER epoch's replay must not overwrite it). A record without one keeps the epoch on record
+                        # (the follow-up's second round, lows 1 and 2)
+                        self._spend_session_id = epoch or str(getattr(self, "_spend_session_id", "") or "")
                     if unknown or duplicate:
                         delta = 0.0       # unknown: the lifetime's total, this turn's share unknowable; duplicate: already folded
                     else:
                         delta = total - self._last_cost_total if total >= self._last_cost_total else total
-                    if not duplicate:
+                    if not duplicate or unknown:
+                        # a replayed result under an UNKNOWN baseline still names the lifetime the watermark starts
+                        # from (live 2026-09-11 22:38Z, the fix's first boot: every session's replayed first result
+                        # left the watermark at zero, and its next live result folded the whole cumulative once)
                         self._last_cost_total = float(total)
                     self._spend_first_result = False   # the watermark moved (or a duplicate was seen): the process's first result is in
                     # the tokens: THIS turn's counts, from whichever result counter is a running total —
@@ -7533,10 +7584,15 @@ class SdkSession:
                         keep = dict(self._last_usage_totals)
                         turn_u = self._turn_usage(msg)
                         turn_u = {k: 0 for k in (turn_u or {})} if isinstance(turn_u, dict) else turn_u
-                        self._last_usage_totals = keep       # the token watermarks are not moved down either
+                        if not unknown:
+                            self._last_usage_totals = keep   # the token watermarks are not moved down either (an unknown
+                            #                                  baseline keeps the map's totals: they start the watermark)
                     else:
                         turn_u = self._turn_usage(msg)
                     if unknown:       # the token watermarks moved with the map; the lifetime's counts are not this turn's
+                        #   (a record without the modelUsage map leaves the token watermark empty, and the next live result's
+                        #   map folds whole: the map is the only cumulative count a result carries, so no line here can do
+                        #   better; the dollar watermark is right either way. Noted in the fix's second round)
                         turn_u = {k: 0 for k in (turn_u or {})} if isinstance(turn_u, dict) else turn_u
                     self._turn_cumulative = float(total)          # the turn row carries the CLI's own cumulative (T354)
                     self._turn_baseline = baseline if first else None
@@ -7571,10 +7627,10 @@ class SdkSession:
                                               "transcript than the connect-time seed (last_cost_state)."
                                               % (self.name, delta, SANE_TURN_USD, total), problem=False)
                     elif unknown:
-                        self.backend._log("spend: %s's first result after a host attach carries the surviving CLI's "
+                        self.backend._log("spend: %s's %s after a host attach carries the surviving CLI's "
                                           "cumulative total ($%.2f) with no watermark on record: this turn's own cost is "
                                           "unknowable and nothing was folded; the watermark is set from here"
-                                          % (self.name, total), problem=False)
+                                          % (self.name, "first result" if first else "replayed result", total), problem=False)
             finally:
                 # T304: one durable row per settled turn (turns.jsonl, see the ledger note by
                 # append_turn_row) — the event stamps the restart monitors read. In the finally, ahead of
@@ -10193,12 +10249,16 @@ class SdkBackend:
             # option that did what the card said. Context is managed by hand for now. Every cut/queued
             # session resumes here, exactly as it did before the gate.
             to_start = [s for s in to_start if s in self._boot_attach_sids] + [s for s in to_start if s not in self._boot_attach_sids]
+            # the attaches this phase waits for, FROZEN with the count: a session a send started ahead of this loop has its
+            # hello discard its sid from _boot_attach_sids, and a per-iteration membership test then saw no attach, parked no
+            # callback, and the count never reached zero (two boots of 2026-09-11 said attachTimedOut with every hello landed)
+            attach_set = {s for s in to_start if s in self._boot_attach_sids}
             with self._boot_attach_lock:
-                self._boot_attach_pending = sum(1 for s in to_start if s in self._boot_attach_sids)
+                self._boot_attach_pending = len(attach_set)
             if not self._boot_attach_pending:
                 self._boot_milestone("attachDone")       # nothing to attach: the phase is over before it began
             for sid in to_start:                         # re-attaches first, then the cold launches
-                attach = sid in self._boot_attach_sids
+                attach = sid in attach_set
                 # a RE-ATTACH (a live host holds the CLI) is a socket connect, first and on its own wider bound; a
                 # cold launch keeps the spawn stagger (the CPU burst the stagger exists for)
                 sem = self._attach_sem if attach else self._spawn_sem

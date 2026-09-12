@@ -1006,7 +1006,17 @@ hash, and hands the judges and the display one tree. Since the lazy index
 each pre-cut turn as its identity, its atoms' row indexes, its segments' spans
 and the scalars the kernel's walkers read (the atoms' uuids, the last and
 latest times, the last model, the tool calls), so a restore builds the turns
-without building an atom. The pre-cut rows stay as bytes; a turn's atoms are
+without building an atom. Document version 5 (T358) adds what the per-cycle
+walkers read: each turn's assistant prose chars by uuid and its newest
+genuine-human time, each segment's has-work verdict and postal message ids,
+and on every lazy marker the prose chars and message ids; the caption
+planner, the feed's transcript-side sets and citation gate, the timeline's
+message-id join then read scalars and build no atom for a captioned or
+already-rendered history, and a segment's atoms are a view that builds only
+what is read. The summary anchors read scalars too (no body is hydrated) but
+still build each pre-cut atom they walk on a cold pass, until the document
+carries per-segment anchors. A version 4 document is refused and the
+session parses whole once. The pre-cut rows stay as bytes; a turn's atoms are
 a list whose slots are built one at a time when a consumer reaches for them,
 through a process-wide LRU of 20000 built atoms across every session (eviction
 drops the memo; a consumer's own reference stays whole), counted per consumer
@@ -1395,6 +1405,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `corrupt`), `dirty` (files whose folds moved since their last write),
   `readBytes` and `readByPath` (what the JSONL reader pulled off disk since
   boot, in total and per file).
+- `stacks`: every thread's last six frames, keyed by the thread's ident and
+  name, when the kernel runs with `ROMP_PERF_STACKS` set (a debugging aid for a
+  served test on a runner nobody can log into); `null` otherwise.
 - `asmCheckpoint`: the assembly documents since boot: `written`, `restored`,
   `fallbacks` per reason (`version`, `session`, `inputs`, `lineage`, `shrunk`,
   `rewrite`, `guard`, `identity`, `corrupt`, `restore`), `skipped` per reason
@@ -1760,7 +1773,8 @@ the same card:
 
 Stage 1 fills it from the slice route (`markdown`, `section`, `code`) and the
 bytes route (`image` at its natural size capped to the card, `pdf` as its first
-page), or with the text-only card. A previewed document renders on the
+page), or with the text-only card; stage 2 fills it with the `term` kind from the
+glossary index below, no fetch. A previewed document renders on the
 sanitizer's inert DOM and is stripped of every remote load there, before its
 nodes join the page: an image's `src` or `srcset`, a picture's sources, a video's
 poster or source, an audio, an SVG image, in any spelling the URL parser
@@ -1777,6 +1791,53 @@ team's glossary format: a per-project glossary file whose headings (and their
 aliases) are linkified in assistant text, mail bodies and cards at render time,
 and a `GET /glossary/<term>` route answering `{title, markdown, source_path,
 anchor}` that fills the `term` kind of the same card.
+
+## The glossary
+
+A team's coinages, linked where they are written. One file per romp tag group,
+`~/.claude/glossaries/<group>.md` (under `CLAUDE_CONFIG_DIR` when set), in the
+grammar of that folder's README: an opening `## Not coinages` list of words never
+linked (each bullet's bold lead, or the text before its colon, read as words), then
+one `## <term>` section per coinage with a definition paragraph and the labelled
+bullets `plain words`, `also` (aliases, spaces allowed), `scope`, `status`
+(unconfirmed, confirmed, retired), `registered` (`<date> by <session>`) and
+`link` (`all`, `first`, `off`; default `all`). A chat message is resolved
+against its author's group: the session's tag group's file, else its own name's;
+a mail body shown in a session's chat links the READER's group (the chat
+session's index; the sender's group is a later refinement). The repo-local
+`docs/glossary.md` is a seam kept for a second source with no file today.
+
+The kernel parses a file once per `(path, mtime)` and ships each session a
+`{type: "glossary"}` frame on the pusher's cycle, on its own dedup slot like the
+comments frame (the stat is the event; no timer, no watcher): `group`, `path`,
+`mtime`, `skip`, `terms` (term, slug, definition, plain words, also, scope,
+status, registered, link) and `truncated`, the count of entries cut by the
+index's byte cap (256 KB) or lying past the heading index's ceiling (256
+headings), counted in `/perf` under `glossary` beside the parses and the frames,
+terms and bytes BUILT per cycle (the dedup slot decides what is shipped). A file
+over the preview route's 2 MB read ceiling is not read; the parsed cache holds
+sixteen files, least recently read out first. Slugs come from the file's headings in order
+through the viewer's own rule, the Not-coinages heading included, so a card opens
+the viewer on the heading the viewer gave that id.
+
+The chat page compiles one matcher per index (`glossary-links.ts`): every form
+(the term, its aliases, and their plurals by the everyday rule; nothing shorter
+than two characters) whole-word and case-insensitive, longest first, minus the
+skip list (a listed word, its plurals and any alias equal to one of them), over
+the prose of assistant and user text and mail bodies; never code, links,
+headings, math, the composer, tool heads, the timeline, nor inside a path-shaped
+or host-shaped token (a path the kernel could not verify stays plain, unsplit).
+A term split across text nodes by an inline element is not matched. Each occurrence becomes a `.term-link` span carrying
+the glossary path and the term's slug, exactly like a path link's absorbed
+section: the same hover card (filled from the index, no fetch) and the same
+click (the viewer at the heading). `link: first` links the first occurrence per
+message; `off` links nothing; a retired term greys and its card says to use the
+plain phrase. A new frame re-links the session's rendered view.
+
+`GET /glossary/<term>?sid=` answers `{title, markdown (the whole section),
+source_path, anchor, group, status, link}` for the lab's own consumers, matching
+the term or an alias whole-word and case-insensitive; 404 with the paths tried
+when the group has no file or the term is absent.
 
 ## Browser-side performance telemetry
 
@@ -2740,13 +2801,27 @@ follows it. A row bearing the signature with no restart instant on record (a
 crash leaves no audit row) is taken as a step only on a chain the session has
 already shown. `--since` is the instant the per-session hosts came on: before
 it every restart killed the CLI, so nothing there is a step. Rows the fixed
-kernel writes (`cumulativeUsd`, `spendBaseline`) are never touched.
+kernel writes (`cumulativeUsd`, `spendBaseline`) are never staircase steps; one
+rule of their own reaches them: a row whose kernel figure equals its cumulative,
+in a session whose `attach-unknown` row precedes it, is the lifetime billed
+once more (the fix's first boot left the watermark at zero after a replayed
+first result) and is corrected by the kernel's own arithmetic to the cumulative
+less the previous same-session row's cumulative (a replayed row with no dollars
+and a rising cumulative counts as that previous row), stamped `repairRule` 5.
+The guard is the kernel's reset comparison, the cumulative above the previous
+row's: the first paid turn after a mid-life `/clear` is written with its
+dollars equal to its cumulative by design, a counter reset, and the rule stands
+down with a note (never a clamp); the chain disarms on the row it judged, on a
+reset and on a fresh or seeded baseline row.
 
 It prints before and after per hour and per session and changes nothing unless
 `--apply` is given. A corrected row keeps the kernel's figure as `usdRecorded`,
 and every run judges a repaired row again on that figure, so a tightened rule
 or a later `--since` restores what an earlier run took, and a run over a
-repaired day changes nothing. Per-session figures fold under the session a row
+repaired day re-judges every correction, staircase and lifetime alike, and
+changes nothing when the judgements stand: a lifetime correction the rule no
+longer believes is restored to `usdRecorded` and its buckets re-folded, the
+same road the staircase rules use. Per-session figures fold under the session a row
 bills (a comment thread's owner, the registry's `threadOf`), and the buckets'
 `key` split moves only for sessions the registry marks as API-key billed; the
 report says how many rows' split was left as recorded. The kernel may be

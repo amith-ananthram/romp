@@ -594,6 +594,137 @@ class Plan(unittest.TestCase):
         self.assertIn("note: hour %sT11 would go 489.0000 below zero; held at zero" % DAY, out.getvalue(), "said on --apply as a new line")
         self.assertEqual(json.loads((state / "spend.json").read_text())["hours"]["%sT11" % DAY]["usd"], 0.0)
 
+    def test_a_lifetime_billed_once_more_after_an_attach_unknown_row_is_corrected_and_a_post_clear_turn_is_not(self):
+        # the fix's first boot (2026-09-11 22:38Z): the replayed attach-unknown first result folded nothing but left the
+        # watermark at zero, and the next live result recorded the whole cumulative. The 1473 review's HIGH: the first
+        # paid turn after a mid-life /clear is written with its dollars equal to its cumulative BY DESIGN (the module's
+        # oracle: a post-clear result 5.00 with costState 5.00), so the match needs the cumulative ABOVE the
+        # attach-unknown row's and a positive remainder, and the rule stands down with a note otherwise
+        turns = [row(A, "web", at(10, 0), 3.0) | {"cumulativeUsd": 100.0},
+                 row(A, "web", at(10, 40), 0.0) | {"cumulativeUsd": 148.4878, "spendBaseline": "attach-unknown", "redelivered": True},
+                 row(A, "web", at(10, 50), 159.2004) | {"cumulativeUsd": 159.2004},         # usd equals its cumulative: the lifetime once more
+                 row(A, "web", at(11, 0), 2.0) | {"cumulativeUsd": 161.2004},               # an ordinary fixed-kernel row
+                 row(A, "web", at(11, 10), 4.5) | {"cumulativeUsd": 4.5, "spendBaseline": "fresh"},   # a fresh process's first result: its own
+                 row(A, "web", at(11, 20), 20.0) | {"cumulativeUsd": 24.5}]
+        p = rp.plan(turns, [at(10, 30)], DAY)
+        got = {c["t"]: c for c in p["rows"]}
+        self.assertEqual(sorted(got), [at(10, 50)], "the lifetime row alone; the fresh first result and the ordinary rows stand")
+        c = got[at(10, 50)]
+        self.assertEqual((c["current"], c["corrected"], c["recorded"], c["rule"]), (159.2004, round(159.2004 - 148.4878, 6), 159.2004, rp.REPAIR_RULE_LIFETIME))
+        self.assertIn("the lifetime billed once more after the attach-unknown row", c["reason"])
+        self.assertEqual(p["stoodDown"], [])
+        # a lifetime row with ordinary rows between it and the attach-unknown row subtracts them too
+        turns2 = [turns[1], row(A, "web", at(10, 45), 2.0) | {"cumulativeUsd": 150.4878}, turns[2] | {"usd": 161.2004, "cumulativeUsd": 161.2004}]
+        got2 = {c["t"]: c["corrected"] for c in rp.plan(turns2, [at(10, 30)], DAY)["rows"]}
+        self.assertEqual(got2, {at(10, 50): round(161.2004 - 148.4878 - 2.0, 6)})
+        # the /clear shape: the post-clear first paid turn follows the attach-unknown row with its cumulative BELOW it
+        turns3 = [turns[1], row(A, "web", at(10, 45), 2.0) | {"cumulativeUsd": 150.4878},
+                  row(A, "web", at(10, 50), 4.25) | {"cumulativeUsd": 4.25},                # /clear, then its first paid turn
+                  row(A, "web", at(10, 55), 1.0) | {"cumulativeUsd": 5.25}]
+        p3 = rp.plan(turns3, [at(10, 30)], DAY)
+        self.assertEqual(p3["rows"], [], "the post-clear turn stands (the first cut zeroed it to max(0, 4.25 - 148.49 - 2))")
+        self.assertEqual(len(p3["stoodDown"]), 1)
+        self.assertIn("4.2500 is at or below the previous row's 150.4878: a counter reset", p3["stoodDown"][0])
+        self.assertIn("web 10:50:00: the lifetime rule stood down", p3["stoodDown"][0])
+        self.assertIn("note: web 10:50:00: the lifetime rule stood down", rp.report(p3), "said in the report")
+        # the guard is against the PREVIOUS row (the kernel's reset comparison), not the attach-unknown row: a cumulative
+        # above the attach-unknown row's but below the previous row's is a reset too, and stands
+        turns4 = [turns[1], row(A, "web", at(10, 45), 20.0) | {"cumulativeUsd": 168.4878},
+                  row(A, "web", at(10, 50), 160.0) | {"cumulativeUsd": 160.0}]
+        p4 = rp.plan(turns4, [at(10, 30)], DAY)
+        self.assertEqual(p4["rows"], [])
+        self.assertIn("160.0000 is at or below the previous row's 168.4878: a counter reset", p4["stoodDown"][0])
+        # the unknown window can replay several records, each a row with usd 0 and a rising cumulative and no baseline
+        # (the review's third round): the previous row's cumulative is the baseline, never the first replayed one
+        turns6 = [turns[1], row(A, "web", at(10, 45), 0.0) | {"cumulativeUsd": 160.0, "redelivered": True},
+                  row(A, "web", at(10, 50), 170.0) | {"cumulativeUsd": 170.0}]
+        got6 = {c["t"]: (c["corrected"], c["reason"]) for c in rp.plan(turns6, [at(10, 30)], DAY)["rows"]}
+        self.assertEqual(sorted(got6), [at(10, 50)])
+        self.assertEqual(got6[at(10, 50)][0], 10.0, "the turn's own cost: 170 less the replay row's 160, not less the first replay's 148.49")
+        self.assertIn("less the previous row's cumulative 160.0000", got6[at(10, 50)][1])
+        # the multi-replay window, a live turn, then a post-clear first paid turn: it stands (the first cut reduced it to
+        # 3.50 less 0.80 less 1.00 with no note, since 3.50 is above the attach-unknown row's 0.80)
+        turns7 = [row(A, "web", at(10, 40), 0.0) | {"cumulativeUsd": 0.8, "spendBaseline": "attach-unknown", "redelivered": True},
+                  row(A, "web", at(10, 42), 0.0) | {"cumulativeUsd": 3.0, "redelivered": True},
+                  row(A, "web", at(10, 45), 1.0) | {"cumulativeUsd": 4.0},
+                  row(A, "web", at(10, 50), 3.5) | {"cumulativeUsd": 3.5}]
+        p7 = rp.plan(turns7, [at(10, 30)], DAY)
+        self.assertEqual(p7["rows"], [], "a genuine post-clear turn is never reduced")
+        self.assertIn("3.5000 is at or below the previous row's 4.0000: a counter reset", p7["stoodDown"][0])
+        # a fresh or seeded baseline row between disarms the chain: the later usd == cumulative row is nobody's lifetime
+        turns5 = [row(A, "web", at(10, 40), 0.0) | {"cumulativeUsd": 100.0, "spendBaseline": "attach-unknown", "redelivered": True},
+                  row(A, "web", at(10, 45), 3.0) | {"cumulativeUsd": 103.0, "spendBaseline": "seeded"},
+                  row(A, "web", at(10, 50), 105.0) | {"cumulativeUsd": 105.0}]
+        p5 = rp.plan(turns5, [at(10, 30)], DAY)
+        self.assertEqual((p5["rows"], p5["stoodDown"]), ([], []), "disarmed by the seeded row, no judgement made")
+
+    def test_the_lifetime_rule_is_idempotent_stamps_its_own_rule_into_the_row_and_the_journal_and_restores_what_it_no_longer_believes(self):
+        # the 1473 review's two mediums: run two re-armed the chain on the corrected row (its usd no longer equal to its
+        # cumulative) and zeroed the post-clear turn; a lifetime correction was never re-judged or restored
+        d = tempfile.mkdtemp()
+        state = Path(d)
+        turns = [row(A, "web", at(10, 40), 0.0) | {"cumulativeUsd": 148.4878, "spendBaseline": "attach-unknown", "redelivered": True},
+                 row(A, "web", at(10, 50), 159.2004) | {"cumulativeUsd": 159.2004},
+                 row(A, "web", at(11, 0), 2.0) | {"cumulativeUsd": 161.2004},
+                 row(A, "web", at(11, 5), 4.25) | {"cumulativeUsd": 4.25},                  # a /clear's first paid turn, present on every run
+                 row(A, "web", at(11, 8), 1.0) | {"cumulativeUsd": 5.25}]
+        (state / "turns.jsonl").write_text("".join(json.dumps(r) + chr(10) for r in turns))
+        (state / "restart-cuts.jsonl").write_text(json.dumps({"t": at(10, 30), "firstServe": at(10, 30), "settleS": 0.1, "pid": 1}) + chr(10))
+        spend = {"hours": {"%sT10" % DAY: {"usd": 159.2004, "turns": 2, "bySid": {A: {"usd": 159.2004, "turns": 2}}},
+                           "%sT11" % DAY: {"usd": 7.25, "turns": 3, "bySid": {A: {"usd": 7.25, "turns": 3}}}},
+                 "days": {DAY: {"usd": 166.4504, "turns": 5, "bySid": {A: {"usd": 166.4504}}}}}
+        (state / "spend.json").write_text(json.dumps(spend))
+        reg(state, A, name="web")
+        import io, contextlib
+        seen, orig = [], rp.journal_append
+        rp.journal_append = lambda st, entry: (seen.append(entry), orig(st, entry))[1]
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(rp.main(["--day", DAY, "--state", d, "--apply", "--no-backup"]), 0)
+        finally:
+            rp.journal_append = orig
+        rows = {r["t"]: r for r in (json.loads(l) for l in (state / "turns.jsonl").read_text().splitlines())}
+        self.assertEqual((round(rows[at(10, 50)]["usd"], 4), rows[at(10, 50)]["usdRecorded"], rows[at(10, 50)]["repairRule"]), (10.7126, 159.2004, rp.REPAIR_RULE_LIFETIME))
+        self.assertEqual((rows[at(11, 5)]["usd"], "usdRecorded" in rows[at(11, 5)]), (4.25, False), "the post-clear turn stands")
+        deltas = [e for e in seen if e.get("phase") == "rows"][0]["deltas"]
+        self.assertEqual((len(deltas), deltas[0]["rule"]), (1, rp.REPAIR_RULE_LIFETIME), "the journal's delta names the rule")
+        self.assertIn("the lifetime billed once more", deltas[0]["reason"])
+        self.assertAlmostEqual(json.loads((state / "spend.json").read_text())["hours"]["%sT10" % DAY]["usd"], 10.7126, places=4)
+        # run two, the same ledger: nothing to apply, the post-clear turn still stands (the corrected row is judged on its
+        # recorded figure, disarms the chain, and the 4.25 row is never reached)
+        turns_2 = [json.loads(l) for l in (state / "turns.jsonl").read_text().splitlines()]
+        p2 = rp.plan(turns_2, [at(10, 30)], DAY)
+        self.assertEqual((p2["rows"], p2["stoodDown"]), ([], []), "idempotent")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(rp.main(["--day", DAY, "--state", d, "--apply", "--no-backup"]), 0)
+        rows = {r["t"]: r for r in (json.loads(l) for l in (state / "turns.jsonl").read_text().splitlines())}
+        self.assertEqual((rows[at(11, 5)]["usd"], round(rows[at(10, 50)]["usd"], 4)), (4.25, 10.7126))
+        self.assertAlmostEqual(json.loads((state / "spend.json").read_text())["hours"]["%sT11" % DAY]["usd"], 7.25, places=4)
+        # the restore arm: the post-clear turn zeroed the way the first cut did (usd 0, the figure kept, the old stamp) is
+        # judged again on its recorded figure and restored, buckets re-folded; and a lifetime correction whose
+        # attach-unknown row is gone from the ledger is no longer believed and restored too
+        rows[at(11, 5)] |= {"usd": 0.0, "usdRecorded": 4.25, "repairRule": rp.REPAIR_RULE, "repairedT": 1}
+        kept = [rows[k] for k in sorted(rows) if k != at(10, 40)]
+        (state / "turns.jsonl").write_text("".join(json.dumps(r) + chr(10) for r in kept))
+        sp = json.loads((state / "spend.json").read_text()); sp["hours"]["%sT11" % DAY]["usd"] = 3.0; sp["hours"]["%sT11" % DAY]["bySid"][A]["usd"] = 3.0
+        sp["days"][DAY]["usd"] = round(10.7126 + 3.0, 4); sp["days"][DAY]["bySid"][A]["usd"] = round(10.7126 + 3.0, 4)
+        (state / "spend.json").write_text(json.dumps(sp))
+        p3 = rp.plan(kept, [at(10, 30)], DAY)
+        got = {c["t"]: c for c in p3["rows"]}
+        self.assertEqual(sorted(got), [at(10, 50), at(11, 5)])
+        self.assertTrue(got[at(10, 50)]["restore"] and got[at(11, 5)]["restore"])
+        self.assertEqual((got[at(10, 50)]["corrected"], got[at(11, 5)]["corrected"]), (159.2004, 4.25))
+        self.assertIn("no attach-unknown row arms a chain before it", got[at(10, 50)]["reason"])
+        self.assertIn("no lifetime billed once more", got[at(11, 5)]["reason"])
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(rp.main(["--day", DAY, "--state", d, "--apply", "--no-backup"]), 0)
+        rows = {r["t"]: r for r in (json.loads(l) for l in (state / "turns.jsonl").read_text().splitlines())}
+        self.assertEqual((rows[at(11, 5)]["usd"], rows[at(10, 50)]["usd"]), (4.25, 159.2004))
+        self.assertFalse(any(k in rows[at(11, 5)] for k in ("usdRecorded", "repairRule", "repairedT")), "the marks are dropped on a restore")
+        sp = json.loads((state / "spend.json").read_text())
+        self.assertAlmostEqual(sp["hours"]["%sT11" % DAY]["usd"], 7.25, places=4)
+        self.assertAlmostEqual(sp["hours"]["%sT10" % DAY]["usd"], 159.2004, places=4)
+
     def test_a_fold_that_would_take_a_bucket_below_zero_is_said_not_hidden(self):
         spend = {"hours": {"%sT10" % DAY: {"usd": 1.0, "turns": 1, "bySid": {A: {"usd": 1.0}}}}, "days": {DAY: {"usd": 1.0, "turns": 1, "bySid": {A: {"usd": 1.0}}}}}
         p = {"day": DAY, "rows": [{"sid": A, "owner": A, "keyed": False, "name": "web", "t": at(10, 0), "hour": "%sT10" % DAY, "current": 5.0, "corrected": 0.0, "recorded": 5.0}]}

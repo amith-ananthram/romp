@@ -473,6 +473,9 @@ class KernelOverRestored(Harness):
             "units": [(u[0], u[1]) for u in jd.plan_units(tree, store)],
             "unitText": [jd._unit_text(seg["atoms"]) for seg in segs],
             "asstWork": [jd._has_asst_work(seg["atoms"]) for seg in segs],
+            "mids": [km._seg_mids(seg) for seg in segs],                       # T358: the stored ids, or the markers'
+            "humanFloor": km._human_turn_floor(tree),
+            "txSets": (lambda s_: (s_[0], s_[1], s_[4]))(km._merge_tx_sets(tree, SID + "-" + str(id(tree)))),
             "bgHold": jd._awaiting_bg_hold(SID, "", tree, store, now=NOW),
         }
 

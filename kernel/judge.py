@@ -2655,19 +2655,15 @@ def _has_asst_work(atoms):
     usage-limit / auto-nudge storm the captioner (and the archiver behind it) then fired a call per errored
     retry turn, a flood of judge calls captioning nothing but error noise. Skipping isApiError atoms means a
     turn whose only assistant output is the error is work-less → no caption; a turn that did real work THEN
-    errored still captions the real work."""
-    em.hydrate(atoms)   # bodies before the assembly cut: read on demand (T323 stage 4a)
-    for a in atoms:
-        if a.get("type") == "assistant" and not a.get("isApiError"):
-            if _atom_text(a):
-                return True
-            for b in (a.get("message") or {}).get("content", []):
-                if isinstance(b, dict) and b.get("type") == "tool_use":
-                    return True
-    return False
+    errored still captions the real work.
+
+    Reads scalars only (em.atom_has_work: a lazy atom answers from its marker's nt and tu), so no body is hydrated
+    (T358). The assembly document stores this verdict per pre-cut segment (`w`): a change to the rule is a document
+    version bump (em._ASM_CKPT_V), pinned by tests/test_asm_index.py."""
+    return any(em.atom_has_work(a) for a in atoms)
 
 
-def _ready_tasks(session, store=None):
+def _ready_tasks(session, store=None, done=()):
     """Caption tasks. Two kinds (the user 2026-06-19):
       - kind 'prompt' = the MESSAGE caption, a gist of the user's ask. READY THE MOMENT THE MESSAGE LANDS
         (even the open final segment), so the timeline dot gets a gloss without waiting for the work. Keyed
@@ -2680,33 +2676,59 @@ def _ready_tasks(session, store=None):
         request. Only the open final TURN-grain caption is still withheld (no turn caption until it ends)."""
     turns = session["turns"]
     tasks = []
+    done = set(done or ())                             # units captioned already: skipped BEFORE any atom is built or read (T358)
     for ti, turn in enumerate(turns):
         is_last_turn = ti == len(turns) - 1
-        has_idle = any(a["type"] == "idle" for a in turn["atoms"])
+        has_idle = is_last_turn and any(a["type"] == "idle" for a in turn["atoms"])   # only the last turn can be open
         turn_open = is_last_turn and not turn["ended"] and not has_idle
         segs = _segs(turn, store) if store is not None else em.segments(turn)   # seam-aware: the tail gets its own caption
         single = len(segs) == 1
         for si, seg in enumerate(segs):
-            trig = next((a for a in seg["atoms"] if a.get("uuid") == seg.get("trigger")), None) or (seg["atoms"][0] if seg["atoms"] else None)
-            if trig and trig.get("author") == "human":   # MESSAGE caption — ready now, even mid-work
-                tasks.append({"kind": "prompt", "atoms": [trig],
-                              "writes": [{"id": seg["id"] + "#p", "grain": "prompt", "t": seg["t"]}]})
+            want_p = seg["id"] + "#p" not in done
+            want_w = seg["id"] not in done or (single and not turn_open and turn["id"] not in done)
+            if not want_p and not want_w:
+                continue                               # captioned at every grain: no atom of it is built or read
+            want_p = want_p and seg.get("hp") is not False   # a restored segment stores whether its message is human-authored (hp)
+            want_w = want_w and (turn_open and si == len(segs) - 1 or _seg_work(seg))   # ...and whether it has work (w)
+            if not want_p and not want_w:
+                continue                               # nothing to caption here: no atom built, no body read (arm low 1)
+            em.hydrate(seg["atoms"])                   # ONE read per planned segment: the prompt and unit texts below then hit the
+            if want_p:                                 # memo, so the judge thread takes the leaf's read lock once per segment, not
+                trig = em.seg_prompt_atom(seg)         # once per prompt and once per unit (the base's granularity; T358 CI red)
+                if trig and trig.get("author") == "human":   # MESSAGE caption — ready now, even mid-work
+                    tasks.append({"kind": "prompt", "atoms": [trig],
+                                  "writes": [{"id": seg["id"] + "#p", "grain": "prompt", "t": seg["t"]}]})
             if turn_open and si == len(segs) - 1:      # the OPEN final segment → a LIVE in-progress work caption
                 if _has_asst_work(seg["atoms"]):       # ...only once it has real assistant work to gloss
                     tasks.append({"kind": "work", "live": True, "natoms": len(seg["atoms"]),
                                   "atoms": seg["atoms"],
                                   "writes": [{"id": seg["id"], "grain": "segment", "t": seg["t"]}]})
                 continue                               # no turn-grain while open; the final caption supersedes on close
-            if not _has_asst_work(seg["atoms"]):       # a work-less segment (bare prompt / aborted) → no WORK caption
-                continue                               # (its #p message caption still glosses the ask)
+            if not want_w:                             # a work-less segment (bare prompt / aborted) → no WORK caption
+                continue                               # (its #p message caption still glosses the ask; want_w carried _seg_work)
             writes = [{"id": seg["id"], "grain": "segment", "t": seg["t"]}]
             if single and not turn_open:               # the turn IS this segment → mirror, no 2nd call
                 writes.append({"id": turn["id"], "grain": "turn", "t": turn["t"]})
+            writes = [w for w in writes if w["id"] not in done]
             tasks.append({"kind": "work", "atoms": seg["atoms"], "writes": writes})
-        if not turn_open and not single and _has_asst_work(turn["atoms"]):   # multi-segment turn → its own work caption
+        if not turn_open and not single and turn["id"] not in done and _turn_work(turn, segs):   # multi-segment turn → its own work caption
             tasks.append({"kind": "work", "atoms": turn["atoms"],
                           "writes": [{"id": turn["id"], "grain": "turn", "t": turn["t"]}]})
     return tasks
+
+
+def _seg_work(seg):
+    """_has_asst_work over a segment: the verdict a restored pre-cut segment stores (`w`, written by the assembly
+    checkpoint from the same rule), else the rule over its atoms (T358)."""
+    w = seg.get("w")
+    return _has_asst_work(seg["atoms"]) if w is None else bool(w)
+
+
+def _turn_work(turn, segs):
+    """_has_asst_work over a whole turn, from its segments' stored verdicts when every one carries one."""
+    if segs and all(sg.get("w") is not None for sg in segs):
+        return any(sg["w"] for sg in segs)
+    return _has_asst_work(turn["atoms"])
 
 
 # ───────────────────────── parse + units, (mtime,size) cached ─────────────────────────
@@ -3456,7 +3478,7 @@ def parsed_session(fsid, files, now, asm_mode_out=None, stats=None, states=None,
     return session
 
 
-def tasks_for(fsid, leaf, files, now):
+def tasks_for(fsid, leaf, files, now, done=None):
     """The transcript's ready caption tasks [{text, writes:[{id,grain,t}]}], memoized on disk
     by the pass's parse pair — repeated passes don't re-parse an unchanged transcript
     (ports the romp-events cache; the per-second-polling / 14MB-transcript guard). The memo key IS
@@ -3473,10 +3495,17 @@ def tasks_for(fsid, leaf, files, now):
     if pair is None:
         return []
     key = list(pair)                                   # as JSON reads it back: [[[mtime, size], ...], cut]
+    cap_key = _file_key(str(CAPDIR / (fsid + ".jsonl")))   # the captions file's stat beside it (T358): the memo holds the UNDONE
+    if cap_key is not None and not isinstance(cap_key, tuple):   #  units' tasks only, so a caption filed since must miss it (a strike
+        _CAPTIONS_STATS["unstatable"] += 1             #  files none). The sentinel (a file that exists but will not stat): this
+        _say_once_judge("captions: %s's captions file exists but cannot be stat'ed: no caption is planned for it until it can "
+                        "(/perf memos.captions.unstatable counts the passes)" % fsid)   # session plans nothing this pass; the others'
+        return []                                      #  captions proceed (arm low 3: loud, and counted, never silent)
+    cap_key = list(cap_key) if cap_key else None
     cf = PCACHE / (fsid + ".json")
     try:
         o = json.loads(cf.read_text())
-        if o.get("key") == key and o.get("v") == 8:    # v8 = the harness skill-load wrapper no longer emits a command atom, so the prompt segment grows (T333, 2026-09-11; with PLACEMENTS_V 14);
+        if o.get("key") == key and o.get("capKey") == cap_key and o.get("v") == 9:    # v8 = the harness skill-load wrapper no longer emits a command atom, so the prompt segment grows (T333, 2026-09-11; with PLACEMENTS_V 14);
             #                                             v7 = machine-written triggers key their segment on the anchor uuid, so those seg ids moved (T318, 2026-09-10; with PLACEMENTS_V 13);
             #                                             v6 = absorbed atoms placed at their landing time, so their seg ids moved (T252d, 2026-09-08);
             #                                             v5 = absorbed SDK-injection atoms carry real text (2026-07-06); older caches regenerate
@@ -3488,7 +3517,9 @@ def tasks_for(fsid, leaf, files, now):
     if fault is not None:
         return []                                      # its row is filed; this session captions nothing this
     tasks = []                                         # pass and the other sessions' captions proceed
-    for t in _ready_tasks(session, store):
+    if done is None:
+        done = captioned_ids(fsid)
+    for t in _ready_tasks(session, store, done):       # captioned units are skipped before their bodies are read (T358)
         kind = t.get("kind", "work")
         text = _prompt_text(t["atoms"]) if kind == "prompt" else _unit_text(t["atoms"])
         task = {"kind": kind, "text": text, "writes": t["writes"]}
@@ -3498,7 +3529,7 @@ def tasks_for(fsid, leaf, files, now):
     try:
         PCACHE.mkdir(parents=True, exist_ok=True)
         tmp = cf.with_suffix(".tmp.%d" % os.getpid())
-        tmp.write_text(json.dumps({"key": key, "v": 8, "tasks": tasks}))
+        tmp.write_text(json.dumps({"key": key, "capKey": cap_key, "v": 9, "tasks": tasks}))
         tmp.rename(cf)
     except Exception:
         pass
@@ -3523,7 +3554,22 @@ def tasks_for(fsid, leaf, files, now):
 # memo serves READERS only (load_goal_archive_shared): every archiver keeps load_goal_archive, a fresh
 # private object it mutates and saves.
 _CAPTIONS_MEMO = {}        # fsid -> (file key taken before the read, the parsed rows)
-_CAPTIONS_STATS = {"served": 0, "parsed": 0}
+_SAID_ONCE = set()
+
+
+def _say_once_judge(line):
+    """One stderr line per distinct text for the process (a condition that recurs every pass is said the first time)."""
+    if line in _SAID_ONCE:
+        return
+    _SAID_ONCE.add(line)
+    try:
+        sys.stderr.write(line + "\n")
+    except Exception:
+        pass
+
+
+_CAPTIONS_STATS = {"served": 0, "parsed": 0, "unstatable": 0}   # unstatable: passes that planned nothing for a session whose
+#                                                                  captions file exists but will not stat (T358 arm low 3)
 _GOALARCH_MEMO = {}        # fsid -> (file key taken before the read, the guarded archive store: read-only)
 _GOALARCH_STATS = {"served": 0, "loaded": 0}
 _FILE_MEMO_MAX = 256
@@ -8610,7 +8656,7 @@ def _run_index(now=None, budget=BUDGET, fairness=FAIRNESS, concurrency=None, ver
         yield_between_sessions()
         done = captioned_ids(fsid)
         live_n = _live_natoms(fsid)                       # the open segment's last live-caption sizes (cadence gate)
-        for task in tasks_for(fsid, str(path), [str(path)], now):
+        for task in tasks_for(fsid, str(path), [str(path)], now, done=done):
             undone = [w for w in task["writes"] if w["id"] not in done]
             if task.get("live"):                          # re-caption the OPEN segment only every CHUNK new atoms
                 undone = [w for w in undone
@@ -11017,6 +11063,7 @@ def _plan_session(fsid, path, now):
         return 0
     _PLANNER_STATS["planned"] += 1
     store = load_goals(fsid)
+    _judge_ctx.relay_turns = (str(fsid), session.get("turns") or [])   # the block writer's excerpt source (T334 relay)
     if _heal_quote_titles(store) + _heal_floor_titles(fsid, store) \
             + _heal_ticket_titles(store):              # + ticket-led titles (T146, the live-failure heal)
         save_goals(fsid, store)                       # own words; raw-head → the landed prompt caption), both
@@ -12944,10 +12991,233 @@ def file_block(store, nd, src, why, ev_t, t=None, seg=None):
     if via == "delegator" and not prior_standing:  # a fresh marker for every new wait (the ended wait's went above)
         nd["relayWanted"] = {"peer": peer, "why": str(why), "t": int(t if t is not None else ev_t),
                              "id": _relay_marker_id(t if t is not None else ev_t, peer, nd.get("id"))}   # its identity:
+        ctx = _relay_context_for(store, t if t is not None else ev_t)   # the conversation the question ends, for the peer
+        if ctx:
+            nd["relayWanted"]["context"] = ctx
         _relay_enqueue(store, nd)                  #   that settle it name it. The kernel's relay tick sends it as the
         landed = True                              #   worker's question, once per block: a re-asserted block on a
                                                    #   standing relayed wait never relays twice
     return "peer", landed
+
+
+RELAY_CONTEXT_BYTES_DEFAULT = 24 * 1024     # the conversation excerpt a relayed question carries: 24 KiB of text
+RELAY_CONTEXT_BYTES_MAX = 768 * 1024        # the bus reads a megabyte per request: the excerpt leaves headroom for the rest
+RELAY_CONTEXT_KNOB = Path(os.path.expanduser("~/.config/romp/relay-context-bytes"))
+_RELAY_MARKER_RE = re.compile(r"<!--\s*romp-.*?-->", re.S)   # to the marker's own close: a payload may hold a '>'
+
+
+def relay_context_bytes():
+    """The bound on the conversation excerpt a relayed question carries, in bytes of text: $ROMP_RELAY_CONTEXT_BYTES,
+    else the first non-comment line of ~/.config/romp/relay-context-bytes, else RELAY_CONTEXT_BYTES_DEFAULT (24 KiB,
+    about six thousand tokens: a typical three-to-eight-turn exchange whole, well under a tenth of a peer's window, and
+    far under the bus's megabyte). Read at CALL time like the other ~/.config/romp knobs, so the user raises it
+    without a release; a value that is not a positive integer is ignored (said once per value)."""
+    for raw, src in ((os.environ.get("ROMP_RELAY_CONTEXT_BYTES"), "$ROMP_RELAY_CONTEXT_BYTES"), (_relay_knob_line(), str(RELAY_CONTEXT_KNOB))):
+        if raw is None:
+            continue
+        try:
+            n = int(str(raw).strip().replace("_", ""))
+            if n > RELAY_CONTEXT_BYTES_MAX:               # past the bus's own limit the send would be refused (a 413 read as
+                if raw not in _RELAY_KNOB_SAID:            #   definitive, every wait reverted): the cap stands in its place
+                    _RELAY_KNOB_SAID.add(raw)
+                    sys.stderr.write("relay context: %s holds %r, over the %d-byte cap; the cap stands\n" % (src, raw, RELAY_CONTEXT_BYTES_MAX))
+                return RELAY_CONTEXT_BYTES_MAX
+            if n > 0:
+                return n
+        except ValueError:
+            pass
+        if raw not in _RELAY_KNOB_SAID:
+            _RELAY_KNOB_SAID.add(raw)
+            sys.stderr.write("relay context: %s holds %r, not a positive integer; the default stands\n" % (src, raw))
+    return RELAY_CONTEXT_BYTES_DEFAULT
+
+
+_RELAY_KNOB_SAID = set()
+
+
+def _relay_knob_line():
+    try:
+        for line in RELAY_CONTEXT_KNOB.read_text(errors="replace").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                return line
+    except Exception:                                      # unreadable, undecodable, not a file: the default stands
+        return None
+    return None
+
+
+def _relay_turn_text(turn, who):
+    """One turn of the conversation as the peer will read it: the user's prompt text and the assistant's reply text,
+    labelled, in order; tool calls collapsed to one line with their count (the code the assistant WROTE stays in its
+    text; the tool noise goes); romp's own markers stripped. Empty when the turn holds no text."""
+    lines, tools = [], 0
+    for a in turn.get("atoms") or []:
+        if a.get("lazy") is not None:
+            em.hydrate([a])                                # a body before the assembly cut: read on demand
+        msg = a.get("message") or {}
+        role = msg.get("role") or a.get("type")
+        blocks = msg.get("content") or []
+        if isinstance(blocks, str):
+            blocks = [{"type": "text", "text": blocks}]
+        tools += sum(1 for b in blocks if isinstance(b, dict) and b.get("type") == "tool_use")
+        text = "\n".join(str(b.get("text") or "") for b in blocks if isinstance(b, dict) and b.get("type") == "text")
+        text = _RELAY_MARKER_RE.sub("", text).strip()
+        if not text:
+            continue
+        label = "user:" if role == "user" else "%s:" % (who or "assistant")
+        # a one-line text sits after its label; a text that opens with a code fence or spans lines goes UNDER the
+        # label on its own lines, so a fence opener stays at a line start (the review: a label on the fence's line
+        # hid the opener from the shortener, which then cut the block mid-fence)
+        lines.append(label + (" " + text if "\n" not in text and not re.match(r"^\s*(`{3,}|~{3,})", text) else "\n" + text))
+    if tools:
+        lines.append("(%d tool call%s)" % (tools, "" if tools == 1 else "s"))
+    return "\n".join(lines)
+
+
+def _relay_units(text):
+    """A turn's text as atomic units for shortening: a fenced code block is ONE unit (never cut), else a paragraph."""
+    units, cur, fence = [], [], None
+    for line in text.split("\n"):
+        m = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if fence is None and m:
+            if cur:
+                units.append(("text", "\n".join(cur))); cur = []
+            fence = m.group(1); cur = [line]
+            continue
+        if fence is not None:
+            cur.append(line)
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
+                units.append(("code", "\n".join(cur))); cur = []; fence = None
+            continue
+        if not line.strip():
+            if cur:
+                units.append(("text", "\n".join(cur))); cur = []
+            continue
+        cur.append(line)
+    if cur:
+        units.append(("code" if fence is not None else "text", "\n".join(cur)))
+    return units
+
+
+def _relay_shorten(text, budget):
+    """The question's own turn when it alone exceeds the bound: its LAST complete units that fit (paragraphs, and code
+    blocks kept whole or left out whole with a line saying so), under a line saying what was left out. A text unit that
+    alone exceeds what is left (a turn with no paragraph break: a long list, a pasted log, a table) is shortened by its
+    LAST lines, and a single line past the budget by its last bytes at a character boundary, so the question's own
+    words always ride (the manager's review: a 27 KB unbroken turn used to vanish into a one-line note)."""
+    note_room = 80
+    units = _relay_units(text)
+    kept, size = [], 0
+    for kind, u in reversed(units):
+        n = len(u.encode("utf-8")) + 2
+        room = budget - note_room - size
+        if n > room:
+            if kind == "code":
+                note = "(a code block of %d lines left out)" % u.count("\n")
+                if len(note) + 2 <= room:
+                    kept.append(note); size += len(note) + 2
+                continue
+            tail = _relay_tail_lines(u, room - 2)
+            if tail:
+                kept.append(tail); size += len(tail.encode("utf-8")) + 2
+            break
+        kept.append(u); size += n
+    kept.reverse()
+    out = "\n\n".join(kept)
+    left = max(0, len(text) - len(out))
+    return "(shortened: this turn's earlier %d characters left out)\n\n%s" % (left, out) if left else out
+
+
+def _relay_tail_lines(text, room):
+    """The last whole lines of `text` that fit `room` bytes; when even the last line does not, its last bytes cut at a
+    character boundary. Empty when there is no room at all."""
+    if room <= 0:
+        return ""
+    lines = text.split("\n")
+    kept, size = [], 0
+    for line in reversed(lines):
+        n = len(line.encode("utf-8")) + 1
+        if size + n > room:
+            break
+        kept.append(line); size += n
+    if kept:
+        kept.reverse()
+        return "\n".join(kept)
+    last = lines[-1].encode("utf-8")[-room:]
+    return last.decode("utf-8", errors="ignore")
+
+
+_RELAY_EXCERPT_HEAD = 96      # the header line's room inside the bound
+_RELAY_EXCERPT_SEP = 40       # a turn's separator line and joins
+_RELAY_EXCERPT_RESERVE = 128  # kept back from a shortened own turn while earlier turns exist, so a one-line earlier
+#                               exchange rides beside it by design rather than by the shortener's line-rounding slack
+
+
+def _relay_wire_len(s):
+    """The bytes `s` takes on the bus: JSON-encoded UTF-8 without the quotes. A newline, a quote or a backslash is two
+    bytes there, so a newline-dense excerpt measured raw could double on the wire past the bound (the third verdict);
+    the bound is measured in this form."""
+    return len(json.dumps(s, ensure_ascii=False).encode("utf-8")) - 2
+
+
+def _relay_excerpt(turns, upto_t, budget, who=""):
+    """The conversation a relayed question sits in, for the peer: whole turns only, selected newest first from the
+    turn the question ends (always included, shortened only when it alone exceeds the bound, to the bound less a small
+    reserve while earlier turns exist so a one-line earlier exchange still rides beside it) back while they fit
+    the bound, shown oldest first under a line that says how many turns are shown and how many were left out (the
+    earlier ones, and any holding no text). The bound is measured as the bus carries the excerpt (_relay_wire_len).
+    Turns are the parse's (event_model): the user's prompt text and the assistant's reply text, tool calls collapsed
+    to a count. Empty when there is nothing to show."""
+    upto = int(upto_t or 0)
+    sel = [t for t in turns or [] if int(t.get("t") or 0) <= upto]   # nothing at or before the block's evidence: no excerpt
+    total = len(sel)
+    kept, size = [], _RELAY_EXCERPT_HEAD
+    for i in range(total - 1, -1, -1):                     # newest first, rendered (and hydrated) one turn at a time: the
+        txt = _relay_turn_text(sel[i], who)                #   walk stops at the bound, so a long session's history is
+        if not txt:                                        #   never read for two turns' worth of excerpt (the review)
+            continue
+        n = _relay_wire_len(txt) + _RELAY_EXCERPT_SEP
+        if not kept:
+            if size + n > budget:
+                cap = budget - (_RELAY_EXCERPT_RESERVE if i > 0 else 0)   # the own turn's share of the bound
+                txt = _relay_shorten(txt, max(256, cap - size - _RELAY_EXCERPT_SEP))
+                for _ in range(4):                         # the shortener counts raw bytes: tighten while the wire form is over
+                    n = _relay_wire_len(txt) + _RELAY_EXCERPT_SEP
+                    raw = len(txt.encode("utf-8"))
+                    if size + n <= cap or raw <= 256:
+                        break
+                    txt = _relay_shorten(txt, max(256, int(raw * (cap - size - _RELAY_EXCERPT_SEP) / max(1, n - _RELAY_EXCERPT_SEP))))
+                n = _relay_wire_len(txt) + _RELAY_EXCERPT_SEP
+            kept.append((i, txt)); size += n
+            continue
+        if size + n > budget:
+            break
+        kept.append((i, txt)); size += n
+    if not kept:
+        return ""
+    kept.reverse()
+    shown = len(kept)
+    left = total - shown                                   # every other turn: earlier than the oldest shown, or holding no
+    head = "The conversation this question ends, oldest first: %d of %d turn%s shown" % (shown, total, "" if total == 1 else "s")
+    head += (", %d left out (earlier, or holding no text)." % left) if left else "."   # text (the third verdict: an
+    #   empty turn above the oldest shown left shown + left-out short of the total)
+    parts = [head] + ["--- turn %d of %d ---\n%s" % (i + 1, total, txt) for i, txt in kept]
+    return "\n\n".join(parts)
+
+
+def _relay_context_for(store, t):
+    """The excerpt for a marker filed on `store` at evidence time `t`, from the parsed turns the judging pass left on
+    the thread (_judge_ctx.relay_turns, set by _close_session and _plan_session for the session they hold); None when
+    the pass left none for this session (a boot conversion, a hand-run), so the marker rides without an excerpt."""
+    held = getattr(_judge_ctx, "relay_turns", None)
+    sid = str(store.get("rompUuid") or "")
+    if not held or str(held[0]) != sid:
+        return None
+    try:
+        return _relay_excerpt(held[1], t, relay_context_bytes(), who=_peer_name(sid) or "") or None
+    except Exception as e:
+        _log_judge_error("relay-context", sid, "the excerpt could not be built (%r); the question rides alone" % (e,))
+        return None
 
 
 def _relay_marker_id(ev_t, peer="", nid=""):
@@ -12959,6 +13229,14 @@ def _relay_marker_id(ev_t, peer="", nid=""):
     return "%d-%s-%s" % (int(ev_t or 0), str(peer or "")[:8] or "peer", str(nid or "").rsplit(":", 1)[-1] or "node")
 
 
+def _relay_owes_recall(nd):
+    """True when the node owes at least one recall ROW (a dict in relayRecall). The flush, the boot pass and the tick's
+    recall entry all ask this rather than the raw list's truth, so a list holding no dict (a hand-edited store, a
+    future writer's shape) never writes, re-queues or keeps an entry (the manager's fourth verdict)."""
+    lst = nd.get("relayRecall") if isinstance(nd, dict) else None
+    return isinstance(lst, list) and any(isinstance(r, dict) for r in lst)
+
+
 def _relay_retire_marker(store, nd):
     """Retire the node's marker for a wait that ended (a new wait replaces it, or the block became the user's): it is
     settled (relaySettled), and when it had already been handed to a far host (pendingMid: parked or unacked) it is
@@ -12968,6 +13246,10 @@ def _relay_retire_marker(store, nd):
     if not isinstance(old, dict):
         return
     _relay_mark_settled(nd, old.get("id") or "")
+    nd.pop("relayCarried", None)                           # this road ends a wait without the kernel's settle (file_block
+    #                                                        deciding the block is the user's, a new wait replacing an ended
+    #                                                        one), and a stale "still parked" note would annotate every
+    #                                                        later block on the node and feed the distiller through _owed_why
     if old.get("pendingMid"):
         lst = [r for r in (nd.get("relayRecall") or []) if isinstance(r, dict)
                and str(r.get("pendingMid") or "") != str(old.get("pendingMid"))]
@@ -13088,7 +13370,7 @@ def _relay_flush(fsid, store, pending):
         rw = nd.get("relayWanted") if isinstance(nd, dict) else None
         if isinstance(rw, dict):
             n += 1 if _relay_write_entry(str(fsid), str(nid), rw.get("id") or "", store.get("rev") or 0) else 0
-        if isinstance(nd, dict) and nd.get("relayRecall"):   # recalls owed ride their own entry, beside the marker's
+        if _relay_owes_recall(nd):                         # recalls owed ride their own entry, beside the marker's
             n += 1 if _relay_write_entry(str(fsid), str(nid), "recall", store.get("rev") or 0) else 0
     return n
 
@@ -13109,7 +13391,7 @@ def _requeue_relays_all():
                 continue
             if isinstance(nd.get("relayWanted"), dict) and not _relay_entry_path(p.stem, nid).exists():
                 n += 1 if _relay_write_entry(p.stem, nid, nd["relayWanted"].get("id") or "", (raw or {}).get("rev") or 0) else 0
-            if nd.get("relayRecall") and not _relay_recall_entry_path(p.stem, nid).exists():   # recalls owed: their own entry
+            if _relay_owes_recall(nd) and not _relay_recall_entry_path(p.stem, nid).exists():   # recalls owed: their own entry
                 n += 1 if _relay_write_entry(p.stem, nid, "recall", (raw or {}).get("rev") or 0) else 0
     return n
 
@@ -14099,6 +14381,7 @@ def _close_session(fsid, path, now, cap=CLOSE_FAIRNESS):
     swept = _closed_turns(store)
     sig = dict(store.get("closedSig") or {})
     turns = session["turns"]
+    _judge_ctx.relay_turns = (str(fsid), turns)      # the block writer's excerpt source (T334 relay)
     newly, did, cut = [], 0, False
     for ti, turn in enumerate(turns):
         if _turn_open(turn, turns):

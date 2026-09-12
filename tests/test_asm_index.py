@@ -15,6 +15,7 @@ import pickle
 import re
 import sys
 import unittest
+from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import test_asm_checkpoint as T                                   # noqa: E402  the stage 4a harness, its event model
 from test_asm_checkpoint_served import transcript                 # noqa: E402  the served fixture's builder: many turns, compacting
@@ -144,7 +145,7 @@ class Versions(Restored):
     def test_a_version_3_document_and_a_version_4_one_read_by_an_older_kernel_both_fall_back(self):
         path, whole, tree = self.restored_tree()
         d = T._doc(path)
-        self.assertEqual(d["av"], 4); self.assertTrue(d["turns"]); self.assertTrue(d["treeIdentity"])
+        self.assertEqual(d["av"], em._ASM_CKPT_V); self.assertTrue(d["turns"]); self.assertTrue(d["treeIdentity"])
         T._write_doc(path, dict(d, av=3, turns=None, treeIdentity=None))   # the document an older kernel wrote
         self.fresh(); modes = []
         got = T._strip(self.parse(path, modes))
@@ -370,6 +371,187 @@ class AuditGuard(unittest.TestCase):
                    'entry["atoms"] = entry["atoms"] + new_atoms')                    # the assembly entry's TAIL atoms: a plain list
         bad = [b for b in bad if not (b.startswith("event_model.py") and any(x in b for x in allowed))]
         self.assertEqual(bad, [], "a reader that would copy a turn's storage or dump a tree: %s" % bad)
+
+
+
+class ScalarWalkers(Restored):
+    """T358: the per-cycle walkers over a restored store read the scalars the document carries and build no atom. A
+    restored turn carries `pcs` (assistant prose chars by uuid) and `hT` (the newest genuine-human time); each of its
+    segment rows carries `w` (the has-work verdict) and `mids` (postal message ids); a segment's atoms are a lazy VIEW
+    that builds only what is read. The caption planner skips captioned units before any atom is built; the kernel's
+    transcript-side sets, human floor and message-id join read the scalars. The has-work rule is pinned beside the
+    document version: a change to the rule (or to what the stored fields mean) is a version bump. The kernel is loaded
+    once, before any tree is parsed: loading it re-executes the shared event model module, and a tree parsed before
+    that would hold the placeholder sentinel of the earlier execution."""
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.km = T.kernel_module()
+
+    def _pre_and_whole_segs(self, whole, tree):
+        cut = tree["cutTurn"]
+        return [(em.segments(w), em.segments(r)) for w, r in zip(whole["turns"][:cut], tree["turns"][:cut])]
+
+    def test_a_restored_turn_carries_the_walkers_scalars(self):
+        path, whole, tree = self.restored_tree()
+        cut = tree["cutTurn"]
+        for w_turn, r_turn in zip(whole["turns"][:cut], tree["turns"][:cut]):
+            self.assertTrue(r_turn.get("pre"))
+            self.assertEqual(r_turn["pcs"], {a["uuid"]: em.atom_prose_chars(a) for a in w_turn["atoms"]
+                                             if a.get("uuid") and em.atom_prose_chars(a) > 0}, "pcs: the assistant prose chars by uuid")
+            self.assertEqual(r_turn["hT"], max((a.get("t", 0) for a in w_turn["atoms"] if a.get("type") == "user"
+                                                and a.get("author") == "human" and not em.is_interrupt_record(a)), default=None))
+            for w_seg, r_seg in zip(em.segments(w_turn), em.segments(r_turn)):
+                self.assertEqual(r_seg["w"], any(em.atom_has_work(a) for a in w_seg["atoms"]), "w: the has-work verdict")
+                self.assertEqual(r_seg["mids"], [m for a in w_seg["atoms"] for m in em.atom_mids(a)], "mids: the ids in order")
+                pa = em.seg_prompt_atom(w_seg)
+                self.assertEqual(r_seg["hp"], bool(pa and pa.get("author") == "human"), "hp: a message caption is wanted")
+        self.assertEqual(em.asm_index_stats()["materialized"], 0, "reading the scalars builds nothing")
+
+    def test_a_segments_atoms_are_a_view_that_builds_only_what_is_read(self):
+        path, whole, tree = self.restored_tree()
+        pre = tree["turns"][0]; la = pre["atoms"]
+        segs = em.segments(pre)
+        self.assertEqual(em.asm_index_stats()["materialized"], 0, "segmenting a restored turn builds nothing")
+        seg = segs[0]; view = seg["atoms"]
+        with self.assertRaises(TypeError):
+            json.dumps(view)                                      # placeholders never ship: refused while a slot is unbuilt
+        self.assertIsInstance(view, em.LazyAtoms); self.assertIsInstance(view, list)
+        self.assertEqual(len(view), pre["segs"][0][5])
+        a0 = view[0]
+        self.assertEqual(em.asm_index_stats()["materialized"], 1, "one read, one build")
+        self.assertIs(a0, la[pre["segs"][0][4]], "the view's build is the parent's slot")
+        self.assertEqual(view.uuids(), pre["uuids"][pre["segs"][0][4]:pre["segs"][0][4] + len(view)])
+        self.assertIsInstance(view[0:1], em.LazyAtoms, "a slice of a view is a view")
+        self.assertEqual([a["uuid"] for a in view], view.uuids())
+        n_built = em.asm_index_stats()["materialized"]
+        self.assertEqual([a["uuid"] for a in view], view.uuids(), "a second pass over the view")
+        self.assertEqual(em.asm_index_stats()["materialized"], n_built, "...builds nothing and, holding what it read, asks the parent nothing")
+        with em._MAT_LOCK:                                        # an eviction in the parent: the view keeps what it read (its build's
+            for key in list(em._MAT_LRU):                         # lifetime), as the plain-list slice it replaces did; a slot it never
+                lz, j = em._MAT_LRU.pop(key); list.__setitem__(lz, j, em._UNMAT)   # read is rebuilt from the parent
+        self.assertTrue(view._unbuilt(), "the json guard reads the parent's slots")
+        self.assertIs(view[0], a0, "a slot the view read stays")
+        fresh = em.segments(pre)[0]["atoms"]
+        self.assertEqual(fresh[0]["uuid"], a0["uuid"], "a new view rebuilds from the parent: a rebuilt atom equals the first")
+        self.assertEqual(em.asm_index_stats()["materialized"], n_built + 1)
+
+    def test_the_planner_skips_captioned_units_before_any_atom_is_built(self):
+        path, whole, tree = self.restored_tree()
+        jd = self.km.jd
+        all_tasks = jd._ready_tasks(whole)
+        ids = {w["id"] for t in all_tasks for w in t["writes"]}
+        self.assertTrue(ids)
+        h0 = em.asm_checkpoint_stats()["hydratedAtoms"]
+        self.assertEqual(jd._ready_tasks(tree, None, ids), [], "every unit captioned: nothing planned")
+        self.assertEqual(em.asm_index_stats()["materialized"], 0, "...and no atom built: %s" % em.asm_index_stats()["materializedBy"])
+        self.assertEqual(em.asm_checkpoint_stats()["hydratedAtoms"], h0, "...and no body read")
+        first_ids = {sg["id"] for sg in em.segments(tree["turns"][0])}
+        pre_work = next(t for t in all_tasks if t["kind"] == "work" and not t.get("live") and any(w["id"] in first_ids for w in t["writes"]))
+        undone = [w["id"] for w in pre_work["writes"]]
+        got = jd._ready_tasks(tree, None, ids - set(undone))
+        self.assertEqual([w["id"] for t in got for w in t["writes"]], undone, "the one uncaptioned unit is planned, with its undone writes only")
+        self.assertLessEqual(em.asm_index_stats()["materialized"], len(pre_work["atoms"]), "at most that segment's atoms were built")
+        self.assertEqual([t["writes"] for t in jd._ready_tasks(tree)], [t["writes"] for t in all_tasks], "nothing captioned: the whole plan")
+        with em._MAT_LOCK:
+            em._ASM_INDEX_STATS.update(materialized=0, materializedBy={})
+        self.assertEqual(jd._ready_tasks(tree, None, ids), [])
+        work_ids = {w["id"] for t in all_tasks if t["kind"] == "work" for w in t["writes"]}   # every work caption filed, no
+        path2, whole2, tree2 = self.restored_tree("compaction_broken_stitch")                #  prompt caption: with hp False
+        with em._MAT_LOCK:                                                                   #  nothing is planned. A FRESH
+            em._ASM_INDEX_STATS.update(materialized=0, materializedBy={})                    #  restored tree: the one above is
+        work_ids2 = {w["id"] for t in jd._ready_tasks(whole2) if t["kind"] == "work" for w in t["writes"]}   # built and hydrated
+        real_segments, real_hydrate, calls = em.segments, em.hydrate, []                     #  whole by now, so its counters
+        em.segments = lambda turn: [dict(sg, hp=False) for sg in real_segments(turn)]      # cannot move; every segment's prompt
+        em.hydrate = lambda atoms, *a, **k: calls.append(len(atoms)) or real_hydrate(atoms, *a, **k)
+        try:
+            self.assertEqual(jd._ready_tasks(tree2, None, work_ids2), [])
+        finally:
+            em.segments, em.hydrate = real_segments, real_hydrate
+        self.assertEqual((em.asm_index_stats()["materialized"], calls), (0, []),
+                         "...and no segment is built or handed to hydrate (arm low 1): %s" % em.asm_index_stats()["materializedBy"])
+        self.assertEqual(em.asm_index_stats()["materialized"], 0,
+                         "a segment with no human message (no #p caption ever) is not re-checked by building its trigger: %s"
+                         % em.asm_index_stats()["materializedBy"])
+
+    def test_the_kernel_walkers_read_the_scalars(self):
+        path, whole, tree = self.restored_tree()
+        km = self.km
+        cut = tree["cutTurn"]
+        self.assertEqual(km._human_turn_floor(tree), km._human_turn_floor(whole))
+        w_sets, r_sets = km._merge_tx_sets(whole, SID), km._merge_tx_sets(tree, SID)
+        self.assertEqual((r_sets[0], r_sets[1], r_sets[4]), (w_sets[0], w_sets[1], w_sets[4]), "uuids, text uuids and the human floor agree")
+        self.assertEqual(em.asm_index_stats()["materialized"], 0, "the sets and the floor built nothing: %s" % em.asm_index_stats()["materializedBy"])
+        tail_texts = {t for turn in whole["turns"][cut:] for a in turn["atoms"] for t in km._atom_user_texts(a)}
+        self.assertEqual(r_sets[2], frozenset(tail_texts), "with no echo floor, the user texts are the tail's")
+        floor = min(a["t"] for a in whole["turns"][0]["atoms"] if a.get("t"))
+        r_old = km._merge_tx_sets(tree, SID, floor)
+        self.assertEqual(r_old[2], w_sets[2], "an echo floor at the first turn: every user text, as the whole parse's")
+        self.assertIs(km._merge_tx_sets(tree, SID, floor + 1), r_old, "a later floor is served by the entry covering it")
+        for w_segs, r_segs in self._pre_and_whole_segs(whole, tree):
+            for w_seg, r_seg in zip(w_segs, r_segs):
+                self.assertEqual(km._seg_mids(r_seg), km._seg_mids(w_seg))
+        h0 = em.asm_checkpoint_stats()["hydratedAtoms"]
+        for w_segs, r_segs in self._pre_and_whole_segs(whole, tree):
+            for w_seg, r_seg in zip(w_segs, r_segs):
+                self.assertEqual(km._seg_anchors(r_seg["atoms"]), km._seg_anchors(w_seg["atoms"]))
+                self.assertEqual(km._seg_jump(r_seg["atoms"]), km._seg_jump(w_seg["atoms"]))
+                self.assertEqual(km._seg_last_text(r_seg["atoms"]), km._seg_last_text(w_seg["atoms"]))
+        self.assertEqual(em.asm_checkpoint_stats()["hydratedAtoms"], h0, "the anchors, jump and last-text reads hydrate nothing")
+
+    def test_the_work_rule_is_pinned_beside_the_document_version(self):
+        """The document stores atom_has_work's verdict (w), seg_prompt_atom's (hp), _prose_chars (pc, pcs) and postal_mids
+        (mid, mids): a change to any of them changes what a stored document means, so it is a version bump. Re-pin here
+        WITH the bump."""
+        import hashlib, inspect
+        rule = "\n".join(inspect.getsource(f).strip() for f in (em.atom_has_work, em._has_text, em.atom_tool_uses, em.seg_prompt_atom,
+                                                                em._prose_chars, em.atom_prose_chars, em.postal_mids, em._encoded_mids,
+                                                                em.is_interrupt_record, em._content, em._text_of, em._lazy_of, em.atom_mids,
+                                                                em._machine_written)) + "\n" + em.POSTAL_RE.pattern
+        self.assertEqual((em._ASM_CKPT_V, hashlib.sha1(rule.encode()).hexdigest()[:10]), (5, "56888f276a"),
+                         "the stored verdicts' rules changed: bump em._ASM_CKPT_V and re-pin the digest here")
+
+    def test_the_stored_rules_on_odd_content_shapes(self):
+        """The readings the document stores where the body road's shape is odd: an assistant message whose content is a bare
+        string counts as text (work) for a resident atom and for its lazy marker alike, unlike the judges' body road, which
+        read no text there (documented at atom_has_work); a bare string or a nested list inside a content list carries no
+        message id (as the body road read it), while a bare-string content does."""
+        bare = {"type": "assistant", "uuid": "a-bare", "message": {"role": "assistant", "content": "a bare reply"}}
+        self.assertTrue(em.atom_has_work(bare))
+        lazy = dict(bare, lazy=em._lazy_of(bare, "a", 0), message=None)
+        self.assertTrue(em.atom_has_work(lazy), "the marker's nt reads the bare string as text: the two roads agree")
+        mk = "<!-- romp-msg-id: 1700000000.1_1.TESTHOST -->"
+        self.assertEqual(em.postal_mids(mk), ["1700000000.1_1.TESTHOST"], "a bare-string content")
+        self.assertEqual(em.postal_mids([mk, [{"type": "text", "text": mk}]]), [], "no block: no id")
+        self.assertEqual(em.postal_mids([{"type": "text", "text": mk}, "x"]), ["1700000000.1_1.TESTHOST"])
+
+
+class CapsSizedToTheMachine(unittest.TestCase):
+    """2026-09-11: the index's 20,000-atom literal evicted 1.19 million atoms in 150 s on a 50-session devbox, the 64 MB body memo
+    hydrated 3.1 GB, and the 64 KB fold-state cap cold-refolded 31 leaves (1.74 GB) at every boot. The user's direction: caches are
+    one shared pool sized to the machine, never a small literal."""
+
+    def test_the_index_cap_is_a_fraction_of_the_machine_with_a_floor(self):
+        text = "MemTotal:       123634396 kB\n"
+        self.assertEqual(em._machine_memory_bytes(text), 123634396 * 1024)
+        self.assertEqual(em._machine_memory_bytes("garbage"), 0, "unreadable: zero, so the floors apply")
+        self.assertGreaterEqual(em._MAT_CAP, 500_000)
+        self.assertGreaterEqual(em._HYDRATED_CAP, 1024 ** 3)
+        self.assertEqual(em._CKPT_FOLD_CAP, 8 * 1024 * 1024)
+
+    def test_the_environment_sets_each_cap_outright(self):
+        with mock.patch.dict(os.environ, {"ROMP_ASM_INDEX_CAP": "777", "ROMP_HYDRATED_CAP_MB": "3", "ROMP_CKPT_FOLD_CAP_KB": "2"}):
+            self.assertEqual(em._env_or("ROMP_ASM_INDEX_CAP", 1), 777)
+            self.assertEqual(em._env_or("ROMP_HYDRATED_CAP_MB", 1, 1024 * 1024), 3 * 1024 * 1024)
+            self.assertEqual(em._env_or("ROMP_CKPT_FOLD_CAP_KB", 1, 1024), 2048)
+        with mock.patch.dict(os.environ, {"ROMP_ASM_INDEX_CAP": "junk"}):
+            self.assertEqual(em._env_or("ROMP_ASM_INDEX_CAP", 5), 5, "a bad value: the derived default")
+
+    def test_the_caps_are_derived_in_source_not_literals(self):
+        src = open(em.__file__).read()
+        self.assertIn('_MAT_CAP = _env_or("ROMP_ASM_INDEX_CAP", max(500_000, _machine_memory_bytes() // (32 * 1024)))', src)
+        self.assertIn('_HYDRATED_CAP = _env_or("ROMP_HYDRATED_CAP_MB", max(1024 ** 3, _machine_memory_bytes() // 32), 1024 * 1024)', src)
+        self.assertIn('_CKPT_FOLD_CAP = _env_or("ROMP_CKPT_FOLD_CAP_KB", 8 * 1024 * 1024, 1024)', src)
 
 
 if __name__ == "__main__":

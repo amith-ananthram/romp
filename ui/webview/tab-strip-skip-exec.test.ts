@@ -67,6 +67,8 @@ type Hooks = {
   tabStateClass: typeof tabStateClass; tabDotClass: typeof tabDotClass; tabDotTitle: typeof tabDotTitle; sectionPip: typeof sectionPip; sectionPipMembers: typeof sectionPipMembers; sectionPipTitle: typeof sectionPipTitle;
   newSkeletonState: typeof newSkeletonState; renderKind: typeof renderKind;   // the skeleton strip (2026-09-07): empty here, so every listed id is a loaded tab or a placeholder
   skeletons: number;          // skeleton tabs minted (none expected: the set stays empty in these worlds)
+  timers: Array<() => void>;  // the deferred checks renderTabs schedules (setTimeout 0), fired by the test when it chooses
+  activated: string[];        // every setActive the fired checks made (T357 later lows: the hidden tab's restore)
 };
 type Api = {
   renderTabs: () => void; sig: () => string; folded: () => Set<string>;
@@ -88,6 +90,7 @@ function lift(): (hooks: Hooks) => Api {
     let renameActive = false, renderPendingAfterRename = false, tabPointerHeld = false, renderPendingWhilePressed = false;
     let tabStripSig = "", activeId = null, peekId = null, allHiddenBlanked = false, draggedId = null, draggedEl = null, tabDragCommitted = false;
     let order = [], closingTabs = new Set(), tabMeta = new Map(), sessions = new Map(), views = new Map();
+    let vanishedId = null, vanishedWhy = null;   // the unfocused pane's memory of what vanished and why (T357)
     let collapsedTabIds = new Set(), draggedGroup = null, provisionalId = null, provisionalTags = [];
     // stripGroupRows mirrors the default. Its break site is never reached here: FakeEl has no childElementCount,
     // so the gate's last operand is undefined whatever the setting, hence no makeRowBreak stub. Give FakeEl a
@@ -100,7 +103,11 @@ function lift(): (hooks: Hooks) => Api {
       createTextNode: (t) => { const n = new H.FakeEl("#text"); n.textContent = t; return n; } };
     const auditTabOrder = () => {}; const onlyTag = () => H.only; const matchesOnly = (name, only) => name.includes(only);
     const tabInView = (id) => id === peekId || !H.hidden.has(id);
-    const setActive = () => {}; const setTimeout = () => 0;
+    // the one visibility predicate renderTabs builds visibleIds from (T357 later lows): the view, then the #only= filter
+    const stripShows = (id, only) => tabInView(id) && (!only || matchesOnly(sessions.get(id)?.name ?? tabMeta.get(id)?.name ?? "", only));
+    const stripLists = (id) => !closingTabs.has(id) && (order.includes(id) || tabMeta.has(id));   // the strip's one membership rule (T357 fix)
+    const setActive = (id) => { H.activated.push(id); }; const setTimeout = (f) => { H.timers.push(f); return 0; };   // the deferred checks, held for the test to fire
+    const unfocusHiddenByView = () => {};
     // the section-at-a-glance view's readers on the strip, inert: the plan the view reads (lastStripItems), the
     // section the pane shows (snapView, null: no view open, so stripAftermath's follow does nothing), and the
     // view's own painter and focus probe (never reached while snapView is null)
@@ -141,6 +148,7 @@ function lift(): (hooks: Hooks) => Api {
         else if (k === "sessions") sessions = p[k]; else if (k === "tabMeta") tabMeta = p[k]; else if (k === "settings") settings = p[k];
         else if (k === "views") views = p[k]; else if (k === "renameActive") renameActive = p[k]; else if (k === "tabPointerHeld") tabPointerHeld = p[k];
         else if (k === "provisionalId") provisionalId = p[k]; else if (k === "provisionalTags") provisionalTags = p[k];
+        else if (k === "vanishedId") vanishedId = p[k]; else if (k === "vanishedWhy") vanishedWhy = p[k];
         else throw new Error("unknown knob " + k); } },
       pending: () => ({ renderPendingAfterRename, renderPendingWhilePressed }) };
   `;
@@ -161,7 +169,7 @@ function world(): { H: Hooks; api: Api; sessions: Map<string, any>; tabMeta: Map
                      keyHint: "Open a session (K)", lens: { all: true }, unions: [], tips: [], aftermaths: [], rowPaints: 0, tagSyncs: 0, placeholders: 0,
                      groupsRaw: null, phone: false, heads: [],
                      planStrip, parseTabGroups, headWords, tabStateClass, tabDotClass, tabDotTitle, sectionPip, sectionPipMembers, sectionPipTitle,
-                     newSkeletonState, renderKind, skeletons: 0 };
+                     newSkeletonState, renderKind, skeletons: 0, timers: [], activated: [] };
   const api = lift()(H);
   const sessions = new Map<string, any>([["a", session("web", "ready")], ["b", session("api", "working")]]);
   const tabMeta = new Map<string, any>([["p", { name: "tests", color: { bg: "#112233", fg: "#ffffff" } }]]);
@@ -405,4 +413,37 @@ test("the all-hidden blank lands on the skip path when the active view appears b
   api.renderTabs();
   assert.equal(H.bar.wipes, 2);
   assert.equal(av.el.style.display, "", "restored once anything is visible");
+});
+
+test("executed: the hidden tab's restore fires only for a tab still on the strip (T357 later lows, the review's low)", () => {
+  // the pane unfocused with web hidden by the filter (vanishedWhy "hidden"); the filter lifts and renderTabs schedules
+  // the restore. BEFORE it fires, web is torn down while not active: dismissSession writes vanished* for the active tab
+  // alone, so the reason still reads "hidden" while web has left `order`. The timer must not hand focus to a tab nobody
+  // can see: the fire-time check reads the strip's membership, not only the predicate
+  const { H, api, sessions } = world();
+  api.set({ activeId: null, vanishedId: "a", vanishedWhy: "hidden" });
+  api.renderTabs();
+  assert.equal(H.timers.length, 1, "the restore is scheduled once");
+  api.set({ order: ["b", "p"] }); sessions.delete("a");
+  H.timers[0]();
+  assert.deepEqual(H.activated, [], "…and does not fire for a tab that left the strip meanwhile");
+  // the same schedule with the tab still listed restores it
+  const w2 = world();
+  w2.api.set({ activeId: null, vanishedId: "a", vanishedWhy: "hidden" });
+  w2.api.renderTabs();
+  assert.equal(w2.H.timers.length, 1);
+  w2.H.timers[0]();
+  assert.deepEqual(w2.H.activated, ["a"], "the tab still on the strip takes focus back");
+});
+
+test("executed: the restore's fire-time membership is the paint's own rule: a tab listed only as a placeholder paints, so it restores (T357 fix)", () => {
+  // the schedule reads visibleIds (order AND the tabMeta placeholders); the fire-time check read `order` alone, so a
+  // tab present only as a placeholder painted while its restore declined (the review's low). One rule at both ends.
+  const { H, api, tabMeta } = world();
+  tabMeta.set("a", { name: "web", color: { bg: "#112233", fg: "#ffffff" } });
+  api.set({ order: ["b", "p"], activeId: null, vanishedId: "a", vanishedWhy: "hidden" });
+  api.renderTabs();
+  assert.equal(H.timers.length, 1, "the placeholder-only tab is visible, so the restore is scheduled");
+  H.timers[0]();
+  assert.deepEqual(H.activated, ["a"], "…and fires: it paints, so it restores");
 });

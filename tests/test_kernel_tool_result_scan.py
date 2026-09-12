@@ -195,13 +195,13 @@ class SegMidsShapes(unittest.TestCase):
         m = ["1700000000.%d_1.TESTHOST" % i for i in range(6)]
         obj = {"a": marker(m[0]), marker(m[1]): [1, marker(m[2]), {"c": marker(m[3]), 4: marker(m[4])}, None, True],
                "d": (marker(m[5]),), "e": {}}
-        self.assertEqual(km._encoded_mids(obj), m)
-        self.assertEqual(km._encoded_mids(obj), POSTAL_RE.findall(json.dumps(obj)))
+        self.assertEqual(km.em._encoded_mids(obj), m)
+        self.assertEqual(km.em._encoded_mids(obj), POSTAL_RE.findall(json.dumps(obj)))
         sink = ["seed"]
-        self.assertIs(km._encoded_mids([marker(m[0])], sink), sink, "appends to the list it is given")
+        self.assertIs(km.em._encoded_mids([marker(m[0])], sink), sink, "appends to the list it is given")
         self.assertEqual(sink, ["seed", m[0]])
-        self.assertEqual(km._encoded_mids(None), [])
-        self.assertEqual(km._encoded_mids(object()), [])
+        self.assertEqual(km.em._encoded_mids(None), [])
+        self.assertEqual(km.em._encoded_mids(object()), [])
 
 
 def asst(bid, name, inp):

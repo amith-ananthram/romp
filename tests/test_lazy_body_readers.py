@@ -17,10 +17,10 @@ BODY_READ = re.compile(r'\.get\("message"\)|\["message"\]|"toolUseResult"|"skill
 # kernel.py: the audited readers. Hydrating leaves (the comment names the stage), whole-turn hydrators, and readers of raw
 # transcript records or live atoms (never lazy).
 KERNEL_ALLOWED = {
-    # leaves that hydrate the atom(s) they read
-    "_atom_md", "_atom_user_text", "_atom_user_texts", "_atom_prose_chars", "_interrupt_cause", "_seg_anchors", "_seg_jump",
-    "_seg_last_text", "_seg_prompt", "_seg_mids", "_open_turn_progress", "_seg_of_tool_uses", "_fold_tasks_turn", "_turn_landed",
-    "_interrupt_settle",
+    # leaves that hydrate the atom(s) they read (T358 moved _atom_prose_chars, _seg_anchors, _seg_jump, _seg_last_text and
+    # _seg_mids to the scalar readers below: they read no body at all now)
+    "_atom_md", "_atom_user_text", "_atom_user_texts", "_interrupt_cause", "_seg_prompt", "_open_turn_progress",
+    "_seg_of_tool_uses", "_fold_tasks_turn", "_turn_landed", "_interrupt_settle",
     # the chat build hydrates the turns it renders before its loops
     "build_session",
     # readers of raw transcript records (jsonl rows), never atoms
@@ -37,6 +37,7 @@ EVENT_MODEL_ALLOWED = {
     "FileAdapter", "_emit_state", "_chrono", "synthesize_orphans", "synthesize_idle", "is_interrupt_record", "_is_opener",
     "_turn_id", "segment_turns", "_finalize_turn", "_segment_id", "segments", "_seam_real_work", "split_segment",
     "_text_hash8", "_stop_reason", "_has_text", "_machine_written", "_lazy_of", "_atom_kind", "_atom_scalars", "_hydrate_one",
+    "_prose_chars", "atom_mids", "atom_is_settle",     # scalar-first readers (T358): the lazy marker answers, the body only for a resident atom
     "hydrate", "is_lazy", "atom_tool_uses", "atom_tool_results", "atom_model", "asm_checkpoint_write", "declared_plan",
     "plan_atoms",                                       # reads blocks only of atoms with no lazy marker; a lazy one answers from tu/tr
     "_pre_tree_identity", "_restore_prefix_atoms", "_asm_heal", "_asm_full", "_asm_fold", "_asm_restore",
@@ -55,7 +56,8 @@ EVENT_MODEL_ALLOWED = {
 SDK_BACKEND_ALLOWED = None        # the backend builds live atoms and reads raw records only: every site allowed, listed for the record
 
 JUDGE_ALLOWED = {
-    "_atom_text", "_unit_text", "_has_asst_work", "_seg_launches", "_human_prompt_record", "_awaiting_bg_hold",
+    "_atom_text", "_unit_text", "_seg_launches", "_human_prompt_record", "_awaiting_bg_hold",   # _has_asst_work reads scalars (T358)
+    "_relay_turn_text",   # the relayed question's conversation excerpt (T334 follow-on): hydrates the atom it renders
     # raw records, the states log, captions
     "transcript_head", "_bg_step", "_bg_unresolved",
     "_skill_load_index",                                # the skill-load boot pass reads raw jsonl rows it json.loads itself (T333)
@@ -123,9 +125,9 @@ class BodyReadersAreAudited(unittest.TestCase):
 
     def test_every_hydrating_leaf_calls_hydrate_before_its_read(self):
         """The leaves the audit named hydrate at the top of their body: the call sits before any body read."""
-        for name, fns in (("kernel.py", ["_atom_md", "_atom_user_text", "_atom_user_texts", "_atom_prose_chars", "_seg_anchors", "_seg_jump",
-                                         "_seg_last_text", "_seg_prompt", "_seg_mids", "_open_turn_progress", "_fold_tasks_turn", "_turn_landed"]),
-                          ("judge.py", ["_atom_text", "_unit_text", "_has_asst_work", "_seg_launches", "_human_prompt_record"])):
+        for name, fns in (("kernel.py", ["_atom_md", "_atom_user_text", "_atom_user_texts", "_seg_prompt", "_open_turn_progress",
+                                         "_fold_tasks_turn", "_turn_landed"]),
+                          ("judge.py", ["_atom_text", "_unit_text", "_seg_launches", "_human_prompt_record", "_relay_turn_text"])):
             src = open(os.path.join(KERNEL, name)).read()
             tree = ast.parse(src)
             defs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
@@ -139,6 +141,39 @@ class BodyReadersAreAudited(unittest.TestCase):
                 if first_read is not None:
                     self.assertLess(hyd, first_read, "%s.%s hydrates before its first body read" % (name, fn))
 
+
+
+class ScalarReadersReadNoBody(unittest.TestCase):
+    """T358: the per-cycle walkers over a session's history read scalars, never a body. The kernel's and the judges'
+    segment readers contain no body read and no hydrate call (a lazy atom answers from its marker through the event
+    model's helpers); the event model's scalar-first helpers branch on the lazy marker before their body read, so the
+    body path is reached only for a resident atom."""
+    def _defs(self, name):
+        src = open(os.path.join(KERNEL, name)).read()
+        tree = ast.parse(src)
+        lines = src.split("\n")
+        return {n.name: "\n".join(lines[n.lineno - 1:n.end_lineno]) for n in tree.body if isinstance(n, ast.FunctionDef)}
+
+    def test_segment_readers_read_no_body(self):
+        for name, fns in (("kernel.py", ["_atom_prose_chars", "_seg_anchors", "_seg_jump", "_seg_last_text", "_seg_mids",
+                                         "_human_turn_floor", "_merge_tx_sets"]),
+                          ("judge.py", ["_has_asst_work", "_seg_work", "_turn_work"])):   # _ready_tasks hydrates a planned segment once, on purpose
+            defs = self._defs(name)
+            for fn in fns:
+                body = "\n".join(l.split("#", 1)[0] for l in defs[fn].split("\n") if '"""' not in l)
+                self.assertIsNone(BODY_READ.search(body), "%s.%s reads no body" % (name, fn))
+                self.assertNotIn("em.hydrate(", body, "%s.%s hydrates nothing" % (name, fn))
+
+    def test_event_model_helpers_branch_on_the_marker_first(self):
+        defs = self._defs("event_model.py")
+        for fn, via in (("atom_prose_chars", "_prose_chars("), ("atom_mids", None), ("atom_is_settle", None), ("atom_tool_uses", None),
+                        ("_has_text", None)):
+            body = defs[fn]
+            code = body.split('"""', 2)[-1]                     # after the docstring
+            lz = code.index('.get("lazy")')
+            read = code.index(via) if via else BODY_READ.search(code).start()   # the body read, or the helper that does it
+            self.assertLess(lz, read, "%s asks the marker before the body" % fn)
+        self.assertNotIn(".get(\"message\")", defs["atom_has_work"], "atom_has_work composes scalar helpers only")
 
 if __name__ == "__main__":
     unittest.main()

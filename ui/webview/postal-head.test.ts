@@ -73,7 +73,7 @@ test("render.ts builds the postal card's head through postalHead and the shared 
   const start = RENDER.indexOf("function renderPostalService(");
   const fn = RENDER.slice(start, RENDER.indexOf("\nfunction ", start + 10));
   assert.match(fn, /const \{ gist: summaryText, body: fullMd \} = postalHead\(ev\);/);
-  assert.match(fn, /if \(fullMd\) \{ body = el\("div", "notice-md md"\); body\.innerHTML = md\(fullMd, postalRepoFor\(ev\)\); highlight\(body\); \}/);
+  assert.match(fn, /if \(fullMd\) \{ body = el\("div", "notice-md md"\); body\.innerHTML = md\(fullMd, postalRepoFor\(ev\)\); highlight\(body\); linkTerms\(body\); \}/);
   assert.doesNotMatch(fn, /postalServiceSummary\(ev\)|collapseWs\(fullText\)/, "the old in-place rule is gone");
 });
 

@@ -5,7 +5,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { onlyTag, matchesOnly, onlyTags } from "./only-filter";
+import { onlyTag, matchesOnly, onlyTags, onlyWindow } from "./only-filter";
 
 const read = (p: string) => fs.readFileSync(path.resolve(process.cwd(), "..", p), "utf8");
 const RENDER = read("ui/webview/render.ts");
@@ -55,6 +55,23 @@ test("onlyTag reads #only= / ?only= from the shell URL (window.top), lowercased"
   } finally { g.window = prev; }
 });
 
+test("onlyWindow: the shell's window when readable (a same-origin frame), else this pane's own (a top-level page, a cross-origin top, a harness)", () => {
+  const g = global as any;
+  const prev = g.window;
+  try {
+    const top: any = { location: { hash: "#only=demo", search: "" } };
+    const pane: any = { top, location: { hash: "", search: "" } };
+    g.window = pane; assert.equal(onlyWindow(), top); assert.equal(onlyTag(), "demo", "the filter is read from the shell's URL, not the pane's");
+    const cross: any = { get location() { throw new Error("SecurityError"); } };
+    const pane2: any = { top: cross, location: { hash: "#only=own", search: "" } };
+    g.window = pane2; assert.equal(onlyWindow(), pane2); assert.equal(onlyTag(), "own", "a cross-origin top throws on the read: the pane's own URL");
+    const solo: any = { location: { hash: "", search: "" } }; solo.top = solo;
+    g.window = solo; assert.equal(onlyWindow(), solo, "a top-level page is its own top");
+    const noTop: any = { location: { hash: "", search: "" } };
+    g.window = noTop; assert.equal(onlyWindow(), noTop, "no top at all (a harness window): the pane's own");
+  } finally { g.window = prev; }
+});
+
 test("the helper: case-insensitive prefix + reads the shell URL via window.top", () => {
   assert.match(ONLY, /export function onlyTag\(\)/);
   assert.match(ONLY, /window\.top \|\| window/);
@@ -66,25 +83,28 @@ test("the timeline's standalone helper splits the tag the same way", () => {
 });
 
 test("chat tabs filter by the #only tag", () => {
-  assert.match(RENDER, /import \{ onlyTag, matchesOnly \} from "\.\/only-filter";/);
-  assert.match(RENDER, /const visibleIds = only \? inViewIds\.filter\(\(id\) => matchesOnly\(nameOf\(id\), only\)\) : inViewIds;/);
+  assert.match(RENDER, /import \{ onlyTag, matchesOnly, onlyWindow \} from "\.\/only-filter";/);
+  assert.match(RENDER, /const onlyHashWindow = onlyWindow\(\);\s*\n\s*onlyHashWindow\.addEventListener\("hashchange", onOnlyHashChange\);/, "the strip's live-edit listener binds to the window the filter is read from (the shell's when framed)");
+  assert.match(RENDER, /const visibleIds = ids\.filter\(\(id\) => stripShows\(id, only\)\);/, "the #only= filter rides the one predicate the deferred checks read too (stripShows: tabInView, then matchesOnly over the hash)");
+  assert.match(RENDER, /return !only \|\| matchesOnly\(sessions\.get\(id\)\?\.name \?\? tabMeta\.get\(id\)\?\.name \?\? "", only\);/);
   // the filtered ids are what the strip plan renders (tab-groups.ts planStrip, since tab groups 2026-09-04)
   assert.match(RENDER, /const plan = planStrip\(visibleIds,/);
 });
 
-test("a filtered view re-points the CHAT BODY, not just the tab bar", () => {
+test("a filtered view blanks the CHAT BODY too: the active tab it hides goes unfocused, never re-pointed", () => {
   // the filter hid a non-matching TAB but left its transcript rendering — a real session's chat
   // (nimbus) sat in a `#only=api,tests,web` frame, statusline and all (the user 2026-07-16). The
   // whole point of the filter is a clean recording frame, so the selection must follow it.
   // the re-point covers BOTH filters since session views landed (2026-08-18): a hidden or
   // filtered-out active session must not keep its transcript on screen
-  assert.match(RENDER, /if \(activeId && ids\.includes\(activeId\) && !visibleIds\.includes\(activeId\) && visibleIds\.length\)/);
+  // (T357: the #only= filter is applied on top of tabInView and is no peek input, so an active tab it hides reaches
+  // this check; the pane goes UNFOCUSED naming it (its transcript leaves the screen, the filter's clean frame holds)
+  // and is never re-pointed at the first visible session; the fire-time check reads the predicate visibleIds uses)
+  assert.match(RENDER, /if \(activeId && ids\.includes\(activeId\) && !visibleIds\.includes\(activeId\)\) \{\s*\n\s*const hid = activeId;\s*\n\s*setTimeout\(\(\) => \{ if \(activeId === hid && !stripShows\(hid\)\) unfocusHiddenByView\(hid\); \}, 0\);/);
+  assert.doesNotMatch(RENDER, /setActive\(next\); \}, 0\);/, "no re-point");
   // the deferred bounce re-validates at FIRE time since the ephemeral peek (2026-08-24): an
   // activation between schedule and fire (a feed click opening a peek) makes the active tab
   // visible again — bouncing then would kick the user off the tab they just opened
-  // (T357: the fallback no longer re-points the pane at another session; it goes UNFOCUSED naming the tab the view
-  // hides, which still takes the hidden transcript off screen, and comes back to it when the view shows it again)
-  assert.match(RENDER, /setTimeout\(\(\) => \{ if \(activeId !== next && activeId && !tabInView\(activeId\)\) unfocusHiddenByView\(activeId\); \}, 0\);/);
 });
 
 test("feed cards filter by the #only tag; clear bookkeeping still uses the FULL payload", () => {
@@ -112,4 +132,23 @@ test("timeline lanes filter by the #only tag (self-contained helper in the stand
   assert.match(TL, /function _rompOnlyTag\(\)/);
   assert.match(TL, /function _rompMatchesOnly\(name, tag\)/);
   assert.match(TL, /sessions: data\.sessions\.filter\(\(s\) => _rompMatchesOnly\(s\.name, _only\)\)/);
+});
+
+test("the hash listener is a named handler and comes off the shell's window on pagehide (a closed split column must not hold the pane alive)", () => {
+  const a = RENDER.indexOf("const onOnlyHashChange = ");
+  const p = RENDER.indexOf('window.addEventListener("pagehide", () => onlyHashWindow.removeEventListener', a);
+  const b = RENDER.indexOf("\n", p);
+  assert.ok(a > 0 && p > a && b > p, "anchors not found: the listener block moved; re-anchor");
+  const js = RENDER.slice(a, b).replace(/\(\): void =>/g, "() =>");
+  const shell: any = { added: [] as string[], removed: [] as string[], f: null,
+    addEventListener(t: string, f: unknown) { this.added.push(t); this.f = f; },
+    removeEventListener(t: string, f: unknown) { this.removed.push(t + (f === this.f ? ":same" : ":other")); } };
+  const paneHandlers: Record<string, () => void> = {};
+  const pane: any = { addEventListener(t: string, f: () => void) { paneHandlers[t] = f; } };
+  let repaints = 0;
+  new Function("onlyWindow", "renderTabs", "window", js)(() => shell, () => { repaints++; }, pane);
+  assert.deepEqual(shell.added, ["hashchange"], "one listener on the window the filter is read from");
+  assert.deepEqual(Object.keys(paneHandlers), ["pagehide"], "the pane's own window carries only the pagehide belt");
+  shell.f(); assert.equal(repaints, 1, "the named handler repaints the strip");
+  paneHandlers.pagehide(); assert.deepEqual(shell.removed, ["hashchange:same"], "the same handler comes off on pagehide");
 });
