@@ -456,6 +456,16 @@ class ScalarWalkers(Restored):
         with em._MAT_LOCK:
             em._ASM_INDEX_STATS.update(materialized=0, materializedBy={})
         self.assertEqual(jd._ready_tasks(tree, None, ids), [])
+        work_ids = {w["id"] for t in all_tasks if t["kind"] == "work" for w in t["writes"]}   # every work caption filed, no
+        real = em.segments                                                                   #  prompt caption: with hp False
+        em.segments = lambda turn: [dict(sg, hp=False) if turn.get("pre") else sg for sg in real(turn)]   # nothing is planned...
+        try:
+            h1 = em.asm_checkpoint_stats()["hydratedAtoms"]
+            self.assertEqual(jd._ready_tasks(tree, None, work_ids), [])
+        finally:
+            em.segments = real
+        self.assertEqual((em.asm_index_stats()["materialized"], em.asm_checkpoint_stats()["hydratedAtoms"]), (0, h1),
+                         "...and the segment is neither built nor body-read (arm low 1)")
         self.assertEqual(em.asm_index_stats()["materialized"], 0,
                          "a segment with no human message (no #p caption ever) is not re-checked by building its trigger: %s"
                          % em.asm_index_stats()["materializedBy"])
@@ -492,8 +502,8 @@ class ScalarWalkers(Restored):
         import hashlib, inspect
         rule = "\n".join(inspect.getsource(f).strip() for f in (em.atom_has_work, em._has_text, em.atom_tool_uses, em.seg_prompt_atom,
                                                                 em._prose_chars, em.atom_prose_chars, em.postal_mids, em._encoded_mids,
-                                                                em.is_interrupt_record))
-        self.assertEqual((em._ASM_CKPT_V, hashlib.sha1(rule.encode()).hexdigest()[:10]), (5, "c56a1970a8"),
+                                                                em.is_interrupt_record, em._content, em._text_of, em._lazy_of, em.atom_mids))
+        self.assertEqual((em._ASM_CKPT_V, hashlib.sha1(rule.encode()).hexdigest()[:10]), (5, "42d84c7ab4"),
                          "the stored verdicts' rules changed: bump em._ASM_CKPT_V and re-pin the digest here")
 
     def test_the_stored_rules_on_odd_content_shapes(self):

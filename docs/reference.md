@@ -1405,6 +1405,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `corrupt`), `dirty` (files whose folds moved since their last write),
   `readBytes` and `readByPath` (what the JSONL reader pulled off disk since
   boot, in total and per file).
+- `stacks`: every thread's last six frames, keyed by the thread's ident and
+  name, when the kernel runs with `ROMP_PERF_STACKS` set (a debugging aid for a
+  served test on a runner nobody can log into); `null` otherwise.
 - `asmCheckpoint`: the assembly documents since boot: `written`, `restored`,
   `fallbacks` per reason (`version`, `session`, `inputs`, `lineage`, `shrunk`,
   `rewrite`, `guard`, `identity`, `corrupt`, `restore`), `skipped` per reason

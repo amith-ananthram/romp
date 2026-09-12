@@ -515,10 +515,17 @@ class PlannerSkipsCaptioned(PassFrame):
         cap = jd.CAPDIR / (SID + ".jsonl")
         real = jd._file_key
         jd._file_key = lambda p: object() if p == str(cap) else real(p)
+        n0 = jd._CAPTIONS_STATS["unstatable"]; jd._SAID_ONCE.clear()
+        import contextlib, io
+        err = io.StringIO()
         try:
-            self.assertEqual(jd.tasks_for(SID, str(self.path), [str(self.path)], T0 + 100), [])
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(jd.tasks_for(SID, str(self.path), [str(self.path)], T0 + 100), [])
+                self.assertEqual(jd.tasks_for(SID, str(self.path), [str(self.path)], T0 + 100), [])
         finally:
             jd._file_key = real
+        self.assertEqual(jd._CAPTIONS_STATS["unstatable"], n0 + 2, "counted per pass")
+        self.assertEqual(err.getvalue().count("cannot be stat'ed"), 1, "said once, loudly")
         self.assertFalse((jd.PCACHE / (SID + ".json")).exists(), "no memo for a pass that planned nothing")
         self.assertTrue(self._ended_work_tasks(jd.tasks_for(SID, str(self.path), [str(self.path)], T0 + 100)), "the next pass plans")
 

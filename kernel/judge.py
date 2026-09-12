@@ -2688,11 +2688,13 @@ def _ready_tasks(session, store=None, done=()):
             want_w = seg["id"] not in done or (single and not turn_open and turn["id"] not in done)
             if not want_p and not want_w:
                 continue                               # captioned at every grain: no atom of it is built or read
+            want_p = want_p and seg.get("hp") is not False   # a restored segment stores whether its message is human-authored (hp)
+            want_w = want_w and (turn_open and si == len(segs) - 1 or _seg_work(seg))   # ...and whether it has work (w)
+            if not want_p and not want_w:
+                continue                               # nothing to caption here: no atom built, no body read (arm low 1)
             em.hydrate(seg["atoms"])                   # ONE read per planned segment: the prompt and unit texts below then hit the
-            if want_p and seg.get("hp") is not False:      # memo, so the judge thread takes the leaf's read lock once per segment, not
-                                                       # once per prompt and once per unit (the base's granularity; T358 CI red)
-                                                       # a restored segment stores whether its message is human-authored (hp)
-                trig = em.seg_prompt_atom(seg)
+            if want_p:                                 # memo, so the judge thread takes the leaf's read lock once per segment, not
+                trig = em.seg_prompt_atom(seg)         # once per prompt and once per unit (the base's granularity; T358 CI red)
                 if trig and trig.get("author") == "human":   # MESSAGE caption — ready now, even mid-work
                     tasks.append({"kind": "prompt", "atoms": [trig],
                                   "writes": [{"id": seg["id"] + "#p", "grain": "prompt", "t": seg["t"]}]})
@@ -3495,8 +3497,11 @@ def tasks_for(fsid, leaf, files, now, done=None):
     key = list(pair)                                   # as JSON reads it back: [[[mtime, size], ...], cut]
     cap_key = _file_key(str(CAPDIR / (fsid + ".jsonl")))   # the captions file's stat beside it (T358): the memo holds the UNDONE
     if cap_key is not None and not isinstance(cap_key, tuple):   #  units' tasks only, so a caption filed since must miss it (a strike
-        return []                                      #  files none). The sentinel (a file that exists but will not stat): this
-    cap_key = list(cap_key) if cap_key else None      #  session plans nothing this pass; the others' captions proceed
+        _CAPTIONS_STATS["unstatable"] += 1             #  files none). The sentinel (a file that exists but will not stat): this
+        _say_once_judge("captions: %s's captions file exists but cannot be stat'ed: no caption is planned for it until it can "
+                        "(/perf memos.captions.unstatable counts the passes)" % fsid)   # session plans nothing this pass; the others'
+        return []                                      #  captions proceed (arm low 3: loud, and counted, never silent)
+    cap_key = list(cap_key) if cap_key else None
     cf = PCACHE / (fsid + ".json")
     try:
         o = json.loads(cf.read_text())
@@ -3549,7 +3554,22 @@ def tasks_for(fsid, leaf, files, now, done=None):
 # memo serves READERS only (load_goal_archive_shared): every archiver keeps load_goal_archive, a fresh
 # private object it mutates and saves.
 _CAPTIONS_MEMO = {}        # fsid -> (file key taken before the read, the parsed rows)
-_CAPTIONS_STATS = {"served": 0, "parsed": 0}
+_SAID_ONCE = set()
+
+
+def _say_once_judge(line):
+    """One stderr line per distinct text for the process (a condition that recurs every pass is said the first time)."""
+    if line in _SAID_ONCE:
+        return
+    _SAID_ONCE.add(line)
+    try:
+        sys.stderr.write(line + "\n")
+    except Exception:
+        pass
+
+
+_CAPTIONS_STATS = {"served": 0, "parsed": 0, "unstatable": 0}   # unstatable: passes that planned nothing for a session whose
+#                                                                  captions file exists but will not stat (T358 arm low 3)
 _GOALARCH_MEMO = {}        # fsid -> (file key taken before the read, the guarded archive store: read-only)
 _GOALARCH_STATS = {"served": 0, "loaded": 0}
 _FILE_MEMO_MAX = 256
