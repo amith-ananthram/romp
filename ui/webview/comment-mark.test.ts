@@ -1,10 +1,12 @@
-// The comment mark's UNREAD cue (the user 2026-09-10): a landed reply you have not opened draws ONE solid outline
-// in the scroll notch's yellow around the WHOLE highlighted passage — in place of the 2026-09-08 dashed ring, which
-// was an outline on the inline mark and so painted once per line fragment (a wrapped passage wore a stack of dashed
-// boxes). The fill keeps saying pending vs landed exactly as before (T237: the green .busy wash = a reply still
-// being written, the 45% yellow .unread tier = landed); the box is the only cue for unread, and only on unread.
-// Source pins (no jsdom harness for the renderers); the union geometry itself is measured on the served page by
-// tests/test_comment_outline_served.py.
+// The comment mark's UNREAD cue: a landed reply you have not opened. Since T310 (the user 2026-09-10) a passage wears
+// ONE box around the WHOLE highlighted area, never a box per line — the 2026-09-08 ring was an outline on the inline
+// mark and so painted once per line fragment. Since 2026-09-12 (the user) that box is dashed in the needs-you red the
+// tab strip uses, and the cue follows the row count: a passage on one or two lines wears the per-fragment ring after
+// all (it hugs the text, where a box over two lines takes in the un-highlighted head and tail), three or more the box.
+// The painter (paintCommentOutlines) makes that call and toggles .cmt-ring on the marks; no mark rule but that one
+// carries an outline. The fill keeps saying pending vs landed exactly as before (T237: the green .busy wash = a reply
+// still being written, the 45% yellow .unread tier = landed). Source pins (no jsdom harness for the renderers); the
+// geometry itself is measured on the served page by tests/test_comment_outline_served.py.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -13,12 +15,16 @@ import * as path from "node:path";
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
 
-test("the per-fragment dashed ring is gone: no outline on the mark itself, in any state", () => {
-  assert.doesNotMatch(CSS, /mark\.cmt-hl\.unread \{ outline/);
-  assert.doesNotMatch(CSS, /dashed var\(--st-awaiting-bg\); outline-offset: 1px/);
+test("the ring is the painter's call: only mark.cmt-hl.unread.cmt-ring carries an outline; plain .unread still does not", () => {
+  assert.doesNotMatch(CSS, /mark\.cmt-hl\.unread \{ outline/, "unread alone decides nothing: the row count does");
+  assert.match(CSS, /^mark\.cmt-hl\.unread\.cmt-ring \{ outline: 1\.5px dashed var\(--st-awaiting-bg\); outline-offset: 1px; \}$/m, "the one- or two-row cue: the tab strip's needs-you ring, hugging the text");
   const marks = CSS.match(/^mark\.cmt-hl[^{]*\{[^}]*\}/gms) || [];
-  assert.ok(marks.length >= 6, "the mark rules are found");
-  for (const rule of marks) assert.doesNotMatch(rule, /outline/, "an outline on an inline mark paints per line fragment: " + rule);
+  assert.ok(marks.length >= 7, "the mark rules are found");
+  for (const rule of marks) {
+    if (rule.startsWith("mark.cmt-hl.unread.cmt-ring ")) continue;
+    assert.doesNotMatch(rule, /outline/, "an outline on an inline mark paints per line fragment — only the painter's .cmt-ring may, on one or two rows: " + rule);
+  }
+  assert.match(RENDER, /m\.classList\.toggle\("cmt-ring", ring\);/, "the painter toggles it");
 });
 
 test("read marks wear no box, and the fill tiers are byte-untouched — the colour still says pending vs landed", () => {

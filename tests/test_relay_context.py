@@ -236,7 +236,7 @@ class OnTheMarkerAndInTheMail(unittest.TestCase):
         node = lambda nid, text, parent=None, t=T0: {"id": nid, "text": text, "parentId": parent, "nodeComplete": False,
                                                     "blocked": False, "cleared": False, "trail": [], "t": t, "mt": t, "log": []}
         st = {"rompUuid": WORKER, "seq": 2, "placements": {}, "status": {top: "working"}, "confirming": [],
-              "nodes": {top: dict(node(top, "Ship the exporter"), askAnchor="machine"),   # a machine-anchored, delegated top
+              "nodes": {top: dict(node(top, "Ship the exporter"), askAnchor="machine", promptMsgId="m-d"),   # a machine-anchored top whose anchor names the dispatch
                         step: node(step, "Ask which client", parent=top, t=T0 + 60)}}
         return st, top, step
 

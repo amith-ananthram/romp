@@ -10703,7 +10703,9 @@ def _latch_prompt_msg_ids(session, store):
     it; the last delegate when a drained inbox holds several, the rule author_of applies to the delivery's peer), or ""
     when it carries no delegate (checked: a batched inbox whose first mail is a peer's coordinate and whose second the
     manager's dispatch is the manager's, and a delivery with no dispatch in it leaves _delegator_of its fallback, the
-    latest delegate at or before the mint; the manager's fourth review). The delegating peer of a top is then the
+    newest delegate at or before the mint whose relation stands, its own top open at the mint, walking past a stray
+    that anchored nothing (_standing_delegator); the manager's fourth review and the 2026-09-12 fix). The delegating
+    peer of a top is then the
     sender of THAT mail (_delegator_of), never merely the latest delegate the session received (a worker dispatched by
     two managers relays each block to the manager that asked, T334)."""
     cands = [nd for nd in store.get("nodes", {}).values()
@@ -12206,6 +12208,19 @@ def apply_group(store, menu, ops, t):
             child = menu[o["goal"] - 1]["id"]          # it) to a top-level card of its own — the inverse
             if child not in nodes or nodes[child].get("parentId") is None:
                 continue                               # merged away this reply, or already a top
+            ptop = nodes.get(_top_of(nodes, child) or "") or {}
+            if ptop.get("askAnchor") and ptop.get("askAnchor") != "machine" and not isinstance(nodes[child].get("origin"), dict):
+                for k in ("askAnchor", "askAnchorRecord", "promptMsgId"):   # a NON-machine parent's verdict (human,
+                    if k in ptop:                      #   scheduled, absent) comes along: the child's own mint record is
+                        nodes[child][k] = ptop[k]      #   a step's (a system record after a compaction, a notice), which
+                    else:                              #   a later latch would read as a machine anchor and hand the
+                        nodes[child].pop(k, None)      #   user's own decision to a peer (the manager's live case,
+                #                                          2026-09-12). A MACHINE parent's child is left to latch itself
+                #                                          from its own record: a system record reads machine with no
+                #                                          stamp and meets the standing-relation check, a typed record
+                #                                          reads human, where an inherited machine verdict would have
+                #                                          mailed the user's own question to the peer and dropped the top
+                #                                          out of the feed heal's hosts set (the verifier's first round)
             nodes[child]["parentId"] = None            # of group: a drifted tangent gets its own card
             if o.get("retitle"):                       # a step-phrased title may not stand alone as a card
                 nodes[child]["text"] = o["retitle"]
@@ -12802,12 +12817,12 @@ def _peer_name(sid):
         return ""
 
 
-_DELEG_CACHE = [None, {}]    # (mtime_ns, size), {to_sid: [(t, from_id), ...] ascending}: one scan per log change
+_DELEG_CACHE = [None, {}]    # (mtime_ns, size), {to_sid: [(t, from_id, mid), ...] ascending}: one scan per log change
 _DELEG_BY_MID = {}           # message id -> (from_id, to_sid) of that delegate row (filled by the same scan)
 
 
 def _delegates_to():
-    """{recipient sid: [(t, from_id), ...] ascending} for every DELEGATE row in the postal log that reached its recipient
+    """{recipient sid: [(t, from_id, mid), ...] ascending} for every DELEGATE row in the postal log that reached its recipient
     (a returned or withdrawn send, _learn_return, makes no entry): the team relation as the mail recorded it. The
     courier's planted origin, when present, is derived from these rows; today's stores hold none, so this is the
     primary record (T334). Cross-host rows key on the resolved to_sid like _postal_ask_maps."""
@@ -12834,7 +12849,7 @@ def _delegates_to():
             f, t_, ts = o.get("from_id"), o.get("to_sid") or o.get("to_id"), o.get("t")
             if not (f and t_ and ts) or str(o.get("id") or "") in returned or str(t_).startswith("peer:"):
                 continue
-            out.setdefault(str(t_), []).append((int(ts), str(f)))
+            out.setdefault(str(t_), []).append((int(ts), str(f), str(o.get("id") or "")))
             if o.get("id"):
                 by_mid[str(o["id"])] = (str(f), str(t_))
         for v in out.values():
@@ -12857,13 +12872,73 @@ def _delegate_sender(mid, sid=None):
     return frm if sid is None or str(to) == str(sid) else None
 
 
+def _open_at(nd, at):
+    """Whether node `nd` was open (neither done nor cleared) at evidence time `at`: its log folded up to that time, the
+    same fold that materializes its live state (_fold_node). A node whose log holds events, none of them by `at`, was
+    open then (its story had not begun); a node with NO log at all reads its live flags (an older store's node
+    completed before the log carried the story)."""
+    full = nd.get("log") or []
+    if not full:
+        return not nd.get("nodeComplete") and not nd.get("cleared")
+    log = [e for e in full if int(e.get("ev_t") or 0) <= int(at or 0)]
+    if not log:
+        return True
+    return _fold_node(dict(nd, log=log)).get("state") not in ("done", "cleared")
+
+
+def _dispatch_tops_open_at(nodes, at, exclude=None):
+    """{message id: whether a top it anchored was open at evidence time `at`} over the parentless nodes other than
+    `exclude`, keyed by the latch's stamp (promptMsgId) and the courier's planted origin (origin.msgId) alike; a mail
+    two tops name is open when either was (_open_at). Built once per attribution, so the walk over the delegate rows
+    costs a lookup per row rather than a pass over the store (the verifier's second round: rows times tops per call)."""
+    out = {}
+    for tid, tn in nodes.items():
+        if tid == exclude or not isinstance(tn, dict) or tn.get("parentId") is not None:
+            continue
+        o = tn.get("origin") if isinstance(tn.get("origin"), dict) else {}
+        mids = {str(tn.get("promptMsgId") or ""), str(o.get("msgId") or "")} - {""}
+        if not mids:
+            continue
+        opened = _open_at(tn, at)
+        for m in mids:
+            out[m] = out.get(m, False) or opened
+    return out
+
+
+def _standing_delegator(nodes, rows, at, exclude=None):
+    """The sender of the NEWEST delegate row ((t, from_id, mid) of _delegates_to) at or before `at` whose relation
+    stands, else None. A relation stands when a top of this store other than `exclude` carries the row's mail as its
+    anchor, by the latch's stamp or the courier's planted origin, and was open at `at` (_dispatch_tops_open_at). A
+    dispatch that anchored no top (handled without a goal) or whose top had finished is no standing relation; a row
+    with no message id sustains nothing (nothing could name it); and a stray later delegate from another peer that
+    anchored nothing (a hand-off note) is walked past, so it neither captures the block nor strands it as the user's
+    while the manager's dispatch top is open (the verifier's first round)."""
+    before = [r for r in rows if r[0] <= at]
+    if not before:
+        return None
+    open_by_mid = _dispatch_tops_open_at(nodes, at, exclude=exclude)
+    for row in reversed(before):
+        mid = str(row[2] or "") if len(row) > 2 else ""
+        if mid and open_by_mid.get(mid):
+            return row[1]
+    return None
+
+
 def _delegator_of(store, nid):
     """The peer that delegated the work `nid` sits under, or None when the goal is the user's own. Two records, the
-    courier's first: the top's planted origin.peer; else the sender of the latest DELEGATE mail this session received
-    at or before the top was minted (_delegates_to), provided the latch has POSITIVELY read the top's anchor as a
-    machine record (askAnchor "machine": the dispatch mail, never a prompt the user typed). An unlatched top, one
-    whose anchor is gone ("absent") or a scheduled prompt's top is left to the user (fail open to the block), whatever
-    mail the session got before. A top minted before any delegate reached the session predates the relation."""
+    courier's first: the top's planted origin.peer; else the sender of the DELEGATE mail the top's anchor names
+    (promptMsgId, the latch's stamp of the delivery's own dispatch), provided the latch has POSITIVELY read the top's
+    anchor as a machine record (askAnchor "machine": the dispatch mail, never a prompt the user typed). An unlatched
+    top, one whose anchor is gone ("absent") or a scheduled prompt's top is left to the user (fail open to the block),
+    whatever mail the session got before. A top whose anchor names no dispatch (a delivery holding only a peer's
+    heads-up, a watch notice, a record after a compaction; an unlatched stamp gets the same bound) falls back to the
+    newest delegate this session received at or before its mint whose dispatch stands as a relation: its own top,
+    latched or courier-planted, open at the mint (_standing_delegator, walking the rows newest first past any stray
+    delegate that anchored nothing; a row with no message id sustains nothing). A worker under a manager's standing dispatch mints later tops from notices and peers'
+    mails, and those blocks still go to the manager; a dispatch that anchored no top or whose top has finished is no
+    relation, and the fallback would otherwise hand the user's own decisions to whichever peer last sent any delegate
+    mail (the manager's live case, 2026-09-12: three decisions relayed to an unrelated peer nine hours after its mail,
+    whose reply lifted a wait nobody should have been in). The time proxy stands only on that event."""
     nodes = store.get("nodes", {})
     top = _top_of(nodes, nid) if nid in nodes else None
     tn = nodes.get(top) or {}
@@ -12875,9 +12950,9 @@ def _delegator_of(store, nid):
     sid = str(store.get("rompUuid") or str(nid).rsplit(":", 1)[0])
     peer = _delegate_sender(tn["promptMsgId"], sid) if tn.get("promptMsgId") else None   # the mail the anchor names, first
     if not peer:                                  # no mail id on the anchor, or one that is no dispatch to this session (a
-        before = [r for r in _delegates_to().get(sid, []) if r[0] <= int(tn.get("t") or 0)]   # stamp from before the
-        peer = before[-1][1] if before else None  #   delegate-kind rule, a quoted marker): the latest delegate at or
-                                                  #   before the mint, as for an anchor that names none
+        mint = int(tn.get("t") or 0)              #   stamp from before the delegate-kind rule, a quoted marker): the newest
+        peer = _standing_delegator(nodes, _delegates_to().get(sid, []), mint, exclude=top)   # delegate at or before the
+        #                                                                                       mint whose own top stood open then
     return None if not peer or ":" in peer else peer   # an ext: mailer or an unresolved cross-host key is no session that
                                                        #   could ever be asked (judge _presumed_closed: closed by construction)
 

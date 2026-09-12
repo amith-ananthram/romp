@@ -64,7 +64,8 @@ const PAIRS: Array<[string, string, number]> = [
   ["--dim", "--bg", 4.5],
   ["--fg", "--surface-raised", 4.5],
   ["--accent", "--bg", 3],
-  ["--cmt-hl-outline", "--bg", 3],   // the comment notch and the unread box: a LINE, so it must read against the page (T310)
+  ["--cmt-hl-outline", "--bg", 3],   // the comment notch (the rail tick's fill): a LINE, so it must read against the page (T310)
+  ["--st-awaiting-bg", "--bg", 3],   // the unread passage's dashed box and ring, and the tick's halo (2026-09-12): a line in the needs-you red
   ["--accent-fg", "--accent", 3],
   ["--warn", "--bg", 3],
   ["--err", "--bg", 3],

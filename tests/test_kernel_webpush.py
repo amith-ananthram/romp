@@ -1771,10 +1771,11 @@ class LandingRevealPins(unittest.TestCase):
         self.assertIn("romp:'revealCard'", html)   # a card kind also scrolls the feed to the card…
         self.assertIn("m.romp==='ready'&&m.app==='feed'", html)   # …once the feed has its cards
         # the TAP's scripts post no focus straight into the chat iframe any more (the kernel aims it). The split
-        # script (_LANDING_SPLIT_JS, 2026-09-08) is the one deliberate exception and is not a tap path: it hands a
-        # column the shell has just MADE the session it was opened on, addressed to that column (`own`).
+        # script (_LANDING_SPLIT_JS) posted one from 2026-09-08 to 2026-09-11 (the hand-over to a column the shell had
+        # just made); since then it seeds the column's state blob instead and posts none either.
         taps = km._LANDING_REVEAL_JS + km._LANDING_PUSH_JS + km._LANDING_MOBILE_JS
         self.assertNotIn("type:'focus',id:sid", taps, "no focus posted straight into the chat iframe any more")
+        self.assertNotIn("own:true", km._LANDING_SPLIT_JS, "the split's hand-over went with the seeded blob (2026-09-11); the plain focus a move into an open column posts wears no `own`")
         self.assertNotIn("type:'focus'", km._LANDING_REVEAL_JS)
         self.assertNotIn("setTimeout", km._LANDING_REVEAL_JS, "event-based: the feed's ready, never a timer")
 
