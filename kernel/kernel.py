@@ -336,8 +336,26 @@ class _PerfStats:
             # the file preview popover's slice cache (T351): hits and misses of GET /file?slice=1, the bytes it served,
             # and the entries the pusher's path warmed ahead of a hover
             self.file_slice_stats = {"hit": 0, "miss": 0, "bytes": 0, "warm": 0}
+            # the glossary (T351 stage 2): files parsed, frames / terms / bytes BUILT per cycle (the dedup slot decides what
+            # is shipped), entries cut (the byte cap or the heading ceiling), files refused over the read ceiling
+            self.glossary_stats = {"parses": 0, "framesBuilt": 0, "termsBuilt": 0, "bytesBuilt": 0, "cut": 0, "refused": 0}
 
     # ── writers (hot paths) ──
+    def glossary(self, parsed=False, terms=0, nbytes=0, cut=0, refused=False):
+        """One glossary file parsed (parsed=True) or one index frame BUILT (the pusher builds one per session per cycle;
+        the dedup slot decides what is shipped, so these are build counts, named so): the terms and bytes it carried,
+        and the entries cut (the byte cap, or sections past the heading ceiling), the /perf note beside a bounded cache."""
+        with self.lock:
+            d = self.glossary_stats
+            if refused:                      # a file over the read ceiling: not read, not held, said here and once on stderr
+                d["refused"] += 1
+                return
+            if parsed:
+                d["parses"] += 1
+            else:
+                d["framesBuilt"] += 1
+            d["termsBuilt"] += int(terms); d["bytesBuilt"] += int(nbytes); d["cut"] += int(cut)
+
     def file_slice(self, hit, nbytes=0, warm=False):
         """One GET /file?slice=1 served (hit: from the text cache; miss: read and indexed now), or one entry the
         pusher's path warmed (warm=True, no request)."""
@@ -508,6 +526,7 @@ class _PerfStats:
             judge = dict(self.judge)
             http = {pth: {"count": e[0], "ms": e[1]} for pth, e in self.http.items()}
             file_slice = dict(self.file_slice_stats)
+            glossary_stats = dict(self.glossary_stats)
             since = self.since
         pusher["ring_n"] = len(ring)
         pusher["cycle_ms_p50"] = self._pct(ring, 0.5)
@@ -564,6 +583,7 @@ class _PerfStats:
                 "process": _process_stats(), "pusher": pusher, "stages_ms": stages,
                 "builds": builds, "sends": sends, "goals": goals, "memos": memos, "judge": judge, "skillLoadIndex": skill_idx, "http": http,
                 "fileSlice": file_slice,                   # T351: the preview popover's slice cache (hit / miss / bytes / warm)
+                "glossary": glossary_stats,                # T351 stage 2: files parsed, frames / terms / bytes BUILT per cycle, entries cut, files refused
                 # T323: cold parses through the ONE parse store (stage 2): total = every miss (whoever asked), kernel =
                 # the display's asks among them, judge = the rest, hits = the display's asks served from the store,
                 # sharedHits = every hit. A boot with no client reads kernel 0.
@@ -44154,6 +44174,226 @@ def _slice_body(fp, sid, anchor):
     return 200, body, "application/json"
 
 
+# ── the glossary (T351 stage 2, the user 2026-09-11): a team's coinages, linked where they are written ──
+# One file per tag group, ~/.claude/glossaries/<group>.md (the dotfiles' directory symlink; under CLAUDE_CONFIG_DIR
+# when set, like every Claude-side path here), in the grammar of that folder's README: an opening `## Not coinages`
+# list of words never linked, then one `## <term>` section per coinage with a definition and the labelled bullets
+# plain words / also / scope / status / registered / link. A message is resolved against its AUTHOR's group (the
+# session's tag group, else its own name; per-group glossaries, no shared file: the user 2026-09-11); the repo-local
+# docs/glossary.md is a seam kept for a second source with no file today (lab_manager 2026-09-11). The kernel parses a
+# file once per (path, mtime) and ships the chat page an INDEX frame per session, bounded by bytes, on the pusher's
+# cycle like the comments frame (no timer, no watcher: the stat is the event); the client links terms at render time
+# and fills the term card from the index with no fetch. GET /glossary/<term> answers the lab's own consumers.
+_GLOSSARY_INDEX_MAX_BYTES = 256 * 1024
+_GLOSSARY_CACHE = collections.OrderedDict()  # (real path, mtime_ns) -> the parsed file; a rewrite is a new key, the old one goes
+_GLOSSARY_CACHE_ENTRIES = 16                 # files held at once (one per group in use); the read ceiling below bounds the bytes
+_GLOSSARY_CACHE_LOCK = threading.Lock()
+_GLOSSARY_REFUSED = set()                    # (real path, mtime_ns) already logged as over the read ceiling: one line per file version
+_GLOSSARY_LINK_MODES = ("all", "first", "off")
+_GLOSSARY_STATUSES = ("unconfirmed", "confirmed", "retired")
+_GLOSSARY_BULLET_RE = re.compile(r"^-\s+(plain words|also|scope|status|registered|link)\s*:\s*(.*?)\s*$", re.I)
+_GLOSSARY_SKIP_BOLD_RE = re.compile(r"^-\s+\*\*(.+?)\*\*")
+_GLOSSARY_SKIP_PLAIN_RE = re.compile(r"^-\s+([^:*]+?)\s*(?::|$)")
+_GLOSSARY_GROUP_RE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _glossary_dir():
+    """Where the per-group glossaries live."""
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")) / "glossaries"
+
+
+def _glossary_parse(text):
+    """One glossary file -> {"skip": [words], "terms": [entries]}. The skip list is read as WORDS only: each
+    Not-coinages bullet names its words in a bold lead (comma-separated) or as the text before its colon; a bullet
+    describing a PATTERN (a T followed by a number, say) is just words the whole-word matcher will never meet, so no
+    special case is needed. Slugs come from the file's headings in order through the viewer's own rule
+    (_slice_headings, the Not-coinages heading included), so the anchor a card opens is the id the viewer gave. Each
+    entry keeps its whole section text (`section`) for the route; the frame strips it."""
+    heads = _slice_headings(text)
+    lines = text.split("\n")
+    skip, terms = [], []
+    for i, h in enumerate(heads):
+        if h["level"] != 2:
+            continue
+        end = len(lines)
+        for h2 in heads[i + 1:]:
+            if h2["level"] <= 2:
+                end = h2["line"]
+                break
+        body = lines[h["line"] + 1:end]
+        name = h["text"].strip()
+        if not name:
+            continue                                   # a bare "## " names nothing: no entry (the review: its plural was the letter s)
+        if name.lower() == "not coinages":
+            for ln in body:
+                s = ln.strip()
+                m = _GLOSSARY_SKIP_BOLD_RE.match(s) or _GLOSSARY_SKIP_PLAIN_RE.match(s)
+                if m:
+                    skip += [w.strip().lower() for w in m.group(1).split(",") if w.strip()]
+            continue
+        e = {"term": name, "slug": h["slug"], "definition": "", "plainWords": "", "also": [], "scope": "",
+             "status": "unconfirmed", "registered": {"date": "", "by": ""}, "link": "all",
+             "section": "\n".join(lines[h["line"]:end]).strip()}
+        para = []
+        seen_bullet = False
+        for ln in body:
+            m = _GLOSSARY_BULLET_RE.match(ln.strip())
+            if m:
+                seen_bullet = True
+                key, val = m.group(1).lower(), m.group(2).strip()
+                if key == "plain words":
+                    e["plainWords"] = val
+                elif key == "also":
+                    e["also"] = [a.strip() for a in val.split(",") if a.strip()]
+                elif key == "scope":
+                    e["scope"] = val
+                elif key == "status":
+                    e["status"] = val.lower() if val.lower() in _GLOSSARY_STATUSES else "unconfirmed"
+                elif key == "registered":
+                    mm = re.match(r"^(\S+)\s+by\s+(.+)$", val)
+                    e["registered"] = {"date": mm.group(1), "by": mm.group(2).strip()} if mm else {"date": val, "by": ""}
+                elif key == "link":
+                    e["link"] = val.lower() if val.lower() in _GLOSSARY_LINK_MODES else "all"
+            elif not seen_bullet and not _HEADING_RE.match(ln):   # a sub-heading inside the section is not prose
+                para.append(ln)
+        e["definition"] = " ".join(x.strip() for x in para if x.strip()).strip()
+        terms.append(e)
+    # sections past the heading index's ceiling (_SLICE_HEADINGS_MAX) never reached `heads`: count them, so the frame
+    # and /perf say how many entries were cut (the review's low: they were dropped silently)
+    total_h2 = 0
+    fence = False
+    for line in lines:
+        st = line.lstrip()
+        if st.startswith("```") or st.startswith("~~~"):
+            fence = not fence
+        elif not fence and re.match(r"^##\s+\S", line):
+            total_h2 += 1
+    handled = len(terms) + sum(1 for h in heads if h["level"] == 2 and h["text"].strip().lower() == "not coinages")   # every skip section within the ceiling is handled, not cut
+    return {"skip": skip, "terms": terms, "cutHeadings": max(0, total_h2 - handled)}
+
+
+def _glossary_load(path):
+    """The parsed file at `path`, cached on (real path, mtime_ns); (parsed, mtime_ns) or (None, 0) when unreadable."""
+    real = os.path.realpath(str(path))
+    try:
+        st = os.stat(real)
+    except OSError:
+        return None, 0
+    key = (real, st.st_mtime_ns)
+    with _GLOSSARY_CACHE_LOCK:
+        hit = _GLOSSARY_CACHE.get(key)
+        if hit is not None:
+            _GLOSSARY_CACHE.move_to_end(key)
+    if hit is not None:
+        return hit, st.st_mtime_ns
+    if st.st_size > _TEXT_MAX_BYTES:            # the preview route's own ceiling (2 MB): a glossary is a short file
+        _PERF_STATS.glossary(refused=True)       # counted every time (the review's low: it was counted and logged nowhere)…
+        with _GLOSSARY_CACHE_LOCK:
+            fresh = key not in _GLOSSARY_REFUSED
+            if fresh:
+                if len(_GLOSSARY_REFUSED) >= 64:
+                    _GLOSSARY_REFUSED.clear()
+                _GLOSSARY_REFUSED.add(key)
+        if fresh:                                # …and said once per file version, not once per pusher cycle
+            sys.stderr.write("glossary refused: %s is %d bytes, over the %d-byte read ceiling\n" % (_tilde(real), st.st_size, _TEXT_MAX_BYTES))
+        return None, 0
+    try:
+        text = Path(real).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None, 0
+    parsed = _glossary_parse(text)
+    _PERF_STATS.glossary(parsed=True)
+    with _GLOSSARY_CACHE_LOCK:
+        for k2 in [k2 for k2 in _GLOSSARY_CACHE if k2[0] == real]:   # a rewrite: the older mtime goes
+            _GLOSSARY_CACHE.pop(k2, None)
+        _GLOSSARY_CACHE[key] = parsed
+        while len(_GLOSSARY_CACHE) > _GLOSSARY_CACHE_ENTRIES:         # least recently read out first
+            _GLOSSARY_CACHE.popitem(last=False)
+    return parsed, st.st_mtime_ns
+
+
+def _session_groups(sid):
+    """The tag groups `sid` belongs to on this kernel, by NAME in the store's order (the glossary lookup's rule)."""
+    out = []
+    try:
+        for t in (_timeline_views().get("tags") or []):
+            for m in (t.get("members") or []):
+                if isinstance(m, dict) and m.get("sid") == sid and not m.get("host"):
+                    nm = str(t.get("name") or "").strip()
+                    if nm and nm not in out:
+                        out.append(nm)
+                    break
+    except Exception:
+        return []
+    return out
+
+
+def _glossary_source(sid):
+    """(group, path) of the one glossary file `sid`'s messages resolve against: the author's tag group's file, else its
+    own name's; (None, None) when neither exists. Candidate names are reduced to filename-safe characters."""
+    d = _glossary_dir()
+    cands = _session_groups(sid) + [str(_name_of(sid) or "")]
+    tried = []
+    for g in cands:
+        g = _GLOSSARY_GROUP_RE.sub("", g)
+        if not g:
+            continue
+        p = d / (g + ".md")
+        tried.append(str(p))
+        if p.is_file():
+            return g, p
+    return None, None
+
+
+def _glossary_frame(sid):
+    """{type:"glossary", id, group, path (tilde), mtime, skip, terms, truncated} for `sid`, or None when its group has
+    no file. Bounded by BYTES (the user's caches direction): terms are kept in file order until the cap, `truncated`
+    says how many were cut, and /perf counts them. An entry's `section` stays on the kernel's side (the route reads
+    it); the rest of the entry is the client's."""
+    group, path = _glossary_source(sid)
+    if not group:
+        return None
+    parsed, mtime = _glossary_load(path)
+    if parsed is None:
+        return None
+    # two cuts, carried apart so the card's note can name each (the review's low): sections past the heading ceiling
+    # (cutHeadings, from the parse) and entries past the index's byte cap (cutBytes, here); `truncated` is their sum
+    terms, size, cut_h, cut_b = [], 0, int(parsed.get("cutHeadings") or 0), 0
+    for e in parsed["terms"]:
+        slim = {k: v for k, v in e.items() if k != "section"}
+        n = len(json.dumps(slim, ensure_ascii=False).encode("utf-8"))
+        if size + n > _GLOSSARY_INDEX_MAX_BYTES:
+            cut_b += 1
+            continue
+        terms.append(slim); size += n
+    _PERF_STATS.glossary(terms=len(terms), nbytes=size, cut=cut_h + cut_b)
+    return {"type": "glossary", "id": sid, "group": group, "path": _tilde(str(path)), "mtime": str(mtime),
+            "skip": parsed["skip"], "terms": terms, "truncated": cut_h + cut_b, "cutHeadings": cut_h, "cutBytes": cut_b}
+
+
+def _glossary_lookup(sid, term):
+    """GET /glossary/<term>?sid= -> (status, payload): the whole `## <term>` section of the session's glossary file
+    (whole-word, case-insensitive on the term and its `also` forms), 404 with the paths tried when absent."""
+    want = (term or "").strip().lower()
+    group, path = _glossary_source(sid)
+    if not group:
+        d = _glossary_dir()
+        tried = [_tilde(str(d / (_GLOSSARY_GROUP_RE.sub("", g) + ".md"))) for g in (_session_groups(sid) + [str(_name_of(sid) or "")]) if g]
+        return 404, {"error": "no glossary for this session's group", "tried": tried}
+    parsed, _ = _glossary_load(path)
+    if parsed is None:
+        return 404, {"error": "the glossary file could not be read", "tried": [_tilde(str(path))]}
+    # an exact term wins over another entry's alias ("tessel head" is its own entry even though "tessel" lists it as an
+    # alias), so the terms are read first and the aliases after
+    hit = next((e for e in parsed["terms"] if e["term"].lower() == want), None) \
+        or next((e for e in parsed["terms"] if want in [a.lower() for a in e["also"]]), None)
+    if hit is not None:
+        e = hit
+        return 200, {"title": e["term"], "markdown": e["section"], "source_path": _tilde(str(path)),
+                     "anchor": e["slug"], "group": group, "status": e["status"], "link": e["link"]}
+    return 404, {"error": "no such term in the group's glossary: %r" % want, "tried": [_tilde(str(path))], "group": group}
+
+
 def _path_previews(links, sid):
     """{token: kind} for the verified links the preview popover may fetch for session `sid` (shipped as pathPreview
     beside pathLinks; a token absent here is shown as text plus "open", with NO request), warming the markdown ones."""
@@ -45490,6 +45730,18 @@ def _push(targets, connect=False, live_map=None):
                 if fr:
                     for c in chat_clients:
                         _send_client(c, ("comments", s["sid"]), fr)
+            # THE GLOSSARY (T351 stage 2): one {type:"glossary"} frame per session whose group has a file, on its own
+            # per-sid dedup slot like the comments frame: the file is stat'd here (the event), parsed once per mtime, and
+            # an unchanged index costs nothing on the wire
+            for s in (chat_list if chat_clients else []):
+                try:
+                    gfr = _glossary_frame(s["sid"])
+                except Exception:
+                    sys.stderr.write("glossary frame failed for %s: %s\n" % (s["sid"], traceback.format_exc()))
+                    continue
+                if gfr:
+                    for c in chat_clients:
+                        _send_client(c, ("glossary", s["sid"]), gfr)
             # OPEN SUBAGENT VIEWERS (plans/subagent-transcripts.md): each rides its own per-client dedup slot
             # like the comment frames, rebuilt only when the agent's file or liveness moved.
             _push_subagents(chat_clients, now, live_map)
@@ -55060,6 +55312,9 @@ class Handler(BaseHTTPRequestHandler):
                 # pinned to the layer that dropped it instead of black-box probing. Read-only.
                 return self._send(200, json.dumps(_sendvis_diag((q.get("sid") or [""])[0])),
                                   "application/json", cache="no-cache")
+            if p.startswith("/glossary/"):                    # T351 stage 2: one term's section as JSON, for the lab's own consumers
+                status, payload = _glossary_lookup((q.get("sid") or [None])[0], unquote(p[len("/glossary/"):]))
+                return self._send(status, json.dumps(payload), "application/json", cache="no-cache")
             if p == "/file":                                  # preview bytes for a chat path-thumbnail
                 return self._file_preview(q)
             if p == "/ssh-hosts":                             # ~/.ssh/config Host aliases for the attach-a-remote UI

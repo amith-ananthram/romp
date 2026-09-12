@@ -1770,7 +1770,8 @@ the same card:
 
 Stage 1 fills it from the slice route (`markdown`, `section`, `code`) and the
 bytes route (`image` at its natural size capped to the card, `pdf` as its first
-page), or with the text-only card. A previewed document renders on the
+page), or with the text-only card; stage 2 fills it with the `term` kind from the
+glossary index below, no fetch. A previewed document renders on the
 sanitizer's inert DOM and is stripped of every remote load there, before its
 nodes join the page: an image's `src` or `srcset`, a picture's sources, a video's
 poster or source, an audio, an SVG image, in any spelling the URL parser
@@ -1787,6 +1788,53 @@ team's glossary format: a per-project glossary file whose headings (and their
 aliases) are linkified in assistant text, mail bodies and cards at render time,
 and a `GET /glossary/<term>` route answering `{title, markdown, source_path,
 anchor}` that fills the `term` kind of the same card.
+
+## The glossary
+
+A team's coinages, linked where they are written. One file per romp tag group,
+`~/.claude/glossaries/<group>.md` (under `CLAUDE_CONFIG_DIR` when set), in the
+grammar of that folder's README: an opening `## Not coinages` list of words never
+linked (each bullet's bold lead, or the text before its colon, read as words), then
+one `## <term>` section per coinage with a definition paragraph and the labelled
+bullets `plain words`, `also` (aliases, spaces allowed), `scope`, `status`
+(unconfirmed, confirmed, retired), `registered` (`<date> by <session>`) and
+`link` (`all`, `first`, `off`; default `all`). A chat message is resolved
+against its author's group: the session's tag group's file, else its own name's;
+a mail body shown in a session's chat links the READER's group (the chat
+session's index; the sender's group is a later refinement). The repo-local
+`docs/glossary.md` is a seam kept for a second source with no file today.
+
+The kernel parses a file once per `(path, mtime)` and ships each session a
+`{type: "glossary"}` frame on the pusher's cycle, on its own dedup slot like the
+comments frame (the stat is the event; no timer, no watcher): `group`, `path`,
+`mtime`, `skip`, `terms` (term, slug, definition, plain words, also, scope,
+status, registered, link) and `truncated`, the count of entries cut by the
+index's byte cap (256 KB) or lying past the heading index's ceiling (256
+headings), counted in `/perf` under `glossary` beside the parses and the frames,
+terms and bytes BUILT per cycle (the dedup slot decides what is shipped). A file
+over the preview route's 2 MB read ceiling is not read; the parsed cache holds
+sixteen files, least recently read out first. Slugs come from the file's headings in order
+through the viewer's own rule, the Not-coinages heading included, so a card opens
+the viewer on the heading the viewer gave that id.
+
+The chat page compiles one matcher per index (`glossary-links.ts`): every form
+(the term, its aliases, and their plurals by the everyday rule; nothing shorter
+than two characters) whole-word and case-insensitive, longest first, minus the
+skip list (a listed word, its plurals and any alias equal to one of them), over
+the prose of assistant and user text and mail bodies; never code, links,
+headings, math, the composer, tool heads, the timeline, nor inside a path-shaped
+or host-shaped token (a path the kernel could not verify stays plain, unsplit).
+A term split across text nodes by an inline element is not matched. Each occurrence becomes a `.term-link` span carrying
+the glossary path and the term's slug, exactly like a path link's absorbed
+section: the same hover card (filled from the index, no fetch) and the same
+click (the viewer at the heading). `link: first` links the first occurrence per
+message; `off` links nothing; a retired term greys and its card says to use the
+plain phrase. A new frame re-links the session's rendered view.
+
+`GET /glossary/<term>?sid=` answers `{title, markdown (the whole section),
+source_path, anchor, group, status, link}` for the lab's own consumers, matching
+the term or an alias whole-word and case-insensitive; 404 with the paths tried
+when the group has no file or the term is absent.
 
 ## Browser-side performance telemetry
 

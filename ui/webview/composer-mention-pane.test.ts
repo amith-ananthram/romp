@@ -819,7 +819,7 @@ test("the composer's keydown: the slash menu, then the card, then an IME's commi
 
 test("renderTabs opens with the whole-roster hook, ahead of its guards; the user's bubble is marked after its path links, and so is the echo of a send", () => {
   assert.match(RENDER, /function renderTabs\(\) \{\n  mentionRosterChanged\(\);/);
-  assert.match(RENDER, /linkifyFileUris\(bubble, imgPaths, ev\.spacePaths, ev\.pathLinks, ev\.pathPins, ev\.pathPreview\);[^\n]*\n\s*if \(kind === "user"\) markMentions\(bubble\);/);
+  assert.match(RENDER, /linkifyFileUris\(bubble, imgPaths, ev\.spacePaths, ev\.pathLinks, ev\.pathPins, ev\.pathPreview\);[^\n]*\n\s*linkTerms\(bubble\);[^\n]*\n\s*if \(kind === "user"\) markMentions\(bubble\);/);
   // the echo keeps the pinned renderer statement as it stands (chat-md and queued-indicator hold it verbatim); the chip is the next statement
   assert.match(RENDER, /if \(!t\.romp && !isCmd\) bubble\.innerHTML = userMd\(t\.md\);[^\n]*\n\s*if \(!t\.romp && !isCmd\) markMentions\(bubble\);/);
 });

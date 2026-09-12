@@ -55,6 +55,7 @@ TOP_KEYS = {"now", "since", "uptime_s", "log", "process", "pusher", "stages_ms",
             "chatPages",                                   # chatPages: the pre-floor history pages cache (T323 stage 4b)
             "skillLoadIndex",                              # skillLoadIndex: the judge's skill-load boot pass, its raw reads (T333)
             "fileSlice",                                   # fileSlice: the file preview popover's slice cache: hit / miss / bytes / warm (T351)
+            "glossary",                                    # glossary: files parsed, frames / terms / bytes built per cycle, entries cut, files refused (T351 stage 2)
             "stacks"}                                      # stacks: every thread's last frames under ROMP_PERF_STACKS, else None (T358)
 
 

@@ -71,7 +71,8 @@ import { initFileView, setFileViewIdentity, hostStub } from "./file-view";
 import { openUrlView } from "./file-view";                 // the URL mode of the same viewer (md-url-view.test.ts)
 import { isMarkdownUrl } from "./md-links";
 import { openPathLink, linkifyPathTokens, selectionOpenIn } from "./path-links";   // the path matcher the chat's links are made from (a shared module)
-import { PREVIEW_DWELL_MS, PREVIEW_GRACE_MS, HoverIntent, parsePreviewLink, previewKindOf, sliceUrl, contentFor, textOnlyContent, stripRemoteLoads, type PreviewContent } from "./file-preview";   // the file preview popover's pure half (T351)
+import { PREVIEW_DWELL_MS, PREVIEW_GRACE_MS, HoverIntent, parsePreviewLink, previewKindOf, sliceUrl, contentFor, textOnlyContent, stripRemoteLoads, type PreviewContent } from "./file-preview";
+import { buildMatcher, linkifyTerms, termContent, type GlossaryIndex, type GlossaryEntry, type TermMatcher } from "./glossary-links";   // the team's coinages, linked where written (T351 stage 2)   // the file preview popover's pure half (T351)
 import { initFileBrowse, openFileBrowse } from "./file-browse";   // the browser is pane-local here now (the user 2026-08-24)
 import { pastedFilePath } from "./paste-path";
 import { insertAtCaret } from "./composer-insert";
@@ -2183,6 +2184,65 @@ function absorbFragment(link: HTMLElement): void {
   nx.textContent = (nx.textContent || "").slice(m[0].length);
 }
 
+// ── the GLOSSARY (T351 stage 2, the user 2026-09-11): the team's coinages, linked where they are written ──────────
+// The kernel ships one index per session (its author group's glossary file, parsed and byte-bounded) on its own frame;
+// the matcher is compiled once per index and every message's prose is linked at render time (glossary-links.ts). A
+// term wears a quiet dotted underline in the text colour (.term-link); its card rides the file preview popover with no
+// fetch (termContent), and a click opens the glossary file in the viewer at the term's heading. Surfaces: assistant and
+// user text and mail bodies in the chat; never tool heads, the composer or the timeline. The DRESS (design A, the
+// underline and hover card, or design B, a marker and click popover) is the user's pick; the mechanics are the same.
+const glossaries = new Map<string, GlossaryIndex>();        // by session id: the frame's index
+const termMatchers = new Map<string, TermMatcher | null>();  // compiled once per index (dropped when the frame changes)
+function termMatcherFor(sid: string | null): TermMatcher | null {
+  if (!sid) return null;
+  if (!termMatchers.has(sid)) { const ix = glossaries.get(sid); termMatchers.set(sid, ix ? buildMatcher(ix) : null); }
+  return termMatchers.get(sid) || null;
+}
+/** Link the terms in a rendered message body for the session being built (renderingSid), the span carrying the
+ *  glossary path and the term's slug exactly like a path link's absorbed section, so the same hover and click roads
+ *  serve it. Nothing when the session's group has no glossary. */
+function linkTerms(root: HTMLElement, sid: string | null = renderingSid): number {
+  // the message roots (the nudge, continue and tagged-template bubbles' full text, the user bubble, the assistant body,
+  // the mail body) are MARKED
+  // here, matcher or not, so a later index frame re-links exactly them (relinkTerms) and never a tool or subagent
+  // report body; a root nested inside a marked root is the ancestor's to scan, with the ancestor's one seen set
+  // (the review's mediums: every .md in the view was relinked, and a nested body was visited twice)
+  if (root.parentElement?.closest("[data-term-root]")) return 0;
+  root.dataset.termRoot = "1";
+  const m = termMatcherFor(sid);
+  if (!m) return 0;
+  return linkifyTerms(root, m, (e, text) => {
+    const s = el("span", "term-link" + (e.status === "retired" ? " term-retired" : ""));
+    s.textContent = text;
+    s.dataset.term = e.slug; s.dataset.gsid = sid || "";
+    s.dataset.path = m.index.path; s.dataset.frag = e.slug;
+    s.title = e.plainWords ? e.term + ": " + e.plainWords : e.term;
+    s.tabIndex = 0;
+    armFilePreview(s);   // the hover card (the popover's dwell and grace), filled from the index without a fetch
+    return s;
+  });
+}
+/** A fresh index for a session: drop its matcher and re-link the session's rendered view, so a rewrite of the file
+ *  shows on the next frame, never on a timer (the old links are unwrapped first). */
+document.addEventListener("click", (e) => {
+  const s = (e.target as HTMLElement | null)?.closest?.("span.term-link") as HTMLElement | null;
+  if (!s) return;
+  e.preventDefault(); e.stopPropagation();
+  filePreviewIntent.cancel();
+  openPath(s.dataset.path || "", s.dataset.gsid || activeId, e, s.dataset.frag || null);   // the viewer, at the term's heading
+});
+function relinkTerms(sid: string): void {
+  termMatchers.delete(sid);
+  const v = views.get(sid);
+  if (!v) return;
+  for (const s of Array.from(v.el.querySelectorAll("span.term-link"))) {
+    const t = document.createTextNode(s.textContent || "");
+    s.replaceWith(t);
+    t.parentNode?.normalize();
+  }
+  for (const root of Array.from(v.el.querySelectorAll("[data-term-root]"))) linkTerms(root as HTMLElement, sid);   // the marked roots alone
+}
+
 // ── the file PREVIEW popover (T351, the user 2026-09-11) ──────────────────────────────────────────
 // Hovering a local file link pops up a card with the rendered head of the file, or the section a `path#slug` link
 // names, near-instantly: the kernel keeps the text of recently linked files with a heading index and warms it on the
@@ -2239,6 +2299,7 @@ function armFilePreview(a: HTMLElement): void {
 // the comment popover's size (70% × 60% of the pane, capped, never under the minimum), below the link when there is
 // room, else above it, and inside the viewport by the popover edge
 function placeFilePreview(p: HTMLElement, a: HTMLElement): void {
+  p.style.maxHeight = "";   // a term card's content-sized height (showFilePreview) must not outlive it: every show starts from the fractions
   const pane = (document.getElementById("content") || document.body).getBoundingClientRect();
   const w = Math.max(CMT_POP_MIN_W, Math.min(pane.width * CMT_POP_THREAD_DEFAULT.w, innerWidth * CMT_POP_CAP_W));
   const h = Math.max(CMT_POP_MIN_H, Math.min(pane.height * CMT_POP_THREAD_DEFAULT.h, innerHeight * CMT_POP_CAP_H));
@@ -2297,6 +2358,23 @@ function previewMdClean(src: string): HTMLElement {
 function showFilePreview(a: HTMLElement): void {
   const open = a.dataset.path || "";
   if (!open) return;
+  if (a.dataset.term) {   // a glossary term (T351 stage 2): the card is filled from the session's index, no request
+    const ix = glossaries.get(a.dataset.gsid || "");
+    const e = ix ? ix.terms.find((x) => x.slug === a.dataset.term) : undefined;
+    if (!ix || !e) return;
+    const p = ensureFilePreview();
+    placeFilePreview(p, a);
+    p.style.display = "";
+    watchFilePreviewAnchor(a);
+    ++filePreviewSeq;
+    renderFilePreview(p, termContent(e, ix), a.dataset.gsid || activeId);
+    // a term card is a few lines: it keeps the file card's width cap but sizes its height to its content (the pane
+    // fraction stays the ceiling), so it never sits mostly empty
+    p.style.maxHeight = p.style.height; p.style.height = "auto";
+    p.style.width = Math.min(parseFloat(p.style.width) || 520, 520) + "px";
+    p.dataset.renderMs = "0"; delete p.dataset.sliceHit;
+    return;
+  }
   const sid = activeId;                          // the kernel resolves a relative path against it and confines by its folder
   const parsed = parsePreviewLink(open);
   const path = parsed.path, anchor = a.dataset.frag || parsed.anchor;   // the section: the absorbed #slug, else one inside a file:// URI
@@ -3548,6 +3626,7 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
         bubble.appendChild(head);
         const full = el("div", "nudge-full md");
         full.innerHTML = md(ev.md);
+        linkTerms(full);   // a message root (T351 stage 2): linked at render, like the nudge's full text below
         bubble.appendChild(full);
         bubble.classList.add("nudge-collapsible");
         bubble.dataset.act = "nudgetoggle";   // the stable body delegate, never a per-render listener (CLAUDE.md)
@@ -3570,6 +3649,7 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
         if (more) {
           const full = el("div", "nudge-full md");
           full.innerHTML = md(ev.md);
+          linkTerms(full);   // a message root (T351 stage 2): linked at render, like the nudge's full text below
           bubble.appendChild(full);
           bubble.classList.add("nudge-collapsible");
           bubble.dataset.act = "nudgetoggle";   // the stable body delegate, never a per-render listener
@@ -3606,6 +3686,7 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
           const full = el("div", "nudge-full md");
           full.innerHTML = md(raw);
           linkifyFileUris(full, imgPaths, ev.spacePaths, ev.pathLinks, ev.pathPins, ev.pathPreview);
+          linkTerms(full);
           bubble.appendChild(full);
           bubble.classList.add("nudge-collapsible");
           // toggle rides the stable document.body delegate (data-act), NOT a per-render listener —
@@ -3621,6 +3702,7 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
         // summary, command stdout — shares this branch and stays on the assistant grammar
         bubble.innerHTML = kind === "user" ? userMd(ev.md) : md(ev.md);
         linkifyFileUris(bubble, imgPaths, ev.spacePaths, ev.pathLinks, ev.pathPins, ev.pathPreview);   // bare file:// URLs in a message → clickable (open in the host's default app)
+        linkTerms(bubble);   // the team's coinages, in the user's own words too (T351 stage 2)
         if (kind === "user") markMentions(bubble);   // in the user's own bubble a typed "@name" that names a live session wears that session's color; a harness note is not the user naming a session
       }
       // images, IN the bubble (part of his message): thumbnail + open/copy caption;
@@ -3778,6 +3860,7 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
     body.innerHTML = md(ev.md);
     highlight(body);
     linkifyFileUris(body, undefined, ev.spacePaths, ev.pathLinks, ev.pathPins, ev.pathPreview);   // bare file:// URLs + verified spaced filenames → clickable
+    linkTerms(body);   // the team's coinages (T351 stage 2)
     turn.appendChild(body);
     return turn;
   }
@@ -5274,7 +5357,7 @@ function renderPostalService(ev: Extract<ChatEvent, { kind: "postal-service" }>)
   // 2026-07-25, who watched a card open and snap shut a moment later: a DOM-only toggle died with every push).
   const { gist: summaryText, body: fullMd } = postalHead(ev);   // gist.ts: the caption, else the CLIPPED first line; the fold whenever the gist does not carry the whole message (T294)
   let body: HTMLElement | null = null;
-  if (fullMd) { body = el("div", "notice-md md"); body.innerHTML = md(fullMd, postalRepoFor(ev)); highlight(body); }
+  if (fullMd) { body = el("div", "notice-md md"); body.innerHTML = md(fullMd, postalRepoFor(ev)); highlight(body); linkTerms(body); }   // a mail body links the reader's group's terms (T351 stage 2; the sender's group is a later refinement)
   // an incoming QUESTION opens by default: a reply is owed, and the whole ask is what you need to read
   const owed = !!intent && intent.cls === "question" && ev.direction === "in";
   const turn = notice({ src, glyph: "peer", gist: summaryText, meta, body, open: owed,
@@ -17173,6 +17256,10 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   else if (m.type === "update") update(m);
   else if (m.type === "wsup") { onSocketUp(skeletonTabs); skeletonDiagArmed = true; reholdQueuedEditors(); }   // the shim's socket-flip marker, in FRAME order: the dead socket's frames may still be draining from the FIFO when onopen fires (review find 2026-09-07)
   else if (m.type === "status") statusOnly(m);
+  else if (m.type === "glossary" && typeof m.id === "string") {   // the session's glossary index (T351 stage 2): a new one re-links the view
+    glossaries.set(m.id, m as GlossaryIndex);
+    relinkTerms(m.id);
+  }
   else if (m.type === "focus" && !m.own && !focusIsOurs(m.id)) { /* another chat column's (split screen): the shell named the column it belongs to; `own` is the shell's hand-over to THIS new column */ }
   else if (m.type === "focus") {
     revealSelfPane();   // every focus is someone jumping HERE — on mobile, come forward (incl. from a remote kernel)

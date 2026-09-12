@@ -18,7 +18,7 @@ test("a leading slash command in a human bubble becomes a .slash-cmd-chip, args 
   // the non-command path still renders markdown as before (now also linkifies bare file:// URLs, and in the
   // user's own bubble marks a typed @name that names a live session: composer-mention-pane.test.ts); the
   // user's own words through userMd (newlines kept), a harness note through md
-  assert.match(RENDER, /\} else if \(ev\.md\) \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*bubble\.innerHTML = kind === "user" \? userMd\(ev\.md\) : md\(ev\.md\);\s*\n\s*linkifyFileUris\(bubble, imgPaths, ev\.spacePaths, ev\.pathLinks, ev\.pathPins, ev\.pathPreview\);[^\n]*\n\s*if \(kind === "user"\) markMentions\(bubble\);[^\n]*\n\s*\}/);
+  assert.match(RENDER, /\} else if \(ev\.md\) \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*bubble\.innerHTML = kind === "user" \? userMd\(ev\.md\) : md\(ev\.md\);\s*\n\s*linkifyFileUris\(bubble, imgPaths, ev\.spacePaths, ev\.pathLinks, ev\.pathPins, ev\.pathPreview\);[^\n]*\n\s*linkTerms\(bubble\);[^\n]*\n\s*if \(kind === "user"\) markMentions\(bubble\);[^\n]*\n\s*\}/);
 });
 
 test("the chip is a monospace, outlined keyword pill that reads on the blue bubble", () => {

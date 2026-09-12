@@ -37,7 +37,7 @@ test("a postal summary is the caption, or the CLIPPED first line of the body whe
 test("both directions render the summary + a click-to-expand full body (no hover tooltip)", () => {
   assert.match(GIST, /const body = !!full && collapseWs\(full\) !== collapseWs\(gist\) \? raw : null;/, "the fold holds the message as sent; the trim is the comparison's");
   // 2026-09-08: the full message is the notice BODY, markdown-rendered against the sender's repo
-  assert.match(RENDER, /if \(fullMd\) \{ body = el\("div", "notice-md md"\); body\.innerHTML = md\(fullMd, postalRepoFor\(ev\)\); highlight\(body\); \}/);
+  assert.match(RENDER, /if \(fullMd\) \{ body = el\("div", "notice-md md"\); body\.innerHTML = md\(fullMd, postalRepoFor\(ev\)\); highlight\(body\); linkTerms\(body\); \}/);
   assert.doesNotMatch(RENDER, /body\.title = ev\.body/, "the old hover-tooltip full body must be gone");
   assert.doesNotMatch(RENDER, /caption \|\| ev\.body/, "no longer 'caption else whole body'");
 });
