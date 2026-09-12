@@ -343,6 +343,13 @@ def _safe_id(s):
 # printable is in here: spaces, punctuation, accents, CJK and emoji all live outside it.
 _HDR_BREAK_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 
+def _marker_val(v):
+    """A relay marker as the wire may carry it: the kernel's own alphabet (digits, letters, ':' '_' '.' '-'), at most 64
+    characters; anything else is dropped, so a value from a tokened client, a far host or a held record can carry
+    no header line and forge nothing."""
+    return re.sub(r"[^A-Za-z0-9:_.-]", "", str(v or ""))[:64]
+
+
 def _hdr_val(v):
     """One value, made safe to write into a maildir header line (see deliver).
 
@@ -552,7 +559,12 @@ def _walk_root_record(frm_id):
 
 
 def deliver(to_id, from_name, from_id, body, park=False, kind="", from_host="",
-            relay_mid="", relay_via="", tracked=False, user_ask=None):
+            relay_mid="", relay_via="", tracked=False, user_ask=None, relayed=False, relay_marker=""):
+    # relayed=True (T334, 2026-09-11): romp sent this on the SENDER's behalf (the kernel relaying a worker's block
+    # toward the peer that delegated its goal, as the worker's own question). The header and the row say so, so
+    # the courier and the sender's own receipts can tell it from a typed ask (the recipient reads ordinary mail);
+    # relay_marker is the kernel's identity for the relay, written on the row so a send whose answer was lost is
+    # found again and never repeated.
     # park=True marks a HANDOFF parked for a session that's currently dead. The
     # maildir is keyed by the session UUID (which `romp resume` reuses), so the
     # message simply waits on disk until that session is revived — delivered then,
@@ -566,7 +578,10 @@ def deliver(to_id, from_name, from_id, body, park=False, kind="", from_host="",
     # from — stamped into headers so the read receipt can flow back when the recipient actually reads
     # it (read_box/restore queue it into the readbox). The maildir file is the durable record: the
     # receipt route survives a bus restart exactly as long as the unread mail does.
-    mb = _mailbox(to_id)
+    relayed = bool(relayed) and kind == "question"   # the invariant every path shares (the /send gate, the far side's
+    relay_marker = _marker_val(relay_marker) if relayed else ""   # deliver, a held message's approve): only a question is
+    mb = _mailbox(to_id)                             #   relayed; the marker (the kernel's relay identity) rides with it,
+    #                                                  clamped to a marker's own alphabet (a wire value forges nothing)
     name = _unique()
     tmp = mb / "tmp" / name
     # THE header write point — every value that lands in a header line goes through _hdr_val
@@ -594,6 +609,11 @@ def deliver(to_id, from_name, from_id, body, park=False, kind="", from_host="",
         hdr += "X-From-Host: %s\n" % h["from_host"]
     if h["relay_mid"] and h["relay_via"]:
         hdr += "X-Peer-Mid: %s\nX-Peer-Via: %s\n" % (h["relay_mid"], h["relay_via"])
+    if relayed:
+        hdr += "X-Relayed: romp\n"                  # sent by romp on the sender's behalf (T334)
+    if relay_marker:
+        hdr += "X-Relay-Marker: %s\n" % _hdr_val(relay_marker)   # the kernel's marker id (clamped above; the one
+        #                                                          sanitizer every header value passes, as well)
     tmp.write_text(hdr + "\n" + body + "\n")
     # Timeline log: a message was SENT (the matching exec event is logged when
     # the recipient consumes it in read_box). id = maildir filename joins the two.
@@ -603,6 +623,10 @@ def deliver(to_id, from_name, from_id, body, park=False, kind="", from_host="",
         ev["park"] = True
     if kind:
         ev["kind"] = kind                            # additive (consumer contract above)
+    if relayed:
+        ev["relayed"] = True                         # additive (consumer contract above): romp relayed it (T334)
+    if relay_marker:
+        ev["relayMarker"] = relay_marker             # additive: the kernel finds a send it lost the record of by this
     if tracked:
         ev["tracked"] = True                         # additive (consumer contract above): report-back
         #                                              delegation — the row is the flag's ONE record;
@@ -790,6 +814,7 @@ def read_box(sid, consume):
         out.append({"from": meta.get("from", "?"), "from_id": meta.get("from-id", ""),
                     "date": meta.get("date", ""), "body": body.rstrip("\n"), "id": f.name,
                     "park": bool(meta.get("x-park")), "kind": meta.get("x-kind", ""),
+                    "relayed": bool(meta.get("x-relayed")),   # romp sent it on the sender's behalf (T334)
                     "from_host": meta.get("x-from-host", "")})
     if consume:
         _mark_pending(sid)         # cleared the box -> drop the marker (no-op if more arrived)
@@ -977,7 +1002,8 @@ def format_receipts(recs):
             st = "delivered %s (not read yet) · id %s" % (_hhmm_epoch(r["relayed"]), r.get("id", "?"))
         else:                                  # still unread -> recallable; show the id to target it
             st = "pending (not read yet) · id %s" % r.get("id", "?")
-        out.append("  → %-18s sent %s · %s" % (r.get("to", "?"), _hhmm_epoch(r["sent"]), st))
+        out.append("  → %-18s sent %s · %s%s" % (r.get("to", "?"), _hhmm_epoch(r["sent"]), st,
+                                                  " · sent on your behalf" if r.get("onBehalf") else ""))
     return "\n".join(out)
 
 # ───────────────────────── the bus (server) ─────────────────────────
@@ -1192,17 +1218,27 @@ def present_count_checked():
 def present_count():
     return present_count_checked()[0]
 
+THREAD_REG_UNREADABLE = "?"   # _thread_of: a reg that EXISTS but cannot be read; the mail rule fails closed on it
+
 def _thread_of(sid):
     """The parent sid when `sid` is a COMMENT THREAD (its durable SDK reg, beside session-flags.json in the kernel's
-    state, carries threadOf), else ''. Unreadable or absent → '' (an ordinary session), the same fail-open the flag
-    read below keeps; a thread's reg is written before its first turn, so a live thread always has one."""
+    state, carries threadOf), '' for an ordinary session, and THREAD_REG_UNREADABLE when a reg exists but cannot be
+    read (the review's low on this change: an unreadable reg read as "not a thread" and mail went out; the kernel
+    writes regs by os.replace, so an unreadable one is corrupt, never torn, and the rule fails CLOSED on it). No reg
+    at all is an ordinary session (a thread's reg is written before its first turn, so a live thread always has one)."""
     if not sid or not _safe_id(sid):
         return ""
+    p = SESSION_FLAGS.parent / "sdk" / (sid + ".json")
     try:
-        d = json.loads((SESSION_FLAGS.parent / "sdk" / (sid + ".json")).read_text())
-        return str(d.get("threadOf") or "") if isinstance(d, dict) else ""
+        # the stat sits INSIDE the try (the review's medium): a directory that cannot be read (EACCES, EIO) raised
+        # out of every reader — read_box, the sender gate, resolve_recipient, the /agents filter — a crash, not a
+        # closed door; here it is the closed door
+        if not p.exists():
+            return ""
+        d = json.loads(p.read_text())
+        return str(d.get("threadOf") or "") if isinstance(d, dict) else THREAD_REG_UNREADABLE
     except Exception:
-        return ""
+        return THREAD_REG_UNREADABLE
 
 def _mail_off_why(sid):
     """Why `sid` can neither send nor receive mail right now, or '' when its mail is on:
@@ -1213,6 +1249,9 @@ def _mail_off_why(sid):
                     reads OFF, and the one way on short of a break-out is the fresh key `threadMail` at the literal
                     True in session-flags.json (never an old key re-read). A break-out clears threadOf, and the
                     promoted session falls to the ordinary rule.
+      "unreadable" — the session's durable record exists but cannot be read (corrupt, or a directory the bus cannot
+                    stat): closed, with its own words (the review's low: an ordinary session with a corrupt record was
+                    told it was a comment thread, a wrong diagnosis the norms then make final).
       "isolation" — the user toggled POSTAL ISOLATION on (the timeline lane's mailbox icon → postalServiceOff;
                     the legacy `postalOff` key still honoured).
     Both read the kernel's shared files. Best-effort on the flag read: any error → the flag is unset (fail OPEN,
@@ -1223,7 +1262,10 @@ def _mail_off_why(sid):
         f = json.loads(SESSION_FLAGS.read_text()).get(sid)
     except Exception:
         f = None
-    if _thread_of(sid) and not (isinstance(f, dict) and f.get("threadMail") is True):
+    t = _thread_of(sid)
+    if t == THREAD_REG_UNREADABLE:
+        return "unreadable"                              # a record that exists but cannot be read: closed, never open
+    if t and not (isinstance(f, dict) and f.get("threadMail") is True):
         return "thread"
     return "isolation" if (isinstance(f, dict) and (f.get("postalServiceOff") or f.get("postalOff"))) else ""
 
@@ -1231,6 +1273,16 @@ def _postal_off(sid):
     """True if the session can neither send nor receive mail (see _mail_off_why): it's invisible to list_agents,
     can't send, and can't receive."""
     return bool(_mail_off_why(sid))
+
+ISOLATION_SENDER = ("isolation: YOUR OWN mailbox is OFF. This session is in postal isolation (its mailbox icon is toggled off "
+                    "on its timeline lane), so it can't send OR receive any mail. This is NOT the recipient's mailbox — the "
+                    "recipient is fine; nothing was sent. To fix, ask the USER to toggle THIS session's mailbox back on in "
+                    "the timeline, then retry. When you relay this, say it's YOUR mailbox that's off, not theirs.")
+
+UNREADABLE_REG_SENDER = ("isolation: YOUR OWN mail is held because this session's record (its entry under the kernel's sdk/ "
+                         "directory) cannot be read, so the bus cannot tell what kind of session this is. Mail to and from it is "
+                         "held until the record is repaired. Nothing was sent, and this is final: do not route around it. Tell "
+                         "the user the session record cannot be read.")
 
 THREAD_MAIL_OFF_SENDER = ("isolation: YOUR OWN mail is OFF because this session is a COMMENT THREAD. A thread neither "
                           "sends nor receives peer mail until the user breaks it out into a session of its own. "
@@ -1406,7 +1458,12 @@ def resolve_recipient(to, frm_id=""):
     if peer_cands:
         return {"kind": "relay", "host": peer_cands[0][0], "agent": peer_cands[0][1]}
     if direct_all:                        # live, but every candidate has its mailbox off
-        if any(_mail_off_why(a["id"]) == "thread" for a in direct_all):
+        whys = {a["id"]: _mail_off_why(a["id"]) for a in direct_all}
+        if "unreadable" in whys.values():
+            return {"kind": "error", "status": 403,
+                    "error": "isolation: the RECIPIENT '%s' has a session record the bus cannot read; mail to it is held "
+                             "until the record is repaired. YOUR mailbox is fine; nothing was sent, and this is final." % to}
+        if "thread" in whys.values():
             # a comment thread's mail is off until the user breaks it out (T356): say what it is, so the sender
             # reaches the session the thread belongs to instead of waiting on a mailbox toggle nobody offers
             return {"kind": "error", "status": 403,
@@ -1588,6 +1645,32 @@ def _recall(from_id, to, mid, kept=None):
                                               "box": "outbox", "host": hostdir.name})
     return removed
 
+def _relay_marker_sent_row(from_id, marker):
+    """The sent row of a relayed question `from_id` sent under the kernel's relay marker `marker`, if any: the bus's own
+    record that makes /send idempotent for a relay (a stalled answer has the kernel POST again; the manager must hold
+    the question once). A row whose id was bounced as NOT PARKED never went anywhere and does not count. Reads the
+    log's tail, newest first."""
+    log = TLDIR / "messages.jsonl"
+    if not (from_id and marker) or not log.exists():
+        return None
+    try:
+        lines = log.read_text(errors="replace").splitlines()
+    except OSError:
+        return None
+    unsent = set()
+    for line in reversed(lines):
+        try:
+            e = json.loads(line)
+        except Exception:
+            continue
+        if e.get("ev") == "bounced" and e.get("notParked"):
+            unsent.add(str(e.get("id") or ""))
+        elif (e.get("ev") == "sent" and e.get("from_id") == from_id and e.get("relayed")
+              and str(e.get("relayMarker") or "") == str(marker) and str(e.get("id") or "") not in unsent):
+            return e
+    return None
+
+
 def _sent_receipts(mid):
     """[{to, id, sent, exec, recalled}] for messages SENT by `mid`, joined by id,
     oldest first. exec is None until the recipient reads it; recalled is set if the
@@ -1635,6 +1718,8 @@ def _sent_receipts(mid):
         r = {"to": e.get("toName") or _name(e.get("to_id", "")), "id": i, "sent": e["t"],
              "exec": execs.get(i), "recalled": recalls.get(i),
              "relayed": relays.get(i), "bounced": bounced.get(i), "parked": h}
+        if e.get("relayed"):
+            r["onBehalf"] = True                     # romp sent it on this session's behalf (T334): the receipt says so
         if r["bounced"]:
             r["bouncedWhy"] = bounced_why.get(i, "")   # additive: an older client ignores it
         if h:
@@ -1827,10 +1912,7 @@ def _warn_stuck_mail():
                 continue
             s = by_name.get(meta.get("from", ""))
             if s and s["id"] != box.name:               # warn the live sender (never self)
-                warn = ("↩ STILL UNDELIVERED — '%s' is live but hasn't read your message after %d min; it may "
-                        "be stuck. Check on it or resend.\nOriginal: %s"
-                        % (recip.get("name") or box.name[:8], max(1, STUCK_GRACE // 60),
-                           " ".join(body.split())[:160]))
+                warn = _stuck_warn_text(recip, box.name, body)
                 try:
                     deliver(s["id"], "Romp Postal Service", "", warn)
                     threading.Thread(target=_push, args=(s["id"], s), daemon=True).start()
@@ -1855,6 +1937,36 @@ def _warn_stuck_mail():
     except Exception:
         pass
 
+
+def _stuck_warn_text(recip, box_sid, body):
+    """The one-time line a sender gets about a message its LIVE recipient has not read: 'resend' for a stuck session,
+    but never for a comment thread whose mail is off (the review's low on this change: the resend invitation was the
+    very reroute the thread refusal calls final) — its mail is HELD in the box and lands when the user breaks the
+    thread out; nothing to resend, nothing to do."""
+    name = recip.get("name") or box_sid[:8]
+    original = " ".join(body.split())[:160]
+    why = _mail_off_why(box_sid)
+    if why == "unreadable":
+        return ("↩ HELD — '%s' has a session record the bus cannot read; your message waits in its box until the record "
+                "is repaired. Nothing to resend.\nOriginal: %s" % (name, original))
+    if why == "thread":
+        return ("↩ HELD — '%s' is a comment thread, and a thread's mail is off until the user breaks it out. Your "
+                "message waits in its box and lands the moment they do. Nothing to resend, and no other door: the "
+                "refusal is final.\nOriginal: %s" % (name, original))
+    return ("↩ STILL UNDELIVERED — '%s' is live but hasn't read your message after %d min; it may "
+            "be stuck. Check on it or resend.\nOriginal: %s" % (name, max(1, STUCK_GRACE // 60), original))
+
+def _isolated_bounce_why(named, to):
+    """Why an inbound cross-host message to `to` bounces when every session answering to it has its mail off: the
+    thread refusal when one of them is a comment thread (the review's low: the sender read 'mailbox off' and waited
+    on a toggle nobody offers), else the isolation line."""
+    whys = {_mail_off_why(a["id"]) for a in named}
+    if "unreadable" in whys:
+        return "recipient '%s' has a session record the bus cannot read; mail to it is held until the record is repaired" % to
+    if "thread" in whys:
+        return ("recipient '%s' is a COMMENT THREAD, and a thread's mail is off, both directions, until the user "
+                "breaks it out into a session of its own; mail the session the thread belongs to instead" % to)
+    return "recipient '%s' has its mailbox off (postal isolation)" % to
 
 def _hhmm(iso):
     # _iso_now() -> "2026-06-05T14:23:45-0700"; pull HH:MM, else fall back to now.
@@ -1950,7 +2062,7 @@ def _bounce_oversize(sid, m):
         return
     if not restore(sid, mid):
         deliver(sid, m.get("from", "?"), frm_id, m.get("body", ""), park=m.get("park", False),
-                kind=m.get("kind", ""), from_host=m.get("from_host", ""))
+                kind=m.get("kind", ""), from_host=m.get("from_host", ""), relayed=bool(m.get("relayed")))
     if mid not in _OVERSIZE_NAMED:
         _OVERSIZE_NAMED.add(mid)
         _log("push to %s: message %s is %d bytes, over the %d-byte /deliver limit, and has no local sender "
@@ -2015,7 +2127,7 @@ def _push(sid, agent):
             if not restore(sid, m.get("id", "")):
                 deliver(sid, m.get("from", "?"), m.get("from_id", ""), m.get("body", ""),
                         park=m.get("park", False), kind=m.get("kind", ""),
-                        from_host=m.get("from_host", ""))
+                        from_host=m.get("from_host", ""), relayed=bool(m.get("relayed")))
         _log("push to %s deferred (%s); %d msg(s) restored for the drain backstop%s"
              % (sid, cause, len(held), (" after %d landed" % landed) if landed else ""))
         return False
@@ -2350,18 +2462,28 @@ class Handler(BaseHTTPRequestHandler):
             if terr:                                   # a string here armed tracking on a plain send
                 return self._send({"error": terr}, 400)
             tracked = tracked and kind == "delegate"
+            relayed, rerr = _as_bool(data.get("relayed"), "relayed")   # the kernel relaying a worker's question (T334)
+            if rerr:
+                return self._send({"error": rerr}, 400)
+            relayed = relayed and kind == "question"
+            relay_marker = _marker_val(data.get("relayMarker")) if relayed else ""   # the kernel's marker id (T334)
+            if relay_marker:
+                prior = _relay_marker_sent_row(frm_id, relay_marker)
+                if prior is not None:                  # the same relayed question was sent already (a stalled answer had
+                    to_prior = str(prior.get("to_id") or "")   # the kernel ask again): answer THAT send, deliver nothing
+                    if to_prior.startswith("peer:"):
+                        return self._send({"ok": True, "id": prior.get("id"), "duplicate": True, "host": to_prior[5:],
+                                           "note": "already relayed to %s" % to_prior[5:]})
+                    return self._send({"ok": True, "to": to, "id": prior.get("id"), "duplicate": True})
             #   (the user 2026-08-24): only a delegate can be tracked; wire metadata only — nothing
             #   about the flag ever appears in message prose (the injected-voice rule)
             why_off = _mail_off_why(frm_id)
             if why_off == "thread":                # a comment thread's own send: refused until broken out (T356)
                 return self._send({"error": THREAD_MAIL_OFF_SENDER}, 403)
+            if why_off == "unreadable":            # its own words: never the thread diagnosis for a corrupt record
+                return self._send({"error": UNREADABLE_REG_SENDER}, 403)
             if why_off:                            # the sender is in isolation → sending is disabled
-                return self._send({"error": "isolation: YOUR OWN mailbox is OFF. This session is in postal "
-                                   "isolation (its mailbox icon is toggled off on its timeline lane), so it "
-                                   "can't send OR receive any mail. This is NOT the recipient's mailbox — the "
-                                   "recipient is fine; nothing was sent. To fix, ask the USER to toggle THIS "
-                                   "session's mailbox back on in the timeline, then retry. When you relay this, "
-                                   "say it's YOUR mailbox that's off, not theirs."}, 403)
+                return self._send({"error": ISOLATION_SENDER}, 403)
             # ONE resolution step for every case (self, ambiguous, isolated, relayed, unknown) —
             # see resolve_recipient. A name that answers to more than one live session is refused
             # here, not tiebroken.
@@ -2398,6 +2520,11 @@ class Handler(BaseHTTPRequestHandler):
                     ua = _walk_root_record(frm_id)
                     if ua:
                         relay_msg["userAsk"] = ua
+                if relayed:
+                    relay_msg["relayed"] = True    # the far side's deliver marks it (T334): a relayed question
+                    #                                reaches a far-host manager marked, exactly as a local one does
+                    if relay_marker:
+                        relay_msg["relayMarker"] = relay_marker
                 # `to_sid` (2026-09-08): the recipient's STABLE id, the same value the wire's toId
                 # carries. The row used to name the recipient only ("<host>:<name>"), so every
                 # reader of the wait (the kernel's wait maps, the judge's ask maps) had to join it
@@ -2416,12 +2543,14 @@ class Handler(BaseHTTPRequestHandler):
                                                      "to_id": "peer:%s" % phost,
                                                      "toName": "%s:%s" % (phost, hit.get("name") or to),
                                                      "to_sid": str(hit.get("id") or ""),
-                                                     "body": body, "kind": kind}):
+                                                     "body": body, "kind": kind,
+                                                     **({"relayed": True} if relayed else {}),   # as deliver's row (T334)
+                                                     **({"relayMarker": relay_marker} if relay_marker else {})}):
                     return self._send({"ok": False, "error": NOT_RECORDED_TEXT}, 503)
                 if not outbox_put(phost, relay_msg):
                     _tl_append("messages.jsonl", {"t": int(time.time()), "ev": "bounced", "id": mid,
                                                   "to": hit.get("name") or to, "host": phost,
-                                                  "why": WHY_NOT_PARKED})
+                                                  "why": WHY_NOT_PARKED, "notParked": True})   # never left (T334 reads it)
                     return self._send({"ok": False, "error": "the message could not be parked for %s "
                                        "(the outbox could not be written), so it was not sent — "
                                        "nothing is lost; retry" % phost}, 503)
@@ -2435,7 +2564,8 @@ class Handler(BaseHTTPRequestHandler):
                                    "note": _parked_note(phost, frm_id) + tnote})
             a0 = res["agent"]
             try:
-                mid = deliver(a0["id"], frm, frm_id, body, kind=kind, tracked=tracked)
+                mid = deliver(a0["id"], frm, frm_id, body, kind=kind, tracked=tracked, relayed=relayed,
+                              relay_marker=relay_marker)
             except DeliveryNotRecorded as e:
                 # 503 + ok:false (see the relay leg): nothing was published; the sender retries.
                 return self._send({"ok": False, "error": str(e)}, 503)
@@ -2691,6 +2821,10 @@ def _rebuild_rows_for_rowless_mail(box, sent, ended):
             row["park"] = True
         if meta.get("x-kind"):
             row["kind"] = meta["x-kind"]
+        if meta.get("x-relayed"):
+            row["relayed"] = True                    # romp sent it on the sender's behalf (T334)
+        if meta.get("x-relay-marker"):
+            row["relayMarker"] = str(meta.get("x-relay-marker"))[:64]
         row["from_host"] = meta.get("x-from-host", "")
         if meta.get("x-peer-mid"):
             row["originMid"] = meta["x-peer-mid"]
@@ -3806,6 +3940,10 @@ def _quarantine_put(origin, m, to_id, via="", wire_id=None):
         rec["toWireId"] = wire
     if isinstance(m.get("userAsk"), dict):
         rec["userAsk"] = m["userAsk"]                # held with its provenance; approve replays it (T126)
+    if m.get("relayed"):
+        rec["relayed"] = True                        # held with its mark; approve replays it (T334)
+        if m.get("relayMarker"):
+            rec["relayMarker"] = str(m.get("relayMarker"))[:64]
     try:
         QUARANTINE.mkdir(parents=True, exist_ok=True)
         tmp = QUARANTINE / (mid + ".tmp")
@@ -3938,7 +4076,8 @@ def quarantine_decide(mid, action, text=None, feedback=None):
             deliver(to_id, rec.get("frm") or "?", rec.get("frmId") or "", body, kind=rec.get("kind") or "",
                     from_host=rec.get("origin") or "",
                     relay_mid=rec.get("mid") or "", relay_via=rec.get("via") or rec.get("origin") or "",
-                    user_ask=rec.get("userAsk"))
+                    user_ask=rec.get("userAsk"), relayed=bool(rec.get("relayed")),
+                    relay_marker=str(rec.get("relayMarker") or ""))
         except DeliveryNotRecorded as e:
             return False, "%s — the held message is untouched" % e
         quarantine_del(mid)
@@ -3975,7 +4114,7 @@ def _relay_in(host, m, token_proven=False):
     # 2026-08-30: a delegate bounced "isolation" with no flag set on either kernel and the
     # maildir delivering minutes either side). Same fetch-pair race the sending resolver's
     # one-fetch fix killed (2026-08-31); `answered` feeds the death-ruling gate at the tail.
-    agents, listing_answered = local_agents_checked()
+    agents, listing_answered = local_agents_checked(threads=True)   # thread rows too: a thread recipient must reach the bounce below, not retry forever (the review)
     to_id = str(m.get("toId") or "")
     if to_id and _ID_FORM_RE.fullmatch(to_id) is None:
         to_id = ""            # a malformed wire toId degrades to name matching — it must NEVER reach
@@ -4012,7 +4151,9 @@ def _relay_in(host, m, token_proven=False):
                 deliver(match[0]["id"], m.get("frm") or "?", m.get("frm_id") or "", m.get("body") or "",
                         kind=m.get("kind") or "", from_host=origin,
                         relay_mid=mid, relay_via=host,       # read-receipt route: back through the direct peer
-                        user_ask=m.get("userAsk"))           # origin-kernel walked record rides through (T126)
+                        user_ask=m.get("userAsk"),           # origin-kernel walked record rides through (T126)
+                        relayed=bool(m.get("relayed")),      # romp sent it on the sender's behalf (T334)
+                        relay_marker=str(m.get("relayMarker") or ""))
             except DeliveryNotRecorded as e:
                 # nothing landed → NOT acked and not marked seen: silence crosses the wire as
                 # 'retry', the sender's outbox keeps it parked and re-relays it next exchange
@@ -4040,7 +4181,7 @@ def _relay_in(host, m, token_proven=False):
     if named:
         # every live candidate's mailbox flag read TRUE in THIS snapshot — a genuine flag ruling,
         # the only thing allowed to mint an isolation bounce (finality makes this arm zero-tolerance)
-        return "bounce", {"mid": mid, "why": "recipient '%s' has its mailbox off (postal isolation)" % to}
+        return "bounce", {"mid": mid, "why": _isolated_bounce_why(named, to)}
     if not m.get("origin"):                          # one hop MAX: a message that already hopped never re-forwards
         # route by the SID when the mail carries one, by name otherwise (skeptic finds
         # 2026-09-01, both rounds): the hub's name-only forward final-bounced a sid-addressed
@@ -4966,6 +5107,13 @@ def cli_send(argv):
     if not ensure():
         sys.stderr.write("[romp mail] %s\n" % _unreachable_hint()); return 1
     mid, me = _self_identity()
+    own = _mail_off_why(mid) if mid else ""
+    if own:
+        # the CALLER's own identity is judged before any --from label substitutes a synthetic one, for every closed
+        # door (the review: --from was a door around the thread's own-send refusal, the incident's shape; then around
+        # a mailbox the user toggled off too)
+        sys.stderr.write("[romp mail] %s\n" % {"thread": THREAD_MAIL_OFF_SENDER, "unreadable": UNREADABLE_REG_SENDER}.get(own, ISOLATION_SENDER))
+        return 1
     if frm_label:
         me, mid = frm_label, "ext:" + frm_label
     if not mid:

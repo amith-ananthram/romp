@@ -7,6 +7,7 @@ end-to-end /send + /agents enforcement is in tests/romp-postal.bats.
 Synthetic only — placeholder UUIDs, hermetic temp state dir, no real session data.
 """
 import json
+import sys
 import os
 import tempfile
 import unittest
@@ -237,6 +238,145 @@ class ThreadOwnSendRefused(unittest.TestCase):
         _reg(THREAD)                                       # broken out: the reg has no threadOf
         status, body = self._send(THREAD, "web-2", "web")
         self.assertNotEqual(status, 403, "a promoted session sends like any other: %r" % (body,))
+
+
+class ThreadMailOffFollowUp(unittest.TestCase):
+    """The review's lows on the thread rule: a reg that exists but cannot be read fails CLOSED; the CLI judges the
+    caller's own identity before a --from label substitutes a synthetic one; a sender's stuck-mail line for a thread
+    says HELD, never resend; an inbound cross-host bounce names the thread refusal."""
+
+    def tearDown(self):
+        for f in (pm.SESSION_FLAGS, pm.SESSION_FLAGS.parent / "sdk" / (THREAD + ".json"), pm.SESSION_FLAGS.parent / "sdk" / (SENDER + ".json")):
+            try:
+                f.unlink()
+            except OSError:
+                pass
+
+    def test_an_unreadable_reg_fails_closed_and_no_reg_stays_open(self):
+        d = pm.SESSION_FLAGS.parent / "sdk"; d.mkdir(parents=True, exist_ok=True)
+        (d / (THREAD + ".json")).write_text("{not json")
+        self.assertEqual(pm._thread_of(THREAD), pm.THREAD_REG_UNREADABLE)
+        self.assertEqual(pm._mail_off_why(THREAD), "unreadable", "a record that exists but cannot be read: closed, under its own reason")
+        self.assertTrue(pm._postal_off(THREAD))
+        (d / (THREAD + ".json")).write_text(json.dumps(["not", "a", "dict"]))
+        self.assertEqual(pm._mail_off_why(THREAD), "unreadable", "…whatever shape the corruption takes")
+        (d / (THREAD + ".json")).unlink()
+        self.assertEqual(pm._thread_of(THREAD), ""); self.assertEqual(pm._mail_off_why(THREAD), "", "no reg at all: an ordinary session")
+
+    def test_the_cli_judges_the_callers_own_identity_before_any_from_label(self):
+        _reg(THREAD, threadOf=PARENT)
+        import io
+        saved = (pm._self_identity, pm.ensure, pm._http)
+        calls = []
+        try:
+            pm._self_identity = lambda: (THREAD, "web-comment-1")
+            pm.ensure = lambda: True
+            pm._http = lambda *a, **k: calls.append(a) or {}
+            err = io.StringIO(); real = sys.stderr; sys.stderr = err
+            try:
+                rc1 = pm.cli_send(["web", "a note"])
+                rc2 = pm.cli_send(["--from", "nightly", "web", "a note"])
+            finally:
+                sys.stderr = real
+            self.assertEqual((rc1, rc2), (1, 1)); self.assertEqual(calls, [], "nothing reached the bus")
+            self.assertEqual(err.getvalue().count("COMMENT THREAD"), 2); self.assertIn("breaks it out", err.getvalue())
+            _reg(THREAD)                                   # broken out: the same calls go through to the bus
+            rc3 = pm.cli_send(["--from", "nightly", "web", "a note"])
+            self.assertEqual(rc3, 0); self.assertEqual(len(calls), 1); self.assertEqual(calls[0][2]["from_id"], "ext:nightly")
+        finally:
+            pm._self_identity, pm.ensure, pm._http = saved
+
+    def test_a_directory_the_bus_cannot_stat_fails_closed_without_raising(self):
+        # the review's medium: the stat sat outside the try, so EACCES on sdk/ raised out of every reader
+        d = pm.SESSION_FLAGS.parent / "sdk"; d.mkdir(parents=True, exist_ok=True)
+        (d / (THREAD + ".json")).write_text(json.dumps({"sid": THREAD, "threadOf": PARENT}))
+        if os.geteuid() == 0:
+            self.skipTest("root reads through chmod 000")
+        os.chmod(d, 0)
+        try:
+            self.assertEqual(pm._thread_of(THREAD), pm.THREAD_REG_UNREADABLE)
+            self.assertEqual(pm._mail_off_why(THREAD), "unreadable")
+            self.assertEqual(pm.read_box(THREAD, consume=True), [], "the receive gate answers empty, it does not raise")
+            self.assertTrue(pm._postal_off(THREAD))
+        finally:
+            os.chmod(d, 0o755)
+
+    def test_an_unreadable_record_gets_its_own_words_never_the_thread_diagnosis(self):
+        d = pm.SESSION_FLAGS.parent / "sdk"; d.mkdir(parents=True, exist_ok=True)
+        (d / (SENDER + ".json")).write_text("{corrupt")
+        self.assertNotIn("COMMENT THREAD", pm.UNREADABLE_REG_SENDER); self.assertIn("cannot be read", pm.UNREADABLE_REG_SENDER)
+        held = pm._stuck_warn_text({"name": "api"}, SENDER, "hello")
+        self.assertTrue(held.startswith("↩ HELD")); self.assertIn("cannot read", held); self.assertNotIn("COMMENT THREAD", held)
+        self.assertIn("cannot read", pm._isolated_bounce_why([{"id": SENDER, "name": "api"}], "api"))
+        import io
+        saved = (pm._self_identity, pm.ensure, pm._http)
+        try:
+            pm._self_identity = lambda: (SENDER, "api"); pm.ensure = lambda: True; pm._http = lambda *a, **k: {}
+            err = io.StringIO(); real = sys.stderr; sys.stderr = err
+            try:
+                rc = pm.cli_send(["web", "a note"])
+            finally:
+                sys.stderr = real
+            self.assertEqual(rc, 1); self.assertIn("cannot be read", err.getvalue()); self.assertNotIn("COMMENT THREAD", err.getvalue())
+        finally:
+            pm._self_identity, pm.ensure, pm._http = saved
+
+    def test_an_inbound_relay_to_a_thread_bounces_through_relay_in_itself(self):
+        # the review's medium: _relay_in listed the DEFAULT rows (no threads), so the thread arm never ran and the relay retried forever
+        _reg(THREAD, threadOf=PARENT)
+        rows = [{"id": PARENT, "name": "web"}, {"id": THREAD, "name": "web-comment-1", "thread": True, "parent": PARENT}]
+        saved = pm._kernel_sessions_checked
+        pm._kernel_sessions_checked = lambda threads=False: ([r for r in rows if threads or not r.get("thread")], True)
+        try:
+            verdict, bounce = pm._relay_in("TESTHOST", {"mid": "relay-thread-0001", "to": "web-comment-1", "frm": "api", "frm_id": "id-api", "body": "a note", "kind": "coordinate"})
+            self.assertEqual(verdict, "bounce", (verdict, bounce))
+            self.assertIn("COMMENT THREAD", bounce["why"]); self.assertIn("breaks it out", bounce["why"])
+        finally:
+            pm._kernel_sessions_checked = saved
+
+    def test_the_stuck_mail_line_says_held_for_a_thread_and_resend_for_a_session(self):
+        _reg(THREAD, threadOf=PARENT)
+        held = pm._stuck_warn_text({"name": "web-comment-1"}, THREAD, "please  look\nat this")
+        self.assertTrue(held.startswith("↩ HELD")); self.assertIn("breaks it out", held); self.assertIn("Nothing to resend", held)
+        self.assertIn("Original: please look at this", held)
+        stuck = pm._stuck_warn_text({"name": "api"}, SENDER, "hello")
+        self.assertTrue(stuck.startswith("↩ STILL UNDELIVERED")); self.assertIn("resend", stuck)
+
+    def test_an_inbound_bounce_names_the_thread_refusal(self):
+        _reg(THREAD, threadOf=PARENT)
+        why = pm._isolated_bounce_why([{"id": THREAD, "name": "web-comment-1"}], "web-comment-1")
+        self.assertIn("COMMENT THREAD", why); self.assertIn("breaks it out", why)
+        _flags({SENDER: {"postalServiceOff": True}})
+        self.assertEqual(pm._isolated_bounce_why([{"id": SENDER, "name": "api"}], "api"), "recipient 'api' has its mailbox off (postal isolation)")
+
+
+class CliJudgesIsolationToo(unittest.TestCase):
+    """`romp mail send --from <label>` judged the caller for the thread and unreadable doors only; a mailbox the user
+    toggled OFF fell through (the review's low). Every closed door now stops the CLI before any label applies."""
+
+    def tearDown(self):
+        try:
+            pm.SESSION_FLAGS.unlink()
+        except OSError:
+            pass
+
+    def test_an_isolated_caller_is_stopped_with_the_isolation_words_with_and_without_from(self):
+        _flags({SENDER: {"postalServiceOff": True}})
+        import io
+        saved = (pm._self_identity, pm.ensure, pm._http)
+        calls = []
+        try:
+            pm._self_identity = lambda: (SENDER, "api"); pm.ensure = lambda: True; pm._http = lambda *a, **k: calls.append(a) or {}
+            err = io.StringIO(); real = sys.stderr; sys.stderr = err
+            try:
+                rc1 = pm.cli_send(["web", "a note"]); rc2 = pm.cli_send(["--from", "nightly", "web", "a note"])
+            finally:
+                sys.stderr = real
+            self.assertEqual((rc1, rc2), (1, 1)); self.assertEqual(calls, [], "nothing reached the bus")
+            self.assertEqual(err.getvalue().count("YOUR OWN mailbox is OFF"), 2); self.assertNotIn("COMMENT THREAD", err.getvalue())
+            self.assertEqual(pm.ISOLATION_SENDER, pm.ISOLATION_SENDER.strip()); self.assertIn("isolation:", pm.ISOLATION_SENDER)
+        finally:
+            pm._self_identity, pm.ensure, pm._http = saved
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

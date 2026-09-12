@@ -321,6 +321,96 @@ class ApprovalModes(unittest.TestCase):
         self.assertEqual(params["approvalsReviewer"], "auto_review")
         restored.kill(sid)
 
+    def test_pending_session_recovery_keeps_the_picked_model(self):
+        # a model picked while the row was still a placeholder vanished at the first send:
+        # thread/start went out without it, and the server's reply (its default, never empty)
+        # overwrote the pick in memory and in the registry, so the turn ran on the default and
+        # the picker showed it, with no word to the user
+        def unavailable():
+            raise RuntimeError("synthetic unavailable client")
+        be, _, tmp = build(factory=unavailable)
+        sid = be.spawn("web", "/TESTDIR")
+        self.assertTrue(be.set_model(sid, "gpt-5-picked"))
+        fake = FakeClient()
+        restored = cb.CodexBackend(tmp, client_factory=lambda: fake)
+        try:
+            self.assertTrue(restored.send(sid, "synthetic recovery"))
+            self.assertTrue(until(lambda: not restored.busy(sid)))
+            self.assertEqual(fake.called("turn_start")[-1][3].get("model"), "gpt-5-picked",
+                             "the turn runs on the pick, not the server's default")
+            self.assertEqual(restored.live_sessions()[sid]["model"], "gpt-5-picked")
+            rows = json.loads(restored._reg_path().read_text())
+            self.assertEqual(rows[sid]["model"], "gpt-5-picked", "the registry keeps the pick")
+            self.assertEqual(fake.called("thread_start")[-1][1].get("model"), "gpt-5-picked",
+                             "the thread is created on the pick")
+        finally:
+            restored.kill(sid)
+
+    def test_failed_placeholder_recovery_keeps_the_picked_model(self):
+        # the same loss without a restart: thread/start raised at spawn (a failed- row on a live
+        # client), the user picked a model on the idle row, then sent
+        class BoomOnce(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.boom = True
+
+            def thread_start(self, params=None):
+                if self.boom:
+                    self.boom = False
+                    raise RuntimeError("synthetic thread/start failure")
+                return super().thread_start(params)
+        fake = BoomOnce()
+        be, _, _ = build(factory=lambda: fake)
+        sid = be.spawn("web", "/TESTDIR")
+        self.assertTrue(be._sessions[sid].tid.startswith("failed-"))
+        self.assertTrue(be.set_model(sid, "gpt-5-picked"))
+        try:
+            self.assertTrue(be.send(sid, "synthetic recovery"))
+            self.assertTrue(until(lambda: not be.busy(sid)))
+            self.assertEqual(fake.called("turn_start")[-1][3].get("model"), "gpt-5-picked")
+            self.assertEqual(be.live_sessions()[sid]["model"], "gpt-5-picked")
+            self.assertEqual(fake.called("thread_start")[-1][1].get("model"), "gpt-5-picked")
+        finally:
+            be.kill(sid)
+
+    def test_model_picked_while_the_thread_is_being_created_stays_picked(self):
+        # the create RPC runs under mode_lock alone and set_model takes the session lock alone, so
+        # a pick can land while thread/start is in flight; the reply must read the live model, not
+        # the snapshot the params were built from, or the server's default overwrites that pick
+        class Holding(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.entered = threading.Event()
+                self.release = threading.Event()
+
+            def thread_start(self, params=None):
+                self.entered.set()
+                assert self.release.wait(timeout=10), "the create was never released"
+                return super().thread_start(params)
+        def unavailable():
+            raise RuntimeError("synthetic unavailable client")
+        be, _, tmp = build(factory=unavailable)
+        sid = be.spawn("web", "/TESTDIR")
+        fake = Holding()
+        restored = cb.CodexBackend(tmp, client_factory=lambda: fake)
+        try:
+            self.assertEqual(restored._sessions[sid].model, "", "no pick before the send")
+            self.assertTrue(restored.send(sid, "synthetic recovery"))
+            self.assertTrue(fake.entered.wait(timeout=5), "thread/start never went out")
+            self.assertTrue(restored.set_model(sid, "gpt-5-picked"))
+            fake.release.set()
+            self.assertTrue(until(lambda: not restored.busy(sid)))
+            self.assertNotIn("model", fake.called("thread_start")[-1][1],
+                             "the pick landed after the create went out")
+            self.assertEqual(fake.called("turn_start")[-1][3].get("model"), "gpt-5-picked",
+                             "the turn runs on the pick that landed during the create")
+            self.assertEqual(restored.live_sessions()[sid]["model"], "gpt-5-picked")
+            rows = json.loads(restored._reg_path().read_text())
+            self.assertEqual(rows[sid]["model"], "gpt-5-picked", "the registry keeps the pick")
+        finally:
+            fake.release.set()             # a failure above must not leave the worker parked
+            restored.kill(sid)
+
     def test_mode_change_refuses_inflight_turn_and_rolls_back_failed_save(self):
         be, fake, _ = build()
         sid = be.spawn("web", "/TESTDIR")
@@ -893,6 +983,56 @@ class Lifecycle(unittest.TestCase):
         self.assertTrue(until(lambda: not be.busy(sid) and not be.pending_queued(sid)))
         self.assertEqual(len(replacement.called("turn_start")), 1)
 
+    def test_replacement_server_resumes_a_thread_the_dead_server_had_loaded(self):
+        # `loaded` meant "thread/resume done in this process", but the process that has to know the
+        # thread is the app-server, and the backend replaces that one on the fly when the pump sees
+        # it die. The thread stayed "loaded" on a server that had never seen it, turn/start went out
+        # with no thread/resume before it, and the app-server refuses that with "thread not found":
+        # a permanent rejection, so every resend met the same refusal until a kernel restart. The fake
+        # answers the way the pinned app-server does, so the turn completing proves the resume came
+        # first; the old server started the thread itself and must not be resumed on the way there.
+        class InvalidRequestError(RuntimeError):
+            code = -32600
+
+        class ThreadAwareClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.known = set()
+
+            def thread_start(self, params=None):
+                resp = super().thread_start(params)
+                self.known.add(resp.thread.id)
+                return resp
+
+            def thread_resume(self, tid, params=None):
+                self.known.add(tid)
+                return super().thread_resume(tid, params)
+
+            def turn_start(self, tid, input_items, params=None):
+                if tid not in self.known:
+                    raise InvalidRequestError("thread not found: %s" % tid)
+                return super().turn_start(tid, input_items, params)
+
+        old, replacement = ThreadAwareClient(), ThreadAwareClient()
+        clients = [old, replacement]
+        be, _, _ = build(factory=lambda: clients.pop(0))
+        sid = be.spawn("web", "/TESTDIR")
+        self.assertTrue(be.send(sid, "first"))
+        self.assertTrue(until(lambda: not be.busy(sid) and not be.pending_queued(sid)))
+        self.assertEqual(len(old.called("turn_start")), 1)
+        with be._client_lock:                  # the old app-server died: the pump's invalidation
+            be._record_client_failure_locked(RuntimeError("server died"), old)
+            be._client_retry_at = 0.0
+        self.assertTrue(be.send(sid, "second"))
+        self.assertTrue(until(lambda: not be.busy(sid) and not be.pending_queued(sid)),
+                        "the second turn never ran on the replacement server")
+        resumes = replacement.called("thread_resume")
+        self.assertEqual([r[1] for r in resumes], [be._session(sid).tid])
+        self.assertEqual(len(replacement.called("turn_start")), 1)
+        self.assertLess(replacement.calls.index(resumes[0]),
+                        replacement.calls.index(replacement.called("turn_start")[0]))
+        self.assertEqual(old.called("thread_resume"), [])
+
     def test_client_factory_failure_backs_off_then_recovers_queued_session(self):
         fake = FakeClient()
         attempts = []
@@ -935,6 +1075,16 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(len(fake.called("thread_start")), 1,
                          "the pending placeholder must become a real Codex thread")
         self.assertFalse(be.pending_queued(sid))
+        # A thread the server itself just created is loaded on that server: the next turn goes
+        # straight to turn/start, with no thread/resume ahead of it. `loaded` counts only while its
+        # recorded app-server generation matches the current one, so the create path has to record
+        # the generation it created on; left unrecorded (None), every later turn would re-resume
+        # the same live server first, an extra RPC per turn that one turn never shows.
+        self.assertTrue(be.send(sid, "and again"))
+        self.assertTrue(until(lambda: not be.busy(sid) and not be.pending_queued(sid), timeout=20))
+        self.assertEqual(fake.called("thread_resume"), [],
+                         "a thread the server itself created is never resumed on that server")
+        self.assertEqual(len(fake.called("turn_start")), 2)
 
     def test_turn_end_pokes_after_busy_clears(self):
         # the kernel's parked-op drain wakes on the poke (2026-09-03): every in-loop poke fires while the
@@ -2208,7 +2358,8 @@ class RaisingRegistryTransactions(unittest.TestCase):
             s = be._session(sid)
             s.tid = "pending-%s" % sid[:8]         # force the create path
             s.loaded = False
-            prior_model = s.model
+            s.model = ""                           # no pick on the placeholder: the server's answer
+            prior_model = s.model                  # fills the field, so the flip is observable
 
             class OtherModel(type(fake)):
                 def thread_start(self2, params):

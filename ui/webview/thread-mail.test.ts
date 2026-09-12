@@ -16,26 +16,44 @@ const POSTAL = fs.readFileSync(path.resolve(process.cwd(), "..", "postal", "post
 
 test("the popover says the thread's mail is off, and the promoted view says it is on now", () => {
   assert.match(COMMENTS, /mailOff\?: boolean;/, "the frame's field on the thread type");
-  assert.match(RENDER, /if \(th && th\.mailOff\) \{[\s\S]*?const mail = el\("div", "cmt-note cmt-mail"\);\s*\n\s*mail\.textContent = "Mail off: this thread neither sends nor receives peer mail until you break it out\.";/);
-  assert.match(RENDER, /note\.textContent = "The discussion continues there\.";\s*\n\s*pop\.appendChild\(note\);[\s\S]{0,200}mailOn\.textContent = "Its mail is on now: peers can reach it and it can send\.";/,
-               "said once, in the promoted view");
+  // the user's ruling (2026-09-11, 3:05 PM PT): the comment box says nothing about mail being off; a line only for held mail
+  assert.doesNotMatch(RENDER, /Mail off: this thread neither sends nor receives peer mail/);
+  assert.match(RENDER, /if \(th && th\.mailOff && \(th\.heldMail \|\| 0\) > 0\) \{[\s\S]{0,700}?mail\.textContent = held \+ \(held === 1 \? " message waits in its box and lands" : " messages wait in its box and land"\) \+ " at the break-out\.";/);
+  assert.match(RENDER, /note\.textContent = "The discussion continues there\.";\s*\n\s*pop\.appendChild\(note\);[\s\S]{0,600}mailOn\.textContent = !th\.mailOff[\s\S]{0,80}\? "Its mail is on now: peers can reach it and it can send\."/,
+               "said once, in the promoted view, from the effective state");
   assert.match(CSS, /\.cmt-note\.cmt-mail \{ opacity: 0\.6; font-size: 0\.86em; \}/);
+  // the follow-up: the promoted line reads the EFFECTIVE state (a mailbox toggled off since says so), and both lines
+  // count the mail held in the box
+  assert.match(COMMENTS, /heldMail\?: number;/);
+  assert.match(RENDER, /mailOn\.textContent = !th\.mailOff\s*\n\s*\? "Its mail is on now[^\n]*\n\s*: th\.mailOffWhy === "unreadable" \? "Its mail is held: this session's record cannot be read, and mail flows again once the record is repaired\."\s*\n\s*: "Its mailbox is off: the lane's mailbox toggle turns peer mail back on\."/,
+               "the promoted line reads the reason: an unreadable record is no mailbox toggle's to clear");
+  assert.match(COMMENTS, /mailOffWhy\?: string;/);
+  assert.match(KERNEL, /mail_why = _mail_off_why_k\(tsid\)\s*\n\s*threads\.append\(\{/, "the comments frame derives the reason once, before the row");
+  assert.match(KERNEL, /"mailOff": bool\(mail_why\),[^\n]*\n\s*"mailOffWhy": mail_why,/, "…and both fields read that one derivation");
+  assert.match(RENDER, /" in a moment\."/);
 });
 
 test("the tab hover and the Sessions pane show a session's mail state", () => {
-  assert.match(RENDER, /rows\.push\(\["Mail", s\.postalServiceOff \? "off: this session neither sends nor receives peer mail" : "on"\]\);/);
+  assert.match(RENDER, /rows\.push\(\["Mail", !s\.postalServiceOff \? "on"\s*\n\s*: s\.mailOffWhy === "unreadable" \? "held: this session's record cannot be read, so mail waits until it is repaired"\s*\n\s*: s\.mailOffWhy === "thread" \? "off until the thread is broken out"\s*\n\s*: "off: this session neither sends nor receives peer mail"\]\);/,
+               "the tab hover says which door is closed");
+  assert.match(RENDER, /mailOffWhy: \("mailOffWhy" in msg\) \? String\(msg\.mailOffWhy \|\| ""\) : \(prev \? prev\.mailOffWhy : undefined\),/, "the reason rides the session frame");
+  assert.match(FLEET, /mo\.textContent = s\.mailOffWhy === "unreadable" \? "mail held" : "mail off";/, "the Sessions pane tag says held for an unreadable record");
   assert.match(FLEET, /postalServiceOff\?: boolean;/, "the Sessions pane row type carries it");
-  assert.match(FLEET, /if \(s\.postalServiceOff\) \{[\s\S]*?const mo = el\("span", "fl-mail-off"\);\s*\n\s*mo\.textContent = "mail off";/);
+  assert.match(FLEET, /if \(s\.postalServiceOff\) \{[\s\S]*?const mo = el\("span", "fl-mail-off"\);\s*\n\s*mo\.textContent = s\.mailOffWhy === "unreadable" \? "mail held" : "mail off";/);
   assert.match(CSS, /\.fl-mail-off \{/);
 });
 
 test("the kernel and the bus derive the same default from the thread's reg and the fresh key", () => {
   assert.match(KERNEL, /def _thread_mail_off\(sid\):[\s\S]*?if not sid or not _thread_reg\(sid\)\.get\("threadOf"\):\s*\n\s*return False\s*\n\s*f = _session_flags\(\)\.get\(sid\)\s*\n\s*return not \(isinstance\(f, dict\) and f\.get\("threadMail"\) is True\)/,
                "literal True only (the flip-a-default rule)");
-  assert.match(KERNEL, /def _postal_isolated\(sid\):[\s\S]*?return _thread_mail_off\(sid\) or bool\(_session_flag\(sid, "postalServiceOff"\) or _session_flag\(sid, "postalOff"\)\)/);
-  assert.match(KERNEL, /"mailOff": bool\(_postal_isolated\(tsid\)\),/, "the comments frame carries it");
+  assert.match(KERNEL, /def _mail_off_why_k\(sid\):[\s\S]*?if _reg_unreadable\(sid\):\s*\n\s*return "unreadable"\s*\n\s*if _thread_mail_off\(sid\):\s*\n\s*return "thread"\s*\n\s*return "isolation" if \(_session_flag\(sid, "postalServiceOff"\) or _session_flag\(sid, "postalOff"\)\) else ""/,
+               "the kernel's reasons: unreadable first (the bus holds everything for it), then the thread default, then the mailbox flag");
+  assert.match(KERNEL, /def _postal_isolated\(sid\):[\s\S]*?return bool\(_mail_off_why_k\(sid\)\)/);
+  assert.match(KERNEL, /"mailOff": bool\(mail_why\),/, "the comments frame carries it (one derivation with the reason)");
   assert.match(KERNEL, /"postalServiceOff": _postal_isolated\(m\["id"\]\),/, "the Sessions pane rows carry it");
-  assert.match(POSTAL, /if _thread_of\(sid\) and not \(isinstance\(f, dict\) and f\.get\("threadMail"\) is True\):\s*\n\s*return "thread"/);
+  assert.match(POSTAL, /t = _thread_of\(sid\)\s*\n\s*if t == THREAD_REG_UNREADABLE:\s*\n\s*return "unreadable"[^\n]*\n\s*if t and not \(isinstance\(f, dict\) and f\.get\("threadMail"\) is True\):\s*\n\s*return "thread"/,
+               "an unreadable record is closed under its own reason, then the literal-True key");
+  assert.match(POSTAL, /agents, listing_answered = local_agents_checked\(threads=True\)/, "the relay lists thread rows, so a thread recipient bounces instead of retrying forever");
   assert.match(POSTAL, /if why_off == "thread":[^\n]*\n\s*return self\._send\(\{"error": THREAD_MAIL_OFF_SENDER\}, 403\)/, "the thread's own send");
-  assert.match(POSTAL, /if any\(_mail_off_why\(a\["id"\]\) == "thread" for a in direct_all\):/, "a send to the thread");
+  assert.match(POSTAL, /whys = \{a\["id"\]: _mail_off_why\(a\["id"\]\) for a in direct_all\}[\s\S]{0,500}?if "unreadable" in whys\.values\(\):[\s\S]{0,500}?if "thread" in whys\.values\(\):/, "a send to the thread, and to a session whose record cannot be read, each with its own words");
 });

@@ -12,6 +12,15 @@
 // `#only=demo` on the dashboard URL scopes all four panes at once. A cross-origin top (an embedded
 // webview) falls back to the pane's own URL.
 
+/** The window whose URL carries the filter: the shell's (window.top) when this pane is a same-origin iframe of it on
+ *  the dashboard, else this pane's own (a top-level /chat page, or a cross-origin top such as an embedded webview,
+ *  which throws on the read). onlyTag reads it, and the strip's hashchange listener binds to it, so a live edit of the
+ *  SHELL's hash repaints the framed pane (the review of T357's later lows: the listener sat on the pane's window, whose
+ *  hash never changes on the dashboard). */
+export function onlyWindow(): Window {
+  try { const t = window.top || window; void t.location.hash; return t; } catch { return window; }
+}
+
 export function onlyTag(): string | null {
   const read = (loc: Location): string | null => {
     try {
@@ -21,8 +30,7 @@ export function onlyTag(): string | null {
     } catch { return null; }
   };
   if (typeof window === "undefined") return null;    // no DOM (a test/headless context) → no filter
-  try { return read((window.top || window).location); } catch { /* cross-origin top */ }
-  try { return read(window.location); } catch { return null; }   // fall back to this pane's own URL
+  try { return read(onlyWindow().location); } catch { return null; }   // the shell's URL, else this pane's own
 }
 
 export function matchesOnly(name: string | null | undefined, tag: string | null): boolean {

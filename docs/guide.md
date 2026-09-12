@@ -411,19 +411,25 @@ session name in it. When that same session's tab returns, the pane goes back
 to it. After a kernel restart the page reloads and remembers the tab you were
 on: until that session is listed again the pane stays blank and names it as not
 listed yet, and it never settles on another session meanwhile; if it never
-returns, the blank body stays until you pick a tab. A tab view that stops
-showing your session (a tag removed) blanks the pane the same way and comes back
-to it when the view shows it again. From the blank pane an arrow key or Next Tab
-lands on the first visible tab. Focus moves to a different session only when
+returns, the blank body stays until you pick a tab (a remembered tab that can
+never return, a subagent's viewer or a session still being created, says so at
+once). A tab view that stops showing your session keeps it on the strip as the
+peek. From the blank pane an arrow key or Next Tab lands on the first visible
+tab. Focus moves to a different session only when
 you pick a tab, or when you close the active tab yourself (then the pane returns
 to the tab you used before it).
 
 A comment thread's mail is off, both directions, until you break it out: peers
 cannot see or mail the thread, and its own mail is refused with a line saying
-so. The popover says "mail off" while it lasts, and the moment you break the
-thread out it is a session like any other, mail on unless you toggle its
-mailbox off (the user 2026-09-11, after a thread received a manager's mail and
-acted as the manager).
+so. The comment box itself says nothing about it (the tab hover's Mail row and
+the Sessions pane show the state), except a count when messages are actually
+held for the thread; they land within seconds of a break-out. The moment you
+break the thread out it is a session like any other, mail on unless you toggle
+its mailbox off (the user 2026-09-11, after a thread received a manager's mail
+and acted as the manager). Only peer mail is gated: what you type into the thread's
+box yourself, and plain text the kernel's own send route carries, is yours and
+still goes through; that is the human channel, by design, not a hole in the
+gate.
 
 Words your team coined wear a quiet dotted underline wherever a session writes
 them: hover for the definition and the plain phrase, click to open the group's

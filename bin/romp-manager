@@ -150,6 +150,7 @@ function specEnv(spec, base, ids) {
     ROMP_KERNEL_PORT: String(spec.port),
     ROMP_MANAGER_PID: String(ids.managerPid),  // → kernel's parent-death watchdog
     ROMP_MANAGER_PORT: String(ids.controlPort),
+    ROMP_SHUTDOWN_GRACE_MS: String(SHUTDOWN_GRACE_MS),   // → the kernel's exit budgets (shares of the grace)
   });
   if (spec.postalPort) env.ROMP_POSTAL_PORT = String(spec.postalPort);
   if (spec.stateDir) env.ROMP_STATE_DIR = spec.stateDir;
@@ -378,7 +379,8 @@ const STORM_OPTS = { coalesceMs: RESTART_COALESCE_MS, stormWindowMs: STORM_WINDO
 // exit 800ms after one SIGTERM and escalate to nothing, so a kernel that ignored the signal outlived
 // it, keeping its port and its sessions under a `romp down` marker that said otherwise. The env seam
 // is for the unit tests, which cannot sit through 5s.
-const SHUTDOWN_GRACE_MS = Number(process.env.ROMP_SHUTDOWN_GRACE_MS) || 5000;
+const SHUTDOWN_GRACE_MS = Number(process.env.ROMP_SHUTDOWN_GRACE_MS) || 8000;   // 8 s (was 5; the kernel's exit
+// budgets are shares of this value, passed down in specEnv, so a kernel never assumes more grace than it gets)
 
 // SIGTERM a kernel and, when it is still there once the grace has run out, SIGKILL it and say so.
 // Every stop and every restart goes through here: a kernel that ignores its SIGTERM under `romp

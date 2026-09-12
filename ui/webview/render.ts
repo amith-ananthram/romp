@@ -58,7 +58,7 @@ import { reconcileHeld, heldAsQueued, type HeldCopy, type HeldQueued, type HeldM
 import { reloadHoldReason } from "./reload-hold";
 import { liveNotices, keepReloadNotices, takeReloadNotices } from "./reload-notices";
 import { mintProvisionalId, isProvisionalId, provisionalName, adoptsProvisional, focusResolvesProvisional } from "./provisional";
-import { onlyTag, matchesOnly } from "./only-filter";
+import { onlyTag, matchesOnly, onlyWindow } from "./only-filter";
 import { numberDiff, type DiffRow } from "./diff-lines";
 import { parseAgentNotif, notifHead, type AgentNotif } from "./agent-notif";
 import { injectedHead, type InjectedSource } from "./injected-source";
@@ -331,7 +331,7 @@ interface BgTasks { count: number; tasks: BgTask[]; }
 // kernel ships only the last WIRE_TAIL events (headFrom > 0) to keep startup light; older history streams in
 // on scroll-back (loadOlder → chatHead prepends, lowering headFrom). headFrom 0 = the whole transcript is
 // resident. chatTail's `from` is GLOBAL and mapped through headFrom.
-interface Session { id: string; name: string; color: Color | null; events: ChatEvent[]; status: Status; firstSeen?: number; cwd?: string; gitBranch?: string; workTree?: { dir: string; branch: string } | null; githubRepo?: string | null; headFrom?: number; headTotal?: number | null; proto?: number; headKnown?: boolean; firstUuid?: string | null; lastUuid?: string | null; detached?: boolean; bgTasks?: BgTasks; hideFromFeed?: boolean; postalServiceOff?: boolean; notify?: boolean; branch?: { fromSid: string; fromName: string; cut: string; t: number } | null; branches?: { sid: string; name: string; cut: string; t: number }[] | null; sub?: SubInfo; }
+interface Session { id: string; name: string; color: Color | null; events: ChatEvent[]; status: Status; firstSeen?: number; cwd?: string; gitBranch?: string; workTree?: { dir: string; branch: string } | null; githubRepo?: string | null; headFrom?: number; headTotal?: number | null; proto?: number; headKnown?: boolean; firstUuid?: string | null; lastUuid?: string | null; detached?: boolean; bgTasks?: BgTasks; hideFromFeed?: boolean; postalServiceOff?: boolean; mailOffWhy?: string; notify?: boolean; branch?: { fromSid: string; fromName: string; cut: string; t: number } | null; branches?: { sid: string; name: string; cut: string; t: number }[] | null; sub?: SubInfo; }
 // A SUBAGENT VIEWER pseudo-session (plans/subagent-transcripts.md): a read-only tab whose events are one
 // agent's own transcript, fed by {type:"subagent"} frames. Client-only — the kernel never lists it in
 // tabOrder (reconcileTabOrder keeps a known, never-kernel-seen id), so it lives exactly as long as the
@@ -1023,7 +1023,7 @@ let activeId: string | null = null;
 let vanishedId: string | null = null;
 let vanishedWhy: VanishWhy | null = null;
 let vanishedName = "";
-/** why the pane is unfocused: a dismissal's reason, or "hidden" (the tab view stopped showing the active tab) */
+/** why the pane is unfocused: a dismissal's reason, or "hidden" (the strip's #only= filter stopped showing the active tab) */
 type VanishWhy = DismissWhy | "hidden";
 let renderingSid: string | null = null;   // the session id syncView is currently building (for per-session fold keys)
 // The SESSION whose transcript DOM is being built — the id preview/image URLs must bake in, host prefix
@@ -1051,6 +1051,19 @@ let wantActive: string | null = (() => { try { return ((vscodeApi?.getState?.() 
 // arrives (its frame, or the strip re-listing it), and clears the wait when the user picks another tab (setActive). A
 // session that never returns leaves the body standing until a pick: no timer.
 let wantActiveName: string = (() => { try { return String(((vscodeApi?.getState?.() || {}) as any).activeName || ""); } catch { return ""; } })();
+// A persisted id that can never be listed again (a subagent viewer's tab, a provisional create) is not awaited: the
+// body says it is gone and invites a pick (the review's low). A session that ended while the page was away is not
+// knowable up front: it is awaited like any other, and the body stands until a pick.
+let wantActiveGone: string | null = null;
+if (wantActive && (isSubId(wantActive) || isProvisionalId(wantActive))) { wantActiveGone = wantActive; wantActive = null; }
+/** The persisted choice this page restores after a reload: the id and the name the body can show before the strip
+ *  knows it. Written by every activation, a pick or an adoption alike (the review's low: an adopted tab was never
+ *  persisted, so a restart still landed elsewhere). */
+function persistActive(id: string): void {
+  try {
+    vscodeApi?.setState?.({ ...(vscodeApi.getState?.() || {}), activeId: id, activeName: liveSession(id)?.name || tabMeta.get(id)?.name || "" });
+  } catch { /* ignore */ }
+}
 let pendingAnchor: string | null = null; // deep-link target waiting to be scrolled to
 let pendingAnchorIntent: string | null = null; // kind the uuid anchor must honor — sticks with pendingAnchor across render-pass retries (pendingAnchorKind is cleared each pass, this isn't)
 let pendingAnchorT: number | null = null; // time fallback (epoch s) when the uuid can't resolve
@@ -5574,6 +5587,7 @@ function applyTabOrder(o: any, tabs?: any, report?: OrderReport, live?: any) {
   // skeleton branch of showActive asks for its frame. Another session's tab appearing does nothing here.
   const back = vanishedId || wantActive;   // …or the tab this page showed before a reload, awaited since boot
   if (back && order.includes(back)) setActive(back);
+  else if (!activeId) showActive();   // the strip changed under an unfocused pane (it may have emptied): the body's line and the box's placeholder follow it (the review's low)
   renderTabs();
 }
 // The tabOrder frame's `skeleton` list (2026-09-07): the tabs the kernel is withholding from this page after a
@@ -5723,7 +5737,10 @@ function showTabTip(tab: HTMLElement, s: Session): void {
   // "SDK backend" badge at the top of the tooltip; it reads as one of the session's config fields).
   if (be) rows.push(["Backend", backendLabel(be)]);
   // the session's mail state (T356): off means peers cannot see or mail it and its own sends are refused
-  rows.push(["Mail", s.postalServiceOff ? "off: this session neither sends nor receives peer mail" : "on"]);   // the shared names (T288); a session still running on the retired terminal backend (until stage 3) reads its id, never blank (review find)
+  rows.push(["Mail", !s.postalServiceOff ? "on"
+    : s.mailOffWhy === "unreadable" ? "held: this session's record cannot be read, so mail waits until it is repaired"
+    : s.mailOffWhy === "thread" ? "off until the thread is broken out"
+    : "off: this session neither sends nor receives peer mail"]);   // the shared names (T288); a session still running on the retired terminal backend (until stage 3) reads its id, never blank (review find)
   // Billing: whether this tab bills the API key or the Claude login — and WHICH login account (the
   // user 2026-08-09: shown whenever the backend reports it, one-auth machines included). No key material, ever.
   // When the CLI's own init landed on the OTHER side (authLive — say, a key found via apiKeyHelper
@@ -6329,29 +6346,31 @@ function renderTabs() {
   // demo/recording view filter (the user 2026-07-14): `#only=<tag>` shows only matching-name tabs; the
   // real sessions keep running, just hidden from this view. No tag → visibleIds === ids (unchanged).
   const only = onlyTag();
-  const nameOf = (id: string) => sessions.get(id)?.name ?? tabMeta.get(id)?.name ?? "";
   // the session VIEWS filter composes here too (the user 2026-08-18): a view-hidden session keeps
-  // its state, drafts and cached transcript — it just loses its tab until revealed
-  const inViewIds = ids.filter(tabInView);
-  const visibleIds = only ? inViewIds.filter((id) => matchesOnly(nameOf(id), only)) : inViewIds;
+  // its state, drafts and cached transcript — it just loses its tab until revealed. ONE predicate (stripShows) builds
+  // this list and answers the deferred checks below, so the two can never disagree (the review's low)
+  const visibleIds = ids.filter((id) => stripShows(id, only));
   // ...and it must govern the CHAT BODY too, not just the bar (the user 2026-07-16). Hiding a
   // non-matching TAB while its transcript keeps rendering leaks precisely what the filter exists to
   // hide: a real session's chat sitting on screen under `#only=api,tests,web`, statusline and all —
-  // found while shooting the demo, with nimbus's transcript filling a "filtered" frame. Re-point the
-  // selection at the first visible session. Deferred so we never re-enter the render we're inside;
-  // setActive is a no-op once activeId is visible, so this settles in one pass.
-  if (activeId && ids.includes(activeId) && !visibleIds.includes(activeId) && visibleIds.length) {
-    const next = visibleIds[0];
-    // re-validate at FIRE time, not schedule time: an activation between the two (a feed click
-    // opening an ephemeral peek, a reveal landing) can have made the active tab visible — bouncing
-    // then would kick the user off the very tab they just opened (the no-flap rule)
-    // …but never at ANOTHER session on the pane's own initiative (T357): the pane goes unfocused, naming the tab the
-    // view no longer shows, and comes back to it below when the view shows it again
-    setTimeout(() => { if (activeId !== next && activeId && !tabInView(activeId)) unfocusHiddenByView(activeId); }, 0);
+  // found while shooting the demo, with nimbus's transcript filling a "filtered" frame.
+  // WHICH filter needs this: visibility is a pure function of the views blob, and captureViews asserts the active
+  // tab's peek before applyTabOrder on every tabOrder frame, so a VIEW that excludes the active tab never reaches
+  // here (the peek keeps it in tabInView). The `#only=` filter is not a peek input: it is applied on top of tabInView
+  // right above, so an only-filtered active tab does reach here. The pane then goes UNFOCUSED naming the hidden tab
+  // (T357: never re-pointed at another session); the check at fire time reads the same predicate visibleIds does
+  // (stripShows), and the tab comes back below when the filter shows it again.
+  if (activeId && ids.includes(activeId) && !visibleIds.includes(activeId)) {
+    const hid = activeId;
+    setTimeout(() => { if (activeId === hid && !stripShows(hid)) unfocusHiddenByView(hid); }, 0);
   }
   if (!activeId && vanishedId && vanishedWhy === "hidden" && visibleIds.includes(vanishedId)) {
     const back = vanishedId;
-    setTimeout(() => { if (!activeId && vanishedId === back && tabInView(back)) setActive(back); }, 0);
+    // the reason re-read too: a teardown queued in between must not be undone. And the strip's MEMBERSHIP, not only the
+    // predicate: a teardown of a tab that is not active writes no vanished* (dismissSession does that for the active tab
+    // alone), so the reason still reads "hidden" after the tab left `order`; stripShows knows the view and the filter,
+    // not the strip, and would hand focus to a tab nobody can see (the review's low)
+    setTimeout(() => { if (!activeId && vanishedId === back && vanishedWhy === "hidden" && order.includes(back) && stripShows(back)) setActive(back); }, 0);
   }
   // TAB SECTIONS (the user 2026-09-04): groups are tags. With sectioning on (per browser — the
   // tag-lens menu's "Group tabs by tag") and some tag holding a visible tab, the strip renders one
@@ -7260,6 +7279,12 @@ window.addEventListener("romp-hosts", () => { renderTabs(); syncComposerPh(); })
 // a dial attempt to a remote host began or ended (federation.ts dialEvent): the host-down foot's swirl
 // spins while one is in flight, as of the last /tunnels poll, so it repaints on this event and on nothing else
 window.addEventListener("romp:hostDial", () => { syncHostOfflineFoot(); repaintEmptyStateIfUnfocused(); });   // the unfocused body's "reconnecting" follows the dial state too (T357)
+// the `#only=` filter is the location hash, so a LIVE edit of the hash repaints the strip at once: the hidden tab's
+// unfocus and its return both run off this repaint, not off the next kernel frame (T357 later lows). On the dashboard
+// this pane is a same-origin iframe of the shell and the filter lives on the SHELL's URL (only-filter.ts reads
+// window.top), so the listener binds to the window onlyTag reads: the shell's there, this pane's own on a top-level
+// page or under a cross-origin top (the review: the pane's own hash never changes on the dashboard)
+onlyWindow().addEventListener("hashchange", () => renderTabs());
 window.addEventListener("mousedown", (e) => { if (ctxMenuEl && !ctxMenuEl.contains(e.target as Node)) dismissTabMenu(); }, true);
 // an Escape that closed the menu says so on the event (preventDefault), so the section view's own Escape
 // (installSnapshotEscape, armed at this same capture phase, later in the listener order) yields to it
@@ -10092,12 +10117,13 @@ function renderCommentPopover(): void {
     crow.append(attach, box, send);
     pop.appendChild(crow);
     if (metaRowPending) pop.appendChild(metaRowPending);   // model/effort under the box, like the chat
-    if (th && th.mailOff) {
-      // T356 (the user 2026-09-11): a thread's mail is off, both directions, until it is broken out; the popover
-      // is the thread's whole surface, so it says so here
+    if (th && th.mailOff && (th.heldMail || 0) > 0) {
+      // T356: a thread's mail is off until it is broken out, but the comment box does not SAY so (the user
+      // 2026-09-11, 3:05 PM PT: not here; the tab hover's Mail row and the Sessions pane tag carry the state quietly).
+      // Only a message actually held in its box is worth a line: the count, and that it lands at the break-out.
+      const held = th.heldMail || 0;
       const mail = el("div", "cmt-note cmt-mail");
-      mail.textContent = "Mail off: this thread neither sends nor receives peer mail until you break it out.";
-      mail.title = "Peers cannot see or mail this thread, and its own mail is refused. Break out turns mail on.";
+      mail.textContent = held + (held === 1 ? " message waits in its box and lands" : " messages wait in its box and land") + " at the break-out.";
       pop.appendChild(mail);
     }
     if (th && th.status === "open") {
@@ -10167,9 +10193,14 @@ function renderCommentPopover(): void {
     const note = el("div", "cmt-note");
     note.textContent = "The discussion continues there.";
     pop.appendChild(note);
-    // the break-out flipped its mail on (T356): said once, here, where the user looks after breaking it out
+    // the break-out flipped its mail on (T356): said once, here, where the user looks after breaking it out — from the
+    // EFFECTIVE state the frame carries, so a mailbox the user toggled off since reads as off (the review's low)
     const mailOn = el("div", "cmt-note cmt-mail");
-    mailOn.textContent = "Its mail is on now: peers can reach it and it can send.";
+    const held = th.heldMail || 0;
+    mailOn.textContent = !th.mailOff
+      ? "Its mail is on now: peers can reach it and it can send." + (held ? " " + held + (held === 1 ? " held message lands" : " held messages land") + " in a moment." : "")
+      : th.mailOffWhy === "unreadable" ? "Its mail is held: this session's record cannot be read, and mail flows again once the record is repaired."
+      : "Its mailbox is off: the lane's mailbox toggle turns peer mail back on.";   // the reason rides the frame: a remedy that fits (T356)
     pop.appendChild(mailOn);
     const row = el("div", "cmt-actions");
     const open = el("button", "cmt-act") as HTMLButtonElement;
@@ -12018,12 +12049,37 @@ function fillSnapshotRow(btn: HTMLElement, r: SnapRow, now: number): void {
 // no DOM left to capture from and the emptied box no longer overflows. undefined = capture here.
 // The empty body's line (pane-focus.ts emptyStateParts, T357): which session vanished and why, its name dressed the way
 // the strip dresses it (host prefix, identity colour), "reconnecting" when its host is dialing; or the plain invitation.
+/** Does the strip show `id` right now: in the tab view (a peek counts) AND matching the `#only=` filter — the one
+ *  predicate renderTabs's visibleIds is built from, read again at fire time so a deferred check judges the strip as
+ *  it is, not as it was scheduled. `only` may be passed by a caller that read the hash once for many ids. */
+function stripShows(id: string, only: string | null = onlyTag()): boolean {
+  if (!tabInView(id)) return false;
+  return !only || matchesOnly(sessions.get(id)?.name ?? tabMeta.get(id)?.name ?? "", only);
+}
+
+// The strip's #only= filter stopped showing the active tab (T357, the review's probe: web persisted, `#only=api`, a
+// reload): the same rule as a dismissal — the pane goes UNFOCUSED naming the session the filter hides, its transcript
+// leaves the screen, and it never re-points itself at another session. renderTabs restores it when the filter shows
+// it again.
+function unfocusHiddenByView(id: string): void {
+  if (activeId !== id) return;
+  stashActiveDraft(id);
+  activeId = null; vanishedId = id; vanishedWhy = "hidden"; vanishedName = sessions.get(id)?.name || tabMeta.get(id)?.name || "";
+  loadComposerFor(null);
+  renderTabs();
+  showActive();
+}
 function paintEmptyState(empty: HTMLElement): void {
   const awaited = !vanishedId && wantActive ? wantActive : null;   // the persisted tab, not listed yet after a reload
-  const named = vanishedId || awaited;
+  const gone = !vanishedId && !awaited && wantActiveGone ? wantActiveGone : null;   // a persisted id that can never be listed again
+  const named = vanishedId || awaited || gone;
+  // a name over a raw sid on EVERY branch: the name carried, the persisted one, the strip's last known, else "a
+  // session" (the review's low: the dismissal branch fell to the id)
+  const nameOf = (id: string, carried = "") => carried || wantActiveName || tabMeta.get(id)?.name || sessions.get(id)?.name || "a session";
   const v = vanishedId && vanishedWhy && vanishedWhy !== "close"
-    ? { name: vanishedName || tabMeta.get(vanishedId)?.name || vanishedId, why: vanishedWhy, dialing: hostIsDialing(vanishedId) }
-    : awaited ? { name: wantActiveName || tabMeta.get(awaited)?.name || awaited, why: "awaited" as const, dialing: hostIsDialing(awaited) }
+    ? { name: nameOf(vanishedId, vanishedName), why: vanishedWhy, dialing: hostIsDialing(vanishedId) }
+    : awaited ? { name: nameOf(awaited), why: "awaited" as const, dialing: hostIsDialing(awaited) }
+    : gone ? { name: nameOf(gone), why: "gone" as const, dialing: false }
     : null;
   const parts = emptyStateParts(v, order.length > 0);
   empty.replaceChildren(document.createTextNode(parts.head));
@@ -12047,17 +12103,6 @@ function repaintEmptyStateIfUnfocused(): void {
   if (e) paintEmptyState(e);
 }
 
-// The tab VIEW stopped showing the active tab (a tag the view selects on was removed; T357, the review): the same
-// rule as a dismissal — the pane goes UNFOCUSED naming the session the view no longer shows, and never re-points
-// itself at another session. renderTabs restores it when the view shows it again.
-function unfocusHiddenByView(id: string): void {
-  if (activeId !== id) return;
-  stashActiveDraft(id);
-  activeId = null; vanishedId = id; vanishedWhy = "hidden"; vanishedName = sessions.get(id)?.name || tabMeta.get(id)?.name || id;
-  loadComposerFor(null);
-  renderTabs();
-  showActive();
-}
 /** From the unfocused pane a keyboard step lands on the first visible tab: a user gesture, allowed (the review's medium:
  *  the cycle and the arrows returned early on no active tab, silently). */
 function pickFirstVisibleTab(): boolean {
@@ -16231,11 +16276,9 @@ function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: s
     clearSeek();
   }
   activeId = id;
-  vanishedId = null; vanishedWhy = null; vanishedName = ""; wantActive = null;   // any activation ends the unfocused state, the awaited tab included (T357)
+  vanishedId = null; vanishedWhy = null; vanishedName = ""; wantActive = null; wantActiveGone = null;   // any activation ends the unfocused state, the awaited tab included (T357)
   updateLivePaused();   // the entering tab's own detached state shows or hides the strip (round 2, item 7)
-  try {   // the name rides beside the id: after a reload the unfocused body names the awaited tab before its host relays (T357)
-    vscodeApi?.setState?.({ ...(vscodeApi.getState?.() || {}), activeId: id, activeName: liveSession(id)?.name || tabMeta.get(id)?.name || "" });
-  } catch { /* ignore */ }
+  persistActive(id);   // the name rides beside the id: after a reload the unfocused body names the awaited tab before its host relays (T357)
   renderTabs();
   showActive();
   schedulePrebuild(); // warm the OTHER tabs in idle (MRU-first) so the next switch is instant
@@ -16336,6 +16379,7 @@ function upsert(msg: any) {
     bgTasks: ("bgTasks" in msg) ? msg.bgTasks : (prev ? prev.bgTasks : undefined),
     hideFromFeed: ("hideFromFeed" in msg) ? !!msg.hideFromFeed : (prev ? prev.hideFromFeed : undefined),
     postalServiceOff: ("postalServiceOff" in msg) ? !!msg.postalServiceOff : (prev ? prev.postalServiceOff : undefined),
+    mailOffWhy: ("mailOffWhy" in msg) ? String(msg.mailOffWhy || "") : (prev ? prev.mailOffWhy : undefined),   // why the mail is off (T356): thread, isolation, an unreadable record
     notify: ("notify" in msg) ? !!msg.notify : (prev ? prev.notify : undefined),
   };
   sessions.set(msg.id, s);
@@ -16402,8 +16446,8 @@ function upsert(msg: any) {
   // T357: the session the user was on is back (its host re-attached, the relay redialed) → its focus is restored;
   // and while it is away, an arrival of ANY OTHER session adopts nothing — the pane stays unfocused
   if (vanishedId === msg.id) setActive(msg.id);
-  const adopted = !activeId && !vanishedId && !wantActive;   // …nor while the persisted tab is still awaited after a reload (T357)
-  if (adopted) { activeId = msg.id; loadComposerFor(msg.id, true); }   // adopted as the only tab → its draft too (T236: the once-per-page restore below never covers a session that LEFT and came back)
+  const adopted = !activeId && !vanishedId && !wantActive && !wantActiveGone;   // …nor while the persisted tab is awaited after a reload, nor while the body says it is gone: a pick, not an arrival, moves on (T357)
+  if (adopted) { activeId = msg.id; assertPeekFor(msg.id); loadComposerFor(msg.id, true); persistActive(msg.id); }   // persisted like a pick: a restart lands here again; the peek asserted like a pick's, so a view-hidden first arrival has a tab (the review's lows)   // adopted as the only tab → its draft too (T236: the once-per-page restore below never covers a session that LEFT and came back)
   if (wantActive && msg.id === wantActive) { wantActive = null; setActive(msg.id); }   // restore persisted tab on arrival
   renderTabs();                                   // a new id appended to `order` above → strip repaints in kernel order
   // Active tab: a content refresh appends + preserves scroll (appendActive); a new tab or a fork
@@ -17008,7 +17052,7 @@ function flashComposerNote(): void {
 function dismissSession(id: string, why: DismissWhy, doomed?: ReadonlySet<string>): void {
   if (peekId === id) peekId = null;   // its tab is going — the peek goes with it
   const wasActive = activeId === id;
-  const name = sessions.get(id)?.name || tabMeta.get(id)?.name || id;   // read before the maps forget it
+  const name = sessions.get(id)?.name || tabMeta.get(id)?.name || "a session";   // read before the maps forget it; never a raw sid in a line the user reads (T357)
   if (wasActive) stashActiveDraft(id);   // FIRST: what is on screen belongs to this id, whatever happens next
   sessions.delete(id);
   onDismiss(skeletonTabs, id);   // a tab that left the strip (✕, the kernel's omission, a host drop) has nothing left to load (2026-09-07)

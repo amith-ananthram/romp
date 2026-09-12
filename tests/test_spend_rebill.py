@@ -37,9 +37,11 @@ class _AssistantMessage:
     pass
 
 
-def _result(total, tokens_in):
+def _result(total, tokens_in, session=""):
     r = _ResultMessage()
     r.total_cost_usd = total
+    if session:
+        r.session_id = session
     r.model_usage = {"claude-x": {"inputTokens": tokens_in, "outputTokens": 0, "cacheReadInputTokens": 0,
                                   "cacheCreationInputTokens": 0, "webSearchRequests": 0, "costUSD": 0.0}}
     r.usage = {"input_tokens": 9999}
@@ -356,6 +358,145 @@ class Rebill(unittest.TestCase):
         self.assertEqual([(r.get("usd"), r.get("redelivered", False)) for r in self._turns()], [(None, False), (20.0, False), (6.0, False)],
                          "the zero-cost result's own row (no dollars), then the two live ones, none read as a replay")
         self.assertEqual(self._cost_state()["session"], "", "the epoch is stamped from live results (these doubles carry none)")
+
+    def test_a_replayed_first_result_under_an_unknown_baseline_sets_the_watermark_so_the_next_live_turn_is_its_own(self):
+        # live on the fix's first boot (2026-09-11 22:37Z): every hosted session's replayed first result was attach-unknown
+        # and folded nothing, right, but the duplicate branch left the watermark at zero, and the next LIVE result folded
+        # the whole cumulative once per session, each by its own lifetime (a synthetic sequence below)
+        s = self._session(attach=True, hello_cli=("4242", "s1"), journal_next=10, tags=[{"offset": 9, "replay": True}, {"offset": 10, "replay": False}])
+        self.assertEqual(s._spend_baseline, "attach-pending")
+        self._run(s, _result(120.5, 40000))                # replayed, no watermark on record: attach-unknown
+        self.assertEqual(self._day(), {}, "the lifetime's total is not a turn")
+        rows = self._turns()
+        self.assertEqual((rows[0].get("usd"), rows[0]["spendBaseline"], rows[0].get("redelivered")), (0.0, "attach-unknown", True))
+        self.assertEqual((s._last_cost_total, s._last_usage_totals.get("input_tokens")), (120.5, 40000), "the watermarks start from the replayed lifetime")
+        self._run(s, _result(123.0, 40300))                # the next LIVE result
+        self.assertAlmostEqual(self._day()["usd"], 2.5, msg="its own delta, not the whole cumulative")
+        self.assertEqual(self._day()["tokIn"], 300)
+        self.assertEqual(self._cost_state()["total"], 123.0)
+
+    def test_the_seeded_road_is_unchanged_by_the_unknown_baseline_rule(self):
+        # a replay below a KNOWN watermark moves nothing, and an unfolded replay above it is absorbed by the next live
+        # delta (the round-five behaviour the verifier read as right); only the unknown baseline seeds from a replay
+        self.be._update_reg(SID, costState={"total": 500.0, "tokens": {"input_tokens": 90000}, "cli": "4242:s1", "t": 1})
+        s2 = self._session(attach=True, journal_next=10, tags=[{"offset": 8, "replay": True}, {"offset": 9, "replay": True}, {"offset": 10, "replay": False}])
+        self._run(s2, _result(480.0, 89000)); self._run(s2, _result(512.5, 90400))
+        self.assertEqual(self._day(), {}, "replays fold nothing")
+        self.assertEqual((s2._last_cost_total, s2._last_usage_totals["input_tokens"]), (500.0, 90000), "the seeded watermarks stand")
+        self._run(s2, _result(520.0, 91000))
+        self.assertAlmostEqual(self._day()["usd"], 20.0, msg="the unfolded 12.5 rides the live delta")
+        self.assertEqual(self._day()["tokIn"], 1000)
+
+    def test_every_replayed_record_under_an_unknown_baseline_advances_the_watermarks_until_the_first_live_result(self):
+        # the fix's second round: a whole-journal replay (hostAck naming another host) hands over several results; keyed
+        # on the connect's first result alone, the watermark stayed at the first replay's total and the next live result
+        # folded the span (replays 100/200/300 then live 301.50 billed 201.50 and 2100 tokens where 1.50 and 100 were due)
+        s = self._session(attach=True, hello_cli=("4242", "s1"), journal_next=10,
+                          tags=[{"offset": 6, "replay": True}, {"offset": 7, "replay": True}, {"offset": 8, "replay": True},
+                                {"offset": 9, "replay": True}, {"offset": 10, "replay": False}])
+        for total, toks in ((100.0, 1000), (200.0, 2000), (300.0, 3000)):
+            self._run(s, _result(total, toks, session="e1"))
+            self.assertEqual((s._last_cost_total, s._last_usage_totals.get("input_tokens")), (total, toks), "each replay advances the watermarks")
+            self.assertEqual((self._cost_state()["total"], self._cost_state()["session"]), (total, "e1"),
+                             "and persists them with the replayed epoch (the road 1469's guard compares against)")
+        self._run(s, _result(300.5, 3050))                   # a replayed record naming no epoch (low 2 of the follow-up's second round)
+        self.assertEqual((self._cost_state()["total"], self._cost_state()["session"]), (300.5, "e1"), "the epoch on record is kept, the watermark advances")
+        self.assertEqual(self._day(), {}, "replays fold nothing")
+        self.assertEqual([(r.get("usd"), r.get("redelivered")) for r in self._turns()], [(0.0, True)] * 4)
+        self._run(s, _result(301.5, 3100, session="e1"))     # the first LIVE result closes the window
+        self.assertAlmostEqual(self._day()["usd"], 1.0, msg="its own delta over the LAST replay, not the span")
+        self.assertEqual(self._day()["tokIn"], 50)
+        self.assertEqual((self._cost_state()["total"], self._cost_state()["session"]), (301.5, "e1"))
+        self.assertFalse(s._spend_unknown_open, "closed by the live result")
+    def test_an_orphan_replay_from_another_epoch_or_under_an_unnamed_seed_folds_nothing(self):
+        # the lows of the fix's round five: (a) an orphan tail reaching back before a /clear the dead kernel bracketed
+        # compared pre-clear totals to the post-clear watermark and re-billed the excess; the record's session_id
+        # against the watermark's epoch says the two are not comparable; (b) an unnamed seed (attach-unknown) protected
+        # the first replayed result alone, every ascending step after it folded its delta
+        self.be._update_reg(SID, costState={"total": 5.0, "tokens": {}, "cli": "4242:s1", "t": 1, "session": "e2"})
+        s = self._session()
+        s._seed_for_dead_cli("4242:s1")
+        self.assertEqual(s._spend_seed_session, "e2", "the watermark's epoch rides the seed")
+        s._host = types.SimpleNamespace(hello=None, journal_dir="/nonexistent/journal", ack_offset=8, exit_info=None, detach_mode=False,
+                                        result_tags=collections.deque([{"offset": 2, "replay": True}, {"offset": 4, "replay": True}]))
+        pre = _result(8.0, 10); pre.session_id = "e1"       # pre-clear, another epoch, above the post-clear watermark
+        self._run(s, pre)
+        self.assertEqual(self._day(), {}, "(a) not comparable to the watermark's epoch: folds nothing")
+        self.assertEqual(self._cost_state()["session"], "e2", "an older epoch's replay does not overwrite the watermark's epoch")
+        post = _result(5.0, 10); post.session_id = "e2"
+        self._run(s, post)
+        self.assertEqual(self._day(), {})
+        self.assertEqual(s._last_cost_total, 5.0)
+        self.assertEqual((s._spend_session_id, self._cost_state()["session"]), ("e2", "e2"),
+                         "the seeded road stamps the epoch from a replay of the watermark's own epoch and persists it (low b)")
+        # (b): no watermark on record for the dead CLI
+        Path(self.d, "spend.json").unlink(missing_ok=True); Path(self.d, "turns.jsonl").unlink(missing_ok=True)
+        sb.write_reg(Path(self.d), SID, {"sid": SID, "name": "web", "cwd": self.d, "alive": True})
+        s2 = self._session()
+        s2._seed_for_dead_cli("9:unknown")
+        self.assertEqual(s2._spend_baseline, "attach-unknown")
+        s2._host = types.SimpleNamespace(hello=None, journal_dir="/nonexistent/journal", ack_offset=3, exit_info=None, detach_mode=False,
+                                         result_tags=collections.deque([{"offset": 1, "replay": True}, {"offset": 2, "replay": True}, {"offset": 3, "replay": True}]))
+        for total in (8.0, 12.0, 20.0):
+            self._run(s2, _result(total, 10, session="e1"))
+        self.assertEqual(self._day(), {}, "every replayed record of an unnamed replay folds nothing, not the first alone")
+        self.assertEqual([r.get("redelivered", False) for r in self._turns()], [True, True, True])
+        self.assertEqual((self._cost_state()["total"], self._cost_state()["cli"], self._cost_state()["session"]), (20.0, "9:unknown", "e1"),
+                         "the watermark persisted under the dead CLI with the replayed epoch (low a)")
+        # a re-drain of the same tail (hostAck never advanced, no hello) seeds from it and bills nothing
+        s3 = self._session()
+        s3._seed_for_dead_cli("9:unknown")
+        self.assertEqual((s3._spend_baseline, s3._last_cost_total, s3._spend_seed_session), ("seeded", 20.0, "e1"))
+        s3._host = types.SimpleNamespace(hello=None, journal_dir="/nonexistent/journal", ack_offset=3, exit_info=None, detach_mode=False,
+                                         result_tags=collections.deque([{"offset": 1, "replay": True}, {"offset": 2, "replay": True}, {"offset": 3, "replay": True}]))
+        for total in (8.0, 12.0, 20.0):
+            self._run(s3, _result(total, 10, session="e1"))
+        self.assertEqual(self._day(), {}, "the re-drain re-bills nothing")
+        self.assertEqual(len(self._turns()), 6)
+
+    def test_a_fresh_seed_closes_the_unknown_window_and_forgets_the_seen_epoch(self):
+        # low 3 of the follow-up's second round: _seed_spend_watermarks reset every spend field but these two
+        s = self._session()
+        s._spend_unknown_open = True; s._spend_seed_epoch_seen = True
+        s._seed_spend_watermarks()
+        self.assertEqual((s._spend_unknown_open, s._spend_seed_epoch_seen, s._spend_baseline), (False, False, "fresh"))
+
+    def test_an_orphan_tail_from_other_epochs_is_judged_by_position_and_a_re_drain_folds_nothing(self):
+        # the follow-up's second round (low c): the epoch guard could not tell an OLDER epoch (before the watermark
+        # epoch's records: folded already) from a NEWER one (after them: a post-clear tail the dead kernel never folded)
+        self.be._update_reg(SID, costState={"total": 5.0, "tokens": {}, "cli": "4242:s1", "t": 1, "session": "e2"})
+        tail = [(8.0, "e1"), (5.0, "e2"), (6.0, "e2"), (1.0, "e3"), (2.5, "e3")]
+
+        def drain(sess):
+            sess._host = types.SimpleNamespace(hello=None, journal_dir="/nonexistent/journal", ack_offset=0, exit_info=None, detach_mode=False,
+                                               result_tags=collections.deque([{"offset": i, "replay": True} for i in range(len(tail))]))
+            for total, epoch in tail:
+                self._run(sess, _result(total, 10, session=epoch))
+        s = self._session()
+        s._seed_for_dead_cli("4242:s1")
+        drain(s)
+        self.assertAlmostEqual(self._day()["usd"], 3.5, msg="e1 before e2's records: older, nothing; e2 at 6.0 over the 5.0 watermark: 1.0; "
+                                                             "e3 after them: newer, 1.0 whole as a counter reset then 1.5")
+        self.assertEqual([r.get("usd") for r in self._turns() if r.get("usd")], [1.0, 1.0, 1.5])
+        self.assertEqual((self._cost_state()["total"], self._cost_state()["session"]), (2.5, "e3"), "the watermark persisted under the newest epoch")
+        # the same tail drained again (hostAck never advanced, no hello): the seed names e3 at 2.5, every record is older or at the line
+        s2 = self._session()
+        s2._seed_for_dead_cli("4242:s1")
+        self.assertEqual((s2._spend_baseline, s2._spend_seed_session, s2._last_cost_total), ("seeded", "e3", 2.5))
+        drain(s2)
+        self.assertAlmostEqual(self._day()["usd"], 3.5, msg="the re-drain bills nothing")
+        self.assertEqual([r.get("redelivered", False) for r in self._turns()][-5:], [True] * 5)
+
+    def test_a_frame_with_no_offset_is_read_as_live_never_as_a_replay(self):
+        # low (c): a missing offset was tagged -1 and read as a replay (below any journal.next), folding nothing
+        ht = load_source("romp_host_transport_nooffset", os.path.join(ROOT, "kernel", "host_transport.py"))
+        t = ht.HostTransport.__new__(ht.HostTransport)
+        t.ack_offset, t.replay_end, t.result_tags, t.on_ack, t.hello = 5, 10, collections.deque(), None, None
+        t._advance = lambda out: None
+        t._take({"data": {"type": "result", "subtype": "success"}})            # no offset field
+        t._take({"offset": 3, "data": {"type": "result", "subtype": "success"}})
+        self.assertEqual(list(t.result_tags), [{"offset": -1, "replay": False}, {"offset": 3, "replay": True}],
+                         "unknown position: live; a positioned record before journal.next: a replay")
 
     def test_the_transport_tags_each_result_record_with_its_offset_as_it_reads_it(self):
         # the transport unit of the rule: the hello's journal.next bounds the replay; records the reader hands over are

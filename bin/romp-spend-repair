@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+"""romp-spend-repair: recompute a day's spend from the turn ledger's re-attach staircase. `romp spend-repair`.
+
+The READER-plus-optional-writer for the T354 fault (a kernel restart re-billing each hosted session's CLI lifetime
+as one turn): it reads the state directory's ledgers, never a kernel module, prints before and after per hour and per
+session, and writes nothing unless --apply. The arithmetic lives in cli/spend_repair.py, where the tests exercise it.
+"""
+import os
+import sys
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "cli"))
+
+import spend_repair  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(spend_repair.main())

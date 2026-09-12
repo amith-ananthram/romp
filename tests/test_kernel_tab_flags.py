@@ -27,7 +27,7 @@ class TabFlags(unittest.TestCase):
         self.assertIn('"postalServiceOff": _postal_isolated(sid)', src,
                       "the EFFECTIVE state, like build_timeline: canonical postalServiceOff with the legacy postalOff fallback "
                       "(_postal_isolated), and a comment thread's mail-off default (T356)")
-        self.assertIn('or bool(_session_flag(sid, "postalServiceOff") or _session_flag(sid, "postalOff"))', inspect.getsource(km._postal_isolated),
+        self.assertIn('(_session_flag(sid, "postalServiceOff") or _session_flag(sid, "postalOff"))', inspect.getsource(km._mail_off_why_k),
                       "the legacy fallback lives in the one reader")
 
     def test_kernel_handles_a_chat_side_setSessionFlag(self):

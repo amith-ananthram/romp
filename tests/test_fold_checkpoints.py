@@ -364,6 +364,9 @@ class GenericFold(Base):
         state past the cap is left out, counted per name; its CURSOR stays, so the next process starts that fold cold at the
         cut and steps the tail only (counted under coldFolds, said once) instead of reading the file whole at every restart;
         the bounded folds beside it restore whole."""
+        saved_cap = em._CKPT_FOLD_CAP                                  # the cap is sized to the machine now (8 MiB); this test's
+        em._CKPT_FOLD_CAP = 64 * 1024                                  # oversize state is 170 KB, so pin the cap it was written for
+        self.addCleanup(setattr, em, "_CKPT_FOLD_CAP", saved_cap)
         _write(self.p, [{"n": i, "pad": "x" * 400} for i in range(400)])           # ~170 KB of records
         big = {}
         self.fold()                                                               # "t": a list of 400 ints, small

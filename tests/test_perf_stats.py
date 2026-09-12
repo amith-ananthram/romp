@@ -55,7 +55,8 @@ TOP_KEYS = {"now", "since", "uptime_s", "log", "process", "pusher", "stages_ms",
             "chatPages",                                   # chatPages: the pre-floor history pages cache (T323 stage 4b)
             "skillLoadIndex",                              # skillLoadIndex: the judge's skill-load boot pass, its raw reads (T333)
             "fileSlice",                                   # fileSlice: the file preview popover's slice cache: hit / miss / bytes / warm (T351)
-            "glossary"}                                    # glossary: files parsed, frames / terms / bytes built per cycle, entries cut, files refused (T351 stage 2)
+            "glossary",                                    # glossary: files parsed, frames / terms / bytes built per cycle, entries cut, files refused (T351 stage 2)
+            "stacks"}                                      # stacks: every thread's last frames under ROMP_PERF_STACKS, else None (T358)
 
 
 def _burn_cpu(seconds):
@@ -124,8 +125,10 @@ class Collector(unittest.TestCase):
         self.assertEqual(set(snap["goals"]), {"loads", "saves", "writes"}, "read through jd.goal_io_stats")
         # the three identity memos' readers land here (review find, 2026-09-08: they had no consumer)
         self.assertEqual(set(snap["memos"]), {"pass", "shared", "chain", "nudgeGate", "cleared", "courierSkip", "backref", "captions", "goalArchive", "plannerSkip",
-                                              "bgTops", "liftGate", "intrMarks", "statesOverlay", "lanes",
+                                              "bgTops", "liftGate", "intrMarks", "statesOverlay", "lanes", "spendTree",
                                               "chatMergeSets", "chatPostal", "chatLedger", "chatFoldTasks"})   # the chat build's fixed-cost memos (2026-09-09)
+        self.assertEqual(set(snap["memos"]["spendTree"]), {"entries", "bytes", "bound"}, "the spend guard's tree memos against their bound")
+        self.assertEqual(snap["memos"]["spendTree"]["bound"], km.SPEND_GUARD_TREE_MEMO_BYTES)
         self.assertEqual(set(snap["memos"]["bgTops"]), {"hit", "miss", "resolve", "walk", "walk_neg", "idx_build", "entries"},
                          "the placed-launch memo (_bg_placed_tops): counters plus its occupancy")
         for k, v in snap["memos"]["bgTops"].items():

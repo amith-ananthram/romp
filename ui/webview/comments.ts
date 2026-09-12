@@ -10,6 +10,10 @@ export type CommentMsg = { who: "you" | "agent"; text: string; t: number };
 export type CommentThread = {
   /** the thread's mail is off (T356): a comment thread neither sends nor receives peer mail until broken out */
   mailOff?: boolean;
+  /** why, when it is off: "thread" (not yet broken out), "isolation" (the lane's mailbox toggle), "unreadable" (its record cannot be read) */
+  mailOffWhy?: string;
+  /** messages waiting in its postal box (they land when it is broken out) */
+  heldMail?: number;
   tid: string;
   name?: string;              // the thread's editable name (<session>-comment-<N> by default)
   color?: string;             // the comment's identity color — picked distinct from its parent's

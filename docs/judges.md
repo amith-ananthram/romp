@@ -194,6 +194,99 @@ turn. Its diary events carry src `closer`, so planner and closer verdicts
 stay distinguishable, and both defer to the user floor: a verdict computed
 from evidence at or before your last reply loses.
 
+A block addressed to a peer is a peer wait, not your needs-you (the user
+2026-09-10, via the philosophy: waiting on a peer or another session is not
+you being the bottleneck). Both judges file blocks through one writer that
+reads the addressee from evidence, never from words alone: the session's own
+open question to a live peer (the wait graph's source), failing that the peer
+that delegated the work the block sits under (the courier-planted top's
+origin when present; else the sender of the delegate mail the session received
+before the goal was minted, the primary record, and only for a top the latch
+has read as a machine record: a goal you typed keeps its blocks, and a script
+mailer's pseudo-sid is never a peer), and words only to pick among
+several open asks; a block on a
+"delegated to <peer>" tracker waits on that peer, whose report ends the
+delegate edge. A block in a
+delegated goal whose text names you still goes to the delegating manager, who
+relays; a worker's card reaches you only through the debt ladder's escalation
+event. The write is the existing awaiting-a-peer stamp in place of the block
+(the "Awaiting <peer>" chip in Working, the auto-nudge skipping it, the peer's
+reply the lift); an already-blocked node is unblocked by romp first. When the
+worker never mailed that peer, nothing could end the wait, so the kernel RELAYS
+it: the block's why goes to the delegating peer as the worker's own question
+(kind question, from the worker, "<worker> cannot move further: <why>", marked
+relayed in the row and the header, on a far host too, the row naming the
+marker so a send whose record was lost is adopted and never repeated; a why
+that speaks romp is scrubbed to the question, and romp's own procedural whys
+ride as the plain lead-in alone; under the question rides the conversation it
+ends, quoted whole inside a fence: whole turns, the question's own always,
+earlier ones newest first while they fit the bound, shown oldest first with a
+line saying how many were left out, the user's prompts and the worker's
+replies with tool calls collapsed to a count and code blocks never cut, a turn
+with no paragraph break keeping its last lines, read newest first only as far
+as the bound reaches; the bound is 24 KiB as the bus carries it (JSON-encoded UTF-8) by
+default, a knob at ~/.config/romp/relay-context-bytes or
+$ROMP_RELAY_CONTEXT_BYTES, read at call time and capped at 768 KiB, so you
+raise it without a release), once per block off a marker the judge
+leaves on the node (each marker has an identity, the block's evidence time
+and the peer, that its queue entry and the record settling it name, and the
+node remembers the markers it settled, so a block filed again after a lift is
+a new marker nothing older can settle, an ended wait's unsent marker is never
+reused for a new wait, a holder stale across two relays never re-mints the
+first, and two holders filing one wait mint one marker) and an entry the
+saver holding the store writes to a queue directory once its own publish
+carried the marker (one file per entry, so the two writers never rewrite
+each other's list; another holder's save of the same session flushes nothing
+of it; an entry whose node carries a newer marker is rewritten for it; an
+entry whose marker is gone with no record is spent once the store's
+published revision passed the entry's; the boot pass re-queues a marker that
+lost its entry; a pass that changed nothing is not repeated until the store,
+the log or the entries move), so the reply lifts the stamp and the reminder
+ladder covers it; a wait that ended before the tick is never relayed, a relay
+the bus handed to a far host (parked, or in flight to a host that is up)
+stays pending by its id up to the far host's delivered row or the peer's
+answer (the pending stamp survives every holder's save), and a refusal the
+bus cannot retry (no live recipient, a message that came back, with the far
+host's reason) reverts the node to your block with the refusal in its why,
+since nobody can be asked (the node is read again first, so a wait another
+holder ended meanwhile stands down instead, and the block is filed at the
+bounce's own time, so a follow-up of yours between the bounce and the tick
+outranks it; the refusal is noted beside the block, never in its words); a
+pending relay whose wait ended another way is withdrawn from the far host's
+outbox, and one the judge retired while it was parked is recalled the same
+way (the recall rides its own queue entry beside the marker's, the boot pass
+re-queues a node that owes one, and a recall nobody answers is asked once per
+hold for a while and then once per half hour, said both times; every queue
+entry carries a token of its own that the spend's re-read compares, so a
+fresh entry flushed over the path during a pass is never taken for the spent
+one; a question the far host carried on before it could be withdrawn, or one
+the host could not be reached to withdraw, leaves a note on the node that the
+brief's owed why carries and the card and the modal show as their own line
+under the brief, dropped when the node's wait next settles); a parked
+question completes only on the far
+host's delivered row, never on a later message; a refused relay's note reaches
+the card's brief beside the question it could not carry; a dead worker's block is not relayed; each record lands
+before its entry is spent; a send the bus answered late is never repeated
+(the bus answers the send it holds, and the tick holds off after an unknown
+outcome and reads the bus's row). A block filed again after the
+peer's reply ended the wait relays again; a block re-asserted on a standing
+wait never does. Your own follow-up on a delegated card, newer than every edge the block
+could wait on (the delegation, a standing wait up the card, the worker's own
+open question, a handoff), keeps its block yours. A top is attributed to the
+delegate mail its anchor names (the delegate-kind marker of the delivery that
+is a dispatch to this session, never one quoted from another session's, so a
+batched inbox whose first mail is a peer's heads-up still belongs to the
+manager whose dispatch follows it; a stamp naming no such dispatch leaves the
+latest delegate as the fallback), so a worker two managers dispatched relays
+each block to the manager that asked.
+An open question to a peer the block never names does not capture a block in
+the delegator's work: that block goes to the delegator, relayed. Rows filed before the rule convert once per boot. The debt ladder judges a debtor's
+reminder only at an idle turn end (the nudge walk's own gates); for a manager
+debtor the record also stands while delivered mail waits unread in its inbox,
+so a manager with worker mail queued is not yet failing to answer. Any other
+peer keeps the ladder as it was, and the dead-man backstop still applies. A block nothing
+resolves to a peer stays yours, exactly as before.
+
 **unblocker.** The stale-block backstop; it exists because answers arrive
 in passing and work overtakes asks. A goal blocked on a question is only
 ever unblocked by work filed on that exact node, but the answer usually

@@ -310,6 +310,9 @@ class _Session:
         self.echoes = []              # optimistic user-atom echoes ahead of the materialized file
         self.turn_id = None           # the active turn (interrupt/steer target), else None
         self.loaded = False           # thread/resume done in THIS process
+        self.loaded_client_generation = None  # ...on WHICH app-server (client generation): a
+                                              # replacement server has never seen the thread, so
+                                              # `loaded` counts only while this matches the current one
         self.launch_error = None      # {text, at, limit} — why the session can't run, or None
         self.norm = None              # ThreadNormalizer, built by the worker on first need
         self.worker = None
@@ -1286,6 +1289,7 @@ class CodexBackend:
             return sid
         s = _Session(sid, tid, name, cwd, model=model, color=bg)
         s.loaded = True
+        s.loaded_client_generation = self._client_generation_for(c)
         with s.lock:
             self._put_session(s)
             try:
@@ -1437,18 +1441,27 @@ class CodexBackend:
         with s.lock:
             if s.dead:
                 return False
-            tid, cwd = s.tid, s.cwd
+            tid, cwd, model = s.tid, s.cwd, s.model
             create = tid.startswith("pending-") or tid.startswith("failed-")
         if create:
-            resp = c.thread_start({"cwd": cwd, **_approval_params(s.mode),
-                                   **_execution_permissions(cwd, thread_start=True)})
+            params = {"cwd": cwd, **_approval_params(s.mode),
+                      **_execution_permissions(cwd, thread_start=True)}
+            if model:
+                params["model"] = model    # picked while the row was a placeholder: born on it
+            resp = c.thread_start(params)
+            loaded_client_generation = self._client_generation_for(c)
             with s.lock:
                 if s.dead:
                     return False
-                prior = (s.tid, s.model, s.loaded)
+                prior = (s.tid, s.model, s.loaded, s.loaded_client_generation)
                 s.tid = resp.thread.id
-                s.model = getattr(resp, "model", "") or s.model
+                # The pick outlives the create. The server's reply names ITS model, never empty
+                # (ThreadStartResponse.model is a required string), so `resp.model or s.model` let
+                # the default overwrite a model the user chose on the pending-/failed- row, saved
+                # it below, and ran every turn on it with no word to anyone (2026-09-11).
+                s.model = s.model or getattr(resp, "model", "") or ""
                 s.loaded = True
+                s.loaded_client_generation = loaded_client_generation
                 try:
                     self._save_registry(s, fields=("tid", "model"))
                 except BaseException:
@@ -1457,7 +1470,7 @@ class CodexBackend:
                     # loaded 'pending-…' and silently started a FRESH Codex thread (the r29
                     # verification). Rolled back, the loud retry re-runs thread_start; an
                     # orphaned server-side thread beats a silently forked conversation.
-                    (s.tid, s.model, s.loaded) = prior
+                    (s.tid, s.model, s.loaded, s.loaded_client_generation) = prior
                     raise
             with s.norm_lock:
                 s.norm = None
@@ -1488,10 +1501,12 @@ class CodexBackend:
             return True
         c.thread_resume(tid, {"cwd": cwd, **_approval_params(s.mode),
                               **_execution_permissions(cwd, thread_start=True)})
+        loaded_client_generation = self._client_generation_for(c)
         with s.lock:
             if s.dead:
                 return False
             s.loaded = True
+            s.loaded_client_generation = loaded_client_generation
         return True
 
     def _work(self, s):
@@ -1591,11 +1606,16 @@ class CodexBackend:
                 self.log("client failure registry save: %s" % traceback.format_exc())
             self.push_session(s.sid)
             return False                   # queue stays parked; worker retries after the deadline
+        prepare_client_generation = self._client_generation_for(c)
         with s.lock:
-            loaded = s.loaded
+            # `loaded` holds per app-server. When the pump saw the old server die and _get_client
+            # built this replacement, the thread stayed "loaded" on a process that had never seen
+            # it, and turn/start went out with no thread/resume before it: the server refuses that
+            # with "thread not found", a permanent rejection every resend met again until a kernel
+            # restart re-read the registry (2026-09-11). Resume it on the server it will run on.
+            loaded = s.loaded and s.loaded_client_generation == prepare_client_generation
             prepare_change_generation = s.change_generation
         if not loaded:
-            prepare_client_generation = self._client_generation_for(c)
             try:
                 prepared = self._prepare_thread(s, c)
             except Exception as e:
