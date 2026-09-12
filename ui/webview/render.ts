@@ -7941,8 +7941,11 @@ function noteOrphanState(): void {
 // the first visible member is activated — deferred and re-checked at fire time, like the hidden-active re-point.
 function staleActiveFallback(ids: readonly string[], visibleIds: readonly string[]): void {
   if (colSets === null) return;   // no partition (standalone, the VS Code webview, an older shell): the first arriving frame is adopted, as always
-  if (activeId || !tabOrderSeen || provisionalId || !visibleIds.length) return;
-  if (wantActive && ids.includes(wantActive) && heldHere(wantActive)) return;   // its frame is on the way: the restore takes it
+  // an unfocused pane is a designed state (T357): a tab that left on its own, or the persisted tab awaited after a
+  // reload, keeps the box held for its return; this fallback speaks only when nothing is active, gone or awaited HERE
+  if (activeId || vanishedId || !tabOrderSeen || provisionalId || !visibleIds.length) return;
+  if (wantActive && heldHere(wantActive)) return;   // awaited by this column, listed or not: T357's restore takes it when it comes
+  // a wanted tab another column holds is nobody's to await here (dragged away before the reload): retired, the first visible member takes the box
   const first = visibleIds[0];
   setTimeout(() => { if (!activeId && !provisionalId && tabInView(first)) { wantActive = null; setActive(first); } }, 0);
 }

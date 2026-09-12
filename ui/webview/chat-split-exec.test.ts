@@ -70,6 +70,7 @@ function world(o: { col?: string; sets?: ColSets | null; tabOrderSeen?: boolean;
     const { columnHolds, isProvisionalId, isSubId, StagedStack, HOOKS } = W;
     const COL = W.col;
     let colSets = W.sets, tabOrderSeen = W.tabOrderSeen, activeId = W.activeId, provisionalId = W.provisionalId, wantActive = W.wantActive;
+    let vanishedId = null;   // T357's tab-that-left; never set in these worlds (the fallback yields to it, pinned in chat-split.test.ts)
     const failedProvisionals = new Set(W.failed || []);
     let colEmptyPosted = false;
     const readColSets = () => { HOOKS.reads++; return W.shell.sets; };
@@ -156,8 +157,8 @@ test("the stale-active fallback belongs to the partition: no sets, nothing sched
   assert.deepEqual(w.HOOKS.timers, [], "with an active tab, nothing more");
   const gone = world({ col: "2", sets: { "2": [API, TESTS] }, wantActive: API });
   gone.api.render([WEB, TESTS]);
-  fire(gone.HOOKS);
-  assert.deepEqual(gone.HOOKS.activated, [TESTS], "a skeleton client whose hinted session ended (no frame to adopt): its other member");
+  assert.deepEqual(gone.HOOKS.timers, [], "a wanted tab this column HOLDS but the strip does not list (its session ended, or its host is away) is awaited, not replaced: the pane stays unfocused naming it (T357), and the column's other member is one click away");
+  assert.equal(gone.api.state().wantActive, API, "…and the want stands for the restore");
 });
 
 test("the fallback yields to a wanted tab this column holds and lists, to a create in flight, to an active tab and to an empty strip; and it re-checks at fire time", () => {

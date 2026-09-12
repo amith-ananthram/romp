@@ -71,7 +71,8 @@ test("a pick of a session another column holds is shown where it lives: the setA
   // runs them); the fallback is the PARTITION's — a page with no sets (standalone, VS Code) boots exactly as before, the first
   // arriving frame adopted (review find 2026-09-11) — and a create in flight, or a failed one holding its text, keeps a
   // column: no emptiness post while it stands (review find 2026-09-11: the column closed under it and the queued text died)
-  assert.match(RENDER, /function staleActiveFallback\(ids: readonly string\[\], visibleIds: readonly string\[\]\): void \{\n\s*if \(colSets === null\) return;[^\n]*\n\s*if \(activeId \|\| !tabOrderSeen \|\| provisionalId \|\| !visibleIds\.length\) return;\n\s*if \(wantActive && ids\.includes\(wantActive\) && heldHere\(wantActive\)\) return;/);
+  assert.match(RENDER, /function staleActiveFallback\(ids: readonly string\[\], visibleIds: readonly string\[\]\): void \{\n\s*if \(colSets === null\) return;[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*if \(activeId \|\| vanishedId \|\| !tabOrderSeen \|\| provisionalId \|\| !visibleIds\.length\) return;\n\s*if \(wantActive && heldHere\(wantActive\)\) return;/,
+    "the fallback yields to an active tab, a tab that left on its own, and a wanted tab this column holds (T357 keeps the pane unfocused for its return); a wanted tab held elsewhere is retired");
   assert.match(RENDER, /function noteColumnEmptiness\(ids: readonly string\[\]\): void \{\n\s*if \(!COL \|\| !colSets \|\| !tabOrderSeen\) return;\n(?:\s*\/\/[^\n]*\n)*\s*if \(provisionalId \|\| failedProvisionals\.size\) return;[\s\S]*?window\.parent\.postMessage\(\{ romp: "colEmpty", gone: mine\.slice\(\) \}, "\*"\);/);
   assert.match(RENDER, /tabOrderSeen = true;[^\n]*\n\s*renderTabs\(\);\n\}/, "set in applyTabOrder, ahead of its render");
   // the shell's two questions before it moves a tab or closes a column (kernel.py moveTab / close; tests/test_chat_split.py
