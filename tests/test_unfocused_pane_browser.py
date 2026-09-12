@@ -187,26 +187,47 @@ out.onlyFiltered = await page.evaluate(() => {
            visibleTurns: turns.length, composerDisabled: document.getElementById("composer-input").disabled };
 });
 // a ROUTINE push under the filter (the review's leak, pre-existing on main): applyTabOrder's restore re-focused the
-// filtered-out session for one animation frame per push, its cached transcript on screen, before renderTabs's deferred
-// unfocus put the body back. A frame recorder samples every animation frame across a tabOrder push listing web.
+// filtered-out session for one task per push, its CACHED transcript on screen, before renderTabs's deferred unfocus put
+// the body back. The leak needs web's view cached, so web is focused live first (the filter lifted live restores it), the
+// filter is set live again (unfocused, view cached), and a MutationObserver samples every DOM change across a routine
+// tabOrder push listing web: the most transcript rows visible at once, and how often the body was down. A frame
+// recorder saw nothing here (headless Chromium reverts the leak in the same task, before any paint); the observer sees
+// the transient: 4 rows / 1 body-down per push on the merge-base, 0 / 0 on the fix.
+await page.evaluate(() => { location.hash = ""; });
+await page.waitForFunction((sid) => { const a = document.querySelector("#tabs .tab.active[data-id]"); return !!a && a.dataset.id === sid && document.querySelectorAll("#content .turn").length > 0; }, cfg.sidA, { timeout: 10000 });
+await page.evaluate(() => { location.hash = "#only=api"; });
+await page.waitForFunction((sid) => !document.querySelector("#tabs .tab.active[data-id]") && !Array.from(document.querySelectorAll("#tabs .tab[data-id]")).some((t) => t.dataset.id === sid), cfg.sidA, { timeout: 10000 });
+await page.waitForTimeout(300);
 await page.evaluate(() => {
-  window.__rec = [];
+  const visibleRows = () => Array.from(document.querySelectorAll("#content .turn")).filter((t) => { const r = t.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(t).display !== "none"; }).length;
   const empty = document.getElementById("empty-state");
-  const tick = () => {
-    const turns = Array.from(document.querySelectorAll("#content .turn")).filter((t) => { const r = t.getBoundingClientRect(); return r.width > 0 && r.height > 0 && getComputedStyle(t).display !== "none"; }).length;
-    window.__rec.push({ turns, active: !!document.querySelector("#tabs .tab.active[data-id]"), emptyShown: !!empty && getComputedStyle(empty).display !== "none" });
-    if (window.__rec.length < 90) requestAnimationFrame(tick);
+  window.__mo = { samples: 0, maxRows: 0, bodyDown: 0, focused: 0 };
+  const sample = () => {
+    window.__mo.samples++;
+    window.__mo.maxRows = Math.max(window.__mo.maxRows, visibleRows());
+    if (!empty || getComputedStyle(empty).display === "none") window.__mo.bodyDown++;
+    if (document.querySelector("#tabs .tab.active[data-id]")) window.__mo.focused++;
   };
-  requestAnimationFrame(tick);
+  const obs = new MutationObserver(sample);
+  obs.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ["class", "style", "hidden"] });
+  window.__moStop = () => obs.disconnect();
 });
 await inject({ type: "tabOrder", order: [cfg.sidA, cfg.sidB], tabs: [A_TAB, B_TAB], live: [cfg.sidA, cfg.sidB], skeleton: [] });
-await page.waitForFunction(() => window.__rec && window.__rec.length >= 90, null, { timeout: 15000 });
-out.pushUnderFilter = await page.evaluate(() => ({ frames: window.__rec.length, leaked: window.__rec.filter((f) => f.turns > 0 || f.active).length, bodyDown: window.__rec.filter((f) => !f.emptyShown).length }));
+await page.waitForTimeout(600);
+out.pushUnderFilter = await page.evaluate(() => { window.__moStop(); return window.__mo; });
 // the hidden tab torn down while the pane is unfocused (the review's low): the body's line follows the reason
 await inject({ type: "closed", id: cfg.sidA, hostDrop: true });
 await inject({ type: "tabOrder", order: [cfg.sidB], tabs: [B_TAB], live: [cfg.sidB], skeleton: [] });
 await page.waitForFunction((sid) => { const e = document.getElementById("empty-state"); return !!e && (e.textContent || "").includes("host disconnected") && !document.querySelector('#tabs .tab[data-id="' + sid + '"]'); }, cfg.sidA, { timeout: 10000 });
 out.tornDownWhileHidden = await state();
+// a FIRST arrival the filter hides is not adopted (the review's low: the adopt wrote activeId past the rule's visibility
+// half): nothing persisted, the page served at #only=api, the sessions arrive: the pane adopts the first VISIBLE one
+await page.evaluate(() => { for (const k of Object.keys(localStorage)) if (k.startsWith("romp-vscode-state-")) localStorage.removeItem(k); });
+await page.goto(cfg.chat + "#only=api");
+await page.reload();
+await page.waitForFunction(() => document.querySelectorAll("#tabs .tab[data-id]").length >= 1, null, { timeout: 20000 });
+await page.waitForTimeout(800);
+out.firstArrivalUnderFilter = await state();
 // the SHELL road (the review's medium): on the dashboard the chat pane is a same-origin iframe of the shell and the
 // filter lives on the SHELL's URL (only-filter.ts reads window.top), so a live edit of the shell's hash must reach the
 // framed pane, whose own hash never changes: the pane unfocuses at once and restores when the filter shows the tab again
@@ -376,7 +397,11 @@ class ServedUnfocusedPane(unittest.TestCase):
         # a routine push under the filter never re-focuses the hidden tab, not for one animation frame (the review's leak:
         # 1 frame of 70 with the body down and four transcript rows visible per push)
         pu = r["pushUnderFilter"]
-        self.assertGreaterEqual(pu["frames"], 90); self.assertEqual((pu["leaked"], pu["bodyDown"]), (0, 0), "no frame with a focused tab, a visible transcript row, or the body down: %r" % pu)
+        self.assertGreater(pu["samples"], 0, "the push mutated the strip, so the observer sampled: %r" % pu)
+        self.assertEqual((pu["maxRows"], pu["bodyDown"], pu["focused"]), (0, 0, 0), "no transient with a transcript row visible, the body down or a tab focused (the merge-base: 4 rows and 1 body-down per push): %r" % pu)
+        fa = r["firstArrivalUnderFilter"]
+        self.assertNotIn(SID_A, fa["tabs"]); self.assertNotEqual(fa["active"], SID_A, "a first arrival the filter hides is never adopted: %r" % fa)
+        self.assertEqual(fa["active"], SID_B, "…the first VISIBLE arrival is: %r" % fa)
         # the hidden tab torn down while the pane is unfocused: the line follows the reason, naming the tab
         td = r["tornDownWhileHidden"]
         self.assertIsNone(td["active"]); self.assertEqual(td["empty"]["vanished"], SID_A); self.assertNotIn(SID_A, td["tabs"])

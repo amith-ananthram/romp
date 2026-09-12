@@ -62,7 +62,10 @@ test("the wiring: the dismiss branch, the unfocused body, the composer, the rest
   assert.match(paint, /empty\.classList\.toggle\("unfocused", !!v\);\s*\n\s*empty\.dataset\.vanished = named \|\| "";/, "the body names the vanished or the awaited id");
   assert.doesNotMatch(RENDER, /empty\.textContent = "No session open/, "the one writer of the empty body is paintEmptyState");
   // the return: the session frame, or the strip re-listing it; no other arrival adopts the box meanwhile
-  assert.match(RENDER, /if \(vanishedId === msg\.id\) restoreIfShown\(msg\.id\);[^\n]*\n\s*const adopted = !activeId && !vanishedId && !wantActive && !wantActiveGone;/);
+  assert.match(RENDER, /if \(vanishedId === msg\.id\) restoreIfShown\(msg\.id\);[^\n]*\n\s*const adopted = !activeId && !vanishedId && !wantActive && !wantActiveGone && stripShows\(msg\.id\);/, "an adoption reads the rule's visibility half: a first arrival the filter hides is not adopted (the review's low)");
+  assert.match(RENDER, /if \(composerNoteSid === msg\.id\) restoreIfShown\(msg\.id\);/, "the composer note's restore goes through the rule too");
+  assert.equal((RENDER.match(/\bsetActive\(msg\.id\)/g) || []).length, 0, "no frame-reachable direct setActive(msg.id) is left in the arrival path");
+  assert.ok(RENDER.indexOf("/** Does the strip show `id` right now:") > RENDER.indexOf("function restoreIfShown("), "stripShows's docstring sits above its own function, after restoreIfShown");
   assert.match(fn("applyTabOrder"), /for \(const id of kernelOrder\) kernelListed\.add\(id\);[\s\S]{0,500}?const back = vanishedId \|\| wantActive;[^\n]*\n\s*if \(back && restoreIfShown\(back\)\)/);
   // every restore reads ONE rule (the review's leak: applyTabOrder's had no visibility predicate, so a routine push
   // re-focused a filtered-out session for one frame): listed AND shown takes focus back; listed but hidden leaves the

@@ -7288,7 +7288,8 @@ const onOnlyHashChange = (): void => renderTabs();
 const onlyHashWindow = onlyWindow();
 onlyHashWindow.addEventListener("hashchange", onOnlyHashChange);
 // a closed split column: the shell removes this pane's iframe, and a listener left on the shell's window would hold the
-// detached pane alive and re-run its renderTabs on every later hash edit (the review): pagehide takes it off again
+// detached pane's document alive for the shell's lifetime (retention is the whole cost: Chromium does not run a removed
+// frame's handler, the review's probe showed): pagehide takes it off again
 window.addEventListener("pagehide", () => onlyHashWindow.removeEventListener("hashchange", onOnlyHashChange));
 window.addEventListener("mousedown", (e) => { if (ctxMenuEl && !ctxMenuEl.contains(e.target as Node)) dismissTabMenu(); }, true);
 // an Escape that closed the menu says so on the event (preventDefault), so the section view's own Escape
@@ -12054,9 +12055,6 @@ function fillSnapshotRow(btn: HTMLElement, r: SnapRow, now: number): void {
 // no DOM left to capture from and the emptied box no longer overflows. undefined = capture here.
 // The empty body's line (pane-focus.ts emptyStateParts, T357): which session vanished and why, its name dressed the way
 // the strip dresses it (host prefix, identity colour), "reconnecting" when its host is dialing; or the plain invitation.
-/** Does the strip show `id` right now: in the tab view (a peek counts) AND matching the `#only=` filter — the one
- *  predicate renderTabs's visibleIds is built from, read again at fire time so a deferred check judges the strip as
- *  it is, not as it was scheduled. `only` may be passed by a caller that read the hash once for many ids. */
 /** The strip's MEMBERSHIP: the ids renderTabs paints a tab for (the kernel's order, plus a pushed tab not yet in it, a
  *  placeholder), less a tab the user just closed. One rule for the paint and for every restore's fire-time check (the
  *  review of T357's later lows: the schedule read visibleIds, built over order AND tabMeta, while the timer read order
@@ -12076,6 +12074,9 @@ function restoreIfShown(id: string): boolean {
   if (!activeId) { vanishedId = id; vanishedWhy = "hidden"; vanishedName = sessions.get(id)?.name || tabMeta.get(id)?.name || vanishedName || wantActiveName || ""; }
   return false;
 }
+/** Does the strip show `id` right now: in the tab view (a peek counts) AND matching the `#only=` filter — the one
+ *  predicate renderTabs's visibleIds is built from, read again at fire time so a deferred check judges the strip as
+ *  it is, not as it was scheduled. `only` may be passed by a caller that read the hash once for many ids. */
 function stripShows(id: string, only: string | null = onlyTag()): boolean {
   if (!tabInView(id)) return false;
   return !only || matchesOnly(sessions.get(id)?.name ?? tabMeta.get(id)?.name ?? "", only);
@@ -16466,11 +16467,11 @@ function upsert(msg: any) {
   // where they were — its tab active, its kept draft in the box. Merely retiring the note here left the
   // fallback tab active with the box unheld, and the next blind keystroke landed there after all (the
   // T236 harness, omission path: the tab is re-listed within seconds). setActive clears the note.
-  if (composerNoteSid === msg.id) setActive(msg.id);
+  if (composerNoteSid === msg.id) restoreIfShown(msg.id);   // …through the one restore rule: a tab the view or the filter hides takes no focus (the review's low)
   // T357: the session the user was on is back (its host re-attached, the relay redialed) → its focus is restored;
   // and while it is away, an arrival of ANY OTHER session adopts nothing — the pane stays unfocused
   if (vanishedId === msg.id) restoreIfShown(msg.id);   // …if the strip shows it: hidden by the view or the filter, the pane stays unfocused (applyTabOrder's rule)
-  const adopted = !activeId && !vanishedId && !wantActive && !wantActiveGone;   // …nor while the persisted tab is awaited after a reload, nor while the body says it is gone: a pick, not an arrival, moves on (T357)
+  const adopted = !activeId && !vanishedId && !wantActive && !wantActiveGone && stripShows(msg.id);   // …nor while the persisted tab is awaited after a reload, nor while the body says it is gone: a pick, not an arrival, moves on (T357); and never a session the view or the #only= filter hides (the review's low: the adopt wrote activeId past the restore rule's visibility half; membership is the append above)
   if (adopted) { activeId = msg.id; assertPeekFor(msg.id); loadComposerFor(msg.id, true); persistActive(msg.id); }   // persisted like a pick: a restart lands here again; the peek asserted like a pick's, so a view-hidden first arrival has a tab (the review's lows)   // adopted as the only tab → its draft too (T236: the once-per-page restore below never covers a session that LEFT and came back)
   if (wantActive && msg.id === wantActive && stripLists(msg.id)) { wantActive = null; restoreIfShown(msg.id); }   // restore persisted tab on arrival, if the strip shows it (else unfocused as hidden, restored when shown)
   renderTabs();                                   // a new id appended to `order` above → strip repaints in kernel order
