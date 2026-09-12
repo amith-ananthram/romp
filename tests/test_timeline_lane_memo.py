@@ -31,6 +31,7 @@ import unittest
 from contextlib import redirect_stderr
 from datetime import datetime, timezone
 from romp_load import load_source
+from fs_clock import move_ctime   # noqa: E402  the shared test helper, on the path the line above put there
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -56,21 +57,6 @@ def _rec(kind, t, uuid, parent, text):
                 "message": {"role": "user", "content": text}}
     return {"type": "assistant", "timestamp": _iso(t), "uuid": uuid, "parentUuid": parent,
             "message": {"role": "assistant", "content": [{"type": "text", "text": text}], "stop_reason": "end_turn"}}
-
-
-def move_ctime(path):
-    """Move a file's ctime and nothing else: flip its mode between 0o600 and 0o644, checking the stat after
-    each chmod, until the ctime differs (a coarse filesystem clock can hand two chmods one timestamp). mtime,
-    size and inode stand. Bounded at 5 s: a filesystem that never ticks ctime under chmod fails the test
-    loudly rather than passing it."""
-    before = cur = os.stat(path)
-    deadline = time.monotonic() + 5
-    while cur.st_ctime_ns == before.st_ctime_ns:
-        if time.monotonic() > deadline:
-            raise AssertionError("ctime did not move under chmod within 5 s")
-        os.chmod(path, 0o644 if (cur.st_mode & 0o777) == 0o600 else 0o600)
-        cur = os.stat(path)
-    return cur
 
 
 class DeadLaneMemo(unittest.TestCase):
