@@ -1040,7 +1040,11 @@ test("a far host's parked-question note shows on its own line with no brief, in 
   assert.equal(card("g4")._distill.style.display, "none", "the distill line is hidden without a brief");
   assert.equal(rn().textContent, note, "the note is the card's own line");
   assert.equal(rn().style.display, "", "…and shows (appended inside the distill element it was hidden with it)");
-  assert.equal(rn().parentNode, card("g4")._secs.parentNode, "beside the sections, not inside them");
+  // compared by INDEX, never by node identity: a failed identity assertion formats two stand-in nodes (a cyclic
+  // tree) and kills the runner before it prints a message (the manager's verifier, with the old placement restored)
+  const kids = card("g4")._secs.parentNode.childNodes;
+  assert.equal(kids.indexOf(rn()), kids.indexOf(card("g4")._face) + 1, "beside the sections, right after the face line, not inside them");
+  assert.equal(kids.indexOf(card("g4")._face), kids.indexOf(card("g4")._secs) + 1, "the face line follows the sections");
   // collapsed mode: every section closed by default, the brief's included
   const setPrefs = (v: string) => { stores.local.set("romp:settings", v); win.dispatchEvent(Object.assign(new Event("storage"), { key: "romp:settings", newValue: v })); };
   setPrefs(JSON.stringify({ collapsed: true }));
