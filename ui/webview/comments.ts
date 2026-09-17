@@ -31,6 +31,8 @@ export type CommentThread = {
   sinceEpoch?: number;        // ms epoch the thread's current state began — the popover chip's timer
   mode?: string;              // the thread's permission mode — the popover statusline's Auto badge
   fast?: string;              // fast-mode state ("on"/"off"/"cooldown"; "" = unknown → no badge)
+  modelFallback?: { pick: string; pickValue: string; live: string; cause: string;
+                    retry: { on: boolean; everyMin: number; armed: boolean; nextIn: number | null; attempts: number } } | null;   // the requested-model mark (render.ts ModelFallback)
   modelColor?: number[];      // the chat statusline's rank tints, so metaColor paints the popover
   effortColor?: number[];     //   badges exactly as the chat's (the 2026-08-25 color rider)
   promotedName: string;       // the board session it became, when status === "promoted"

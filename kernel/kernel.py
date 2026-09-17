@@ -17515,6 +17515,8 @@ def _comments_frame(sid, live_map=None):
                         "effort": (reg.get("effort") or "") if reg else "",
                         "sinceEpoch": since_ms,
                         "mode": str(meta.get("mode") or ""), "fast": str(meta.get("fast") or ""),
+                        "modelFallback": (meta.get("modelFallback") if meta.get("modelFallback") is not None
+                                          else (be.fallback_row_for_reg(reg) if (be is not None and reg and hasattr(be, "fallback_row_for_reg")) else None)),   # the popover picker's requested-model mark (2026-09-17)
                         # the same rank tints the chat statusline's badges wear (the user 2026-08-25,
                         # color rider: the popover's model/effort rendered plain gray — metaColor
                         # reads these and the frame never carried them)
@@ -20398,6 +20400,7 @@ class Sessions:
                                 "ctxTokens": st.get("ctxTokens"),   # raw totalTokens (SDK only) — the
                                 #   compaction-suggestion thresholds key on true tokens (2026-08-30)
                                 "fast": st.get("fast", ""),   # fast-mode state from the CLI's init ("on"/"off"/"cooldown"; "" = unknown → no badge)
+                                "modelFallback": st.get("modelFallback"),   # the picker's requested-model mark while the live model sits below the pick (2026-09-17)
                                 "fastReason": st.get("fastReason", ""),   # init's disabled_reason — non-empty hides the chat toggle
                                 "auth": st.get("auth", ""),   # which account this session bills ('login'|'key') → gear badge
                                 # the CLI's own init report ('key'|'login', "" until one lands): the
@@ -38555,6 +38558,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                   # no badge — a row without the field stays ""). A non-empty
                   # disabled_reason means /fast would refuse, so the chat hides the toggle.
                   "fast": "" if tm.get("fastReason") else tm.get("fast", ""),
+                  "modelFallback": tm.get("modelFallback"),   # the picker's yellow tick beside the requested model, with why and the retry cadence (2026-09-17)
                   # which account this session bills ('login'|'key') — ALWAYS reported when the backend
                   # knows it (the user 2026-08-09: the tab hover says Billing even on a one-auth
                   # machine; a row without the field reports nothing, honestly).
@@ -46673,6 +46677,7 @@ def build_timeline(now, live_map=None, with_bars=True, live_only=False):
             # with no level had no picker at all)
             "backend": _session_backend(sid, tm),
             "modelPending": _model_pending_now(sid, tm),   # switching-dots until the /model pick lands, from EITHER surface (the user 2026-07-03)
+            "modelFallback": (tm.get("modelFallback") if tm else None),   # the picker's requested-model mark (2026-09-17)
             # model name + effort tinted on the GLOBAL colormap by capability/effort rank (the user 2026-07-02);
             # the lane just applies these, like ctxColor. None → the lane keeps its default gray text.
             "modelColor": _model_color(tm["model"] if tm else "", ctx_stops),

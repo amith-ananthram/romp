@@ -307,11 +307,11 @@ function liftMenu(opts: { thread?: { th: unknown; status: any } } = {}) {
   const sessions = new Map<string, any>();
   const fn = new Function("document", "window", "kernelUrl", "fetch", "adoptCommentDefaults", "sessions",
     "openCommentThread", "threadMetaStatus", "metaCurrent", "metaPending", "vscodeApi",
-    "modeIconSvg", "riskyMode", "nonClassicChoiceTone", "setTip", "liveSession", js);
+    "modeIconSvg", "riskyMode", "nonClassicChoiceTone", "setTip", "pruneTip", "liveSession", js);   // pruneTip: closeMetaMenu/closeSub drop a row's tip with the menu (2026-09-17)
   const api = fn(doc, win, (p: string) => p, stub.fetch, () => {}, sessions,
     () => (opts.thread ? { th: opts.thread.th } : null),
     () => { if (!opts.thread) throw new Error("no thread here"); return opts.thread.status; },
-    () => "", new Map(), null, () => "", () => false, () => undefined, () => {},
+    () => "", new Map(), null, () => "", () => false, () => undefined, () => {}, () => {},
     (id: string) => sessions.get(id));
   return { api, sessions, body: BODY, win, pending: stub.pending, failing: stub.failing, rectReads };
 }

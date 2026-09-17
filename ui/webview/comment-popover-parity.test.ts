@@ -103,7 +103,8 @@ test("a family click sends the kernel's alias default; a version the seed table 
   assert.match(RENDER, /learned\?: boolean/);
   assert.match(RENDER, /if \(v\.learned\) \{[\s\S]{0,600}el\("span", "meta-item-sub"\)/,
     "the marker wears the menu vocabulary's sub-line size and opacity");
-  assert.match(RENDER, /if \(v\.learned\) \{[\s\S]{0,600}row\.title = /, "and says where the version came from");
+  assert.match(RENDER, /if \(v\.learned\) \{[\s\S]{0,700}const note = "Reported by a running session's Claude Code; not yet in romp's version list";[\s\S]{0,300}setTip\(row, rowTip\)/,
+    "and says where the version came from (the one tooltip treatment, composed with the requested-model tip when both apply; 2026-09-17)");
 });
 
 test("the create dialog's model menu sends the family's remembered default, like the other two pickers", () => {

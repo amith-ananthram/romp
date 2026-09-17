@@ -1719,6 +1719,15 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
   width: 13px; height: 13px; font-size: 9px; font-weight: 900;
   display: inline-flex; align-items: center; justify-content: center; line-height: 1;
 }
+/* the REQUESTED model while an automatic fallback answers instead (the user 2026-09-17): the same ✓ geometry in the
+   working-state yellow (a status, not the accent), so the picker shows both the model that answers (blue ✓) and the one
+   romp keeps asking for; the row's title says why and whether it is retrying */
+.meta-item.requested::after {
+  content: "✓"; position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  background: var(--st-working-bg, #e0b020); color: var(--st-working-fg, #332600); border-radius: 50%;
+  width: 13px; height: 13px; font-size: 9px; font-weight: 900;
+  display: inline-flex; align-items: center; justify-content: center; line-height: 1;
+}
 /* context "battery": a bar that FILLS with the context-used %, recolors as it
    fills (green → amber → red), with the % written inside it. Clickable: /compact. */
 .ctx-bar {

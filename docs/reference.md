@@ -334,7 +334,11 @@ following to every connected machine's kernel):
   happens again is logged once per attempt; its card follows the board's usual
   rule, nothing new while the swap's card stands, a fresh one once you cleared it. When a turn is served on the picked tier, a second
   Completed card says the session is back (`Model back on …`) and the retry ends.
-  A pick of your own ends it too, as does turning the switch off.
+  A pick of your own ends it too, as does turning the switch off. While a
+  fallback stands, the session's model picker marks the requested model with a
+  yellow tick beside the blue tick on the model that answers; its tooltip says why
+  (the safety classifiers, once the CLI has named them) and whether romp is
+  retrying, with the cadence and the next attempt, or where to turn retries on.
 
 ### Per-session billing (login vs API key)
 

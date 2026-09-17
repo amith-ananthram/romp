@@ -326,7 +326,12 @@ type PeerIdent = { name: string; host?: string; sid?: string; color?: { bg: stri
 // the add flow could read for a stored one), `why` the reason it is greyed when `available` is false
 interface AuthLogin { id?: string; value?: string; label?: string; machine?: boolean; available?: boolean; why?: string; expiresSoon?: boolean }
 interface AuthAvail { login?: boolean; key?: boolean; loginWhy?: string; keyWhy?: string; acct?: string; default?: string; defaultExplicit?: boolean; logins?: AuthLogin[] }   // defaultExplicit: set in the Billing flyout's Default group, else the helper rule (T380)
-interface Status { state: ChipState; sinceEpoch: number | null; awaitingWhy?: string | null; awaitingKind?: string | null; awaitingPeers?: PeerIdent[] | null; awaitingTasks?: string[]; awaitingTaskIds?: string[]; bgServiceIds?: string[]; awaitingCount?: number | null; awaitingItems?: AwaitRow[]; effort?: string; model?: string; modelPending?: boolean; effortPending?: boolean; mode?: string; fast?: string; auth?: string; authLive?: string; authPending?: boolean; authBoth?: boolean; authAvail?: AuthAvail; authPickUnavailable?: string; authPickFell?: string; authAcct?: string; authLogin?: string; authLabel?: string; authLoginLive?: string | null; ctx?: string; ctxOver?: boolean; ctxColor?: number[]; modelColor?: number[]; effortColor?: number[]; modelTone?: number[]; effortTone?: number[]; ctxTone?: number[]; faded?: boolean; backend?: string; apiTooLong?: boolean; apiSpendLimit?: boolean; apiModelLimit?: boolean; apiAuthErr?: boolean; apiRefusal?: boolean; needsYou?: boolean | null; retrySuppressed?: boolean; retryNextAt?: number | null; retryTries?: number | null; }   // awaitingWhy/awaitingTasks = what an awaitingBg session is waiting on (kernel _session_awaiting's phrasing + the live awaited task descriptions) — the #bg-tasks box renders it as the header of the in-flight rows (renderBgTasks; the user 2026-08-13, who moved it out of the statusline the same day PR #350 put it there)   // retrySuppressed = the user interrupted this thread's API-error storm → romp's auto-retry stays OFF for it until a successful turn re-arms (the user 2026-07-06). backend = "sdk" | "codex"; apiTooLong = the "blocked" is a "prompt is too long" error (on you → red tab) vs a transient API error (amber/retrying); apiSpendLimit = a monthly spend cap (on you → raise it; NEVER auto-retried — retrying can't fix it, the user 2026-07-14); apiModelLimit = this session's MODEL is out of allowance (on you → switch model or add credits; not auto-retried either, the user 2026-08-01); apiRefusal = the model's safeguards refused the prompt itself (on you → rewrite it or drop the thread; never auto-retried — a refusal is deterministic on the same input, so a retry just manufactures the same refusal, the user 2026-08-15); needsYou = the FEED filed a card of this session under needs-you (build_session, from the kernel's last feed build; null before the first) → the Waiting-on-you ring widget wears a dashed yellow ring on the tab in every live state, working included (tab-state.ts RING_TEST, tab-widgets.ts composeTabRing; the ask ring, 2026-09-13); ctxColor = the GLOBAL colormap's RGB for the context%, computed server-side; modelColor/effortColor = the same map's RGB tint for the model name + effort (by capability/effort rank), server-computed; modelPending = a /model switch is resolving → the badge shows switching-dots until the new name lands (server-driven, event-based, the user 2026-07-03); fast = the CLI's fast-mode state ("on"/"off"/"cooldown", from the SDK init's fast_mode_state; absent = unknown/unavailable → no fast badge)
+// The model picker's REQUESTED-model mark (the user 2026-09-17): the kernel sends this while a session's live model sits a
+// tier below its pick (an automatic fallback). pick/pickValue name the requested model (label, and the alias or id the
+// pick was made with); live is what answers; cause is "safeguards" once the CLI named the classifiers, else ""; retry says
+// whether Retry upgrades after downgrades is on, its cadence, and when the next attempt is due.
+interface ModelFallback { pick: string; pickValue: string; live: string; cause: string; retry: { on: boolean; everyMin: number; armed: boolean; nextIn: number | null; attempts: number } }
+interface Status { state: ChipState; sinceEpoch: number | null; modelFallback?: ModelFallback | null; awaitingWhy?: string | null; awaitingKind?: string | null; awaitingPeers?: PeerIdent[] | null; awaitingTasks?: string[]; awaitingTaskIds?: string[]; bgServiceIds?: string[]; awaitingCount?: number | null; awaitingItems?: AwaitRow[]; effort?: string; model?: string; modelPending?: boolean; effortPending?: boolean; mode?: string; fast?: string; auth?: string; authLive?: string; authPending?: boolean; authBoth?: boolean; authAvail?: AuthAvail; authPickUnavailable?: string; authPickFell?: string; authAcct?: string; authLogin?: string; authLabel?: string; authLoginLive?: string | null; ctx?: string; ctxOver?: boolean; ctxColor?: number[]; modelColor?: number[]; effortColor?: number[]; modelTone?: number[]; effortTone?: number[]; ctxTone?: number[]; faded?: boolean; backend?: string; apiTooLong?: boolean; apiSpendLimit?: boolean; apiModelLimit?: boolean; apiAuthErr?: boolean; apiRefusal?: boolean; needsYou?: boolean | null; retrySuppressed?: boolean; retryNextAt?: number | null; retryTries?: number | null; }   // awaitingWhy/awaitingTasks = what an awaitingBg session is waiting on (kernel _session_awaiting's phrasing + the live awaited task descriptions) — the #bg-tasks box renders it as the header of the in-flight rows (renderBgTasks; the user 2026-08-13, who moved it out of the statusline the same day PR #350 put it there)   // retrySuppressed = the user interrupted this thread's API-error storm → romp's auto-retry stays OFF for it until a successful turn re-arms (the user 2026-07-06). backend = "sdk" | "codex"; apiTooLong = the "blocked" is a "prompt is too long" error (on you → red tab) vs a transient API error (amber/retrying); apiSpendLimit = a monthly spend cap (on you → raise it; NEVER auto-retried — retrying can't fix it, the user 2026-07-14); apiModelLimit = this session's MODEL is out of allowance (on you → switch model or add credits; not auto-retried either, the user 2026-08-01); apiRefusal = the model's safeguards refused the prompt itself (on you → rewrite it or drop the thread; never auto-retried — a refusal is deterministic on the same input, so a retry just manufactures the same refusal, the user 2026-08-15); needsYou = the FEED filed a card of this session under needs-you (build_session, from the kernel's last feed build; null before the first) → the Waiting-on-you ring widget wears a dashed yellow ring on the tab in every live state, working included (tab-state.ts RING_TEST, tab-widgets.ts composeTabRing; the ask ring, 2026-09-13); ctxColor = the GLOBAL colormap's RGB for the context%, computed server-side; modelColor/effortColor = the same map's RGB tint for the model name + effort (by capability/effort rank), server-computed; modelPending = a /model switch is resolving → the badge shows switching-dots until the new name lands (server-driven, event-based, the user 2026-07-03); fast = the CLI's fast-mode state ("on"/"off"/"cooldown", from the SDK init's fast_mode_state; absent = unknown/unavailable → no fast badge)
 
 // The side a pick this box cannot bill actually fell to ("login" | "key"), "" when nothing did: the kernel's
 // authPickFell (the launch's own decision, 2026-09-09). An older kernel without the field is read the way the
@@ -10208,6 +10213,7 @@ function threadMetaStatus(th: CommentThread): Status {
   return { state: stuck ? "needsInput" : (threadBusy(th.state) ? "working" : "ready"),
            sinceEpoch: th.sinceEpoch || null, mode: th.mode || "", model: th.model || "",
            effort: th.effort || "default", fast: th.fast || "", backend: "sdk",
+           modelFallback: th.modelFallback ?? null,   // the popover's picker wears the requested-model mark too (2026-09-17)
            modelColor: th.modelColor, effortColor: th.effortColor,
            modelTone: (th as any).modelTone, effortTone: (th as any).effortTone } as Status;
 }
@@ -15544,6 +15550,29 @@ function isCurrentMeta(kind: MetaKind, st: Status, value: string): boolean {
   return (st.model || "").toLowerCase().startsWith(value);
 }
 
+// The requested-model tooltip (the user 2026-09-17): why the pick is not answering, then what romp does about it —
+// the retry cadence when Retry upgrades after downgrades is on, else where to turn it on.
+function requestedModelTip(fb: ModelFallback): string {
+  const why = fb.cause === "safeguards" ? "Requested model blocked due to safety classifiers."
+    : `Requested model unavailable right now; ${fb.live || "a fallback model"} is answering.`;
+  const r = fb.retry || { on: false, everyMin: 10, armed: false, nextIn: null, attempts: 0 };
+  const next = r.nextIn !== null && r.nextIn !== undefined ? ` Next attempt in ${Math.max(1, Math.ceil(r.nextIn / 60))} min.` : "";
+  // the cadence is promised only when a retry is ARMED (the kernel's standing retry, which the tick fires); the switch being
+  // on with nothing armed — a dormant session, whose next launch carries the pick — says what is true instead
+  if (r.armed) return `${why} Retrying every ${r.everyMin || 10} minutes.${next}`;
+  if (r.on) return `${why} Auto-retry is on; the requested model is asked for when the session next starts.`;
+  return `${why} Configure auto-retry in Settings, Automation.`;
+}
+// Is this picker row the REQUESTED model? A family row (value = the alias, "fable") when the pick's label is of that
+// family; a version row when its label is the pick's label or its id is the pick itself.
+function isRequestedFamily(fb: ModelFallback, value: string): boolean {
+  const pk = (fb.pick || "").toLowerCase(), pv = (fb.pickValue || "").toLowerCase(), v = (value || "").toLowerCase();
+  return !!v && (pk.startsWith(v) || pv === v || pv.startsWith("claude-" + v));
+}
+function isRequestedVersion(fb: ModelFallback, v: { label: string; value: string }): boolean {
+  return (fb.pick || "").toLowerCase() === (v.label || "").toLowerCase() || (!!fb.pickValue && fb.pickValue === v.value);
+}
+
 // "<sessionId>:<kind>" → set when the user picks a value, cleared when the session
 // republishes the value (or after 20s, if the CLI rejected/ignored the command).
 const metaPending = new Map<string, { was: string; until: number }>();
@@ -15599,6 +15628,7 @@ function closeMetaMenu() {
   metaMenuEl?.remove();
   metaMenuEl = null;
   onModelChoicesLoaded = null;   // the rebuild hook belongs to the menu it was set for
+  pruneTip();   // a tip up on a menu row drops with the menu (the rows leave without a blur or a mouseleave)
 }
 // The badge a menu anchors to, as it stands NOW: `btn` while it is still in the document, else the connected
 // badge of the same kind for the same session (a popover's by data-sid; the chat's carry none) that the last
@@ -15645,7 +15675,7 @@ function toggleMetaMenu(kind: MetaKind, btn: HTMLElement, forSid?: string | null
     closeMetaMenu();
   };
   let subEl: HTMLElement | null = null;
-  const closeSub = () => { subEl?.remove(); subEl = null; };
+  const closeSub = () => { subEl?.remove(); subEl = null; pruneTip(); };
   // An sdkOnly entry is dropped on Codex rather than shown-and-refused: the backend cannot apply it,
   // and a menu that lists a mode you can't have is worse than one that doesn't. Codex sessions read
   // their own vocabulary via metaChoices (docs/codex.md) before the same filter.
@@ -15691,6 +15721,13 @@ function toggleMetaMenu(kind: MetaKind, btn: HTMLElement, forSid?: string | null
     const rowIco = kind === "mode" ? el("span", "meta-ico mode-ico") : null;
     if (rowIco) rowIco.innerHTML = modeIconSvg(c.value);
     if (kind === "mode" && riskyMode(c.value)) item.classList.add("mode-risky");
+    // the REQUESTED model wears a yellow tick while a fallback answers instead (the user 2026-09-17): romp knows the
+    // pick and the live model differ and says why, and whether it is retrying, in the tooltip
+    const fb = kind === "model" ? (s.status.modelFallback || null) : null;
+    if (fb && !item.classList.contains("current") && isRequestedFamily(fb, c.value)) {
+      item.classList.add("requested");
+      setTip(item, requestedModelTip(fb));   // the one tooltip treatment (tip.ts): hover AND focus, above the menu
+    }
     // model/effort rows wear THEIR OWN rank color (the user 2026-08-31: a picker whose rows are
     // all default-gray codes nothing) — the same /models-fed color+tone the badges use
     if (kind === "model" || kind === "effort") {
@@ -15736,6 +15773,10 @@ function toggleMetaMenu(kind: MetaKind, btn: HTMLElement, forSid?: string | null
       const lsub = el("div", "meta-item-sub");
       lsub.textContent = pinned ? "unpins — follows the newest " + c.label : "follows the newest " + c.label;
       latest.append(lhead, lsub);
+      if (fb && !latest.classList.contains("current") && !(fb.pickValue || "").toLowerCase().startsWith("claude-") && isRequestedFamily(fb, c.value)) {
+        latest.classList.add("requested");   // an alias pick IS the floating family: Latest is its row in the submenu
+        setTip(latest, requestedModelTip(fb));
+      }
       latest.addEventListener("click", (e) => { e.stopPropagation(); pickValue(c.value, true); });
       latest.addEventListener("keydown", (e) => {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); pickValue(c.value, true); }
@@ -15747,6 +15788,11 @@ function toggleMetaMenu(kind: MetaKind, btn: HTMLElement, forSid?: string | null
         const row = el("div", "meta-item" + (cur ? " current" : ""));
         row.tabIndex = 0;
         row.textContent = v.label;
+        let rowTip = "";
+        if (fb && !cur && isRequestedVersion(fb, v)) {
+          row.classList.add("requested");   // the requested version: the yellow tick, the same tooltip
+          rowTip = requestedModelTip(fb);
+        }
         if (v.learned) {
           // LOUD, per the fail-loudly rule: this version is in no catalog list — a running session's CLI
           // reported it (kernel /models `learned`) — so the row says so instead of a stale menu hiding
@@ -15754,8 +15800,10 @@ function toggleMetaMenu(kind: MetaKind, btn: HTMLElement, forSid?: string | null
           const tag = el("span", "meta-item-sub");
           tag.textContent = " new";
           row.appendChild(tag);
-          row.title = "Reported by a running session's Claude Code; not yet in romp's version list";
+          const note = "Reported by a running session's Claude Code; not yet in romp's version list";
+          rowTip = rowTip ? rowTip + "\n" + note : note;   // a requested learned version keeps its explanation
         }
+        if (rowTip) setTip(row, rowTip);
         row.addEventListener("click", (e) => { e.stopPropagation(); pickValue(v.value); });
         row.addEventListener("keydown", (e) => {
           if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); pickValue(v.value); }

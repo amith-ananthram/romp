@@ -5078,6 +5078,31 @@ def _model_downgrade(frm, to):
     return a is not None and b is not None and b < a
 
 
+def model_fallback_row(pick, live, cause="", arm=None, retry_on=False, now=None, pending=False):
+    """The model picker's REQUESTED-model mark (the user 2026-09-17): while a session's live model sits a tier below
+    its pick, the picker draws a yellow tick beside the requested model with a tooltip saying why and whether romp is
+    retrying. None when no fallback stands (no pick, no live name, or the live tier at or above the pick's). `pick` is
+    the reg's model (an alias or an id), `live` the live label; `cause` is "safeguards" once the CLI's
+    model_refusal_fallback frame named the episode, else "" (unknown: a capacity fallback, or the frame not yet in);
+    `arm` is the standing upgrade retry ({next, attempts}) and `retry_on` the switch; `pending` (a /model pick of the
+    user's own still resolving) is the badge's switching-dots, never a fallback mark. `live` should be the model the API
+    last SERVED a parent reply on (the reg's servedModel): the per-turn init and a reconnect report the CONFIGURED model,
+    the pick, before anything is served, and a mark keyed on that would vanish at every turn start and reappear at the
+    first reply (review 2026-09-17). Pure over its inputs."""
+    if pending:
+        return None
+    pick_label = _alias_label(str(pick or ""))
+    if not pick_label or not live or not _model_downgrade(pick_label, live):
+        return None
+    now = time.time() if now is None else float(now)
+    nxt = None
+    if arm and arm.get("next"):
+        nxt = max(0, int(float(arm["next"]) - now))
+    return {"pick": pick_label, "pickValue": str(pick or ""), "live": str(live), "cause": str(cause or ""),
+            "retry": {"on": bool(retry_on), "everyMin": int(RETRY_UPGRADE_S // 60), "armed": bool(arm),
+                      "nextIn": nxt, "attempts": int((arm or {}).get("attempts", 0) or 0)}}
+
+
 def _echo_queued_in(a: dict, queued) -> bool:
     """Whether echo atom `a` is in the surviving queue `queued` — its copies as {"md", "qid"} (a plain text is an
     id-less copy) — by identity where it has one (T252c, third review): an echo whose uuid a queued copy wears is
@@ -5499,6 +5524,9 @@ class SdkSession:
         #   connection shows a turn boundary (the init handler and the settle write 0), so an attach to a CLI mid-turn never reads a
         #   later frame as the turn's first reply (review 2026-09-17)
         self._fast_restart_failed = None   # the re-ask itself came back at normal speed: no more stops on this connection until fast mode is seen
+        self._fallback_cause = str(reg.get("fallbackCause") or "")   # "safeguards" once the CLI's refusal frame named the standing fallback (model_fallback_row)
+        self._served_model = str(reg.get("servedModel") or reg.get("liveModel") or "")   # the model the API last SERVED a parent reply on (the picker's mark)
+        self._refusal_this_turn = False   # a model_refusal_fallback frame landed in the turn in flight: the downgrade learn keeps its cause
         self._fast_restart = None     # Always fast stopped this turn at its first fallen reply: {from,to,speed,opener}, consumed at the settle
         self._fast_restarted = False  # the turn in flight is the re-ask itself: no second restart, whatever its first reply does
         self._restart_opener = None   # the stopped turn's opener, restored onto the re-ask when the feeder pops it
@@ -6617,6 +6645,26 @@ class SdkSession:
             self.backend._log("always fast (%s): the re-asked turn still came back at normal speed on %s — the stop bought nothing; "
                               "not stopping turns on this connection again until fast mode is seen" % (self.name, pm), problem=True)
 
+    def _arm_if_below_pick(self) -> bool:
+        """Retry upgrades after downgrades, for a session ALREADY sitting below its pick: arm from the pick's label when the
+        switch is on, no arm stands, and the model last served ranks below the pick. Two callers: the switch flip
+        (apply_model_switches) and a host ATTACH after a kernel restart (review 2026-09-17: the arm is in memory only,
+        and an attach to a CLI that survived the restart replays no init and serves no new fallback, so a standing
+        fallback lost its retry — and the picker's tooltip promised a cadence nothing was running). Off: the switch
+        going off ends any arm (_retry_armed). Returns True when it armed."""
+        pick = getattr(self, "chosen_model", "") or ""
+        if not retry_upgrade_on(getattr(self.backend, "state_dir", None)):
+            self._retry_armed()
+            return False
+        if not pick or pick == "default" or getattr(self, "_upgrade_retry", None):
+            return False
+        live = getattr(self, "_served_model", "") or getattr(self, "model", "")
+        pr, lr = _model_rank(pick), _model_rank(live)
+        if pr is not None and lr is not None and lr < pr:
+            self._arm_upgrade_retry(_alias_label(pick), live)
+            return True
+        return False
+
     def _arm_upgrade_retry(self, frm, to):
         """A down-tier model change nobody asked for just landed (the card's branch in _learn_model): with the gear's
         Retry upgrades after downgrades switch on, remember what to get back to and let the kernel's tick ask for it
@@ -7142,6 +7190,8 @@ class SdkSession:
                     # SDK already holds (get_server_info), so the badge exists pre-turn too — without
                     # this, nothing showed after a kernel restart until each session's next turn.
                     asyncio.ensure_future(self._do_adopt_server_info())
+                    if getattr(self, "_host_is_attach", False):
+                        self._arm_if_below_pick()   # an attach replays no init and serves nothing new: a standing fallback re-arms its retry here
                     feeder = asyncio.ensure_future(client.query(inputs()))
                     recv = asyncio.ensure_future(self._drain(client, AssistantMessage, ResultMessage, SystemMessage))
                     waker = asyncio.ensure_future(self._wake.wait())
@@ -7319,6 +7369,16 @@ class SdkSession:
             return
         cleared = self._resolve_model_pending(pm)
         raw = (raw or "").strip()
+        if served and pm:
+            prev = getattr(self, "_served_model", "") or self.model   # unseeded: the configured model stands in, so an unchanged main loop is a no-op write
+            if pm != prev:
+                self._served_model = pm        # what the API last SERVED a parent reply on — the picker's mark reads this, never the init's configured name
+                try:
+                    self.backend._update_reg(self.sid, servedModel=pm)
+                except Exception as e:
+                    self.backend._log("served model (%s): registry write failed: %s" % (self.name, e))
+            elif not getattr(self, "_served_model", ""):
+                self._served_model = pm        # remembered in memory only: nothing changed on disk
         if served and self._retry_armed():
             self._note_model_served(pm)
         if pm == self.model:
@@ -7368,8 +7428,15 @@ class SdkSession:
                 except Exception as e:
                     self.backend._log("model-fallback card (%s): %s" % (self.name, e), problem=True)
             self._arm_upgrade_retry(self.model, pm)   # Retry upgrades after downgrades: remember the way back (off → nothing)
+            if not getattr(self, "_refusal_this_turn", False):   # a provisional refusal frame can precede the final hop's reply: its cause stands
+                self._fallback_cause = ""             # a new episode: its cause is unknown until the CLI's end-of-turn frame names it
+            downgraded = not getattr(self, "_refusal_this_turn", False)
+        else:
+            downgraded = False
         old, self.model = self.model, pm
         fields = {"liveModel": pm, "modelPending": bool(self._model_pending)}
+        if downgraded:
+            fields["fallbackCause"] = ""
         if raw:
             self._model_id = raw
             fields["liveModelId"] = raw
@@ -7407,6 +7474,13 @@ class SdkSession:
         # A 'local' refusal (a subagent's or a side question's reply) never swapped the session's model,
         # so none of this turn's cards is its own.
         caps = [] if scope == "local" else [c[2] for c in (getattr(self, "_swap_cards", None) or []) if c[2]]
+        if scope != "local":
+            self._fallback_cause = "safeguards"   # the picker's requested-model tooltip names the classifiers (model_fallback_row)
+            self._refusal_this_turn = True
+            try:
+                self.backend._update_reg(self.sid, fallbackCause="safeguards")
+            except Exception as e:
+                self.backend._log("fallback cause (%s): registry write failed: %s" % (self.name, e))
         hook = getattr(type(self.backend), "on_model_refusal_fallback", None)
         if not hook:
             memo = "model_refusal_fallback:no-hook"
@@ -8481,6 +8555,7 @@ class SdkSession:
                 # the CLI, its next streamed atom re-asserts 'working' via _forward — the stream is the truth.
                 self.inflight = 0
                 self._inflight_texts.clear()           # the CLI processed everything fed — same settle semantics
+                self._refusal_this_turn = False        # the turn's refusal frame, if any, has been read into the cause
                 self._swap_cards = []                  # T279: a capacity card learned this turn is claimable only by
                 #                                        this turn's refusal notice — the settle is the deciding event
                 # A /compact that found NOTHING to compact emits no boundary — the turn just settles here. Clear
@@ -9629,7 +9704,7 @@ class SdkSession:
 
     # ---- snapshot for live_sessions() ----
 
-    def snapshot(self) -> dict:
+    def snapshot(self, retry_on=None) -> dict:
         # Parked in can_use_tool/_ask_user waiting on the USER (a permission Allow/Deny or an
         # AskUserQuestion picker)? The turn stays inflight through that wait, so reporting "working" made
         # the feed/timeline miss it — the kernel floors a card to BLOCKED off the live "permission"/"picker"
@@ -9696,6 +9771,10 @@ class SdkSession:
                 #   would wake it in seconds (the user 2026-08-13). Dormant rows carry no spawning
                 #   key at all, so they read ready.
                 "fast": self.fast,   # fast-mode state from init ("on"/"off"/"cooldown"; "" = unknown → no badge)
+                "modelFallback": model_fallback_row(self.chosen_model, getattr(self, "_served_model", "") or self.model, getattr(self, "_fallback_cause", ""),
+                                                    getattr(self, "_upgrade_retry", None),
+                                                    retry_upgrade_on(self.backend.state_dir) if retry_on is None else bool(retry_on),
+                                                    pending=bool(self._model_pending)),   # the picker's requested-model mark (served model, never the init's)
                 "fastReason": self.fast_reason,   # init's disabled_reason — non-empty hides the chat toggle
                 "retryCount": self.retry_count,   # api_retry backoff attempts in the current storm → the live 'attempt N' in the chat's retrying element
                 "retryInfo": self.retry_info,     # the latest attempt's detail (attempt/max, error status+message, next-attempt epoch) → the retrying element's context lines (the user 2026-07-10)
@@ -14387,10 +14466,12 @@ class SdkBackend:
         if s and s.thread.is_alive():
             try:
                 snap = s.snapshot()
-                return {"mode": str(snap.get("mode") or ""), "fast": str(snap.get("fast") or "")}
+                return {"mode": str(snap.get("mode") or ""), "fast": str(snap.get("fast") or ""),
+                        "modelFallback": snap.get("modelFallback")}   # the popover's picker wears the requested-model mark too (2026-09-17)
             except Exception:
                 return {}
-        return {}
+        reg = read_reg(self.state_dir, sid)
+        return {"modelFallback": self.fallback_row_for_reg(reg)} if reg else {}
 
     def rename(self, sid: str, new_name: str) -> bool:
         reg = read_reg(self.state_dir, sid)
@@ -14715,10 +14796,13 @@ class SdkBackend:
                 s._model_pending = "" if already else value
                 pending = bool(s._model_pending)
                 s._upgrade_retry = None        # a pick of the user's own supersedes the retry after a downgrade (2026-09-17)
+                s._fallback_cause = ""        # …and the standing fallback's cause; the served model is learned afresh on the pick
+                s._served_model = ""
             # remember as the seed for the NEXT new session (the user 2026-06-27) — pending the CLI's verdict
             tok = self._seed_write_pending(sid, value)
             prev = {"picked": value, "tok": tok}   # what the layers hold until the CLI rules — the revert's CAS keys
             self._update_reg(sid, model=value, modelPending=pending)   # locked RMW — see set_effort
+            self._update_reg(sid, fallbackCause="", servedModel="")   # the requested-model mark starts over with the pick (2026-09-17)
             s.set_model_live(None if value in ("", "default") else value, prev=prev)
         else:
             write_sdk_default(self.state_dir, model=value)   # the seed for the NEXT new session (the user 2026-06-27)
@@ -14726,6 +14810,7 @@ class SdkBackend:
             # alias's best-effort label immediately — never leave the badge on a stale liveModel or trapped
             # on dots. The value applies for real on the next connect (chosen_model → _options).
             self._update_reg(sid, model=value, liveModel=_alias_label(value), modelPending=False)
+            self._update_reg(sid, fallbackCause="", servedModel="")   # a dormant pick starts the mark over too
         # the acknowledging chip — live OR dormant (see _ack_cmd_chip)
         self._ack_cmd_chip(sid, "/model", "/model " + value, s.resume_sid if s else reg.get("lastSid"))
         return True
@@ -14931,13 +15016,7 @@ class SdkBackend:
                                  "" if s.quiet() else " once the session is quiet"))
                     s.want_switch_reconnect("always fast")
                     asked += 1
-                pick = getattr(s, "chosen_model", "") or ""
-                if retry_upgrade_on(self.state_dir) and pick and pick != "default" and not getattr(s, "_upgrade_retry", None):
-                    pr, lr = _model_rank(pick), _model_rank(getattr(s, "model", ""))
-                    if pr is not None and lr is not None and lr < pr:
-                        s._arm_upgrade_retry(_alias_label(pick), s.model)
-                else:
-                    s._retry_armed()
+                s._arm_if_below_pick()
             except Exception as e:
                 self._log("model switches (%s): %s" % (s.name, e), problem=True)
         return asked
@@ -15622,6 +15701,7 @@ class SdkBackend:
         """{sid: state-dict} for every alive SDK session — merged by the kernel
         into its session enumeration so SDK sessions appear in the UI."""
         out = {}
+        retry_on = retry_upgrade_on(self.state_dir)   # once per listing: every row's mark reads the same answer
         for reg in list_regs(self.state_dir):
             if not reg.get("alive"):
                 continue
@@ -15631,7 +15711,7 @@ class SdkBackend:
             if not sid:
                 continue
             try:
-                out[sid] = self._live_row(reg, sid)
+                out[sid] = self._live_row(reg, sid, retry_on)
             except Exception:
                 # One session's bad row must not hide the OTHERS — this loop used to run unguarded
                 # under the kernel merge's single try, so one snapshot() exception silently dropped
@@ -15648,12 +15728,22 @@ class SdkBackend:
                             "retryInfo": None, "ctx": None, "subagents": [], "bgTasks": []}
         return out
 
-    def _live_row(self, reg, sid):
+    def fallback_row_for_reg(self, reg, retry_on=None):
+        """A dormant session's requested-model mark from its registry alone (model_fallback_row over the pick, the model
+        last SERVED, the persisted cause; no arm, the switch read here unless the caller read it once for a listing)."""
+        if not isinstance(reg, dict):
+            return None
+        return model_fallback_row(reg.get("model") or "", reg.get("servedModel") or reg.get("liveModel") or "",
+                                  reg.get("fallbackCause") or "", None,
+                                  retry_upgrade_on(self.state_dir) if retry_on is None else bool(retry_on),
+                                  pending=bool(reg.get("modelPending")))
+
+    def _live_row(self, reg, sid, retry_on=None):
         """One session's live_sessions row (running snapshot, else the dormant reg row) — factored
         so live_sessions can guard it PER SESSION (one bad row must not hide the other sessions)."""
         s = self.sessions.get(sid)
         if s and s.thread.is_alive():
-            return s.snapshot()
+            return s.snapshot(retry_on=retry_on)
         ls = last_state(self.state_dir, sid)
         st = ls.get("state") or "waiting"
         # A NOT-running (dormant, resumable) SDK session can't actually be mid-turn: after a kernel
@@ -15673,6 +15763,7 @@ class SdkBackend:
                     # not running (e.g. post-restart): prefer the last LIVE model we persisted
                     # (liveModel), else the chosen alias — so the badge isn't blank while dormant.
                     "model": model_label(reg.get("liveModel") or "", reg.get("model") or ""),
+                    "modelFallback": self.fallback_row_for_reg(reg, retry_on),   # a dormant session keeps its mark
                     "modelPending": bool(reg.get("modelPending")),
                     "effortPending": bool(reg.get("effortPending")),
                     "effort": reg.get("effort", ""),
