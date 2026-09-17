@@ -337,7 +337,9 @@ following to every connected machine's kernel):
   A pick of your own ends it too, as does turning the switch off. While a
   fallback stands, the session's model picker marks the requested model with a
   yellow tick beside the blue tick on the model that answers; its tooltip says why
-  (the safety classifiers, once the CLI has named them) and whether romp is
+  (the safety classifiers and their category, once the CLI has named them, which it
+  does within seconds of the swap; a fallback that predates the kernel is read off
+  the transcript when the kernel attaches) and whether romp is
   retrying, with the cadence and the next attempt, or where to turn retries on.
 
 ### Per-session billing (login vs API key)

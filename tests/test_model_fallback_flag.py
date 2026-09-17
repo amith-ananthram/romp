@@ -6,6 +6,7 @@ requested model with a tooltip saying why and whether romp is retrying. This pin
 backend puts it (the live snapshot and the dormant row), how the cause is learned and persisted, and the kernel's three
 projection sites. Hermetic state, synthetic sids, no CLI."""
 import inspect
+import json
 import os
 import tempfile
 import time
@@ -199,6 +200,89 @@ class TheRetryReArmsAtAnAttach(unittest.TestCase):
         self.assertIn('if getattr(self, "_host_is_attach", False):', src)
         self.assertIn('self._arm_if_below_pick()   # an attach replays no init', src)
         self.assertIn("s._arm_if_below_pick()", inspect.getsource(sb.SdkBackend.apply_model_switches))
+
+
+class TheCauseNamesItsCategory(unittest.TestCase):
+    def test_the_frame_records_the_category_and_the_row_carries_it(self):
+        be = _backend()
+        s = _sess(be, liveModel="Opus 5", liveModelId="claude-opus-5", servedModel="Opus 5")
+        sb.SdkBackend.on_model_refusal_fallback = staticmethod(lambda *a, **k: None)
+        try:
+            s._on_refusal_fallback({"original_model": "claude-fable-5-1", "fallback_model": "claude-opus-5", "scope": "session", "api_refusal_category": "cyber"})
+        finally:
+            del sb.SdkBackend.on_model_refusal_fallback
+        fb = s.snapshot()["modelFallback"]
+        self.assertEqual((fb["cause"], fb["category"]), ("safeguards", "cyber"))
+        reg = sb.read_reg(be.state_dir, SID)
+        self.assertEqual((reg.get("fallbackCause"), reg.get("fallbackCategory")), ("safeguards", "cyber"))
+        self.assertEqual(be.live_sessions()[SID]["modelFallback"]["category"] if SID in be.live_sessions() else "cyber", "cyber")
+
+
+class AStandingFallbackReadsItsCauseOffTheTranscript(unittest.TestCase):
+    """A fallback that happened under an earlier kernel: this one saw no frame, so at the attach the cause is read from the
+    CLI's transcript, from the end. The refusal record follows the fallback marker within seconds (measured 2026-09-17)."""
+    def _transcript(self, lines):
+        root = tempfile.mkdtemp()
+        os.environ["CLAUDE_CONFIG_DIR"] = root
+        path = sb.transcript_path("/tmp/notes-api", SID)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        Path(path).write_text("".join(json.dumps(l) + "\n" for l in lines))
+        return path
+
+    def _sess(self):
+        be = _backend()
+        s = _sess(be, cwd="/tmp/notes-api", liveModel="Opus 5", liveModelId="claude-opus-5", servedModel="Opus 5")
+        return be, s
+
+    def tearDown(self):
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+
+    def test_a_refusal_record_after_the_last_marker_seeds_the_cause_and_category(self):
+        be, s = self._sess()
+        path = self._transcript([
+            {"type": "user", "message": {"role": "user", "content": "x"}},
+            {"type": "assistant", "message": {"model": "claude-opus-5", "content": [{"type": "fallback", "from": {"model": "claude-fable-5-1"}, "to": {"model": "claude-opus-5"}}]}},
+            {"type": "system", "subtype": "model_refusal_fallback", "trigger": "refusal", "scope": "session", "originalModel": "claude-fable-5-1", "fallbackModel": "claude-opus-5", "apiRefusalCategory": "bio"},
+            {"type": "assistant", "message": {"model": "claude-opus-5", "content": [{"type": "text", "text": "y"}]}},
+        ])
+        self.assertTrue(s._seed_fallback_cause_from_transcript(path, "Opus 5"))
+        self.assertEqual((s._fallback_cause, s._fallback_category), ("safeguards", "bio"))
+        reg = sb.read_reg(be.state_dir, SID)
+        self.assertEqual((reg.get("fallbackCause"), reg.get("fallbackCategory")), ("safeguards", "bio"))
+        self.assertEqual(s.snapshot()["modelFallback"]["category"], "bio")
+        self.assertTrue(any("safeguards refusal (bio)" in m for m in be._logs), be._logs)
+
+    def test_no_seed_when_the_last_swap_was_not_a_refusal_or_was_local_or_another_tier(self):
+        be, s = self._sess()
+        rec = {"type": "system", "subtype": "model_refusal_fallback", "trigger": "refusal", "scope": "session", "originalModel": "claude-fable-5-1", "fallbackModel": "claude-opus-5", "apiRefusalCategory": "cyber"}
+        marker = {"type": "assistant", "message": {"model": "claude-opus-5", "content": [{"type": "fallback", "from": {"model": "claude-fable-5-1"}, "to": {"model": "claude-opus-5"}}]}}
+        self.assertFalse(s._seed_fallback_cause_from_transcript(self._transcript([rec, marker]), "Opus 5"), "a later marker with no refusal record after it: another kind of swap")
+        self.assertFalse(s._seed_fallback_cause_from_transcript(self._transcript([marker, dict(rec, scope="local")]), "Opus 5"), "a local refusal swapped one reply, not the session")
+        self.assertFalse(s._seed_fallback_cause_from_transcript(self._transcript([marker, dict(rec, fallbackModel="claude-sonnet-5")]), "Opus 5"), "a record about another tier")
+        self.assertFalse(s._seed_fallback_cause_from_transcript(self._transcript([marker]), "Opus 5"), "no record at all")
+        self.assertFalse(s._seed_fallback_cause_from_transcript("/nonexistent/transcript.jsonl", "Opus 5"), "no file: nothing, no raise")
+        self.assertEqual(s._fallback_cause, "")
+
+    def test_the_attach_asks_only_for_a_standing_fallback_with_no_cause(self):
+        be, s = self._sess()
+        s2 = _sess(be, sid="11111111-2222-4333-8444-000000000805", cwd="/tmp/notes-api", liveModel="Fable 5.1", servedModel="Fable 5.1")
+        s._fallback_cause = "safeguards"
+        started = []
+        import threading as _th
+        real = _th.Thread
+        _th.Thread = lambda *a, **k: started.append(k.get("name")) or real(target=lambda: None)
+        try:
+            s._maybe_seed_fallback_cause()
+            self.assertEqual(started, [], "a cause on record: nothing to read")
+            s._fallback_cause = ""
+            s._maybe_seed_fallback_cause()
+            self.assertEqual(started, ["sdk-fbcause:web"], "no cause and a standing fallback: the transcript is read off the loop thread")
+            s2._maybe_seed_fallback_cause()
+            self.assertEqual(len(started), 1, "on the pick: no fallback stands, nothing to read")
+        finally:
+            _th.Thread = real
+        src = inspect.getsource(sb.SdkSession._amain)
+        self.assertIn("self._maybe_seed_fallback_cause()", src)
 
 
 class TheKernelProjectsIt(unittest.TestCase):

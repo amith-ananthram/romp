@@ -35,7 +35,10 @@ test("the tooltip says why, then what romp does: the cadence when a retry is arm
     "Requested model blocked due to safety classifiers. Configure auto-retry in Settings, Automation.");
   // the cause is named only once the CLI named it: an unknown cause (a capacity fallback, or the end-of-turn frame not yet in) says so plainly
   assert.equal(requestedModelTip(fb({ cause: "", retry: { on: false, everyMin: 10, armed: false, nextIn: null, attempts: 0 } })),
-    "Requested model unavailable right now; Opus 5 is answering. Configure auto-retry in Settings, Automation.");
+    "Requested model is not answering; Opus 5 is. Configure auto-retry in Settings, Automation.");
+  // the API's refusal category rides along once the CLI named it
+  assert.equal(requestedModelTip(fb({ category: "cyber", retry: { on: true, everyMin: 10, armed: true, nextIn: null, attempts: 0 } })),
+    "Requested model blocked due to safety classifiers (cyber). Retrying every 10 minutes.");
 });
 
 test("the requested row is found by family alias, by pick id and by version label; the answering row never wears it", () => {

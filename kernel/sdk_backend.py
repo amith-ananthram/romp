@@ -5078,7 +5078,7 @@ def _model_downgrade(frm, to):
     return a is not None and b is not None and b < a
 
 
-def model_fallback_row(pick, live, cause="", arm=None, retry_on=False, now=None, pending=False):
+def model_fallback_row(pick, live, cause="", arm=None, retry_on=False, now=None, pending=False, category=""):
     """The model picker's REQUESTED-model mark (the user 2026-09-17): while a session's live model sits a tier below
     its pick, the picker draws a yellow tick beside the requested model with a tooltip saying why and whether romp is
     retrying. None when no fallback stands (no pick, no live name, or the live tier at or above the pick's). `pick` is
@@ -5099,6 +5099,7 @@ def model_fallback_row(pick, live, cause="", arm=None, retry_on=False, now=None,
     if arm and arm.get("next"):
         nxt = max(0, int(float(arm["next"]) - now))
     return {"pick": pick_label, "pickValue": str(pick or ""), "live": str(live), "cause": str(cause or ""),
+            "category": str(category or ""),   # the API's refusal category when the CLI named one ("cyber", "bio", …)
             "retry": {"on": bool(retry_on), "everyMin": int(RETRY_UPGRADE_S // 60), "armed": bool(arm),
                       "nextIn": nxt, "attempts": int((arm or {}).get("attempts", 0) or 0)}}
 
@@ -5526,6 +5527,7 @@ class SdkSession:
         self._fast_restart_failed = None   # the re-ask itself came back at normal speed: no more stops on this connection until fast mode is seen
         self._fallback_cause = str(reg.get("fallbackCause") or "")   # "safeguards" once the CLI's refusal frame named the standing fallback (model_fallback_row)
         self._served_model = str(reg.get("servedModel") or reg.get("liveModel") or "")   # the model the API last SERVED a parent reply on (the picker's mark)
+        self._fallback_category = str(reg.get("fallbackCategory") or "")   # the refusal's category beside the cause
         self._refusal_this_turn = False   # a model_refusal_fallback frame landed in the turn in flight: the downgrade learn keeps its cause
         self._fast_restart = None     # Always fast stopped this turn at its first fallen reply: {from,to,speed,opener}, consumed at the settle
         self._fast_restarted = False  # the turn in flight is the re-ask itself: no second restart, whatever its first reply does
@@ -6645,6 +6647,73 @@ class SdkSession:
             self.backend._log("always fast (%s): the re-asked turn still came back at normal speed on %s — the stop bought nothing; "
                               "not stopping turns on this connection again until fast mode is seen" % (self.name, pm), problem=True)
 
+    def _maybe_seed_fallback_cause(self) -> None:
+        """A standing fallback with no cause on record (it happened under an earlier kernel, whose frame this one never
+        saw): read the CLI's transcript, from the end, for the last swap it recorded, off the loop thread. The picker's
+        tooltip otherwise says the requested model is not answering without saying why until the next fallback."""
+        try:
+            live = getattr(self, "_served_model", "") or getattr(self, "model", "")
+            if getattr(self, "_fallback_cause", "") or not model_fallback_row(self.chosen_model, live):
+                return
+            path = transcript_path(self.cwd, getattr(self, "resume_sid", None) or self.sid)
+            threading.Thread(target=self._seed_fallback_cause_from_transcript, args=(path, live),
+                             name="sdk-fbcause:%s" % self.name, daemon=True).start()
+        except Exception as e:
+            self.backend._log("fallback cause (%s): %s" % (self.name, e))
+
+    def _seed_fallback_cause_from_transcript(self, path, live, cap_bytes=24 << 20) -> bool:
+        """The last swap the transcript recorded, read from the file's end (bounded): a model_refusal_fallback record
+        after the last fallback marker names the safeguards refusal and its category; a marker with no refusal record
+        after it was a swap of another kind, and a record of 'local' scope swapped one reply, not the session. Seeds
+        the cause only when that record's fallback model is the tier now serving. Returns True when it seeded."""
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                chunk = 1 << 20
+                tail = b""
+                pos = size
+                while pos > 0 and (size - pos) < cap_bytes:
+                    step = min(chunk, pos)
+                    pos -= step
+                    f.seek(pos)
+                    tail = f.read(step) + tail
+                    if b"model_refusal_fallback" in tail:
+                        break
+        except OSError:
+            return False
+        i_ref = tail.rfind(b'"model_refusal_fallback"')
+        if i_ref < 0:
+            return False
+        i_mark = max(tail.rfind(b'"type":"fallback"'), tail.rfind(b'"type": "fallback"'))
+        if i_mark > i_ref:
+            return False   # the last swap on record was not a refusal: say nothing
+        start = tail.rfind(b"\n", 0, i_ref) + 1
+        end = tail.find(b"\n", i_ref)
+        try:
+            rec = json.loads(tail[start:end if end >= 0 else None].decode("utf-8", "replace"))
+        except Exception:
+            return False
+        if str(rec.get("scope") or "session") == "local":
+            return False
+        to = str(rec.get("fallbackModel") or rec.get("fallback_model") or "")
+        if _model_rank(to) is None or _model_rank(to) != _model_rank(live):
+            return False
+        cat = str(rec.get("apiRefusalCategory") or rec.get("api_refusal_category") or "").strip()
+        self._fallback_cause = "safeguards"
+        self._fallback_category = cat
+        try:
+            self.backend._update_reg(self.sid, fallbackCause="safeguards", fallbackCategory=cat)
+        except Exception as e:
+            self.backend._log("fallback cause (%s): registry write failed: %s" % (self.name, e))
+        self.backend._log("fallback cause (%s): the transcript's last swap was a safeguards refusal%s — the picker's mark says so"
+                          % (self.name, (" (%s)" % cat) if cat else ""))
+        try:
+            self.backend._poke()
+        except Exception:
+            pass
+        return True
+
     def _arm_if_below_pick(self) -> bool:
         """Retry upgrades after downgrades, for a session ALREADY sitting below its pick: arm from the pick's label when the
         switch is on, no arm stands, and the model last served ranks below the pick. Two callers: the switch flip
@@ -7192,6 +7261,7 @@ class SdkSession:
                     asyncio.ensure_future(self._do_adopt_server_info())
                     if getattr(self, "_host_is_attach", False):
                         self._arm_if_below_pick()   # an attach replays no init and serves nothing new: a standing fallback re-arms its retry here
+                        self._maybe_seed_fallback_cause()   # …and a standing fallback whose cause this kernel never saw reads it off the transcript
                     feeder = asyncio.ensure_future(client.query(inputs()))
                     recv = asyncio.ensure_future(self._drain(client, AssistantMessage, ResultMessage, SystemMessage))
                     waker = asyncio.ensure_future(self._wake.wait())
@@ -7429,7 +7499,8 @@ class SdkSession:
                     self.backend._log("model-fallback card (%s): %s" % (self.name, e), problem=True)
             self._arm_upgrade_retry(self.model, pm)   # Retry upgrades after downgrades: remember the way back (off → nothing)
             if not getattr(self, "_refusal_this_turn", False):   # a provisional refusal frame can precede the final hop's reply: its cause stands
-                self._fallback_cause = ""             # a new episode: its cause is unknown until the CLI's end-of-turn frame names it
+                self._fallback_cause = ""             # a new episode: its cause is unknown until the CLI's refusal frame names it (seconds later)
+                self._fallback_category = ""
             downgraded = not getattr(self, "_refusal_this_turn", False)
         else:
             downgraded = False
@@ -7437,6 +7508,7 @@ class SdkSession:
         fields = {"liveModel": pm, "modelPending": bool(self._model_pending)}
         if downgraded:
             fields["fallbackCause"] = ""
+            fields["fallbackCategory"] = ""
         if raw:
             self._model_id = raw
             fields["liveModelId"] = raw
@@ -7476,9 +7548,10 @@ class SdkSession:
         caps = [] if scope == "local" else [c[2] for c in (getattr(self, "_swap_cards", None) or []) if c[2]]
         if scope != "local":
             self._fallback_cause = "safeguards"   # the picker's requested-model tooltip names the classifiers (model_fallback_row)
+            self._fallback_category = cat
             self._refusal_this_turn = True
             try:
-                self.backend._update_reg(self.sid, fallbackCause="safeguards")
+                self.backend._update_reg(self.sid, fallbackCause="safeguards", fallbackCategory=cat)
             except Exception as e:
                 self.backend._log("fallback cause (%s): registry write failed: %s" % (self.name, e))
         hook = getattr(type(self.backend), "on_model_refusal_fallback", None)
@@ -9774,7 +9847,7 @@ class SdkSession:
                 "modelFallback": model_fallback_row(self.chosen_model, getattr(self, "_served_model", "") or self.model, getattr(self, "_fallback_cause", ""),
                                                     getattr(self, "_upgrade_retry", None),
                                                     retry_upgrade_on(self.backend.state_dir) if retry_on is None else bool(retry_on),
-                                                    pending=bool(self._model_pending)),   # the picker's requested-model mark (served model, never the init's)
+                                                    pending=bool(self._model_pending), category=getattr(self, "_fallback_category", "")),   # the picker's requested-model mark (served model, never the init's)
                 "fastReason": self.fast_reason,   # init's disabled_reason — non-empty hides the chat toggle
                 "retryCount": self.retry_count,   # api_retry backoff attempts in the current storm → the live 'attempt N' in the chat's retrying element
                 "retryInfo": self.retry_info,     # the latest attempt's detail (attempt/max, error status+message, next-attempt epoch) → the retrying element's context lines (the user 2026-07-10)
@@ -14797,12 +14870,13 @@ class SdkBackend:
                 pending = bool(s._model_pending)
                 s._upgrade_retry = None        # a pick of the user's own supersedes the retry after a downgrade (2026-09-17)
                 s._fallback_cause = ""        # …and the standing fallback's cause; the served model is learned afresh on the pick
+                s._fallback_category = ""
                 s._served_model = ""
             # remember as the seed for the NEXT new session (the user 2026-06-27) — pending the CLI's verdict
             tok = self._seed_write_pending(sid, value)
             prev = {"picked": value, "tok": tok}   # what the layers hold until the CLI rules — the revert's CAS keys
             self._update_reg(sid, model=value, modelPending=pending)   # locked RMW — see set_effort
-            self._update_reg(sid, fallbackCause="", servedModel="")   # the requested-model mark starts over with the pick (2026-09-17)
+            self._update_reg(sid, fallbackCause="", fallbackCategory="", servedModel="")   # the requested-model mark starts over with the pick (2026-09-17)
             s.set_model_live(None if value in ("", "default") else value, prev=prev)
         else:
             write_sdk_default(self.state_dir, model=value)   # the seed for the NEXT new session (the user 2026-06-27)
@@ -14810,7 +14884,7 @@ class SdkBackend:
             # alias's best-effort label immediately — never leave the badge on a stale liveModel or trapped
             # on dots. The value applies for real on the next connect (chosen_model → _options).
             self._update_reg(sid, model=value, liveModel=_alias_label(value), modelPending=False)
-            self._update_reg(sid, fallbackCause="", servedModel="")   # a dormant pick starts the mark over too
+            self._update_reg(sid, fallbackCause="", fallbackCategory="", servedModel="")   # a dormant pick starts the mark over too
         # the acknowledging chip — live OR dormant (see _ack_cmd_chip)
         self._ack_cmd_chip(sid, "/model", "/model " + value, s.resume_sid if s else reg.get("lastSid"))
         return True
@@ -15736,7 +15810,7 @@ class SdkBackend:
         return model_fallback_row(reg.get("model") or "", reg.get("servedModel") or reg.get("liveModel") or "",
                                   reg.get("fallbackCause") or "", None,
                                   retry_upgrade_on(self.state_dir) if retry_on is None else bool(retry_on),
-                                  pending=bool(reg.get("modelPending")))
+                                  pending=bool(reg.get("modelPending")), category=reg.get("fallbackCategory") or "")
 
     def _live_row(self, reg, sid, retry_on=None):
         """One session's live_sessions row (running snapshot, else the dormant reg row) — factored
