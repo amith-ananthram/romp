@@ -1140,6 +1140,12 @@ function requestedModelTip(fb) {
   if (r.on) return why + ' Auto-retry is on; the requested model is asked for when the session next starts.';
   return why + ' Configure auto-retry in Settings, Automation.';
 }
+function requestedModelSub(fb) {
+  const why = fb.cause === 'safeguards' ? 'blocked by safety classifiers' + (fb.category ? ' (' + fb.category + ')' : '') : 'not answering; ' + (fb.live || 'a fallback') + ' is';
+  const r = fb.retry || { on: false, everyMin: 10, armed: false, nextIn: null, attempts: 0 };
+  const what = r.armed ? 'retrying every ' + (r.everyMin || 10) + ' min' : r.on ? 'auto-retry on' : 'auto-retry off';
+  return 'requested · ' + why + ' · ' + what;
+}
 function isRequestedFamily(fb, value) {
   const pk = (fb.pick || '').toLowerCase(), pv = (fb.pickValue || '').toLowerCase(), v = (value || '').toLowerCase();
   return !!v && (pk.startsWith(v) || pv === v || pv.startsWith('claude-' + v));
@@ -3341,6 +3347,10 @@ class TimelinePanel {
       if (fb && !cur && isRequestedFamily(fb, c.value)) {
         const rq = item.createSpan({ text: '✓' }); rq.setAttribute('style', MENU_REQUESTED_STYLE);
         item.setAttribute('title', requestedModelTip(fb));
+        // the permanent sub-line (the chat's .meta-item-sub, inlined): the explanation never depends on a hover
+        item.setAttribute('style', item.getAttribute('style') + 'flex-direction:column;align-items:flex-start;');
+        const rsub = item.createDiv({ text: requestedModelSub(fb) });
+        rsub.setAttribute('style', 'font-size:0.82em;opacity:0.6;');
       }
       // A family with more than one live version wears the side-submenu affordance (the user
       // 2026-08-25): hovering (or right-arrow) reveals every version, each directly pickable with
@@ -3368,6 +3378,7 @@ class TimelinePanel {
         else if (fb && !(fb.pickValue || '').toLowerCase().startsWith('claude-') && isRequestedFamily(fb, c.value)) {
           const rq = latest.createSpan({ text: '✓' }); rq.setAttribute('style', MENU_REQUESTED_STYLE);   // an alias pick IS the floating family
           latest.setAttribute('title', requestedModelTip(fb));
+          lsub.textContent = requestedModelSub(fb) + ' — ' + lsub.textContent;   // plain DOM: the hosts install no setText
         }
         latest.addEventListener('mouseenter', () => { latest.style.background = HOVER_BG; });
         latest.addEventListener('mouseleave', () => { latest.style.background = 'transparent'; });
@@ -3392,6 +3403,8 @@ class TimelinePanel {
           if (cv) { const ck = row.createSpan({ text: '✓' }); ck.setAttribute('style', MENU_CHECK_STYLE); }
           else if (fb && isRequestedVersion(fb, v)) {
             const rq = row.createSpan({ text: '✓' }); rq.setAttribute('style', MENU_REQUESTED_STYLE);
+            const vsub = row.createDiv({ text: requestedModelSub(fb) });
+            vsub.setAttribute('style', 'font-size:0.82em;opacity:0.6;');
             const note = row.getAttribute('title');   // a requested learned version keeps its explanation beside the learned note
             row.setAttribute('title', note ? requestedModelTip(fb) + '\n' + note : requestedModelTip(fb));
           }

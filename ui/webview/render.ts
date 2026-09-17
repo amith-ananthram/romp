@@ -15563,6 +15563,14 @@ function requestedModelTip(fb: ModelFallback): string {
   if (r.on) return `${why} Auto-retry is on; the requested model is asked for when the session next starts.`;
   return `${why} Configure auto-retry in Settings, Automation.`;
 }
+// The requested row's permanent one-line sub-line (the menu vocabulary's .meta-item-sub, the mode rows' shape): the gist
+// of the tooltip, so the explanation never depends on a hover (the user 2026-09-17, whose hover showed nothing).
+function requestedModelSub(fb: ModelFallback): string {
+  const why = fb.cause === "safeguards" ? `blocked by safety classifiers${fb.category ? ` (${fb.category})` : ""}` : `not answering; ${fb.live || "a fallback"} is`;
+  const r = fb.retry || { on: false, everyMin: 10, armed: false, nextIn: null, attempts: 0 };
+  const what = r.armed ? `retrying every ${r.everyMin || 10} min` : r.on ? "auto-retry on" : "auto-retry off";
+  return `requested · ${why} · ${what}`;
+}
 // Is this picker row the REQUESTED model? A family row (value = the alias, "fable") when the pick's label is of that
 // family; a version row when its label is the pick's label or its id is the pick itself.
 function isRequestedFamily(fb: ModelFallback, value: string): boolean {
@@ -15727,6 +15735,15 @@ function toggleMetaMenu(kind: MetaKind, btn: HTMLElement, forSid?: string | null
     if (fb && !item.classList.contains("current") && isRequestedFamily(fb, c.value)) {
       item.classList.add("requested");
       setTip(item, requestedModelTip(fb));   // the one tooltip treatment (tip.ts): hover AND focus, above the menu
+      if (!c.sub) {                          // a bare-text row grows the sub-lined shape the mode rows wear
+        const label = item.textContent || c.label;
+        item.textContent = "";
+        const head = el("div"); head.textContent = label;
+        item.appendChild(head);
+      }
+      const rsub = el("div", "meta-item-sub");
+      rsub.textContent = requestedModelSub(fb);
+      item.appendChild(rsub);
     }
     // model/effort rows wear THEIR OWN rank color (the user 2026-08-31: a picker whose rows are
     // all default-gray codes nothing) — the same /models-fed color+tone the badges use
@@ -15776,6 +15793,7 @@ function toggleMetaMenu(kind: MetaKind, btn: HTMLElement, forSid?: string | null
       if (fb && !latest.classList.contains("current") && !(fb.pickValue || "").toLowerCase().startsWith("claude-") && isRequestedFamily(fb, c.value)) {
         latest.classList.add("requested");   // an alias pick IS the floating family: Latest is its row in the submenu
         setTip(latest, requestedModelTip(fb));
+        lsub.textContent = requestedModelSub(fb) + " — " + lsub.textContent;
       }
       latest.addEventListener("click", (e) => { e.stopPropagation(); pickValue(c.value, true); });
       latest.addEventListener("keydown", (e) => {
@@ -15790,8 +15808,11 @@ function toggleMetaMenu(kind: MetaKind, btn: HTMLElement, forSid?: string | null
         row.textContent = v.label;
         let rowTip = "";
         if (fb && !cur && isRequestedVersion(fb, v)) {
-          row.classList.add("requested");   // the requested version: the yellow tick, the same tooltip
+          row.classList.add("requested");   // the requested version: the yellow tick, the same tooltip, the sub-line
           rowTip = requestedModelTip(fb);
+          const vsub = el("div", "meta-item-sub");
+          vsub.textContent = requestedModelSub(fb);
+          row.appendChild(vsub);
         }
         if (v.learned) {
           // LOUD, per the fail-loudly rule: this version is in no catalog list — a running session's CLI

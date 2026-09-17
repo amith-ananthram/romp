@@ -18,6 +18,7 @@ function fnSource(name: string): string {
 }
 // the tooltip builder, executed as written (no DOM): the kernel's ModelFallback shape in, one sentence pair out
 const requestedModelTip = new Function(fnSource("requestedModelTip").replace(/: ModelFallback\)/, ")").replace(/\): string \{/, ") {") + "\nreturn requestedModelTip;")() as (fb: any) => string;
+const requestedModelSub = new Function(fnSource("requestedModelSub").replace(/: ModelFallback\)/, ")").replace(/\): string \{/, ") {") + "\nreturn requestedModelSub;")() as (fb: any) => string;
 const isRequestedFamily = new Function(fnSource("isRequestedFamily").replace(/\(fb: ModelFallback, value: string\): boolean/, "(fb, value)") + "\nreturn isRequestedFamily;")() as (fb: any, v: string) => boolean;
 const isRequestedVersion = new Function(fnSource("isRequestedVersion").replace(/\(fb: ModelFallback, v: \{ label: string; value: string \}\): boolean/, "(fb, v)") + "\nreturn isRequestedVersion;")() as (fb: any, v: any) => boolean;
 
@@ -39,6 +40,16 @@ test("the tooltip says why, then what romp does: the cadence when a retry is arm
   // the API's refusal category rides along once the CLI named it
   assert.equal(requestedModelTip(fb({ category: "cyber", retry: { on: true, everyMin: 10, armed: true, nextIn: null, attempts: 0 } })),
     "Requested model blocked due to safety classifiers (cyber). Retrying every 10 minutes.");
+});
+
+test("the requested row carries a permanent one-line sub-line: the tooltip's gist, never dependent on a hover", () => {
+  assert.equal(requestedModelSub(fb()), "requested · blocked by safety classifiers · retrying every 10 min");
+  assert.equal(requestedModelSub(fb({ category: "bio" })), "requested · blocked by safety classifiers (bio) · retrying every 10 min");
+  assert.equal(requestedModelSub(fb({ cause: "", retry: { on: true, everyMin: 10, armed: false, nextIn: null, attempts: 0 } })), "requested · not answering; Opus 5 is · auto-retry on");
+  assert.equal(requestedModelSub(fb({ retry: { on: false, everyMin: 10, armed: false, nextIn: null, attempts: 0 } })), "requested · blocked by safety classifiers · auto-retry off");
+  assert.match(RENDER, /const rsub = el\("div", "meta-item-sub"\);\s*\n\s*rsub\.textContent = requestedModelSub\(fb\);/, "the family row's sub-line, the menu vocabulary");
+  assert.match(RENDER, /const vsub = el\("div", "meta-item-sub"\);\s*\n\s*vsub\.textContent = requestedModelSub\(fb\);/, "the version row's");
+  assert.match(RENDER, /lsub\.textContent = requestedModelSub\(fb\) \+ " — " \+ lsub\.textContent;/, "Latest keeps its own line after the gist");
 });
 
 test("the requested row is found by family alias, by pick id and by version label; the answering row never wears it", () => {
