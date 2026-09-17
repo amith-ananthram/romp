@@ -7439,8 +7439,9 @@ class SdkSession:
             return
         cleared = self._resolve_model_pending(pm)
         raw = (raw or "").strip()
+        prev_served = getattr(self, "_served_model", "")   # what the API served BEFORE this observation: the downgrade branch reads it
         if served and pm:
-            prev = getattr(self, "_served_model", "") or self.model   # unseeded: the configured model stands in, so an unchanged main loop is a no-op write
+            prev = prev_served or self.model   # unseeded: the configured model stands in, so an unchanged main loop is a no-op write
             if pm != prev:
                 self._served_model = pm        # what the API last SERVED a parent reply on — the picker's mark reads this, never the init's configured name
                 try:
@@ -7498,10 +7499,15 @@ class SdkSession:
                 except Exception as e:
                     self.backend._log("model-fallback card (%s): %s" % (self.name, e), problem=True)
             self._arm_upgrade_retry(self.model, pm)   # Retry upgrades after downgrades: remember the way back (off → nothing)
-            if not getattr(self, "_refusal_this_turn", False):   # a provisional refusal frame can precede the final hop's reply: its cause stands
+            # A NEW episode resets the cause (the CLI's refusal frame names it seconds later); an observation of the fallback
+            # ALREADY standing — the API served this tier last time too: a host attach replaying the fallen reply the old
+            # kernel never acked, a reconnect's init reporting the pick and the next reply falling back the same way — keeps
+            # the cause on record (review 2026-09-17: the attach's seed set "safeguards" and the replayed learn erased it).
+            same_episode = bool(prev_served) and _model_rank(prev_served) is not None and _model_rank(prev_served) == _model_rank(pm)
+            if not getattr(self, "_refusal_this_turn", False) and not same_episode:
                 self._fallback_cause = ""             # a new episode: its cause is unknown until the CLI's refusal frame names it (seconds later)
                 self._fallback_category = ""
-            downgraded = not getattr(self, "_refusal_this_turn", False)
+            downgraded = not getattr(self, "_refusal_this_turn", False) and not same_episode
         else:
             downgraded = False
         old, self.model = self.model, pm

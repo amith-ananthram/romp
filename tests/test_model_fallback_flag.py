@@ -180,6 +180,23 @@ class TheMarkFollowsTheServedModel(unittest.TestCase):
         self.assertIn("self._refusal_this_turn = False        # the turn's refusal frame", src, "the settle clears the latch")
 
 
+class ObservingTheStandingFallbackAgainKeepsTheCause(unittest.TestCase):
+    def test_a_replayed_or_repeated_fallen_reply_is_not_a_new_episode(self):
+        # the attach seeds "safeguards" off the transcript, then the host replays the fallen reply the old kernel never acked
+        be = _backend()
+        s = _sess(be, liveModel="Opus 5", liveModelId="claude-opus-5", servedModel="Opus 5", fallbackCause="safeguards", fallbackCategory="bio")
+        s._learn_model("Fable 5.1", raw="claude-fable-5-1")                 # the replayed init: the configured pick
+        s._learn_model("Opus 5", raw="claude-opus-5", served=True)          # the replayed fallen reply: the API served Opus, as it already did
+        self.assertEqual((s._fallback_cause, s._fallback_category), ("safeguards", "bio"), "the same episode: the cause stands")
+        reg = sb.read_reg(be.state_dir, SID)
+        self.assertEqual((reg.get("fallbackCause"), reg.get("fallbackCategory")), ("safeguards", "bio"))
+        # a NEW episode: the API had served the pick, and now falls back
+        s._learn_model("Fable 5.1", raw="claude-fable-5-1", served=True)    # served on the pick (the retry succeeded for a while)
+        s._fallback_cause = "safeguards"
+        s._learn_model("Opus 5", raw="claude-opus-5", served=True)          # …and falls back again
+        self.assertEqual(s._fallback_cause, "", "a new episode: unknown until the frame names it")
+
+
 class TheRetryReArmsAtAnAttach(unittest.TestCase):
     def test_a_session_below_its_pick_arms_when_the_switch_is_on(self):
         be = _backend(); Path(be.state_dir, sb.RETRY_UPGRADE_STORE).write_text("on")
