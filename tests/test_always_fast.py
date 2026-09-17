@@ -37,10 +37,10 @@ def _switch(be, name, value):
 def _sess(be, **reg):
     r = {"sid": SID, "name": "web", "cwd": "/tmp"}
     r.update(reg)
-    sb.write_reg(be.state_dir, SID, dict(r, alive=True))
+    sb.write_reg(be.state_dir, r["sid"], dict(r, alive=True))
     s = sb.SdkSession(be, r)
     s.thread = type("T", (), {"is_alive": lambda self: True})()
-    be.sessions[SID] = s
+    be.sessions[r["sid"]] = s
     return s
 
 
@@ -75,6 +75,10 @@ class FastEffective(unittest.TestCase):
         self.assertTrue(s3.fast_effective(), "before any turn, the pick decides")
         s4 = _sess(be, liveModel="Fable 5.1", liveModelId="claude-fable-5-1", model="fable")
         self.assertFalse(s4.fast_effective(), "Fable cannot run fast mode: the flag stays off (the CLI would report off anyway; the rule arms only where it takes)")
+        s6 = _sess(be, liveModel="Sonnet 5", liveModelId="claude-sonnet-5", model="opus")
+        self.assertTrue(s6.fast_effective(), "an Opus PICK served a Sonnet fallback: the pick arms the flag (any known face; harmless on the served model, and the snapshot no longer flaps with it)")
+        s7 = _sess(be, liveModel="Opus 5", liveModelId="claude-opus-5", model="fable")
+        self.assertTrue(s7.fast_effective(), "the user's case: Opus served under a Fable pick — the reported id arms it")
         s5 = _sess(be)
         self.assertFalse(s5.fast_effective(), "no model known at all: off, never a guess")
 
@@ -93,8 +97,10 @@ class FastEffective(unittest.TestCase):
     def test_the_connect_and_the_snapshot_read_the_one_expression(self):
         self.assertIn("fast=sess.fast_effective()", inspect.getsource(sb.SdkBackend._options))
         self.assertIn("self._fast_unlocked = self.fast_effective()", inspect.getsource(sb.SdkSession._amain))
-        self.assertNotIn('self.send(sid, "/fast on")', inspect.getsource(sb.SdkSession.fast_effective) + inspect.getsource(sb.SdkSession._after_model_change),
-                         "the rule never sends the literal toggle: on a non-Opus session the CLI answers it by switching model")
+        rule_src = inspect.getsource(sb.SdkSession.fast_effective) + inspect.getsource(sb.SdkSession._after_model_change) + inspect.getsource(sb.SdkBackend.apply_model_switches)
+        self.assertIn('"/fast ', inspect.getsource(sb.SdkBackend.set_fast), "the literal send, spelled as the toggle spells it (so the check below is not vacuous)")
+        self.assertNotIn('"/fast', rule_src, "the rule never sends the literal toggle: on a non-Opus session the CLI answers it by switching model")
+        self.assertNotIn(".send(", rule_src)
 
 
 class SetFastRemembersSlow(unittest.TestCase):
@@ -171,3 +177,98 @@ class TheCliRefusesTheRule(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class APickToOpusLandsThroughTheRefresh(unittest.TestCase):
+    def test_the_control_channels_refresh_learns_the_id_before_the_hook_reads_it(self):
+        # review 2026-09-17: the hook ran before the id was stored, so a session picked onto Opus stayed slow for good
+        import asyncio
+        be = _backend(); _switch(be, sb.ALWAYS_FAST_STORE, "on")
+        s = _sess(be, liveModel="Fable 5.1", liveModelId="claude-fable-5-1", model="opus")
+        s.model, s._model_id = "Fable 5.1", "claude-fable-5-1"; s.chosen_model = ""   # the id and name the CLI last reported; no pick face to lean on
+        s._fast_unlocked = False
+        asks = []
+        s.request_reconnect = lambda *a, **k: asks.append(a)
+
+        class Client:
+            async def get_context_usage(self):
+                return {"model": "claude-opus-5", "percentage": 12}
+        s.client = Client()
+        asyncio.run(s._do_refresh_context())
+        self.assertEqual((s.model, s._model_id), ("Opus 5", "claude-opus-5"))
+        self.assertEqual(len(asks), 1, "the reconnect that arms the flag")
+
+
+class TheUsersOwnAskIsNotTheSwitchs(unittest.TestCase):
+    def test_a_refused_ask_rings_only_its_own_line_when_the_switch_is_off(self):
+        be = _backend()   # switch OFF
+        s = _sess(be, liveModelId="claude-opus-5", fast=True)
+        s._fast_unlocked = True
+        s.request_reconnect = lambda *a, **k: None
+        s._adopt_fast_state({"fast_mode_state": "off", "fast_mode_disabled_reason": "extra_usage_disabled"})
+        self.assertEqual([m for m in be._logs if m.startswith("always fast")], [], "the switch is off: the refusal is the ask's alone")
+        self.assertTrue(any(m.startswith("fast mode (web): the CLI refused the toggle") for m in be._logs), be._logs)
+        self.assertEqual(s.fast_rule_refused, "", "…and the switch's memory stays empty")
+
+    def test_the_switchs_memory_survives_a_flagless_connect_and_lifts_on_a_reported_on_or_the_users_gesture(self):
+        be = _backend(); _switch(be, sb.ALWAYS_FAST_STORE, "on")
+        s = _sess(be, liveModelId="claude-opus-5")
+        s._fast_unlocked = True; s.request_reconnect = lambda *a, **k: None
+        s._adopt_fast_state({"fast_mode_state": "off", "fast_mode_disabled_reason": "extra_usage_disabled"})
+        self.assertEqual(s.fast_rule_refused, "extra_usage_disabled"); self.assertFalse(s.fast_effective())
+        self.assertEqual(sb.read_reg(be.state_dir, SID)["fastRuleRefused"], "extra_usage_disabled", "persisted: a restart remembers")
+        # the next connect is flagless and reports the opt-in reason, which fast_reason blanks — the memory is not in fast_reason
+        s._fast_unlocked = False
+        s._adopt_fast_state({"fast_mode_state": "off", "fast_mode_disabled_reason": "sdk_opt_in_required"})
+        self.assertEqual(s.fast_reason, "", "the pre-existing blanking"); self.assertFalse(s.fast_effective(), "…and still no flag: no refuse → reconnect → refuse, however stretched")
+        self.assertEqual(len([m for m in be._logs if m.startswith("always fast (web): the CLI refused")]), 1, "said once")
+        # the CLI reporting fast ON lifts it
+        s._fast_unlocked = True
+        s._adopt_fast_state({"fast_mode_state": "on"})
+        self.assertEqual(s.fast_rule_refused, ""); self.assertTrue(s.fast_effective())
+        # …and so does the user's own gesture on the session
+        s._adopt_fast_state({"fast_mode_state": "off", "fast_mode_disabled_reason": "extra_usage_disabled"})
+        self.assertTrue(s.fast_rule_refused)
+        be.send = lambda sid, text: True; be._wake_push = lambda: None
+        be.set_fast(SID, "on")
+        self.assertEqual((s.fast_rule_refused, sb.read_reg(be.state_dir, SID)["fastRuleRefused"]), ("", ""))
+
+
+class NoFlapWhenTheServedModelDiffersFromThePick(unittest.TestCase):
+    def test_one_ask_per_connection_and_the_pick_keeps_the_flag_across_a_served_fallback(self):
+        be = _backend(); _switch(be, sb.ALWAYS_FAST_STORE, "on")
+        s = _sess(be, liveModel="Opus 5", liveModelId="claude-opus-5", model="opus")
+        s._fast_unlocked = False
+        asks = []
+        def ask(*a, **k): asks.append(a); s._reconnect_when_idle = True   # what request_reconnect does mid-turn
+        s.request_reconnect = ask
+        s._learn_model("Sonnet 5", raw="claude-sonnet-5", served=True)   # the API served a fallback below the pick
+        self.assertEqual(len(asks), 1, "flagless connection, the pick is Opus: one ask")
+        s._learn_model("Opus 5", raw="claude-opus-5")                    # the next init reports the configured model again
+        s._learn_model("Sonnet 5", raw="claude-sonnet-5", served=True)
+        self.assertEqual(len(asks), 1, "a reconnect already requested is not asked for again")
+        s._reconnect_when_idle = False; s._fast_unlocked = True          # the reconnect happened, flag on (the pick decided)
+        s._learn_model("Opus 5", raw="claude-opus-5")
+        s._learn_model("Sonnet 5", raw="claude-sonnet-5", served=True)
+        self.assertEqual(len(asks), 1, "flagged: nothing more, whatever the served model does")
+
+
+class TheSwitchReachesRunningSessions(unittest.TestCase):
+    def test_apply_model_switches_reconnects_the_sessions_whose_flag_should_change_and_arms_the_fallen(self):
+        be = _backend(); _switch(be, sb.ALWAYS_FAST_STORE, "on")
+        opus = _sess(be, liveModel="Opus 5", liveModelId="claude-opus-5"); opus._fast_unlocked = False
+        fable = _sess(be, liveModel="Fable 5.1", liveModelId="claude-fable-5-1", sid="11111111-2222-4333-8444-000000000702")
+        own = _sess(be, liveModel="Opus 5", liveModelId="claude-opus-5", fast=True, sid="11111111-2222-4333-8444-000000000703"); own._fast_unlocked = True
+        for x in (opus, fable, own):
+            x._asks = []; x.request_reconnect = (lambda self_: (lambda *a, **k: self_._asks.append(a)))(x)
+        self.assertEqual(be.apply_model_switches(), 1)
+        self.assertEqual((len(opus._asks), len(fable._asks), len(own._asks)), (1, 0, 0), "the idle Opus session gets the flag; Fable has nothing to arm; the session's own ask already has it")
+        _switch(be, sb.ALWAYS_FAST_STORE, "off")
+        opus._fast_unlocked = True
+        self.assertEqual(be.apply_model_switches(), 1)
+        self.assertEqual((len(opus._asks), len(own._asks)), (2, 0), "off: the session the switch flagged drops it; the session's own ask keeps it")
+
+    def test_fork_carries_an_explicit_slow_and_a_parents(self):
+        src = inspect.getsource(sb.SdkBackend.fork)
+        self.assertIn('if fast == "off" or (not fast and parent.get("fastOff")):', src)
+        self.assertIn('reg["fastOff"] = True', src)

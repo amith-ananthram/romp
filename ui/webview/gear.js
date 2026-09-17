@@ -205,11 +205,11 @@ var GEAR_HTML =
   "<div class='rs-sec'>Model</div>" +
   "<label class='rs-row'><input type=checkbox id=rs-alwaysfast>" +
   '<span><b>Always fast</b><span class=rs-mixed hidden></span>' +
-  "<span class=rs-sub>Every session runs in Claude Code's fast mode whenever its model allows it (Opus-only, billed at a premium): a session on Opus starts fast, and one that lands on Opus later turns fast at the end of its turn. A session you set to Slow from its statusline stays slow. Off by default. Follows to every connected machine's kernel.</span>" +
+  "<span class=rs-sub>Every session runs in Claude Code's fast mode whenever its model allows it (Opus-only, billed at a premium): a session on Opus starts fast, and one that lands on Opus later turns fast at the end of its turn; a running session picks the change up at the end of its turn. A session you set to Slow from its statusline stays slow. Off by default. Follows to every connected machine's kernel.</span>" +
   '</span></label>' +
   "<label class='rs-row'><input type=checkbox id=rs-retryupgrade>" +
   '<span><b>Retry upgrades after downgrades</b><span class=rs-mixed hidden></span>' +
-  "<span class=rs-sub>When a session's model changes to a lower tier without a pick (the automatic fallback the Completed card reports), ask for the picked model again every ten minutes, at a turn boundary, until a turn is served on it; a card says when it is back. Off by default. Follows to every connected machine's kernel.</span>" +
+  "<span class=rs-sub>When a session's model changes to a lower tier without a pick (the automatic fallback the Completed card reports), ask for the picked model again every ten minutes, at a turn boundary, until a turn is served on it; a card says when it is back. A session that already fell back is taken up when you turn this on. Off by default. Follows to every connected machine's kernel.</span>" +
   '</span></label>' +
   // CHAT HISTORY (2026-09-15): every chat loaded from its first message for every page, instead of from the saved document's
   // cut with the history above it loading as the user scrolls; the lever for a page that cannot fill the region above the cut.

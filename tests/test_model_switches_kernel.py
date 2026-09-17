@@ -144,5 +144,65 @@ class TheBackOnCard(unittest.TestCase):
         self.assertNotEqual(jd.RESTORED_WHY, jd.CAPACITY_FALLBACK_WHY, "its own why key: the fallback's dedupe never folds it")
 
 
+class TheTick(_Base):
+    """_retry_upgrade_tick is the one time-shaped piece: a 30 s look between attempts ten minutes apart. Executed with an
+    injected backend and explicit clocks (review 2026-09-17: it had only source pins)."""
+
+    def setUp(self):
+        super().setUp()
+        self._sdk = km._sdk
+        km._retry_upgrade_last[0] = 0.0
+
+    def tearDown(self):
+        km._sdk = self._sdk
+        km._retry_upgrade_last[0] = 0.0
+        super().tearDown()
+
+    def test_it_looks_every_thirty_seconds_and_hands_the_clock_to_the_backend(self):
+        calls = []
+        fake = types.SimpleNamespace(retry_model_upgrades=lambda now: calls.append(now))
+        km._sdk = lambda: fake
+        km._retry_upgrade_tick(1000.0); self.assertEqual(calls, [1000.0])
+        km._retry_upgrade_tick(1010.0); self.assertEqual(calls, [1000.0], "inside the look: nothing")
+        km._retry_upgrade_tick(1000.0 + km.RETRY_UPGRADE_TICK_S + 1); self.assertEqual(len(calls), 2)
+        self.assertEqual(km.RETRY_UPGRADE_TICK_S, 30)
+
+    def test_no_backend_or_an_older_one_is_a_quiet_no_op(self):
+        km._sdk = lambda: None
+        km._retry_upgrade_tick(2000.0)   # no raise
+        km._sdk = lambda: types.SimpleNamespace()   # a backend without the method
+        km._retry_upgrade_tick(2000.0 + km.RETRY_UPGRADE_TICK_S + 1)
+
+    def test_an_applied_flip_reaches_the_running_sessions_and_a_stale_one_does_not(self):
+        calls = []
+        km._sdk = lambda: types.SimpleNamespace(apply_model_switches=lambda: calls.append(1))
+        saved_threading, saved_prop = km.threading, km._propagate_judge_settings
+        ns = {k: getattr(_real_threading, k) for k in dir(_real_threading) if not k.startswith("__")}
+        ns["Thread"] = _InlineThread
+        km.threading = types.SimpleNamespace(**ns)
+        km._propagate_judge_settings = lambda body: None
+        try:
+            sent = []
+            client = {"send": lambda s: sent.append(json.loads(s)), "alive": True}
+            with contextlib.redirect_stderr(io.StringIO()):
+                km.Handler._dispatch_ws(types.SimpleNamespace(), {"type": "setAlwaysFast", "enabled": True, "gt": T_NEW}, client)
+            self.assertEqual(calls, [1], "the gear's own flip: the sessions follow")
+            with contextlib.redirect_stderr(io.StringIO()):
+                km.Handler._dispatch_ws(types.SimpleNamespace(), {"type": "setAlwaysFast", "enabled": False, "gt": T_OLD}, client)
+            self.assertEqual(calls, [1], "a stale gesture applied nothing, so nothing follows")
+            km._apply_judge_settings({"retryUpgrade": "on", "gt": T_NEW + 5})
+            self.assertEqual(calls, [1, 1], "a peer's propagated pick lands here too")
+            km._apply_judge_settings({"judgeFast": "on", "gt": T_NEW + 6})
+            self.assertEqual(calls, [1, 1], "another field: not these switches' business")
+        finally:
+            km.threading, km._propagate_judge_settings = saved_threading, saved_prop
+            jd._state_cache.clear()
+            for f in ("judge-fast", "judge-fast.gt"):
+                try:
+                    (jd.STATE / f).unlink()
+                except OSError:
+                    pass
+
+
 if __name__ == "__main__":
     unittest.main()

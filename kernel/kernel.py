@@ -468,7 +468,7 @@ class _PerfStats:
     SLOTS = 32
     JOBS = ("beginCheckpointCycle", "sessionsListing", "applyPendingOps", "turnNotify", "liftSpentAwaiting", "deathSweep", "endOnIdle", "deferralSweep",
             "autoNudge", "interruptBlock", "persistTickSeen", "persistIntrMarks", "persistSpendTrees", "persistCheckpoints", "convergeCheckpoints", "bootRowBackstop",
-            "kernelSample", "autoPauseOnLimit", "usagePoll", "autoPauseOnSpend", "spendGuard", "autoResumeRetry", "apiHealth",
+            "kernelSample", "autoPauseOnLimit", "usagePoll", "retryUpgrade", "autoPauseOnSpend", "spendGuard", "autoResumeRetry", "apiHealth",
             "autoResumeSession", "autoRetry", "idleQueueDrive", "clearDoneNotes")   # the tick jobs, each a `jobs.<job>` stage (T398)
     STAGES = ("prelude", "jobs", "push", "push.chat", "push.feed", "push.timeline", "push.send", "push.warm", "push.feedFirst",
               "jobsPass", "jobs.prelude") \
@@ -10344,6 +10344,20 @@ _retry_upgrade_last = [0.0]           #   are sdk_backend.RETRY_UPGRADE_S apart)
 #                                       (the user 2026-09-17: a trigger in the task's context, which ages out of the window),
 #                                       the same exception USAGE_POLL_SECS below documents; the reconnect the attempt asks
 #                                       for keys on the turn's end, the event.
+
+
+def _model_switches_applied():
+    """A Model switch (Always fast, Retry upgrades after downgrades) just applied here — the gear's own gesture or a
+    peer's propagated pick: the SDK backend acts on the sessions already running (apply_model_switches), so the flip is
+    not a promise for the next connect only (review 2026-09-17). No backend, nothing; a failure is said, never raised
+    into the settings door."""
+    be = _sdk()
+    if be is None or not hasattr(be, "apply_model_switches"):
+        return
+    try:
+        be.apply_model_switches()
+    except Exception:
+        sys.stderr.write("model switches: %s\n" % traceback.format_exc())
 
 
 def _retry_upgrade_tick(now):
@@ -49651,6 +49665,8 @@ def _apply_judge_settings(body):
             setter(str(body.get(key) or ""), gt=_gt)
     _pop_stale_notice()   # HTTP legs have no delivering dashboard socket — discard the verdict so
     #                       no later message handled on a kept-alive connection's thread inherits it
+    if isinstance(body, dict) and ("alwaysFast" in body or "retryUpgrade" in body):
+        _model_switches_applied()   # a peer's pick lands here: the running sessions follow it here too (2026-09-17)
     if jd._distill_model() != _dm_before:
         # Switching the distill tier's EFFECTIVE model is a discrete recovery event (the user
         # 2026-08-18, who pointed the tier away from an outage-scoped model and expected the failed
@@ -66303,6 +66319,7 @@ class Handler(BaseHTTPRequestHandler):
             if _jgt is not None:
                 threading.Thread(target=_propagate_judge_settings,
                                  args=({_sfield: _sfv, "gt": _jgt},), daemon=True).start()
+                _model_switches_applied()   # the sessions already running follow the flip (a reconnect at their turn's end)
             else:
                 _tell_stale_gesture(client, msg)
         elif msg and msg.get("type") in ("setJudgeFast", "setDistillFast", "setIndexFast") and msg.get("enabled") is not None:

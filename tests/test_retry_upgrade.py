@@ -36,12 +36,12 @@ def _backend():
 def _sess(be, **reg):
     r = {"sid": SID, "name": "web", "cwd": "/tmp", "model": "fable", "liveModel": "Fable 5.1", "liveModelId": "claude-fable-5-1"}
     r.update(reg)
-    sb.write_reg(be.state_dir, SID, dict(r, alive=True))
+    sb.write_reg(be.state_dir, r["sid"], dict(r, alive=True))
     s = sb.SdkSession(be, r)
     s.thread = type("T", (), {"is_alive": lambda self: True})()
     s.request_reconnect = lambda *a, **k: s._asks.append(a)
     s._asks = []
-    be.sessions[SID] = s
+    be.sessions[r["sid"]] = s
     return s
 
 
@@ -78,16 +78,26 @@ class Arming(unittest.TestCase):
             self.assertGreaterEqual(arm["next"], t0 + sb.RETRY_UPGRADE_S - 1, "the first attempt waits a full cadence")
             self.assertTrue(any(m.startswith("retry upgrade (web): Fable 5.1 fell back to Opus 5") for m in be._logs), be._logs)
 
-    def test_a_fallback_while_armed_is_logged_not_carded_again(self):
+    def test_a_fallback_while_armed_asks_the_store_again_and_is_logged_once_per_attempt(self):
+        # review 2026-09-17: the card is the store's call (mint_fallback_card's existence-keyed dedupe mints nothing
+        # while the swap's card stands, a fresh one once the user cleared it); the log says it once per attempt
         be = _backend(); Path(be.state_dir, sb.RETRY_UPGRADE_STORE).write_text("on")
         with _Hooks() as h:
             s = _sess(be)
             s._learn_model("Opus 5", raw="claude-opus-5", served=True)        # the fallback: card + arm
-            s._learn_model("Fable 5.1", raw="claude-fable-5-1")               # the retry's connect reports the pick (the init: not served)
+            s._learn_model("Fable 5.1", raw="claude-fable-5-1")               # a connect reports the pick (the init: not served)
             self.assertIsNotNone(s._upgrade_retry, "the CLI running on the pick is not the API serving it")
-            s._learn_model("Opus 5", raw="claude-opus-5", served=True)        # …and the API falls back again
-            self.assertEqual(len(h.fallbacks), 1, "one card for the swap the board already shows")
-            self.assertTrue(any("fell back to Opus 5 again" in m for m in be._logs), be._logs)
+            s._learn_model("Opus 5", raw="claude-opus-5", served=True)        # …and the API falls back again, before any attempt
+            self.assertEqual(len(h.fallbacks), 2, "the hook is asked each time; the store dedupes")
+            self.assertEqual([m for m in be._logs if "fell back to Opus 5 again" in m], [], "no attempt yet: nothing to report")
+            be.retry_model_upgrades(time.time() + sb.RETRY_UPGRADE_S + 1)     # attempt 1
+            s._learn_model("Fable 5.1", raw="claude-fable-5-1")
+            s._learn_model("Opus 5", raw="claude-opus-5", served=True)
+            s._learn_model("Fable 5.1", raw="claude-fable-5-1")
+            s._learn_model("Opus 5", raw="claude-opus-5", served=True)
+            again = [m for m in be._logs if "fell back to Opus 5 again after attempt 1" in m]
+            self.assertEqual(len(again), 1, "said once for attempt 1, with the wait to the next: %r" % be._logs)
+            self.assertIn("next attempt in", again[0])
             self.assertIsNotNone(s._upgrade_retry, "still armed")
 
 
@@ -108,14 +118,37 @@ class TheTick(unittest.TestCase):
             self.assertEqual(s._upgrade_retry["attempts"], 2)
             self.assertTrue(any(m.startswith("retry upgrade (web): attempt 2") for m in be._logs), be._logs)
 
-    def test_the_switch_going_off_leaves_an_armed_session_inert(self):
+    def test_the_switch_going_off_ends_a_standing_retry(self):
+        # review 2026-09-17: an arm that outlived the switch would have minted a "back on" card crediting a retry that never ran
         be = _backend(); Path(be.state_dir, sb.RETRY_UPGRADE_STORE).write_text("on")
-        with _Hooks():
+        with _Hooks() as h:
             s = _sess(be)
             s._learn_model("Opus 5", raw="claude-opus-5", served=True)
             Path(be.state_dir, sb.RETRY_UPGRADE_STORE).write_text("off")
             self.assertEqual(be.retry_model_upgrades(time.time() + sb.RETRY_UPGRADE_S + 1), 0)
-            self.assertEqual(s._asks, [])
+            self.assertEqual(s._asks, []); self.assertIsNone(s._upgrade_retry, "the tick clears it")
+            self.assertTrue(any("standing down" in m for m in be._logs), be._logs)
+            s._learn_model("Fable 5.1", raw="claude-fable-5-1", served=True)
+            self.assertEqual(h.restored, [], "no card credits a retry that never ran")
+            # a reader that meets the switch off first clears it too
+            Path(be.state_dir, sb.RETRY_UPGRADE_STORE).write_text("on")
+            s._learn_model("Opus 5", raw="claude-opus-5", served=True); self.assertIsNotNone(s._upgrade_retry)
+            Path(be.state_dir, sb.RETRY_UPGRADE_STORE).write_text("off")
+            s._learn_model("Fable 5.1", raw="claude-fable-5-1", served=True)
+            self.assertIsNone(s._upgrade_retry); self.assertEqual(h.restored, [])
+
+    def test_turning_the_switch_on_takes_up_a_session_that_already_sits_below_its_pick(self):
+        be = _backend()
+        with _Hooks():
+            s = _sess(be, liveModel="Opus 5", liveModelId="claude-opus-5")   # pick fable, running on Opus already
+            Path(be.state_dir, sb.RETRY_UPGRADE_STORE).write_text("on")
+            be.apply_model_switches()
+            arm = s._upgrade_retry
+            self.assertIsNotNone(arm, "the very card the user was looking at")
+            self.assertEqual(arm["to"], "Opus 5"); self.assertTrue(arm["from"]); self.assertEqual(arm["pick"], "fable")
+            t = _sess(be, sid="11111111-2222-4333-8444-000000000712", model="", liveModel="Opus 5", liveModelId="claude-opus-5")
+            be.apply_model_switches()
+            self.assertIsNone(t._upgrade_retry, "no pick, no tier to sit below")
 
     def test_an_ended_session_is_skipped(self):
         be = _backend(); Path(be.state_dir, sb.RETRY_UPGRADE_STORE).write_text("on")
@@ -175,8 +208,10 @@ class KernelWiring(unittest.TestCase):
         self.assertIn("_job_stage('retryUpgrade', lambda: _retry_upgrade_tick(now))", self.src)
         self.assertIn("def _retry_upgrade_tick(now):", self.src)
         self.assertIn("be.retry_model_upgrades(now)", self.src)
-        self.assertIn('self._learn_model(pretty_model(m), raw=str(m), served=True)', inspect.getsource(sb.SdkSession._on_message),
-                      "the parent AssistantMessage is the served evidence; the init's learn passes no flag")
+        src = inspect.getsource(sb.SdkSession._on_message)
+        self.assertIn('self._learn_model(pretty_model(m), raw=str(m), served=True)', src, "the parent AssistantMessage is the served evidence")
+        self.assertEqual(src.count("served=True"), 1, "…and the ONLY served learn: the init's report of the configured model passes no flag")
+        self.assertIn('self._learn_model(pretty_model(d.get("model")), raw=str(d.get("model") or ""))', src, "the init learn, flagless")
 
 
 if __name__ == "__main__":

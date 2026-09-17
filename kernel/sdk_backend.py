@@ -5364,6 +5364,12 @@ class SdkSession:
         self.fast_off = bool(reg.get("fastOff"))   # the user put THIS session on Slow explicitly (set_fast "off", the
         #   reg's `fastOff`, 2026-09-17): the machine's Always fast switch (fast_effective) leaves such a session at normal
         #   speed until its next "on" — a Slow pick that flipped back at the next reconnect would be a switch nobody asked for.
+        self.fast_rule_refused = reg.get("fastRuleRefused") or ""   # the reason the CLI gave when the machine's Always fast
+        #   switch (not this session's own ask) armed the flag and was refused (review 2026-09-17): fast_effective stops
+        #   re-arming while it stands. Its OWN memory, because fast_reason cannot hold it — a flagless connect reports
+        #   sdk_opt_in_required, which _adopt_fast_state blanks into fast_reason, and the switch would re-arm the flag
+        #   at the connect after that (refuse → reconnect → refuse, stretched to two connects). Cleared by an explicit
+        #   toggle of this session (set_fast: the user's gesture is new information) and by the CLI reporting fast on.
         self._upgrade_retry = None   # Retry upgrades after downgrades (the user 2026-09-17): while set, {"from", "to",
         #   "pick", "since", "next", "attempts"} — this session's model fell from `from` to `to` without a pick and the
         #   kernel's tick asks for the pick again every RETRY_UPGRADE_S (retry_model_upgrades → request_reconnect); cleared
@@ -6277,11 +6283,12 @@ class SdkSession:
         pm = pretty_model(raw)
         if pm and self._resolve_model_pending(pm):
             changed = True
+        if raw and raw != getattr(self, "_model_id", ""):   # getattr: __new__-built test doubles skip __init__
+            self._model_id, changed = raw, True            # the id FIRST: the hook below reads it (review 2026-09-17: read
+        #                                                     after, a pick to Opus asked for nothing and the session stayed slow)
         if pm and pm != self.model:
             old, self.model, changed = self.model, pm, True
             self._after_model_change(old, pm)   # Always fast: a pick to Opus lands here first (the control channel's refresh)
-        if raw and raw != getattr(self, "_model_id", ""):   # getattr: __new__-built test doubles skip __init__
-            self._model_id, changed = raw, True
         upd = {}
         if self.model:
             upd["liveModel"] = self.model
@@ -6322,18 +6329,27 @@ class SdkSession:
         flag file and the per-connection snapshot cannot disagree."""
         if getattr(self, "fast_opt", False):
             return True
-        if getattr(self, "fast_off", False) or getattr(self, "fast_reason", ""):
+        if getattr(self, "fast_off", False) or getattr(self, "fast_reason", "") or getattr(self, "fast_rule_refused", ""):
             return False
         if not always_fast_on(getattr(self.backend, "state_dir", None)):
             return False
-        return fast_capable(getattr(self, "_model_id", "") or getattr(self, "model", "") or getattr(self, "chosen_model", ""))
+        # ANY known face of the model being Opus arms the flag — the pick, the id the CLI last reported, its name. The
+        # flag is harmless where it cannot take (a non-Opus connect reports fast off with no reason, verified
+        # 2026-08-10), and keying on one face made the snapshot flap with the served model (review 2026-09-17: an Opus
+        # pick served a Sonnet fallback reconnected at every turn's end, the init's Opus arming a flag the served Sonnet
+        # then dropped at the connect). The user's case is the other way round — Opus served under a Fable pick — and the
+        # reported id carries it.
+        return any(fast_capable(x) for x in (getattr(self, "chosen_model", ""), getattr(self, "_model_id", ""), getattr(self, "model", "")))
 
     def _after_model_change(self, old, pm):
         """The live model just changed (a learn, a context refresh): the machine's Always fast switch may now want the
         flag this connection was made without — a model that can run fast mode arrived, by a pick to Opus or a fallback
         onto it. The flag rides the connect, so ask for one: now if idle, at the turn's end if busy (request_reconnect,
-        the /effort road). A session whose own ask stands (fast_opt) is set_fast's to reconnect, not this."""
+        the /effort road). A session whose own ask stands (fast_opt) is set_fast's to reconnect, not this. One ask per
+        connection: a reconnect already requested (the flag, or anything else) is not asked for again."""
         try:
+            if getattr(self, "_reconnect_when_idle", False) or getattr(self, "_reconnect", False):
+                return
             if not getattr(self, "fast_opt", False) and not getattr(self, "_fast_unlocked", False) and self.fast_effective():
                 self.backend._log("always fast (%s): %s can run fast mode — reconnecting with the opt-in%s"
                                   % (self.name, pm, "" if getattr(self, "inflight", 0) == 0 else " at the turn's end"))
@@ -6353,12 +6369,23 @@ class SdkSession:
         self.backend._log("retry upgrade (%s): %s fell back to %s — the picked model is asked for again every %d min, "
                           "at a turn boundary, until a turn is served on it" % (self.name, frm, to, int(RETRY_UPGRADE_S // 60)))
 
+    def _retry_armed(self):
+        """The standing retry, or None — and None as well once the switch is off (review 2026-09-17: an arm that outlived
+        the switch went on suppressing and would have minted a "back on" card crediting a retry that never ran): the
+        arm clears the moment any reader finds the switch off, said once in the log."""
+        arm = getattr(self, "_upgrade_retry", None)
+        if arm and not retry_upgrade_on(getattr(self.backend, "state_dir", None)):
+            self._upgrade_retry = None
+            self.backend._log("retry upgrade (%s): the switch is off — standing down" % self.name)
+            return None
+        return arm
+
     def _note_model_served(self, pm):
         """A PARENT turn was served on `pm` while a retry stands (the AssistantMessage learn, never the init's report of
         the configured model or a context refresh: the CLI running on the pick is not the API serving it). At or above
         the tier the session fell from, the retry is done: the arm clears and the kernel-wired hook mints the completed
         card saying the session is back (on_model_restored, the on_model_fallback idiom)."""
-        arm = getattr(self, "_upgrade_retry", None)
+        arm = self._retry_armed()
         if not arm:
             return
         a, b = _model_rank(pm), _model_rank(arm.get("from"))
@@ -6408,20 +6435,31 @@ class SdkSession:
         # sdk_opt_in_required, which blanks the reason above, so the badge comes BACK instead of
         # disappearing under the dead-control rule.
         refused_ask = bool(reason) and self.fast_opt and fast != "on"
+        # The machine's Always fast switch armed this connection's flag (no ask of the session's own — read BEFORE the
+        # clear below, so the user's own refused ask is never also charged to the switch) and the CLI answered with a
+        # reason: said once per reason in the log, loudly, and remembered in the session's fast_rule_refused, which
+        # fast_effective reads from here on — the next connect does not re-arm the flag, and a flagless connect's
+        # sdk_opt_in_required (blanked into fast_reason above) cannot erase that memory. The CLI reporting fast ON for
+        # this session lifts it: the reason is gone.
+        rule_refused = bool(reason) and not self.fast_opt and getattr(self, "_fast_unlocked", False) \
+            and always_fast_on(getattr(self.backend, "state_dir", None)) \
+            and reason != getattr(self, "fast_rule_refused", "")
+        rule_lifted = fast == "on" and bool(getattr(self, "fast_rule_refused", ""))
         if refused_ask:
             self.fast_opt = False
-        # The machine's Always fast switch armed this connection's flag (no ask of the session's own) and the CLI
-        # answered with a reason: said once per reason in the log, loudly. fast_effective reads the persisted reason
-        # from here on, so the next connect does not re-arm the flag — no refuse → reconnect → refuse loop.
-        rule_refused = bool(reason) and not self.fast_opt and getattr(self, "_fast_unlocked", False) \
-            and reason != self.fast_reason
+        if rule_refused:
+            self.fast_rule_refused = reason
+        if rule_lifted:
+            self.fast_rule_refused = ""
         changed = fast != self.fast or reason != self.fast_reason
         self.fast, self.fast_reason = fast, reason
-        if changed or refused_ask:
+        if changed or refused_ask or rule_refused or rule_lifted:
             try:
                 kw = dict(liveFast=fast, liveFastReason=reason)
                 if refused_ask:
                     kw["fast"] = False
+                if rule_refused or rule_lifted:
+                    kw["fastRuleRefused"] = self.fast_rule_refused
                 self.backend._update_reg(self.sid, **kw)
             except Exception as e:
                 self.backend._log("fast-state persist (%s): registry write failed: %s" % (self.name, e))
@@ -6992,7 +7030,7 @@ class SdkSession:
             return
         cleared = self._resolve_model_pending(pm)
         raw = (raw or "").strip()
-        if served and getattr(self, "_upgrade_retry", None):
+        if served and self._retry_armed():
             self._note_model_served(pm)
         if pm == self.model:
             if raw and raw != getattr(self, "_model_id", ""):   # getattr: __new__-built test doubles skip __init__
@@ -7014,13 +7052,15 @@ class SdkSession:
             # arrives here as an unrequested transition too, and a capacity fallback never moves a
             # session UP-tier. An up-tier, lateral, or unknown-name change is treated as the user's
             # doing and just updates the badge, exactly as before the card existed.
-            arm = getattr(self, "_upgrade_retry", None)
-            fb = None if (arm and arm.get("to") == pm) else getattr(type(self.backend), "on_model_fallback", None)
-            if arm and arm.get("to") == pm:
-                # the retry's own re-fallback (the user 2026-09-17): the board already says this — the card that armed
-                # the retry stands — so a log line, never a second card per attempt
-                self.backend._log("retry upgrade (%s): %s fell back to %s again after attempt %d; asking again in %d min"
-                                  % (self.name, self.model, pm, arm.get("attempts", 0), int(RETRY_UPGRADE_S // 60)))
+            arm = self._retry_armed()
+            if arm and arm.get("to") == pm and arm.get("attempts", 0) > arm.get("logged", 0):
+                # the retry's own re-fallback (the user 2026-09-17), said once per attempt with the real wait; the card
+                # is the store's call — mint_fallback_card's existence-keyed dedupe mints nothing while the swap's card
+                # stands and a fresh one once the user cleared it (the deciding event is the dismissal, never this arm)
+                arm["logged"] = arm["attempts"]
+                self.backend._log("retry upgrade (%s): %s fell back to %s again after attempt %d; next attempt in %d min"
+                                  % (self.name, self.model, pm, arm["attempts"], max(0, int((arm.get("next", 0) - time.time()) // 60))))
+            fb = getattr(type(self.backend), "on_model_fallback", None)
             if fb:
                 try:
                     ret = fb(self.sid, self.model, pm)
@@ -12648,6 +12688,9 @@ class SdkBackend:
         # the ask — same model, normal speed, never a silent substitute.
         if fast == "on" or (not fast and parent.get("fast")):
             reg["fast"] = True
+        if fast == "off" or (not fast and parent.get("fastOff")):
+            reg["fastOff"] = True   # an explicit Slow — the dialog's, or the parent's own — that the machine's Always fast
+            #                         switch respects for the thread (fast_effective, review 2026-09-17)
         # Per-fork model/effort OVERRIDES (the user 2026-08-17: a comment thread on a different model
         # or effort, without touching the parent). Applied HERE, in the reg the first connect reads —
         # never via set_model, whose write_sdk_default side effect would make a thread's pick the seed
@@ -14530,6 +14573,8 @@ class SdkBackend:
         Returns how many sessions were asked this tick. The fallback's cause is outside romp's view (the trigger lives in
         the task's context and ages out of the window), so the cadence is the designed read; the boundary is the event."""
         if not retry_upgrade_on(self.state_dir):
+            for s in list(self.sessions.values()):
+                s._retry_armed()               # off ends every standing retry, said once each (review 2026-09-17)
             return 0
         now = now if now is not None else time.time()
         fired = 0
@@ -14547,6 +14592,37 @@ class SdkBackend:
             s.request_reconnect()
             fired += 1
         return fired
+
+    def apply_model_switches(self) -> int:
+        """A Model switch just flipped (the kernel's arm, or a peer's propagated pick): act on the sessions that already
+        run (review 2026-09-17: a switch read only at connect left an idle Opus session slow, and a session that had
+        already fallen back unarmed — the very card the user was looking at). Always fast: every live session whose flag
+        should now be there, or no longer be there, reconnects (deferred: now if idle, at the turn's end if busy; a
+        session's own ask is untouched either way). Retry upgrades: every live session whose model sits below its pick
+        arms now, from the pick's label; off clears through _retry_armed. Returns how many sessions were asked."""
+        asked = 0
+        for sid, s in list(self.sessions.items()):
+            th = getattr(s, "thread", None)
+            if getattr(s, "ended", False) or (th is not None and not th.is_alive()):
+                continue
+            try:
+                want = s.fast_effective()
+                if want != bool(getattr(s, "_fast_unlocked", False)) and not (getattr(s, "_reconnect_when_idle", False) or getattr(s, "_reconnect", False)):
+                    self._log("always fast (%s): the switch %s — reconnecting %s the opt-in%s"
+                              % (s.name, "wants the flag" if want else "went off", "with" if want else "without",
+                                 "" if getattr(s, "inflight", 0) == 0 else " at the turn's end"))
+                    s.request_reconnect()
+                    asked += 1
+                pick = getattr(s, "chosen_model", "") or ""
+                if retry_upgrade_on(self.state_dir) and pick and pick != "default" and not getattr(s, "_upgrade_retry", None):
+                    pr, lr = _model_rank(pick), _model_rank(getattr(s, "model", ""))
+                    if pr is not None and lr is not None and lr < pr:
+                        s._arm_upgrade_retry(_alias_label(pick), s.model)
+                else:
+                    s._retry_armed()
+            except Exception as e:
+                self._log("model switches (%s): %s" % (s.name, e), problem=True)
+        return asked
 
     def set_fast(self, sid: str, value: str) -> bool:
         """Toggle fast mode ('on'|'off'). The CLI's /fast descriptor is marked supportsNonInteractive,
@@ -14573,13 +14649,15 @@ class SdkBackend:
             return False
         # liveFast mirrors the optimistic flip where the badge reads it while dormant / across a
         # restart; _adopt_fast_state re-asserts at the next connect. Locked RMW — see set_effort.
-        self._update_reg(sid, fast=(value == "on"), fastOff=(value == "off"), liveFast=value)   # fastOff: an explicit
-        #   Slow, which the machine's Always fast switch respects for this session (fast_effective, 2026-09-17)
+        self._update_reg(sid, fast=(value == "on"), fastOff=(value == "off"), fastRuleRefused="", liveFast=value)   # fastOff: an
+        #   explicit Slow, which the machine's Always fast switch respects for this session; fastRuleRefused: the switch's
+        #   refusal memory, which the user's own gesture lifts (fast_effective, 2026-09-17)
         s = self.sessions.get(sid)
         if not s or not s.thread.is_alive():
             return True                        # dormant: the persisted ask applies at the next connect
         s.fast_opt = (value == "on")
         s.fast_off = (value == "off")
+        s.fast_rule_refused = ""
         if s._fast_unlocked:                   # opted in at connect → the CLI interprets the literal send
             if not self.send(sid, "/fast " + value):
                 return False

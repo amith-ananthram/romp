@@ -300,19 +300,24 @@ following to every connected machine's kernel):
   (Opus-only, billed at a premium). The kernel arms the CLI's fast-mode opt-in at
   each connect for a session whose model is Opus, and when a session lands on Opus
   later, by a pick or by an automatic fallback, it reconnects at the end of the
-  turn to arm it then. A session you set to **Slow** from its statusline stays
-  slow until you set it to **Fast** again. If the CLI refuses fast mode for a
+  turn to arm it then; turning the switch on or off reaches every running session
+  the same way, at the end of its turn. A session you set to **Slow** from its
+  statusline stays slow until you set it to **Fast** again, and a comment thread
+  launched slow, or forked from a slow session, counts as such a pick. If the CLI refuses fast mode for a
   session with a reason (extra usage off, an organisation gate), the kernel log
-  says so once and that session runs at normal speed until the reason clears; the
-  switch is never the literal `/fast on`, which on a non-Opus session would make
-  the CLI change model.
+  says so once and that session runs at normal speed until the reason clears (the
+  CLI reporting fast on for it, or your own Fast or Slow pick on it); the switch is
+  never the literal `/fast on`, which on a non-Opus session would make the CLI
+  change model.
 - **Retry upgrades after downgrades** acts when a session's model changes to a
   lower tier without a pick, the automatic fallback the Completed card reports
   (`Model changed automatically: … → …`). Every ten minutes the kernel asks for
   the picked model again by reconnecting the session, now if it is idle, at the
   end of the turn if it is busy, so nothing is cut; a fresh CLI starts on the pick
-  (or the account default when nothing is picked). A fallback that happens again
-  is logged, not carded again. When a turn is served on the picked tier, a second
+  (or the account default when nothing is picked). A session that already sits
+  below its pick when you turn the switch on is taken up at once. A fallback that
+  happens again is logged once per attempt; its card follows the board's usual
+  rule, nothing new while the swap's card stands, a fresh one once you cleared it. When a turn is served on the picked tier, a second
   Completed card says the session is back (`Model back on …`) and the retry ends.
   A pick of your own ends it too, as does turning the switch off.
 
