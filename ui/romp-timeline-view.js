@@ -417,11 +417,15 @@ const menuStyleFor = (p) => 'padding:4px;background:' + p.menuBg + ';border:1px 
 const MENU_MARK_BOX = 'position:absolute;right:6px;top:50%;transform:translateY(-50%);width:13px;height:13px;border-radius:50%;box-sizing:border-box;'
   + 'display:inline-flex;align-items:center;justify-content:center;line-height:1;font-size:9px;font-weight:900;';
 const menuCheckStyleFor = (p) => MENU_MARK_BOX + 'background:' + p.accentSolid + ';color:#fff;';
+// the REQUESTED model's ✓ while an automatic fallback answers instead (the user 2026-09-17): the same mark box in the
+// working-state yellow — a status, not the accent — beside the blue ✓ on the model that answers (the chat's
+// .meta-item.requested::after, inlined for a foreign document)
+const menuRequestedStyleFor = (p) => MENU_MARK_BOX + 'background:' + p.workingBg + ';color:' + p.workingFg + ';';
 // the checkbox row's OFF mark (T413, the user 2026-09-14): an empty ring where the ✓ sits when on, so a tag row's box reads in both
 // states, in the palette's muted text (round two: the hairline read at 1.5 to 1 against the menu ground, under the 3 to 1 floor;
 // the muted text clears it in both themes); the shared menu (ui/webview/tag-menu.ts checkMark) draws the same from its tokens
 const menuRingStyleFor = (p) => MENU_MARK_BOX + 'border:1px solid ' + p.modelFg + ';background:transparent;';
-let MENU_STYLE = null, MENU_CHECK_STYLE = null, MENU_RING_STYLE = null;   // set by applyPal() below (dark by default)
+let MENU_STYLE = null, MENU_CHECK_STYLE = null, MENU_RING_STYLE = null, MENU_REQUESTED_STYLE = null;   // set by applyPal() below (dark by default)
 // THE TAG CHIP in the views menu (T283b, the user 2026-09-09: menus wear one vocabulary): the shared tag-lens
 // menu renders each tag as the tag chip itself acting as a toggle (ui/webview/tag-menu.ts tagChip + T283's
 // loop); this pane inlines the RESOLVED twin, since it may live in a foreign document that loads no module.
@@ -904,6 +908,7 @@ const PAL_DARK = {
   metaHoverFg: '#e6edf3',        // hover-brightened text (META_HOVER_FG)
   accent: ROMP_BLUE,             // the romp accent
   accentSolid: '#1EA1EB',        // the ✓-in-circle current mark (menu vocabulary)
+  workingBg: '#E0B020', workingFg: '#332600',   // the working-state yellow (styles.css --st-working-bg/fg): the picker's REQUESTED-model ✓
   faintFg: '#6e7681',            // faint gray (unlocked padlock)
   menuBg: '#252526',             // menu/card surface (menu vocabulary)
   menuFg: '#cccccc',             // menu/card body text
@@ -924,6 +929,7 @@ const PAL_LIGHT = {
   metaHoverFg: '#1F1E1D',
   accent: '#C2410C',             // light accent is CLAY, replacing the blue
   accentSolid: '#C2410C',
+  workingBg: '#8B6914', workingFg: '#ffffff',   // the light theme's working yellow (styles.css body.theme-light)
   faintFg: '#8A8378',
   menuBg: '#FBF6EF',               // mirrors the sheets' --vscode-menu-background (one menu vocabulary; swept 2026-08-31)
   menuFg: '#1F1E1D',
@@ -958,7 +964,7 @@ function applyPal() {
   MODEL_FG = p.modelFg; ACCENT = p.accent; META_HOVER_FG = p.metaHoverFg;
   MENU_FG = p.menuFg; HAIRLINE = p.hairline; OUTLINE_FG = p.outline;
   HOVER_BG = p.hoverBg; SEL_BG = p.selBg; INPUT_BG = p.inputBg; INPUT_FG = p.inputFg;
-  MENU_STYLE = menuStyleFor(p); MENU_CHECK_STYLE = menuCheckStyleFor(p); MENU_RING_STYLE = menuRingStyleFor(p);
+  MENU_STYLE = menuStyleFor(p); MENU_CHECK_STYLE = menuCheckStyleFor(p); MENU_RING_STYLE = menuRingStyleFor(p); MENU_REQUESTED_STYLE = menuRequestedStyleFor(p);
 }
 applyPal();
 function modelLabel(s) {
@@ -1121,6 +1127,26 @@ function loadModelChoices() {
 loadModelChoices();
 // Is this menu entry the lane's CURRENT value? Effort matches exactly; the model var holds a display
 // name ("Opus 4.8"), so match on the leading word — same rule as the chat view's isCurrentMeta.
+// The requested-model mark's tooltip and row matching (the user 2026-09-17), the chat's requestedModelTip /
+// isRequestedFamily / isRequestedVersion (render.ts) word for word: why the pick is not answering (the safety
+// classifiers and their category once the CLI named them), then the retry cadence when a retry is armed, that
+// auto-retry applies at the next start when only the switch is on, or where to turn it on.
+function requestedModelTip(fb) {
+  const why = fb.cause === 'safeguards' ? 'Requested model blocked due to safety classifiers' + (fb.category ? ' (' + fb.category + ')' : '') + '.'
+    : 'Requested model is not answering; ' + (fb.live || 'a fallback model') + ' is.';
+  const r = fb.retry || { on: false, everyMin: 10, armed: false, nextIn: null, attempts: 0 };
+  const next = r.nextIn !== null && r.nextIn !== undefined ? ' Next attempt in ' + Math.max(1, Math.ceil(r.nextIn / 60)) + ' min.' : '';
+  if (r.armed) return why + ' Retrying every ' + (r.everyMin || 10) + ' minutes.' + next;
+  if (r.on) return why + ' Auto-retry is on; the requested model is asked for when the session next starts.';
+  return why + ' Configure auto-retry in Settings, Automation.';
+}
+function isRequestedFamily(fb, value) {
+  const pk = (fb.pick || '').toLowerCase(), pv = (fb.pickValue || '').toLowerCase(), v = (value || '').toLowerCase();
+  return !!v && (pk.startsWith(v) || pv === v || pv.startsWith('claude-' + v));
+}
+function isRequestedVersion(fb, v) {
+  return (fb.pick || '').toLowerCase() === (v.label || '').toLowerCase() || (!!fb.pickValue && fb.pickValue === v.value);
+}
 function isCurrentMeta(kind, s, value) {
   const cur = ((kind === 'model' ? s.model : s.effort) || '').toLowerCase();
   return kind === 'effort' ? cur === value : cur.startsWith(value);
@@ -3309,6 +3335,13 @@ class TimelinePanel {
       item.setAttribute('style', 'padding:4px 22px 4px 8px;border-radius:4px;cursor:pointer;position:relative;white-space:nowrap;display:flex;align-items:center;');
       item.setAttribute('tabindex', '0');
       if (cur) { const ck = item.createSpan({ text: '✓' }); ck.setAttribute('style', MENU_CHECK_STYLE); }
+      // the REQUESTED model wears the yellow ✓ while an automatic fallback answers instead (the user 2026-09-17);
+      // the row's title says why and whether romp is retrying (the kernel's modelFallback on the lane's row)
+      const fb = kind === 'model' ? (s.modelFallback || null) : null;
+      if (fb && !cur && isRequestedFamily(fb, c.value)) {
+        const rq = item.createSpan({ text: '✓' }); rq.setAttribute('style', MENU_REQUESTED_STYLE);
+        item.setAttribute('title', requestedModelTip(fb));
+      }
       // A family with more than one live version wears the side-submenu affordance (the user
       // 2026-08-25): hovering (or right-arrow) reveals every version, each directly pickable with
       // the ✓ on the lane's current one; clicking the family itself picks its DEFAULT — the version
@@ -3332,6 +3365,10 @@ class TimelinePanel {
         const lsub = latest.createDiv({ text: pinned ? 'unpins — follows the newest ' + c.label : 'follows the newest ' + c.label });
         lsub.setAttribute('style', 'font-size:0.82em;opacity:0.6;');
         if (!pinned && cur) { const ck = latest.createSpan({ text: '✓' }); ck.setAttribute('style', MENU_CHECK_STYLE); }
+        else if (fb && !(fb.pickValue || '').toLowerCase().startsWith('claude-') && isRequestedFamily(fb, c.value)) {
+          const rq = latest.createSpan({ text: '✓' }); rq.setAttribute('style', MENU_REQUESTED_STYLE);   // an alias pick IS the floating family
+          latest.setAttribute('title', requestedModelTip(fb));
+        }
         latest.addEventListener('mouseenter', () => { latest.style.background = HOVER_BG; });
         latest.addEventListener('mouseleave', () => { latest.style.background = 'transparent'; });
         latest.addEventListener('click', (e) => { e.stopPropagation(); pick(c.value, true); });
@@ -3353,6 +3390,11 @@ class TimelinePanel {
             row.setAttribute('title', "Reported by a running session's Claude Code; not yet in romp's version list");
           }
           if (cv) { const ck = row.createSpan({ text: '✓' }); ck.setAttribute('style', MENU_CHECK_STYLE); }
+          else if (fb && isRequestedVersion(fb, v)) {
+            const rq = row.createSpan({ text: '✓' }); rq.setAttribute('style', MENU_REQUESTED_STYLE);
+            const note = row.getAttribute('title');   // a requested learned version keeps its explanation beside the learned note
+            row.setAttribute('title', note ? requestedModelTip(fb) + '\n' + note : requestedModelTip(fb));
+          }
           row.addEventListener('mouseenter', () => { row.style.background = HOVER_BG; });
           row.addEventListener('mouseleave', () => { row.style.background = 'transparent'; });
           row.addEventListener('click', (e) => { e.stopPropagation(); pick(v.value); });

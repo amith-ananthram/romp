@@ -335,8 +335,9 @@ following to every connected machine's kernel):
   rule, nothing new while the swap's card stands, a fresh one once you cleared it. When a turn is served on the picked tier, a second
   Completed card says the session is back (`Model back on …`) and the retry ends.
   A pick of your own ends it too, as does turning the switch off. While a
-  fallback stands, the session's model picker marks the requested model with a
-  yellow tick beside the blue tick on the model that answers; its tooltip says why
+  fallback stands, the session's model picker, in the chat statusline and in the
+  timeline's lane picker alike, marks the requested model with a yellow tick
+  beside the blue tick on the model that answers; its tooltip says why
   (the safety classifiers and their category, once the CLI has named them, which it
   does within seconds of the swap; a fallback that predates the kernel is read off
   the transcript when the kernel attaches) and whether romp is
