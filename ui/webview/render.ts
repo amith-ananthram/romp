@@ -2624,7 +2624,8 @@ function linkifyFileUris(root: HTMLElement, skipThumbs?: string[], spacePaths?: 
 // The gist strings a notice and its compact-mode group head share (noticeBrief), so a fold never says
 // something its members would not.
 function interruptGist(cause?: string): string {
-  return cause === "restart" ? "interrupted — kernel restart" : cause === "crash" ? "interrupted — process died" : "interrupted";
+  return cause === "restart" ? "interrupted — kernel restart" : cause === "crash" ? "interrupted — process died"
+    : cause === "fast" ? "interrupted — restarted in fast mode" : "interrupted";
 }
 const SETTLE_GIST = "turn settled with no response";
 function retriedGist(n: number): string { return `recovered after ${n} ${n === 1 ? "retry" : "retries"}`; }
@@ -3641,6 +3642,7 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
       return notice({ src: "session", glyph: "session", gist: interruptGist(cause), cls: "turn-interrupt",
                       tip: cause === "restart" ? "a romp kernel restart cut this turn; the session was resumed automatically"
                         : cause === "crash" ? "this session's claude process died mid-turn; the session was resumed automatically"
+                        : cause === "fast" ? "this reply fell back to a slower model at normal speed; romp stopped it before it ran and asked the session to continue in fast mode"
                         : "you stopped this turn here (the stop button / Ctrl+C)" });
     }
     // A romp SYSTEM notice (kernel restart/resume, Retry) — flagged server-side (ev.rompSystem) so it's

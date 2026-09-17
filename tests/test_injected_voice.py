@@ -226,6 +226,23 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
         self.assertIn("renamed", body)
         self.assertIn("'tests'", body, "…and it names the new name itself")
 
+    def test_the_fast_restart_re_ask_is_the_persons_own_words(self):
+        # Always fast stops a turn whose first reply fell back at normal speed and asks it to continue
+        # (FAST_RESTART_TEXT, 2026-09-17): one line in the person's voice, the injected marker only for
+        # the opener stamp, no romp nouns, nothing about speed or models — the agent cannot act on those
+        import os as _os
+        sb = load_source("romp_sdk_backend_voice2", _os.path.join(BIN, "romp_sdk_backend.py"))
+        line = sb.FAST_RESTART_TEXT
+        self.assertNotIn("\n", line, "one line")
+        body = prose(line).lower()
+        self.assertTrue(body, "prose before the marker")
+        for word, why in ROMP_WORDS:
+            self.assertNotIn(word, body, "the re-ask speaks plainly (%r: %s)" % (word, why))
+        for word in ("fast", "slow", "model", "opus", "fable", "speed", "retry"):
+            self.assertNotIn(word, body, "no mechanics the agent cannot act on (%r)" % word)
+        self.assertIn("continue", body)
+        self.assertIn("<!-- romp-injected -->", line, "the opener stamp reads the marker")
+
     def test_the_lost_tasks_notice_asks_for_a_check_in_the_persons_voice(self):
         # the lost-background-tasks notice (task_death_notice) is the same [romp]-prefixed mechanics
         # family; past the prefix it speaks plainly, to "you". Since 2026-09-05 it says the tasks were

@@ -4757,6 +4757,12 @@ RETRY_UPGRADE_S = 600.0   # ten minutes between attempts to get a fallen-back se
 SWITCH_END_GRACE_S = 1200.0   # the host's end grace for a Model switch's reconnect: a CLI that opened a turn of its own in the instant
 #   between the quiet read and the host's `end` FINISHES it (stdin is closed; it exits at the turn's end) instead of dying at the
 #   default 120 s — three sessions were force-killed mid-turn that way on 2026-09-17 (the manager's default is for a user's own switch)
+FAST_RESTART_TEXT = "Please continue from where you were. <!-- romp-injected -->"
+#   Always fast's re-ask after it stops a turn whose FIRST reply fell back onto a model that can run fast mode at normal
+#   speed (2026-09-17): the CLI settles fast mode when a turn begins, for the model it is configured on then, so a turn
+#   that began on the pick and fell back at its first request runs the whole turn at normal speed; stopped at that
+#   reply (nothing has run yet) and asked to continue, the new turn begins on the fallback model, fast. The person's
+#   words, one line, the injected marker for the opener stamp (fed_text_opener); pinned by test_injected_voice.
 
 #   fallback's cause is outside romp's view (the user 2026-09-17: a trigger in the task's context, which ages out of
 #   the window), so a fixed cadence is the designed read, the same exception the kernel's usage poll documents; each
@@ -5489,6 +5495,13 @@ class SdkSession:
         self._switch_wait_said = ""  # the ask the 'waiting for quiet' line was said for, once per ask
         self._switch_ask_pending = ""  # the switch ask handed to request_reconnect(defer=False) and not yet armed or dropped
         self._reconnect_switch_why = ""  # the armed reconnect is a switch's ("always fast"/"retry upgrade"): the waker's last look reads it
+        self._turn_replies = -1       # parent assistant messages with a real model id in the turn in flight; -1 = UNARMED until this
+        #   connection shows a turn boundary (the init handler and the settle write 0), so an attach to a CLI mid-turn never reads a
+        #   later frame as the turn's first reply (review 2026-09-17)
+        self._fast_restart_failed = None   # the re-ask itself came back at normal speed: no more stops on this connection until fast mode is seen
+        self._fast_restart = None     # Always fast stopped this turn at its first fallen reply: {from,to,speed,opener}, consumed at the settle
+        self._fast_restarted = False  # the turn in flight is the re-ask itself: no second restart, whatever its first reply does
+        self._restart_opener = None   # the stopped turn's opener, restored onto the re-ask when the feeder pops it
         self._settled_msg = None                 # the ResultMessage whose settle ran last (its finally records
         #   it) — what _note_message_failure reads to say whether a failed result's turn still settled
         # The handshake as a cross-thread EVENT: set the moment a ClaudeSDKClient is up, cleared when
@@ -5750,6 +5763,8 @@ class SdkSession:
             elif expect is not None and not (0 <= idx < len(self._pending) and self._pending[idx] == expect):
                 idx = next((i for i, q in enumerate(self._pending) if q == expect), -1)
             item = self._q_pop(idx)[0] if 0 <= idx < len(self._pending) else None
+            if item == FAST_RESTART_TEXT:
+                self._restart_opener = None            # the re-ask left the queue by the user's hand: nothing to restore onto
         if item is not None:
             self._persist_queue()
         return item
@@ -6351,19 +6366,26 @@ class SdkSession:
         loop refuse → reconnect → refuse. The flag is all the rule ever arms — never the literal '/fast on', which on
         a non-Opus session makes the CLI switch the model. _options and _amain read the same expression, so the
         flag file and the per-connection snapshot cannot disagree."""
-        if getattr(self, "fast_opt", False):
-            return True
-        if getattr(self, "fast_off", False) or getattr(self, "fast_reason", "") or getattr(self, "fast_rule_refused", ""):
-            return False
-        if not always_fast_on(getattr(self.backend, "state_dir", None)):
-            return False
         # ANY known face of the model being Opus arms the flag — the pick, the id the CLI last reported, its name. The
         # flag is harmless where it cannot take (a non-Opus connect reports fast off with no reason, verified
         # 2026-08-10), and keying on one face made the snapshot flap with the served model (review 2026-09-17: an Opus
         # pick served a Sonnet fallback reconnected at every turn's end, the init's Opus arming a flag the served Sonnet
         # then dropped at the connect). The user's case is the other way round — Opus served under a Fable pick — and the
         # reported id carries it.
-        return any(fast_capable(x) for x in (getattr(self, "chosen_model", ""), getattr(self, "_model_id", ""), getattr(self, "model", "")))
+        return any(self.fast_wanted_on(x) for x in (getattr(self, "chosen_model", ""), getattr(self, "_model_id", ""), getattr(self, "model", "")))
+
+    def fast_wanted_on(self, model) -> bool:
+        """fast_effective's rule for ONE face of the model: the session's own ask wants fast whatever the model; an explicit
+        Slow, a refusal with a reason, or the switch being off wants none; else the switch wants it exactly when `model` can
+        run fast mode. The fast restart asks it of the model a fallen first reply was served on (_maybe_restart_fallen_turn),
+        before the learn has moved self.model there."""
+        if getattr(self, "fast_opt", False):
+            return True
+        if getattr(self, "fast_off", False) or getattr(self, "fast_reason", "") or getattr(self, "fast_rule_refused", ""):
+            return False
+        if not always_fast_on(getattr(self.backend, "state_dir", None)):
+            return False
+        return fast_capable(model)
 
     def _after_model_change(self, old, pm):
         """The live model just changed (a learn, a context refresh): the machine's Always fast switch may now want the
@@ -6488,6 +6510,112 @@ class SdkSession:
         self.backend._log("%s (%s): the CLI started work between the ask and the reconnect — %s; the reconnect stands "
                           "down and the ask waits for the next quiet moment; nothing is cut" % (why, self.name, self._busy_words()))
         return True
+
+    def _maybe_restart_fallen_turn(self, msg, before, pm) -> bool:
+        """Always fast, at a turn's FIRST parent reply (the served-model site; the init reset _turn_replies): the reply
+        was served on a lower tier than the model the turn began on, that tier can run fast mode, and the reply came
+        at normal speed (msg.usage["speed"], the API's own word for how it served the message, "fast"/"standard").
+        The CLI settles fast mode when a turn begins, for the model it is configured on then, and a fallback inside the
+        turn does not re-engage it: every such turn today ran to its end at normal speed, the retry's first turn after
+        each upgrade included (2026-09-17). Nothing has run at this point (the fallen first reply carries no tool
+        call; one that does is left alone), so the turn is stopped here, on the fallback itself, and re-asked at its
+        settle (_apply_fast_restart): the new turn begins on the fallback model, which the CLI now runs, in fast mode.
+        Gates: the connection carries the flag and the session wants fast (fast_effective: its own ask or the switch,
+        not an explicit Slow or a refusal), never a pick of the user's own (the caller skips a pending pick), one
+        restart per turn episode (_fast_restart standing, or the turn in flight being the re-ask), a live client.
+        Returns True when the stop was asked. Loud on a failure, never a raise into the stream."""
+        try:
+            if getattr(self, "_fast_restart", None) or getattr(self, "_fast_restarted", False) or getattr(self, "_fast_restart_failed", None):
+                return False
+            if getattr(self, "_interrupted", False) or getattr(self, "_intr_level", 0):
+                return False   # a stop already stands on this turn (the user's, a rewind's, a shutdown's): theirs, never re-asked
+            if not before or not pm or not _model_downgrade(before, pm) or not fast_capable(pm):
+                return False
+            if not getattr(self, "_fast_unlocked", False) or not self.fast_wanted_on(pm):
+                return False
+            usage = getattr(msg, "usage", None)
+            speed = str(usage.get("speed") or "") if isinstance(usage, dict) else ""
+            if speed == "fast":
+                return False
+            if any(type(b).__name__ == "ToolUseBlock" for b in (getattr(msg, "content", None) or [])):
+                return False
+            if len(getattr(self, "_inflight_texts", None) or ()) > 1:
+                return False   # a message forwarded into this turn rides the CLI's own queue: a stop would strand it behind the re-ask
+            if getattr(self, "ended", False) or getattr(self, "loop", None) is None or getattr(self, "client", None) is None:
+                return False
+            self._fast_restart = {"from": before, "to": pm, "speed": speed or "unknown", "t": time.time(),
+                                  "opener": getattr(self, "_turn_opener", None)}
+            self.backend._log("always fast (%s): the turn's first reply fell back from %s to %s at %s speed — stopping it here, "
+                              "before its reply has streamed, so it can be asked to continue on %s in fast mode (the CLI settles "
+                              "fast mode when a turn begins, for the model it is configured on then)"
+                              % (self.name, before, pm, speed or "unknown", pm))
+            # the polite rung, issued directly — never interrupt(), whose ladder is the user's: a press of theirs after this
+            # must still start polite, and this stop must never become a signal because a press of theirs came first
+            self._interrupted = True
+            self.backend._poke()
+            self.loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self._do_interrupt()))
+            return True
+        except Exception as e:
+            self.backend._log("always fast (%s): the fast restart failed: %s" % (self.name, e), problem=True)
+            self._fast_restart = None
+            return False
+
+    def _settle_fast_restart(self, msg, pressed_by_hand: bool) -> None:
+        """The stopped turn's ResultMessage landed (the settle's own step, before the wake releases the queue). Re-ask only
+        when the stop is what ended the turn: an interrupted turn's result is subtype error_during_execution with is_error
+        (measured on the SDK, 2026-09-17); a result of any other shape means the reply completed before the stop landed,
+        and a re-ask would follow a finished answer (or walk the session past a question it asked). And never over a stop
+        of the user's own: their press climbs interrupt()'s ladder (this stop does not), so a ladder above zero at the
+        settle says they stopped this turn too, and it stays stopped."""
+        r = self._fast_restart
+        self._fast_restart = None
+        if not r:
+            return
+        if pressed_by_hand:
+            self.backend._log("always fast (%s): a stop of the user's own landed on the fallen turn as well — it stays stopped, "
+                              "nothing is re-asked" % self.name)
+            return
+        cut = bool(getattr(msg, "is_error", False)) and str(getattr(msg, "subtype", "") or "") == "error_during_execution"
+        if not cut:
+            self.backend._log("always fast (%s): the fallen reply completed before the stop landed (result %s) — left as it is; "
+                              "that turn ran on %s at normal speed" % (self.name, getattr(msg, "subtype", "?"), r.get("to")))
+            return
+        self._apply_fast_restart(r)
+
+    def _apply_fast_restart(self, r: dict) -> None:
+        """The re-ask heads the queue, so the feeder pops it first; the queue is persisted (a kernel death re-delivers it);
+        the cut is stamped as ROMP's (append_machine_cut, the crash and restart resumes' stamp), so the kernel's readers of
+        the CLI's "[Request interrupted by user]" record never file it as the user's stop (no needs-you block, no
+        nudge suppression, no "you stopped this" badge); the stopped turn's opener is kept for the feeder to restore onto
+        the re-ask, whose pop marks the turn in flight as the re-ask (_fast_restarted)."""
+        try:
+            with self._lock:
+                self._q_prepend([FAST_RESTART_TEXT])
+            self._persist_queue()
+            append_machine_cut(self.backend.state_dir, self.sid, "fast")   # after the CLI's stop record, before the re-ask lands
+            self._restart_opener = r.get("opener")
+            self.backend._log("always fast (%s): the stopped turn settled — asking it to continue, so the new turn can begin on %s "
+                              "in fast mode" % (self.name, r.get("to")))
+        except Exception as e:
+            self.backend._log("always fast (%s): could not re-ask after the stop: %s" % (self.name, e), problem=True)
+
+    def _note_restart_outcome(self, msg, pm) -> None:
+        """The first parent reply of the re-ask itself (the feeder marked it): its served speed is the outcome the stop was
+        for. Fast: said, and any stand-down lifted. Normal speed on a model that can run fast mode: the stop bought nothing
+        (a cooldown, a refusal the CLI did not report, a CLI that did not move onto the fallback), so no turn on this
+        connection is stopped again until fast mode is seen — said once, loudly."""
+        if not getattr(self, "_fast_restarted", False):
+            return
+        usage = getattr(msg, "usage", None)
+        speed = str(usage.get("speed") or "") if isinstance(usage, dict) else ""
+        if speed == "fast":
+            if getattr(self, "_fast_restart_failed", None):
+                self._fast_restart_failed = None
+            self.backend._log("always fast (%s): the re-asked turn runs on %s in fast mode" % (self.name, pm))
+        elif speed == "standard" and fast_capable(pm):
+            self._fast_restart_failed = {"to": pm, "t": time.time()}
+            self.backend._log("always fast (%s): the re-asked turn still came back at normal speed on %s — the stop bought nothing; "
+                              "not stopping turns on this connection again until fast mode is seen" % (self.name, pm), problem=True)
 
     def _arm_upgrade_retry(self, frm, to):
         """A down-tier model change nobody asked for just landed (the card's branch in _learn_model): with the gear's
@@ -6864,6 +6992,11 @@ class SdkSession:
                     self._first_out_t = None         # the turn's first output is still to come (turns.jsonl)
                     self._fed_t = time.time()        # the pop, at millisecond resolution (turns.jsonl fedT)
                 self._note_turn_opener(fed_text_opener(item), fresh)   # who this turn is for (the Stop hook stamps it)
+                if fresh and item == FAST_RESTART_TEXT:
+                    self._fast_restarted = True                # the turn in flight IS the re-ask: its first reply reports the outcome, no second stop
+                    if getattr(self, "_restart_opener", None):
+                        self._turn_opener = self._restart_opener   # the re-ask continues the stopped turn: whoever opened that one owns this
+                        self._restart_opener = None
                 if item.startswith(RENAME_PING_HEAD):
                     self._ping_feeding = True       # hold feeds until this turn's first streamed message
                 self._mark_producing()              # the one gate: a text fed under a standing prompt leaves the prompt's state
@@ -6892,6 +7025,11 @@ class SdkSession:
             self._deliberate_connect = deliberate    # read by _on_host_hello, where the block runs under a host
             self._reconnect = False
             self._reconnect_switch_why = ""
+            if getattr(self, "_fast_restart", None):
+                self.backend._log("always fast (%s): the stopped turn's client was torn down before it settled — dropping the re-ask" % self.name)
+                self._fast_restart = None
+            self._turn_replies = -1            # unarmed until this connection shows a turn boundary (see __init__)
+            self._fast_restart_failed = None   # the stand-down was about the last connection
             self._ping_feeding = False   # a reconnect restarts the feed — a stale hold must not wedge it
             # the abandoned client's live subagents and background tasks died with it — retire them on
             # the teardown event itself (and tell the session what it lost, as a CLI death does)
@@ -7870,6 +8008,7 @@ class SdkSession:
             #                             is over, so the boot-stagger slot (if any) frees NOW
             d = msg.data if isinstance(msg.data, dict) else {}
             self._learn_model(pretty_model(d.get("model")), raw=str(d.get("model") or ""))
+            self._turn_replies = 0   # a turn begins: its first parent reply is the one Always fast may stop (_maybe_restart_fallen_turn)
             # the connect launched with chosen_model (--model rides _options) and the CLI is up on it: the
             # verdict for a pick whose control request never resolved (its task died with the previous
             # thread) — it is the accepted model now, so a later refused pick reverts to IT. The reg's
@@ -8131,7 +8270,15 @@ class SdkSession:
             # so an unguarded assign would CORRUPT the model badge to "<synthetic>". A real id always contains
             # "claude" (claude-opus-4-8, us.anthropic.claude-…); keep the last good one otherwise.
             if m and "claude" in m.lower():
+                before, pending = self.model, bool(getattr(self, "_model_pending", ""))   # getattr: __new__-built doubles
+                first_reply = getattr(self, "_turn_replies", -1) == 0
+                if getattr(self, "_turn_replies", -1) >= 0:
+                    self._turn_replies += 1             # -1 (no boundary seen on this connection) stays -1
                 self._learn_model(pretty_model(m), raw=str(m), served=True)
+                if first_reply:
+                    self._note_restart_outcome(msg, pretty_model(m))   # the re-ask's first reply says whether the stop bought fast mode
+                    if not pending:
+                        self._maybe_restart_fallen_turn(msg, before, pretty_model(m))   # Always fast: a fallen first reply is stopped and re-asked
         elif isinstance(msg, ResultMessage) and self._consume_move_settle(msg):
             pass   # the accepted move's turn-less result — nothing ended, so nothing settles (see the def)
         elif isinstance(msg, ResultMessage):
@@ -8321,6 +8468,7 @@ class SdkSession:
                 self.retrying = False
                 self.retry_count = 0                    # turn over → clear the storm count (a turn that errored out without recovering leaves no "recovered" note)
                 self.retry_info = None
+                pressed_by_hand = bool(getattr(self, "_intr_level", 0))   # the ladder climbs only under interrupt(): a stop of the user's
                 self._interrupted = False              # this turn's result settled it (whether it finished or was interrupted)
                 self._intr_level = 0                   # settle ends the escalation episode — the next stop starts polite
                 # A ResultMessage is the AUTHORITATIVE turn-end: the CLI has processed everything we handed it
@@ -8340,6 +8488,11 @@ class SdkSession:
                 self._compacting = False
                 self._clearing = False   # /clear backstop: the turn settled, whatever the init did or didn't flip
                 self._settled_msg = msg  # the exact event the failure report reads: the settle ran for THIS result
+                self._turn_replies = 0                 # a boundary: the next parent reply is a turn's first
+                if getattr(self, "_fast_restart", None):
+                    self._settle_fast_restart(msg, pressed_by_hand)   # the stopped turn settled: re-ask, or stand down, before the wake below
+                else:
+                    self._fast_restarted = False   # a turn that was not the re-ask settled: a later fallen first reply may restart again
                 if self._input_wake is not None:   # turn done → release the next queued turn, if any
                     self._input_wake.set()
                 failed = []

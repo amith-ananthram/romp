@@ -6,6 +6,7 @@ on', which on a non-Opus session makes the CLI switch model), respects a session
 and a refusal the CLI answered with a reason (liveFastReason), and asks for a reconnect when a model that can run fast
 arrives on a connection made without the flag. Hermetic state, synthetic sids, no CLI."""
 import inspect
+import json
 import os
 import tempfile
 import time
@@ -308,6 +309,132 @@ class TheCliSaysWhichConnectionsHaveNoFlag(unittest.TestCase):
         self.assertEqual(s.fast_reason, "", "the opt-in reason stays blanked for the badge, as before")
         s._adopt_fast_state({"fast_mode_state": "on"})
         self.assertEqual(len(s._asks), 1, "a flagged connection's reports move nothing")
+
+
+class AFallenFirstReplyIsStoppedAndReAsked(unittest.TestCase):
+    """2026-09-17: the CLI settles fast mode when a turn begins, for the model it is configured on then. A turn that began
+    on the pick and fell back onto Opus at its first request ran to its end at normal speed, every time, the retry's first
+    turn after each upgrade included. Always fast now stops such a turn at that first reply, before its reply has streamed,
+    and re-asks it at the settle when the result proves the stop took effect, so the new turn begins on Opus in fast mode.
+    The review round (2026-09-17): the stop never climbs the user's escalation ladder and stands down when a stop already
+    stands; the re-ask is dropped when the reply completed on its own or the user stopped the turn too; the cut is stamped
+    as romp's; the counter is armed only at an observed boundary; a re-ask that still comes back slow stands the rule down."""
+    def _sess(self, **state):
+        import types
+        be = _backend(); _switch(be, sb.ALWAYS_FAST_STORE, "on")
+        s = _sess(be, liveModel="Fable 5.1", liveModelId="claude-fable-5-1", model="fable")
+        s._fast_unlocked = True; s.client = object()
+        s._stops = []
+        s.loop = types.SimpleNamespace(call_soon_threadsafe=lambda fn: s._stops.append(fn))   # the polite rung, scheduled
+        s._turn_opener = "human"; s._inflight_texts = ["the prompt"]; s._turn_replies = 0
+        for k, v in state.items():
+            setattr(s, k, v)
+        return be, s
+
+    @staticmethod
+    def _reply(speed="standard", blocks=()):
+        import types
+        return types.SimpleNamespace(usage={"speed": speed}, content=list(blocks), model="claude-opus-5")
+
+    @staticmethod
+    def _result(cut=True):
+        import types
+        return types.SimpleNamespace(subtype="error_during_execution" if cut else "success", is_error=cut)
+
+    def test_the_stop_is_the_polite_rung_only_and_the_settle_re_asks_when_the_result_proves_the_cut(self):
+        be, s = self._sess()
+        self.assertTrue(s._maybe_restart_fallen_turn(self._reply(), "Fable 5.1", "Opus 5"))
+        self.assertEqual(len(s._stops), 1, "one stop, scheduled on the loop")
+        self.assertTrue(s._interrupted, "the chip reads the stop at once, as interrupt() does")
+        self.assertEqual(s._intr_level, 0, "never the user's ladder: their next press still starts polite")
+        self.assertEqual((s._fast_restart["from"], s._fast_restart["to"], s._fast_restart["speed"], s._fast_restart["opener"]),
+                         ("Fable 5.1", "Opus 5", "standard", "human"))
+        self.assertTrue(any("stopping it here" in m and "fast mode" in m for m in be._logs), be._logs)
+        self.assertFalse(s._maybe_restart_fallen_turn(self._reply(), "Fable 5.1", "Opus 5"), "a stop already asked: not twice")
+        s._settle_fast_restart(self._result(cut=True), pressed_by_hand=False)      # the settle's step
+        self.assertEqual(s._pending[:1], [sb.FAST_RESTART_TEXT], "the re-ask heads the queue")
+        self.assertEqual(len(s._pending_meta), len(s._pending), "the two queue lists stay aligned")
+        self.assertIsNone(s._fast_restart); self.assertEqual(s._restart_opener, "human")
+        self.assertFalse(s._fast_restarted, "the mark is set when the feeder pops the re-ask, not here")
+        self.assertEqual(sb.read_reg(be.state_dir, SID).get("queue"), [sb.FAST_RESTART_TEXT], "persisted: a kernel death re-delivers it")
+        rows = [json.loads(l) for l in Path(be.state_dir, "states", SID + ".jsonl").read_text().splitlines() if l.strip()]
+        self.assertTrue(any(r.get("machineCut") == "fast" for r in rows), "the cut is stamped as romp's: never the user's stop")
+
+    def test_the_settle_stands_down_when_the_reply_completed_or_the_user_stopped_it_too(self):
+        be, s = self._sess()
+        self.assertTrue(s._maybe_restart_fallen_turn(self._reply(), "Fable 5.1", "Opus 5"))
+        s._settle_fast_restart(self._result(cut=False), pressed_by_hand=False)
+        self.assertEqual(s._pending, [], "a success result: the reply completed before the stop landed; nothing re-asked")
+        self.assertTrue(any("completed before the stop landed" in m for m in be._logs), be._logs)
+        be, s = self._sess()
+        self.assertTrue(s._maybe_restart_fallen_turn(self._reply(), "Fable 5.1", "Opus 5"))
+        s._settle_fast_restart(self._result(cut=True), pressed_by_hand=True)
+        self.assertEqual(s._pending, [], "the user's own stop landed too: it stays stopped")
+        self.assertTrue(any("stays stopped" in m for m in be._logs), be._logs)
+        self.assertIsNone(s._fast_restart)
+
+    def test_the_gates_that_leave_a_turn_alone(self):
+        for why, state, args in (
+                ("the reply was already fast", {}, (self._reply("fast"), "Fable 5.1", "Opus 5")),
+                ("a tool call already started in the reply", {}, (self._reply(blocks=[type("ToolUseBlock", (), {})()]), "Fable 5.1", "Opus 5")),
+                ("not a downgrade", {}, (self._reply(), "Opus 5", "Opus 5")),
+                ("the fallback tier cannot run fast mode", {}, (self._reply(), "Fable 5.1", "Sonnet 5")),
+                ("no flag on this connection", {"_fast_unlocked": False}, (self._reply(), "Fable 5.1", "Opus 5")),
+                ("an explicit Slow on the session", {"fast_off": True}, (self._reply(), "Fable 5.1", "Opus 5")),
+                ("no live client", {"client": None}, (self._reply(), "Fable 5.1", "Opus 5")),
+                ("the session is ending", {"ended": True}, (self._reply(), "Fable 5.1", "Opus 5")),
+                ("a stop already stands (the user's press)", {"_intr_level": 1, "_interrupted": True}, (self._reply(), "Fable 5.1", "Opus 5")),
+                ("a stop already in flight", {"_interrupted": True}, (self._reply(), "Fable 5.1", "Opus 5")),
+                ("a message was forwarded into this turn", {"_inflight_texts": ["the prompt", "a forward"]}, (self._reply(), "Fable 5.1", "Opus 5")),
+                ("the re-ask itself is in flight", {"_fast_restarted": True}, (self._reply(), "Fable 5.1", "Opus 5")),
+                ("an earlier re-ask came back slow on this connection", {"_fast_restart_failed": {"to": "Opus 5"}}, (self._reply(), "Fable 5.1", "Opus 5"))):
+            be, s = self._sess(**state)
+            self.assertFalse(s._maybe_restart_fallen_turn(*args), why)
+            self.assertEqual(s._stops, [], why); self.assertIsNone(s._fast_restart, why)
+        be, s = self._sess(); _switch(be, sb.ALWAYS_FAST_STORE, "off")
+        self.assertFalse(s._maybe_restart_fallen_turn(self._reply(), "Fable 5.1", "Opus 5"), "the switch is off and the session has no ask of its own")
+        be, s = self._sess(); _switch(be, sb.ALWAYS_FAST_STORE, "off"); s.fast_opt = True
+        self.assertTrue(s._maybe_restart_fallen_turn(self._reply(), "Fable 5.1", "Opus 5"), "the session's own Fast ask is a fast wish too")
+
+    def test_the_re_asks_first_reply_reports_the_outcome_and_a_slow_one_stands_the_rule_down(self):
+        be, s = self._sess(_fast_restarted=True)
+        s._note_restart_outcome(self._reply("standard"), "Opus 5")
+        self.assertEqual(s._fast_restart_failed["to"], "Opus 5")
+        self.assertTrue(any("bought nothing" in m for m in be._logs), be._logs)
+        s._fast_restarted = False
+        self.assertFalse(s._maybe_restart_fallen_turn(self._reply(), "Fable 5.1", "Opus 5"), "stood down on this connection")
+        s._fast_restarted = True
+        s._note_restart_outcome(self._reply("fast"), "Opus 5")
+        self.assertIsNone(s._fast_restart_failed, "fast mode seen: the stand-down lifts")
+        self.assertTrue(any("runs on Opus 5 in fast mode" in m for m in be._logs), be._logs)
+        be, s = self._sess()          # not the re-ask: the outcome note says nothing
+        s._note_restart_outcome(self._reply("standard"), "Opus 5")
+        self.assertIsNone(s._fast_restart_failed)
+
+    def test_an_unqueued_re_ask_takes_its_opener_memory_with_it(self):
+        be, s = self._sess()
+        with s._lock:
+            s._q_prepend([sb.FAST_RESTART_TEXT])
+        s._restart_opener = "human"
+        self.assertEqual(s.unqueue(0), sb.FAST_RESTART_TEXT)
+        self.assertIsNone(s._restart_opener)
+
+    def test_the_wiring_the_served_site_the_settle_the_feeder_and_the_loop_top(self):
+        src = inspect.getsource(sb.SdkSession._on_message)
+        self.assertIn('first_reply = getattr(self, "_turn_replies", -1) == 0', src)
+        self.assertIn("self._note_restart_outcome(msg, pretty_model(m))", src)
+        self.assertIn("self._maybe_restart_fallen_turn(msg, before, pretty_model(m))", src)
+        self.assertIn('pressed_by_hand = bool(getattr(self, "_intr_level", 0))', src, "read BEFORE the settle resets the ladder")
+        self.assertIn("self._settle_fast_restart(msg, pressed_by_hand)", src)
+        self.assertIn('self._learn_model(pretty_model(d.get("model")), raw=str(d.get("model") or ""))\n            self._turn_replies = 0', src,
+                      "the per-turn init arms the count, so a CLI-opened turn's first reply counts too")
+        amain = inspect.getsource(sb.SdkSession._amain)
+        self.assertIn("if fresh and item == FAST_RESTART_TEXT:\n                    self._fast_restarted = True", amain, "the mark is set at the re-ask's pop")
+        self.assertIn("self._turn_replies = -1", amain, "a fresh connection is unarmed until it shows a boundary")
+        self.assertIn("self._fast_restart_failed = None", amain)
+        self.assertIn("dropping the re-ask", amain, "a stop whose client was torn down never re-asks a later turn")
+        be, s = self._sess()
+        self.assertEqual(sb.SdkSession(be, {"sid": SID, "name": "web", "cwd": "/tmp"})._turn_replies, -1)
 
 
 if __name__ == "__main__":

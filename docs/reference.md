@@ -305,7 +305,18 @@ following to every connected machine's kernel):
   nothing is cut (the wait is said once in the kernel log, with what is running;
   the kernel looks once more the instant before the reconnect and stands down if
   the CLI has started work since); turning the switch on or off reaches every
-  running session the same way. A session you set to **Slow** from its
+  running session the same way. The CLI settles fast mode when a turn begins, for
+  the model it is configured on then, so a turn that began on the pick and fell
+  back onto Opus at its first request would run to its end at normal speed; the
+  kernel stops such a turn at that first reply, before its reply has streamed, and
+  asks the session to continue, so the new turn begins on Opus in fast mode. The
+  re-ask is made only when the result shows the stop took effect: a reply that
+  completed first is left as it is, and a turn you stopped yourself stays stopped.
+  The cut is recorded as the kernel's own, so it is never read as your stop, and
+  the chat seam labels it as a restart in fast mode. A fallback deeper in a turn,
+  after work has started, is left alone, as is a turn a message was forwarded
+  into; and if a re-asked turn still comes back at normal speed, the kernel stops
+  no more turns on that connection until fast mode is seen. A session you set to **Slow** from its
   statusline stays slow until you set it to **Fast** again, and a comment thread
   launched slow, or forked from a slow session, counts as such a pick. If the CLI refuses fast mode for a
   session with a reason (extra usage off, an organisation gate), the kernel log

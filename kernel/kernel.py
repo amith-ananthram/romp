@@ -1466,6 +1466,7 @@ def _turn_romp_injected(turn):
 # genuine user stop. Kept in lockstep with the nudge text by test_kernel_interrupt_machine_cut.
 INTR_RESTART_SIG = "kernel restarted and cut"        # BOOT_RESUME_NUDGE
 INTR_CRASH_SIG = "died mid-turn"                      # CRASH_RESUME_NUDGE
+INTR_FAST_SIG = "continue from where you were"        # FAST_RESTART_TEXT (Always fast stopped a fallen first reply, 2026-09-17)
 
 
 def _interrupt_cause(nxt_atom):
@@ -1483,6 +1484,8 @@ def _interrupt_cause(nxt_atom):
         return "restart"
     if INTR_CRASH_SIG in body:
         return "crash"
+    if INTR_FAST_SIG in body:
+        return "fast"
     return None
 
 
@@ -36960,7 +36963,8 @@ def _stamp_interrupt_causes(events):
             if nxt.get("rompSystem"):
                 body = nxt.get("md") or ""
                 cause = ("restart" if INTR_RESTART_SIG in body else    # same signatures the nudge gate
-                         "crash" if INTR_CRASH_SIG in body else None)  # reads (_machine_cut_cause)
+                         "crash" if INTR_CRASH_SIG in body else       # reads (_machine_cut_cause)
+                         "fast" if INTR_FAST_SIG in body else None)
                 if cause:
                     ev["interruptCause"] = cause
                     # A MACHINE cut leaves no "no response — turn settled" line (the user 2026-07-22): romp

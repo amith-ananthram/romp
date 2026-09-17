@@ -69,6 +69,8 @@ class InterruptCauseClassifier(unittest.TestCase):
 
     def test_crash_notice_is_a_crash_cut(self):
         self.assertEqual(km._interrupt_cause(uatom(T0, km.INTR_CRASH_SIG, "romp")), "crash")
+        self.assertEqual(km._interrupt_cause(uatom(T0, km.INTR_FAST_SIG, "romp")), "fast",
+                         "Always fast stopped a fallen first reply and re-asked (2026-09-17): romp's cut, never the user's")
 
     def test_a_typed_human_reply_is_a_user_stop(self):
         self.assertIsNone(km._interrupt_cause(uatom(T0, "actually, try the other approach")))
@@ -85,6 +87,8 @@ class InterruptCauseClassifier(unittest.TestCase):
                       "the crash signature must be a substring of CRASH_RESUME_NUDGE")
         self.assertEqual(km._interrupt_cause(uatom(T0, sb.BOOT_RESUME_NUDGE, "romp")), "restart")
         self.assertEqual(km._interrupt_cause(uatom(T0, sb.CRASH_RESUME_NUDGE, "romp")), "crash")
+        self.assertIn(km.INTR_FAST_SIG, sb.FAST_RESTART_TEXT, "the re-ask carries the signature the scan reads")
+        self.assertEqual(km._interrupt_cause(uatom(T0, sb.FAST_RESTART_TEXT, "romp")), "fast")
 
 
 class MachineCutSuppression(unittest.TestCase):
