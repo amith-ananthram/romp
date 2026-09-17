@@ -16226,6 +16226,44 @@ def mint_fallback_card(sid, from_model, to_model, ev_t=None):
         return None
 
 
+RESTORED_WHY = "kernel-observed model restored"   # mint_restored_card's why key (the user 2026-09-17)
+
+
+def mint_restored_card(sid, from_model, to_model, ev_t=None):
+    """A COMPLETED card recording that a session is BACK on its model after an automatic change (the user 2026-09-17:
+    the Retry upgrades after downgrades switch): romp asked for the picked model again at a turn boundary and a turn
+    was served on it. mint_fallback_card's twin — `from_model` is the fallback the session sat on, `to_model` the model
+    it is back on — with the same existence-keyed dedupe: while an identical uncleared card stands, another observation
+    mints nothing. Kernel-authored bookkeeping: minted done, never a question. Returns the card id, or None."""
+    try:
+        store = load_goals(sid)
+        nodes = store.setdefault("nodes", {})
+        text = "Model back on %s (after the automatic change to %s)" % (to_model, from_model or "?")
+        vc = _view_cleared()
+        for prev in nodes.values():
+            if prev.get("why") == RESTORED_WHY and prev.get("text") == text and not prev.get("cleared") \
+                    and prev.get("id") not in vc:
+                return None
+        n = store.get("seq", 0) + 1
+        store["seq"] = n
+        gid = "%s:g%d" % (sid, n)
+        t = int(ev_t or time.time())
+        why = ("The session is back on %s: after the automatic change to %s, romp asked for the picked model again "
+               "(Settings, Chat, Retry upgrades after downgrades) and a turn was served on it."
+               % (to_model, from_model or "the fallback"))
+        nd = GuardedNode({"id": gid, "text": text, "swap": {"from": from_model or "?", "to": to_model or "?"},
+                          "parentId": None, "nodeComplete": False, "blocked": False, "cleared": False,
+                          "trail": [], "promptUuid": "", "quote": "", "t": t, "mt": t, "why": RESTORED_WHY, "log": []})
+        nodes[gid] = nd
+        record_verdict(store, nd, "romp", "done", t, why=why)
+        rollup_status(store, True)
+        save_goals(sid, store)
+        return gid
+    except Exception as e:
+        sys.stderr.write("restored-card mint (%s): %r\n" % (sid[:8], e))
+        return None
+
+
 REFUSAL_FALLBACK_WHY = "kernel-observed safeguards refusal fallback"     # the refusal card's why key (T279)
 CAPACITY_FALLBACK_WHY = "kernel-observed API model fallback"            # mint_fallback_card's, as it spells it
 

@@ -579,7 +579,7 @@ class LiveTail(unittest.TestCase):
         # the per-connection unlock is snapshotted from fast_opt exactly where _connect_once builds
         # the options that carry the flag, so the two can never disagree
         import inspect
-        self.assertIn("self._fast_unlocked = self.fast_opt", inspect.getsource(sb.SdkSession._amain))
+        self.assertIn("self._fast_unlocked = self.fast_effective()", inspect.getsource(sb.SdkSession._amain))   # the same expression _options reads (2026-09-17)
 
     def test_set_fast_refuses_bad_values_and_unknown_sids(self):
         d = tempfile.mkdtemp()

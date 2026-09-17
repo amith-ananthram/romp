@@ -198,6 +198,19 @@ var GEAR_HTML =
   '<span><b>Thinking summaries</b>' +
   '<span class=rs-sub>For every new Claude Code session, ask the API for reasoning summaries and show them in the chat, folded to two lines (click to expand). The summaries are output tokens the session pays for, which is why this row sits under Chat and not Display. Compact transcript still hides them. If thinking was turned off for this install, this turns adaptive thinking on as well. A running session picks the change up at its next reconnect: an effort or billing switch, the first fast-mode opt-in, or a kernel restart. Switching the model applies live and does not reconnect. Off by default; this kernel keeps its own copy.</span>' +
   '</span></label>' +
+  // MODEL (the user 2026-09-17): two switches about which model a session runs on and how — both cost decisions (fast
+  // mode bills Opus at a premium; an upgrade asked for again is a fresh CLI on the pick), which is why they sit in Chat.
+  // Kernel-side, like the judges' Fast mode boxes: stored on/off, stamped, propagated to every linked kernel; the SDK
+  // backend reads them at connect, on a model change and from its retry tick. Off by default.
+  "<div class='rs-sec'>Model</div>" +
+  "<label class='rs-row'><input type=checkbox id=rs-alwaysfast>" +
+  '<span><b>Always fast</b><span class=rs-mixed hidden></span>' +
+  "<span class=rs-sub>Every session runs in Claude Code's fast mode whenever its model allows it (Opus-only, billed at a premium): a session on Opus starts fast, and one that lands on Opus later turns fast at the end of its turn. A session you set to Slow from its statusline stays slow. Off by default. Follows to every connected machine's kernel.</span>" +
+  '</span></label>' +
+  "<label class='rs-row'><input type=checkbox id=rs-retryupgrade>" +
+  '<span><b>Retry upgrades after downgrades</b><span class=rs-mixed hidden></span>' +
+  "<span class=rs-sub>When a session's model changes to a lower tier without a pick (the automatic fallback the Completed card reports), ask for the picked model again every ten minutes, at a turn boundary, until a turn is served on it; a card says when it is back. Off by default. Follows to every connected machine's kernel.</span>" +
+  '</span></label>' +
   // CHAT HISTORY (2026-09-15): every chat loaded from its first message for every page, instead of from the saved document's
   // cut with the history above it loading as the user scrolls; the lever for a page that cannot fill the region above the cut.
   // Per-install, like Thinking summaries: the floor is this kernel's build decision; the kernel reads it live at every push.
@@ -385,6 +398,7 @@ function initGear(post, opts) {
     pn = { timeline: document.getElementById('rs-pane-timeline'), fleet: document.getElementById('rs-pane-fleet'), feed: document.getElementById('rs-pane-feed') },
     ths = document.getElementById('rs-thinksum'),
     wcf = document.getElementById('rs-wholechat'),
+    afb = document.getElementById('rs-alwaysfast'), rub = document.getElementById('rs-retryupgrade'),   // the Chat pane's model switches (2026-09-17)
     tk = document.getElementById('rs-tasktrack'),
     ans = document.getElementById('rs-autonudge-split'), asub = document.getElementById('rs-autonudge-sub');
   // No default for tabWidgets (round one, HIGH): an injected empty object won over a pre-widgets store's tabCtx, so the
@@ -1384,6 +1398,11 @@ function initGear(post, opts) {
   if (jf) jf.addEventListener('change', function () { post({ type: 'setJudgeFast', enabled: jf.checked, gt: gclock.stamp('judge-fast') }); judgeFastGate(); });   // the hint follows the box (a refusal reads only on a checked box)
   if (df) df.addEventListener('change', function () { post({ type: 'setDistillFast', enabled: df.checked, gt: gclock.stamp('distill-fast') }); judgeFastGate(); });   // the hint follows the box (a refusal reads only on a checked box)
   if (xf) xf.addEventListener('change', function () { post({ type: 'setIndexFast', enabled: xf.checked, gt: gclock.stamp('index-fast') }); judgeFastGate(); });   // the hint follows the box (a refusal reads only on a checked box)
+  // the Chat pane's model switches (the user 2026-09-17): kernel settings like the judge boxes (stamped, propagated); the
+  // SDK backend reads Always fast at connect and on a model change, Retry upgrades from its tick — no gate: the kernel
+  // decides per session whether the model can run fast, and the switch is a standing wish, not a per-model verdict
+  if (afb) afb.addEventListener('change', function () { post({ type: 'setAlwaysFast', enabled: afb.checked, gt: gclock.stamp('always-fast') }); });
+  if (rub) rub.addEventListener('change', function () { post({ type: 'setRetryUpgrade', enabled: rub.checked, gt: gclock.stamp('retry-upgrade') }); });
   // Fast mode is an Opus-only research preview (render.ts fastAvailable and cmtFastGate above, the same rule),
   // and the judges' opt-in rides only a call whose model is Opus: with no tier on Opus the box is inert, so it
   // greys and its hint says why (a review finding on the setting's first cut: with the default tiers the box
@@ -1482,6 +1501,7 @@ function initGear(post, opts) {
     'comment-model': 'Comment model', 'comment-effort': 'Comment effort',
     'comment-fast': 'Fast comment threads',
     'judge-fast': 'Fast mode (triage judges)', 'distill-fast': 'Fast mode (distilling judges)', 'index-fast': 'Fast mode (indexing judges)',
+    'always-fast': 'Always fast', 'retry-upgrade': 'Retry upgrades after downgrades',
     'thinking-summaries': 'Thinking summaries', 'whole-chat-frames': 'Always load whole chats' };
   // store name → the message type that sets it: the whitelist for the toast's Apply anyway (a frame
   // may re-issue the one setting it names, nothing else) and the completeness pin's map
@@ -1493,7 +1513,8 @@ function initGear(post, opts) {
     'index-model': 'setIndexModel', 'index-effort': 'setIndexEffort', 'judge-concurrency': 'setJudgeConcurrency',
     'distill-model': 'setDistillModel', 'distill-effort': 'setDistillEffort',
     'comment-model': 'setCommentModel', 'comment-effort': 'setCommentEffort', 'comment-fast': 'setCommentFast',
-    'judge-fast': 'setJudgeFast', 'distill-fast': 'setDistillFast', 'index-fast': 'setIndexFast' };
+    'judge-fast': 'setJudgeFast', 'distill-fast': 'setDistillFast', 'index-fast': 'setIndexFast',
+    'always-fast': 'setAlwaysFast', 'retry-upgrade': 'setRetryUpgrade' };
   // store name → the words its select shows for the sentinel options whose value is not the word. The
   // effort selects' Default is the EMPTY value (no effort flag), which read as no value at all, so a
   // refused Default pick drew the value-less copy and a plain Apply anyway — in the frozen-tab case, the
@@ -1768,7 +1789,8 @@ function initGear(post, opts) {
      ['indexEffort', ie], ['judgeConcurrency', jc], ['distillModel', dm], ['distillEffort', de], ['fileEditing', fe],
      ['compactSuggest', csg], ['taskTracking', tk],
      ['commentModel', cmm], ['commentEffort', cme], ['commentFast', cmf],
-     ['judgeFast', jf], ['distillFast', df], ['indexFast', xf]].forEach(function (pair) {
+     ['judgeFast', jf], ['distillFast', df], ['indexFast', xf],
+     ['alwaysFast', afb], ['retryUpgrade', rub]].forEach(function (pair) {
       var key = pair[0], el = pair[1];
       if (!el) return;
       // the mark nearest the control: a checkbox's own <label> (the fast-mode box shares the Triage model
@@ -1821,6 +1843,8 @@ function initGear(post, opts) {
     if (jf && typeof v.judgeFast === 'string') jf.checked = v.judgeFast === 'on';   // RAW on/off: the kernel's persisted answer
     if (df && typeof v.distillFast === 'string') df.checked = v.distillFast === 'on';
     if (xf && typeof v.indexFast === 'string') xf.checked = v.indexFast === 'on';
+    if (afb && typeof v.alwaysFast === 'string') afb.checked = v.alwaysFast === 'on';   // RAW on/off: the kernel's persisted answer (2026-09-17)
+    if (rub && typeof v.retryUpgrade === 'string') rub.checked = v.retryUpgrade === 'on';
     fastRefused = (v.fastRefused && typeof v.fastRefused === 'object') ? v.fastRefused : {};
     cmtFastGate(false);
     judgeFastGate();   // the tiers are set above; the boxes follow them

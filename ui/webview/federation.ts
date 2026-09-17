@@ -82,7 +82,8 @@ const KERNEL_SETTING = new Set(["setAutoNudge", "setJudgeModel", "setIndexModel"
                                 "setDistillModel", "setDistillEffort", "setFileEditing",
                                 "setCompactSuggest", "setTaskTracking",   // T404: the master switch, one value across machines
                                 "setCommentModel", "setCommentEffort", "setCommentFast",
-                                "setJudgeFast", "setDistillFast", "setIndexFast"]);   // Fast mode per judge tier, one value across machines
+                                "setJudgeFast", "setDistillFast", "setIndexFast",   // Fast mode per judge tier, one value across machines
+                                "setAlwaysFast", "setRetryUpgrade"]);   // the chat's model switches (2026-09-17), one value across machines
 
 // ── what a send to a host whose relay socket is NOT open does, by message class (2026-09-10) ─────────
 // Three classes, decided by an EXPLICIT list — never guessed from the type's spelling at run time:
