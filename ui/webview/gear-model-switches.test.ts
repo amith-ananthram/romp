@@ -41,7 +41,7 @@ test("the rows' words: off by default, follows to every connected machine, and w
     assert.equal((s.match(/class=rs-sub/g) || []).length, 1, "one rs-sub per row (the hover popover)");
   }
   assert.match(af, /fast mode/); assert.match(af, /Opus-only, billed at a premium/); assert.match(af, /set to Slow from its statusline stays slow/);
-  assert.match(ru, /lower tier without a pick/); assert.match(ru, /every ten minutes, at a turn boundary/); assert.match(ru, /a card says when it is back/);
+  assert.match(ru, /lower tier without a pick/); assert.match(ru, /every ten minutes, once the session is quiet/); assert.match(ru, /a card says when it is back/);
   assert.doesNotMatch(af + ru, /fleet/i);
 });
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Retry upgrades after downgrades (the user 2026-09-17): a kernel-side switch (Settings, Chat, Model; STATE/retry-upgrade)
 under which a session whose model fell to a lower tier without a pick asks for its pick again every RETRY_UPGRADE_S at a
-turn boundary — a reconnect (request_reconnect: now if idle, at the turn's end if busy) whose connect re-asserts the pick —
+quiet moment — a reconnect (want_switch_reconnect: now if nothing runs, else at the event that ends the last of it) whose connect re-asserts the pick —
 until a parent turn is SERVED on the pick's tier again (the AssistantMessage learn, never the init's report or a context
 refresh), which mints the "back on" card through the kernel-wired hook; a pick of the user's own, the session's end or the
 switch going off end it too. A fallback that happens again while armed is logged, not carded again. The fallback's cause
@@ -111,7 +111,8 @@ class TheTick(unittest.TestCase):
             self.assertEqual(be.retry_model_upgrades(now), 0, "not due yet")
             self.assertEqual(s._asks, [])
             self.assertEqual(be.retry_model_upgrades(now + sb.RETRY_UPGRADE_S + 1), 1, "due: one ask")
-            self.assertEqual(len(s._asks), 1, "request_reconnect, deferred: now if idle, at the turn's end if busy")
+            self.assertEqual(len(s._asks), 1, "the session is quiet: one immediate reconnect (defer=False)")
+            self.assertEqual(s._asks[0], (), "…through request_reconnect(defer=False), a keyword the stub drops")
             self.assertEqual(s._upgrade_retry["attempts"], 1)
             self.assertEqual(be.retry_model_upgrades(now + sb.RETRY_UPGRADE_S + 2), 0, "…and not again until the next cadence")
             self.assertEqual(be.retry_model_upgrades(now + 2 * sb.RETRY_UPGRADE_S + 3), 1)
@@ -212,6 +213,27 @@ class KernelWiring(unittest.TestCase):
         self.assertIn('self._learn_model(pretty_model(m), raw=str(m), served=True)', src, "the parent AssistantMessage is the served evidence")
         self.assertEqual(src.count("served=True"), 1, "…and the ONLY served learn: the init's report of the configured model passes no flag")
         self.assertIn('self._learn_model(pretty_model(d.get("model")), raw=str(d.get("model") or ""))', src, "the init learn, flagless")
+
+
+class ABusySessionIsNotCut(unittest.TestCase):
+    def test_a_due_attempt_on_a_busy_session_waits_for_quiet_and_no_second_attempt_stacks_on_it(self):
+        be = _backend(); Path(be.state_dir, sb.RETRY_UPGRADE_STORE).write_text("on")
+        with _Hooks():
+            s = _sess(be)
+            s._learn_model("Opus 5", raw="claude-opus-5", served=True)
+            s.inflight = 1
+            now = time.time()
+            self.assertEqual(be.retry_model_upgrades(now + sb.RETRY_UPGRADE_S + 1), 1, "due: the attempt is asked for")
+            self.assertEqual(s._asks, [], "…but nothing reconnects mid-turn, and never through the deferred road")
+            self.assertFalse(s._reconnect_when_idle)
+            self.assertEqual(s._switch_wanted, "retry upgrade")
+            self.assertTrue(any("once the session is quiet" in m for m in be._logs if m.startswith("retry upgrade (web): attempt 1")), be._logs)
+            self.assertEqual(be.retry_model_upgrades(now + 2 * sb.RETRY_UPGRADE_S + 2), 0, "a cadence later, still busy: no attempt stacks on the standing ask")
+            self.assertEqual(s._upgrade_retry["attempts"], 1)
+            s.inflight = 0
+            self.assertTrue(s._try_switch_reconnect(), "the settle's try: quiet now, carried")
+            self.assertEqual(len(s._asks), 1)
+            self.assertGreaterEqual(s._upgrade_retry["next"], time.time() + sb.RETRY_UPGRADE_S - 5, "the next attempt counts from the carried reconnect")
 
 
 if __name__ == "__main__":

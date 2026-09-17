@@ -299,9 +299,11 @@ following to every connected machine's kernel):
 - **Always fast** runs every session in fast mode whenever its model allows it
   (Opus-only, billed at a premium). The kernel arms the CLI's fast-mode opt-in at
   each connect for a session whose model is Opus, and when a session lands on Opus
-  later, by a pick or by an automatic fallback, it reconnects at the end of the
-  turn to arm it then; turning the switch on or off reaches every running session
-  the same way, at the end of its turn. A session you set to **Slow** from its
+  later, by a pick or by an automatic fallback, it reconnects to arm it as soon as
+  the session is quiet: no turn in flight or queued, no subagent, no background
+  task, so nothing is cut (the wait is said once in the kernel log, with what is
+  running); turning the switch on or off reaches every running session the same
+  way. A session you set to **Slow** from its
   statusline stays slow until you set it to **Fast** again, and a comment thread
   launched slow, or forked from a slow session, counts as such a pick. If the CLI refuses fast mode for a
   session with a reason (extra usage off, an organisation gate), the kernel log
@@ -312,8 +314,8 @@ following to every connected machine's kernel):
 - **Retry upgrades after downgrades** acts when a session's model changes to a
   lower tier without a pick, the automatic fallback the Completed card reports
   (`Model changed automatically: … → …`). Every ten minutes the kernel asks for
-  the picked model again by reconnecting the session, now if it is idle, at the
-  end of the turn if it is busy, so nothing is cut; a fresh CLI starts on the pick
+  the picked model again by reconnecting the session as soon as it is quiet, the
+  same rule as above, so nothing is cut; a fresh CLI starts on the pick
   (or the account default when nothing is picked). A session that already sits
   below its pick when you turn the switch on is taken up at once. A fallback that
   happens again is logged once per attempt; its card follows the board's usual

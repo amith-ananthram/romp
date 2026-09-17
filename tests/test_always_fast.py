@@ -8,6 +8,7 @@ arrives on a connection made without the flag. Hermetic state, synthetic sids, n
 import inspect
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from romp_load import load_source
@@ -133,7 +134,7 @@ class AModelThatCanRunFastArrives(unittest.TestCase):
         be = _backend(); _switch(be, sb.ALWAYS_FAST_STORE, "on")
         s = _sess(be, liveModel="Fable 5.1", liveModelId="claude-fable-5-1")
         s._fast_unlocked = False
-        self.assertEqual(len(self._learn(be, s, "Opus 5", "claude-opus-5")), 1, "Opus arrived on a connection made without the flag: reconnect (at the turn's end if busy)")
+        self.assertEqual(len(self._learn(be, s, "Opus 5", "claude-opus-5")), 1, "Opus arrived on a connection made without the flag, the session is quiet: reconnect now")
         self.assertTrue(any("always fast (web)" in m and "Opus 5" in m for m in be._logs), be._logs)
 
     def test_nothing_when_the_flag_is_already_there_the_switch_is_off_or_the_session_is_on_slow(self):
@@ -173,6 +174,95 @@ class TheCliRefusesTheRule(unittest.TestCase):
         self.assertEqual(len([m for m in be._logs if m.startswith("always fast (web): the CLI refused")]), 1, "the same reason again is not said again")
         self.assertIn('refused_ask = bool(reason) and self.fast_opt and fast != "on"', inspect.getsource(sb.SdkSession._adopt_fast_state),
                       "the user's own ask keeps its refusal path unchanged")
+
+
+class TheAskWaitsForAQuietSession(unittest.TestCase):
+    """2026-09-17: the rule's deferred turn's-end reconnect force-killed a CLI whose turn had ended with three subagents and a
+    background task still running inside it. A switch's ask now stands until the session is QUIET (no turn in flight or
+    queued, no live subagent, no background task) and is carried at the exact event that ends the last of it: the turn's
+    result, a subagent's stop, a task's end — with the kernel's tick as the backstop. Never through request_reconnect's
+    deferred road, which is a user's own gesture on the session and accepts what it cuts."""
+    def _armed(self, **state):
+        be = _backend(); _switch(be, sb.ALWAYS_FAST_STORE, "on")
+        s = _sess(be, liveModel="Fable 5.1", liveModelId="claude-fable-5-1")
+        s._fast_unlocked = False
+        for k, v in state.items():
+            setattr(s, k, v)
+        s._asks = []; s.request_reconnect = lambda *a, **k: s._asks.append((a, k))
+        s._learn_model("Opus 5", raw="claude-opus-5")
+        return be, s
+
+    def test_a_turn_in_flight_holds_the_ask_and_the_result_carries_it(self):
+        be, s = self._armed(inflight=1)
+        self.assertEqual(s._asks, [], "mid-turn: no reconnect of any kind")
+        self.assertEqual(s._switch_wanted, "always fast", "the ask stands")
+        self.assertFalse(s._reconnect_when_idle, "never the deferred turn's-end road: that one cuts live work")
+        waits = [m for m in be._logs if "waiting for the session to go quiet" in m]
+        self.assertEqual(len(waits), 1, be._logs); self.assertIn("a turn in flight", waits[0]); self.assertIn("nothing is cut", waits[0])
+        s._learn_model("Sonnet 5", raw="claude-sonnet-5"); s._learn_model("Opus 5", raw="claude-opus-5")
+        self.assertEqual(len([m for m in be._logs if "waiting for the session to go quiet" in m]), 1, "said once per ask")
+        s.inflight = 0                       # the settle sets inflight 0, then asks (the elif at the result)
+        self.assertTrue(s._try_switch_reconnect())
+        self.assertEqual(s._asks, [((), {"defer": False})], "carried as an IMMEDIATE reconnect, whose loop-side re-check stands")
+        self.assertEqual(s._switch_wanted, "")
+        self.assertTrue(any("the session is quiet — reconnecting now" in m for m in be._logs), be._logs)
+
+    def test_a_live_subagent_holds_the_ask_and_its_stop_hook_carries_it(self):
+        be, s = self._armed()
+        s._asks.clear(); s._switch_wanted = "always fast"    # re-armed for the walk: the first learn found it quiet and asked
+        with s._sub_lock:
+            s._subagents["a1"] = {"type": "Task", "since": 1}
+        self.assertFalse(s._try_switch_reconnect())
+        self.assertEqual(s._asks, [])
+        self.assertIn("1 subagent running", [m for m in be._logs if "waiting" in m][-1])
+        import asyncio
+        asyncio.run(s._subagent_stop_hook({"agent_id": "a1"}, None, None))
+        self.assertEqual(len(s._asks), 1, "the last subagent's end is the event that carries the ask")
+
+    def test_a_background_task_holds_the_ask_and_its_end_carries_it(self):
+        be, s = self._armed()
+        s._asks.clear(); s._switch_wanted = "always fast"
+        with s._sub_lock:
+            s._bg_tasks["t1"] = {"desc": "x", "type": "local_bash", "since": 1, "toolUseId": "", "lastTool": ""}
+        self.assertFalse(s._try_switch_reconnect())
+        self.assertIn("1 background task running", [m for m in be._logs if "waiting" in m][-1])
+        s._on_task_event("task_notification", {"task_id": "t1", "status": "completed"})
+        self.assertEqual(len(s._asks), 1, "the task's end is the event that carries the ask")
+
+    def test_a_queued_turn_holds_it_and_a_reconnect_already_on_its_way_stands_it_down(self):
+        be, s = self._armed(_pending=["hi"])
+        self.assertEqual(s._asks, []); self.assertIn("a queued turn", [m for m in be._logs if "waiting" in m][-1])
+        s._reconnect_when_idle = True        # the user's own effort pick meanwhile: its reconnect carries the flag
+        self.assertFalse(s._try_switch_reconnect())
+        self.assertEqual((s._switch_wanted, s._asks), ("", []), "stood down to the reconnect on its way")
+
+    def test_the_tick_is_the_backstop_and_a_dropped_immediate_reconnect_re_raises_the_ask(self):
+        be, s = self._armed(inflight=1)
+        self.assertEqual(be.retry_model_upgrades(time.time()), 0, "the retry switch is off: no attempt; the standing ask is still nudged")
+        self.assertEqual(s._asks, [], "…and still busy: nothing")
+        s.inflight = 0
+        be.retry_model_upgrades(time.time())
+        self.assertEqual(len(s._asks), 1, "quiet at the tick: carried")
+        # the loop-side re-check of the immediate form dropped it (work registered meanwhile): the ask stands again
+        s._last_switch_why = "always fast"; s._switch_wanted = ""
+        s._re_raise_switch_ask()
+        self.assertEqual(s._switch_wanted, "always fast")
+
+
+class TheCliSaysWhichConnectionsHaveNoFlag(unittest.TestCase):
+    def test_sdk_opt_in_required_reads_the_flag_back_as_absent_and_asks_the_rule_again(self):
+        # An attach to a CLI that survived a kernel restart snapshots _fast_unlocked from the rule's answer, not the spawn's
+        # fact; the CLI's sdk_opt_in_required is the fact (2026-09-17)
+        be = _backend(); _switch(be, sb.ALWAYS_FAST_STORE, "on")
+        s = _sess(be, liveModel="Opus 5", liveModelId="claude-opus-5")
+        s._fast_unlocked = True
+        s._asks = []; s.request_reconnect = lambda *a, **k: s._asks.append(a)
+        s._adopt_fast_state({"fast_mode_state": "off", "fast_mode_disabled_reason": "sdk_opt_in_required"})
+        self.assertFalse(s._fast_unlocked, "the CLI's own word: this connection was made without the flag")
+        self.assertEqual(len(s._asks), 1, "…so the rule asks for the flag from the truth (quiet: now)")
+        self.assertEqual(s.fast_reason, "", "the opt-in reason stays blanked for the badge, as before")
+        s._adopt_fast_state({"fast_mode_state": "on"})
+        self.assertEqual(len(s._asks), 1, "a flagged connection's reports move nothing")
 
 
 if __name__ == "__main__":

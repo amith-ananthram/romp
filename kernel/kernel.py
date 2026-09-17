@@ -10363,7 +10363,8 @@ def _model_switches_applied():
 def _retry_upgrade_tick(now):
     """Retry upgrades after downgrades (Settings, Chat, Model): every RETRY_UPGRADE_TICK_S, the SDK backend asks for the
     picked model again on every session whose model fell back and whose attempt is due (retry_model_upgrades reads the
-    switch itself, so off costs a file stat). No backend, nothing."""
+    switch itself, so off costs a file stat), and carries any switch's ask still waiting for a quiet session — the
+    backstop behind the live-work events that carry them first. No backend, nothing."""
     if now - _retry_upgrade_last[0] < RETRY_UPGRADE_TICK_S:
         return
     _retry_upgrade_last[0] = now

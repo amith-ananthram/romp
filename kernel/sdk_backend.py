@@ -5478,6 +5478,11 @@ class SdkSession:
         self._wake: asyncio.Event | None = None
         self._reconnect = False                 # the current break is a reconnect (not a shutdown)
         self._reconnect_when_idle = False        # a reconnect was requested mid-turn → apply at turn end
+        self._switch_wanted = ""    # a Model switch's standing ask for a reconnect ("always fast" / "retry upgrade"), applied by
+        #   _try_switch_reconnect the moment the session is QUIET (no turn in flight or queued, no live subagent or background
+        #   task), never at a bare turn's end: the deferred road fired at the result and force-killed a CLI with three subagents
+        #   and a background task still running inside it (2026-09-17). A switch is nobody's gesture on the session, so it cuts nothing.
+        self._switch_wait_said = ""  # the ask the 'waiting for quiet' line was said for, once per ask
         self._settled_msg = None                 # the ResultMessage whose settle ran last (its finally records
         #   it) — what _note_message_failure reads to say whether a failed result's turn still settled
         # The handshake as a cross-thread EVENT: set the moment a ClaudeSDKClient is up, cleared when
@@ -5919,14 +5924,24 @@ class SdkSession:
                 if busy_work:
                     self.backend._log("reconnect (%s): live work registered before the reconnect ran; not "
                                       "reconnected, ask again when it is quiet" % self.name)
+                    self._re_raise_switch_ask()
                     return
             self._reconnect = True
+            self._last_switch_why = ""   # armed: a later drop is some other ask's
             self._wake_set()
         elif defer:
             self._reconnect_when_idle = True   # the ResultMessage handler fires it when the turn ends
         else:
             self.backend._log("reconnect (%s): became busy before the reconnect ran; not reconnected, ask "
                               "again when it is quiet" % self.name)
+            self._re_raise_switch_ask()
+
+    def _re_raise_switch_ask(self):
+        """An immediate reconnect a switch asked for was dropped by the loop-side re-check (work registered between the
+        quiet read and the run): the ask stands again, so the next live-work event or tick carries it."""
+        why = getattr(self, "_last_switch_why", "")
+        if why and not getattr(self, "_switch_wanted", ""):
+            self._switch_wanted = why
 
     def _reconcile_stranded(self):
         """RECONCILE ACROSS A RECONNECT, at the loop's top where no client is connected so nothing can
@@ -6344,18 +6359,92 @@ class SdkSession:
     def _after_model_change(self, old, pm):
         """The live model just changed (a learn, a context refresh): the machine's Always fast switch may now want the
         flag this connection was made without — a model that can run fast mode arrived, by a pick to Opus or a fallback
-        onto it. The flag rides the connect, so ask for one: now if idle, at the turn's end if busy (request_reconnect,
-        the /effort road). A session whose own ask stands (fast_opt) is set_fast's to reconnect, not this. One ask per
-        connection: a reconnect already requested (the flag, or anything else) is not asked for again."""
+        onto it. The flag rides the connect, so ask for one — through want_switch_reconnect, which applies it the moment
+        the session is quiet and never cuts a turn, a subagent or a background task. A session whose own ask stands
+        (fast_opt) is set_fast's to reconnect, not this. One ask per connection: a reconnect already requested or wanted
+        (the flag, or anything else) is not asked for again."""
         try:
-            if getattr(self, "_reconnect_when_idle", False) or getattr(self, "_reconnect", False):
+            if self._switch_wanted or getattr(self, "_reconnect_when_idle", False) or getattr(self, "_reconnect", False):
                 return
             if not getattr(self, "fast_opt", False) and not getattr(self, "_fast_unlocked", False) and self.fast_effective():
                 self.backend._log("always fast (%s): %s can run fast mode — reconnecting with the opt-in%s"
-                                  % (self.name, pm, "" if getattr(self, "inflight", 0) == 0 else " at the turn's end"))
-                self.request_reconnect()
+                                  % (self.name, pm, "" if self.quiet() else " once the session is quiet"))
+                self.want_switch_reconnect("always fast")
         except Exception as e:
             self.backend._log("always fast (%s): %s" % (self.name, e), problem=True)
+
+    def live_work(self):
+        """(subagents, background tasks) running inside the CLI right now, read under the lock."""
+        lock = getattr(self, "_sub_lock", None)
+        if lock is None:
+            return 0, 0
+        with lock:
+            return len(getattr(self, "_subagents", ()) or ()), len(getattr(self, "_bg_tasks", ()) or ())
+
+    def quiet(self) -> bool:
+        """Nothing a reconnect would cut: no turn in flight, none queued, no live subagent, no background task. The
+        loop-side re-check in _do_request_reconnect(defer=False) is the authority; this is the same question asked from
+        wherever a switch's ask is considered (the settle, a hook, the kernel's tick)."""
+        if getattr(self, "inflight", 0) or getattr(self, "_pending", None):
+            return False
+        a, b = self.live_work()
+        return not (a or b)
+
+    def _busy_words(self) -> str:
+        parts = []
+        if getattr(self, "inflight", 0):
+            parts.append("a turn in flight")
+        elif getattr(self, "_pending", None):
+            parts.append("a queued turn")
+        a, b = self.live_work()
+        if a:
+            parts.append("%d subagent%s" % (a, "" if a == 1 else "s"))
+        if b:
+            parts.append("%d background task%s" % (b, "" if b == 1 else "s"))
+        return ", ".join(parts) or "live work"
+
+    def want_switch_reconnect(self, why: str) -> None:
+        """A Model switch (Always fast: `why` "always fast"; Retry upgrades after downgrades: "retry upgrade") wants this
+        session reconnected so the connect can carry what it decided (the flag, the pick). The ask stands until the session
+        is QUIET and is applied then, by _try_switch_reconnect at the exact events that end live work (the turn's result,
+        a subagent's stop, a background task's end) with the kernel's 30 s tick behind them as the backstop. Never the
+        deferred turn's-end reconnect: that road is a user's own gesture on the session (an effort or fast pick) and
+        accepts what it cuts; a machine-wide switch is nobody's gesture on this session and must cut nothing (2026-09-17,
+        a session whose three subagents and background task died at its turn's end for the flag). Any thread."""
+        if getattr(self, "ended", False):
+            return
+        self._switch_wanted = why
+        loop = getattr(self, "loop", None)
+        if loop is not None:
+            loop.call_soon_threadsafe(self._try_switch_reconnect)
+        else:
+            self._try_switch_reconnect()   # not connected yet (or a test double): the connect reads the switch itself
+
+    def _try_switch_reconnect(self) -> bool:
+        """Apply the standing switch ask if the session is quiet now; otherwise keep it, saying once what it waits for.
+        A reconnect already on its way carries the switch's decision, so the ask stands down to it. When the ask is
+        carried, the upgrade retry's next attempt counts from here, not from the tick that asked. Loop thread (the
+        hooks and the settle run there; want_switch_reconnect schedules onto it)."""
+        why = getattr(self, "_switch_wanted", "")
+        if not why or getattr(self, "ended", False):
+            return False
+        if getattr(self, "_reconnect", False) or getattr(self, "_reconnect_when_idle", False):
+            self._switch_wanted = self._switch_wait_said = ""
+            return False
+        if not self.quiet():
+            if self._switch_wait_said != why:
+                self._switch_wait_said = why
+                self.backend._log("%s (%s): waiting for the session to go quiet before the reconnect — %s running; "
+                                  "nothing is cut" % (why, self.name, self._busy_words()))
+            return False
+        self._switch_wanted = self._switch_wait_said = ""
+        self._last_switch_why = why
+        arm = getattr(self, "_upgrade_retry", None)
+        if arm:   # the cadence counts from the reconnect that carried the ask (never earlier than the tick's own stamp)
+            arm["next"] = max(arm.get("next", 0) or 0, time.time() + RETRY_UPGRADE_S)
+        self.backend._log("%s (%s): the session is quiet — reconnecting now" % (why, self.name))
+        self.request_reconnect(defer=False)   # the loop-side re-check stands: work that registered meanwhile drops it,
+        return True                           #   and the next event or tick asks again (the ask is re-raised below)
 
     def _arm_upgrade_retry(self, frm, to):
         """A down-tier model change nobody asked for just landed (the card's branch in _learn_model): with the gear's
@@ -6367,7 +6456,7 @@ class SdkSession:
         self._upgrade_retry = {"from": frm, "to": to, "pick": getattr(self, "chosen_model", "") or "",
                                "since": now, "next": now + RETRY_UPGRADE_S, "attempts": 0}
         self.backend._log("retry upgrade (%s): %s fell back to %s — the picked model is asked for again every %d min, "
-                          "at a turn boundary, until a turn is served on it" % (self.name, frm, to, int(RETRY_UPGRADE_S // 60)))
+                          "when the session is quiet, until a turn is served on it" % (self.name, frm, to, int(RETRY_UPGRADE_S // 60)))
 
     def _retry_armed(self):
         """The standing retry, or None — and None as well once the switch is off (review 2026-09-17: an arm that outlived
@@ -6417,6 +6506,15 @@ class SdkSession:
             fast = self._fast_expect
         self._fast_expect = ""
         reason = str(d.get("fast_mode_disabled_reason") or "")
+        # …and it is the CLI's own word that THIS connection was made without the flag. _amain snapshots _fast_unlocked
+        # from fast_effective at the connect, which for an ATTACH to a CLI that survived a kernel restart is the rule's
+        # wish today, not the spawn's fact (a switch turned on across the restart read as already armed, so the rule
+        # never asked and the session stayed slow; and set_fast would have sent a literal '/fast on' the CLI refuses).
+        # The readback corrects it, and the rule is asked again from the truth (2026-09-17).
+        relearn = False
+        if reason == "sdk_opt_in_required" and getattr(self, "_fast_unlocked", False):
+            self._fast_unlocked = False
+            relearn = True
         # 'sdk_opt_in_required' is NOT a refusal to respect — it is the one refusal romp is
         # BUILT to cure (set_fast reconnects with the fastMode flag-settings opt-in), and the
         # CLI stamps it on EVERY connect made without the flag (verified live 2026-08-10 on
@@ -6477,8 +6575,9 @@ class SdkSession:
                 self.backend._log("fast mode (%s): could not tell the chat about the refusal: %s"
                                   % (self.name, e))
             self.request_reconnect()
+        if relearn:
+            self._after_model_change(self.model, self.model)   # the flag this connection lacks, asked for from the truth
         return changed or refused_ask
-
     async def _do_adopt_server_info(self):
         """Fast-mode state at CONNECT, before any turn. The init message _adopt_fast_state feeds on
         only streams WITH a turn — so after a kernel restart every session's fast badge sat blank
@@ -8210,6 +8309,8 @@ class SdkSession:
                     self._reconnect_when_idle = False
                     self._reconnect = True     # inputs() holds the queue from here: the wake above cannot feed
                     self._wake_set()           #   the head to THIS client — the new one takes it (see inputs)
+                elif getattr(self, "_switch_wanted", ""):   # a Model switch's ask: carried only if the session is quiet now
+                    self._try_switch_reconnect()   #   (no queued turn, no live subagent or background task)
                 for what, err in failed:
                     # The report is guarded too: _log runs the kernel's log callback
                     # bare, and a callback raising here (a closed stderr under a service restart) would
@@ -9009,6 +9110,7 @@ class SdkSession:
             with self._sub_lock:
                 self._subagents.pop(aid, None)
             self.backend._poke()
+            self._try_switch_reconnect()   # the last subagent's end may be what a switch's ask waited for
         return {}
 
     def _live_subagents(self) -> list:
@@ -9168,6 +9270,7 @@ class SdkSession:
                 self._subagents.pop(a, None)
         if drop:
             self.backend._poke()
+            self._try_switch_reconnect()
 
     # ---- background-task tracking (the CLI's task lifecycle stream) ----
 
@@ -9235,6 +9338,7 @@ class SdkSession:
                 self.backend._log("background tasks (%s): registry mirror write failed: %s" % (self.name, e))
         if changed or sub_changed:
             self.backend._poke()
+            self._try_switch_reconnect()   # a task's end may be what a switch's ask waited for
 
     def request_stop_task(self, tool_use_id: str) -> bool:
         """Stop ONE background task by the id the chat box shows (its tool-use id). Resolved to the
@@ -14566,12 +14670,18 @@ class SdkBackend:
         """Retry upgrades after downgrades (the user 2026-09-17), the kernel's tick: for every live session whose model
         fell to a lower tier without a pick (SdkSession._arm_upgrade_retry, at the fallback card's branch) and whose next
         attempt is due, ask for the pick again — a reconnect, which re-asserts `--model <pick>` (or the account default
-        when there is no pick) on a fresh CLI, now if the session is idle and at the turn's end if busy (request_reconnect):
-        a turn is never cut. Every RETRY_UPGRADE_S until a parent turn is served on the pick's tier again
+        when there is no pick) on a fresh CLI, the moment the session is quiet (want_switch_reconnect: no turn in flight or
+        queued, no live subagent or background task): nothing is cut. Every RETRY_UPGRADE_S until a parent turn is served on the pick's tier again
         (_note_model_served clears the arm and mints the "back on" card), the user picks a model (set_model clears it),
         the session ends, or the switch is turned off — read here at every tick, so off leaves an armed session inert.
         Returns how many sessions were asked this tick. The fallback's cause is outside romp's view (the trigger lives in
         the task's context and ages out of the window), so the cadence is the designed read; the boundary is the event."""
+        for s in list(self.sessions.values()):
+            # the standing asks first, whatever the switch says — the Always fast flag's asks wait here too. The events
+            # that end live work carry an ask the moment they happen; the tick is the backstop behind them (an ask
+            # dropped by the loop-side re-check, a session that went quiet through a road with no hook)
+            if getattr(s, "_switch_wanted", "") and not getattr(s, "ended", False):
+                s.want_switch_reconnect(s._switch_wanted)
         if not retry_upgrade_on(self.state_dir):
             for s in list(self.sessions.values()):
                 s._retry_armed()               # off ends every standing retry, said once each (review 2026-09-17)
@@ -14585,11 +14695,14 @@ class SdkBackend:
             th = getattr(s, "thread", None)
             if th is not None and not th.is_alive():
                 continue
+            if getattr(s, "_switch_wanted", ""):
+                continue                       # an ask stands (the session has not been quiet since): no attempt on top of it
             arm["attempts"] = arm.get("attempts", 0) + 1
-            arm["next"] = now + RETRY_UPGRADE_S
-            self._log("retry upgrade (%s): attempt %d — asking for %s again (the reconnect carries the pick; at the turn's "
-                      "end if one is running)" % (s.name, arm["attempts"], arm.get("from") or "the picked model"))
-            s.request_reconnect()
+            arm["next"] = now + RETRY_UPGRADE_S   # provisional; the carried reconnect re-stamps it (_try_switch_reconnect)
+            self._log("retry upgrade (%s): attempt %d — asking for %s again (the reconnect carries the pick%s)"
+                      % (s.name, arm["attempts"], arm.get("from") or "the picked model",
+                         "" if s.quiet() else "; once the session is quiet"))
+            s.want_switch_reconnect("retry upgrade")
             fired += 1
         return fired
 
@@ -14597,8 +14710,8 @@ class SdkBackend:
         """A Model switch just flipped (the kernel's arm, or a peer's propagated pick): act on the sessions that already
         run (review 2026-09-17: a switch read only at connect left an idle Opus session slow, and a session that had
         already fallen back unarmed — the very card the user was looking at). Always fast: every live session whose flag
-        should now be there, or no longer be there, reconnects (deferred: now if idle, at the turn's end if busy; a
-        session's own ask is untouched either way). Retry upgrades: every live session whose model sits below its pick
+        should now be there, or no longer be there, reconnects once it is quiet (want_switch_reconnect: now if nothing
+        runs, else at the event that ends the last of it; a session's own ask is untouched either way). Retry upgrades: every live session whose model sits below its pick
         arms now, from the pick's label; off clears through _retry_armed. Returns how many sessions were asked."""
         asked = 0
         for sid, s in list(self.sessions.items()):
@@ -14607,11 +14720,11 @@ class SdkBackend:
                 continue
             try:
                 want = s.fast_effective()
-                if want != bool(getattr(s, "_fast_unlocked", False)) and not (getattr(s, "_reconnect_when_idle", False) or getattr(s, "_reconnect", False)):
+                if want != bool(getattr(s, "_fast_unlocked", False)) and not (getattr(s, "_switch_wanted", "") or getattr(s, "_reconnect_when_idle", False) or getattr(s, "_reconnect", False)):
                     self._log("always fast (%s): the switch %s — reconnecting %s the opt-in%s"
                               % (s.name, "wants the flag" if want else "went off", "with" if want else "without",
-                                 "" if getattr(s, "inflight", 0) == 0 else " at the turn's end"))
-                    s.request_reconnect()
+                                 "" if s.quiet() else " once the session is quiet"))
+                    s.want_switch_reconnect("always fast")
                     asked += 1
                 pick = getattr(s, "chosen_model", "") or ""
                 if retry_upgrade_on(self.state_dir) and pick and pick != "default" and not getattr(s, "_upgrade_retry", None):
