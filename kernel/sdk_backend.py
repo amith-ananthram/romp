@@ -6453,8 +6453,20 @@ class SdkSession:
         (_switch_teardown_check) ask the same question."""
         if getattr(self, "inflight", 0) or getattr(self, "_pending", None) or getattr(self, "_cli_working", False):
             return False
+        if self._ask_parked():
+            return False   # a permission or picker ask waiting on the user: the turn is alive, only paused (audit 2026-09-17)
         a, b = self.live_work()
         return not (a or b)
+
+    def _ask_parked(self) -> bool:
+        """A permission prompt or a picker question is standing for this session: _mark_producing's own gate. A turn parked on
+        an ask read as quiet to the Model switches (no feed in flight, the CLI not producing), and a reconnect then cancelled
+        the ask and the tool call with it; the host road closed stdin so the answer could never land (audit 2026-09-17)."""
+        try:
+            pend = getattr(self.backend, "_pending_ask", None)
+            return bool(pend) and pend.get(self.sid) is not None
+        except Exception:
+            return False
 
     def _busy_words(self) -> str:
         parts = []
@@ -6464,6 +6476,8 @@ class SdkSession:
             parts.append("a turn the CLI opened itself")
         elif getattr(self, "_pending", None):
             parts.append("a queued turn")
+        if self._ask_parked():
+            parts.append("a question waiting on you")
         a, b = self.live_work()
         if a:
             parts.append("%d subagent%s" % (a, "" if a == 1 else "s"))

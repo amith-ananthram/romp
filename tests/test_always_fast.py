@@ -249,6 +249,18 @@ class TheAskWaitsForAQuietSession(unittest.TestCase):
         s._re_raise_switch_ask()
         self.assertEqual((s._switch_wanted, s._switch_ask_pending), ("always fast", ""))
 
+    def test_a_permission_or_picker_ask_waiting_on_the_user_holds_the_ask(self):
+        # audit 2026-09-17: a turn parked on an ask has no feed in flight and the CLI is not producing, so it read as quiet;
+        # a switch reconnect then cancelled the ask and the tool call with it
+        be, s = self._armed()
+        s._asks.clear(); s._switch_wanted = "always fast"
+        be._pending_ask[s.sid] = {"kind": "permission"}
+        self.assertFalse(s.quiet()); self.assertFalse(s._try_switch_reconnect())
+        self.assertEqual(s._asks, [])
+        self.assertIn("a question waiting on you", [m for m in be._logs if "waiting" in m][-1])
+        be._pending_ask.pop(s.sid, None)
+        self.assertTrue(s._try_switch_reconnect(), "the ask answered: quiet")
+
     def test_a_turn_the_cli_opened_itself_holds_the_ask(self):
         # 2026-09-17: inflight counts FED turns only; a background task's notification opens a turn the feeder never saw,
         # so three sessions read as quiet while running dozens of tool calls a minute and the host's end grace killed them

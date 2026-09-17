@@ -301,7 +301,8 @@ following to every connected machine's kernel):
   each connect for a session whose model is Opus, and when a session lands on Opus
   later, by a pick or by an automatic fallback, it reconnects to arm it as soon as
   the session is quiet: no turn in flight, queued, or opened by the CLI itself (a
-  background task's notification starts one), no subagent, no background task, so
+  background task's notification starts one), no question waiting on you, no
+  subagent, no background task, so
   nothing is cut (the wait is said once in the kernel log, with what is running;
   the kernel looks once more the instant before the reconnect and stands down if
   the CLI has started work since); turning the switch on or off reaches every
