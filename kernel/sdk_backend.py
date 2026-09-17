@@ -4754,6 +4754,10 @@ def fast_capable(model) -> bool:
 
 
 RETRY_UPGRADE_S = 600.0   # ten minutes between attempts to get a fallen-back session onto its picked model again: the
+SWITCH_END_GRACE_S = 1200.0   # the host's end grace for a Model switch's reconnect: a CLI that opened a turn of its own in the instant
+#   between the quiet read and the host's `end` FINISHES it (stdin is closed; it exits at the turn's end) instead of dying at the
+#   default 120 s — three sessions were force-killed mid-turn that way on 2026-09-17 (the manager's default is for a user's own switch)
+
 #   fallback's cause is outside romp's view (the user 2026-09-17: a trigger in the task's context, which ages out of
 #   the window), so a fixed cadence is the designed read, the same exception the kernel's usage poll documents; each
 #   attempt itself waits for a turn boundary (request_reconnect), never cutting a turn.
@@ -5483,6 +5487,8 @@ class SdkSession:
         #   task), never at a bare turn's end: the deferred road fired at the result and force-killed a CLI with three subagents
         #   and a background task still running inside it (2026-09-17). A switch is nobody's gesture on the session, so it cuts nothing.
         self._switch_wait_said = ""  # the ask the 'waiting for quiet' line was said for, once per ask
+        self._switch_ask_pending = ""  # the switch ask handed to request_reconnect(defer=False) and not yet armed or dropped
+        self._reconnect_switch_why = ""  # the armed reconnect is a switch's ("always fast"/"retry upgrade"): the waker's last look reads it
         self._settled_msg = None                 # the ResultMessage whose settle ran last (its finally records
         #   it) — what _note_message_failure reads to say whether a failed result's turn still settled
         # The handshake as a cross-thread EVENT: set the moment a ClaudeSDKClient is up, cleared when
@@ -5921,13 +5927,15 @@ class SdkSession:
             if not defer:
                 with self._sub_lock:             # the loop-side re-check the immediate form relies on: live work
                     busy_work = bool(self._subagents or self._bg_tasks)   # that registered since the caller looked
+                busy_work = busy_work or bool(getattr(self, "_cli_working", False))   # …or a turn the CLI opened itself
                 if busy_work:
                     self.backend._log("reconnect (%s): live work registered before the reconnect ran; not "
                                       "reconnected, ask again when it is quiet" % self.name)
                     self._re_raise_switch_ask()
                     return
             self._reconnect = True
-            self._last_switch_why = ""   # armed: a later drop is some other ask's
+            self._reconnect_switch_why = getattr(self, "_switch_ask_pending", "")   # a switch's reconnect, or "" for a user's own
+            self._switch_ask_pending = ""
             self._wake_set()
         elif defer:
             self._reconnect_when_idle = True   # the ResultMessage handler fires it when the turn ends
@@ -5939,7 +5947,8 @@ class SdkSession:
     def _re_raise_switch_ask(self):
         """An immediate reconnect a switch asked for was dropped by the loop-side re-check (work registered between the
         quiet read and the run): the ask stands again, so the next live-work event or tick carries it."""
-        why = getattr(self, "_last_switch_why", "")
+        why = getattr(self, "_switch_ask_pending", "")
+        self._switch_ask_pending = ""
         if why and not getattr(self, "_switch_wanted", ""):
             self._switch_wanted = why
 
@@ -6382,10 +6391,15 @@ class SdkSession:
             return len(getattr(self, "_subagents", ()) or ()), len(getattr(self, "_bg_tasks", ()) or ())
 
     def quiet(self) -> bool:
-        """Nothing a reconnect would cut: no turn in flight, none queued, no live subagent, no background task. The
-        loop-side re-check in _do_request_reconnect(defer=False) is the authority; this is the same question asked from
-        wherever a switch's ask is considered (the settle, a hook, the kernel's tick)."""
-        if getattr(self, "inflight", 0) or getattr(self, "_pending", None):
+        """Nothing a reconnect would cut: no turn in flight, none queued, the CLI not producing, no live subagent, no
+        background task. `inflight` counts the turns the FEEDER handed over; a turn the CLI opens by itself (a background
+        task's notification, a scheduled prompt, a peer's channel message) never passes through it, so inflight stays 0
+        while the CLI works — `_cli_working`, the stream's own busy signal (_mark_producing at the first work atom, the
+        settle's 'waiting' at the Result), is what says so. Without it three sessions read as quiet on 2026-09-17 while
+        running dozens of tool calls a minute; the host's `end` closed their stdin and its 120 s grace killed them
+        mid-turn. The loop-side re-check in _do_request_reconnect(defer=False) and the waker's last look
+        (_switch_teardown_check) ask the same question."""
+        if getattr(self, "inflight", 0) or getattr(self, "_pending", None) or getattr(self, "_cli_working", False):
             return False
         a, b = self.live_work()
         return not (a or b)
@@ -6394,6 +6408,8 @@ class SdkSession:
         parts = []
         if getattr(self, "inflight", 0):
             parts.append("a turn in flight")
+        elif getattr(self, "_cli_working", False):
+            parts.append("a turn the CLI opened itself")
         elif getattr(self, "_pending", None):
             parts.append("a queued turn")
         a, b = self.live_work()
@@ -6438,13 +6454,40 @@ class SdkSession:
                                   "nothing is cut" % (why, self.name, self._busy_words()))
             return False
         self._switch_wanted = self._switch_wait_said = ""
-        self._last_switch_why = why
+        self._switch_ask_pending = why
         arm = getattr(self, "_upgrade_retry", None)
         if arm:   # the cadence counts from the reconnect that carried the ask (never earlier than the tick's own stamp)
             arm["next"] = max(arm.get("next", 0) or 0, time.time() + RETRY_UPGRADE_S)
         self.backend._log("%s (%s): the session is quiet — reconnecting now" % (why, self.name))
         self.request_reconnect(defer=False)   # the loop-side re-check stands: work that registered meanwhile drops it,
         return True                           #   and the next event or tick asks again (the ask is re-raised below)
+
+    def _switch_teardown_check(self) -> bool:
+        """The waker's LAST look before a Model switch's reconnect tears the client down (the host's `end` closes the CLI's
+        stdin, which no later finding can reopen). True = vetoed: the CLI is at work (quiet() is false — typically a turn
+        it opened itself from a background task's notification in the seconds since the quiet read), so the reconnect
+        stands down and the switch's ask stands again for the next quiet moment. False = proceeding: the end grace on
+        this connection's host is raised to SWITCH_END_GRACE_S first, so a turn that starts in the instant left between
+        here and the `end` is finished, not killed at 120 s. A user's own reconnect (an effort or fast pick, no switch
+        why) is never touched here: that road accepts what it cuts."""
+        why = getattr(self, "_reconnect_switch_why", "")
+        if not (why and getattr(self, "_reconnect", False)) or getattr(self, "ended", False):
+            return False
+        if self.quiet():
+            host = getattr(self, "_host", None)
+            if host is not None:
+                try:
+                    host.end_grace = max(float(getattr(host, "end_grace", 0) or 0), SWITCH_END_GRACE_S)
+                except Exception as e:
+                    self.backend._log("%s (%s): could not lengthen the host's end grace: %s" % (why, self.name, e))
+            return False
+        self._reconnect = False
+        self._reconnect_switch_why = ""
+        self._switch_wanted = why
+        self._switch_wait_said = why   # the line below says it; no second 'waiting' line for the same ask
+        self.backend._log("%s (%s): the CLI started work between the ask and the reconnect — %s; the reconnect stands "
+                          "down and the ask waits for the next quiet moment; nothing is cut" % (why, self.name, self._busy_words()))
+        return True
 
     def _arm_upgrade_retry(self, frm, to):
         """A down-tier model change nobody asked for just landed (the card's branch in _learn_model): with the gear's
@@ -6848,6 +6891,7 @@ class SdkSession:
             deliberate = bool(self._reconnect) and not self._host_attach_retries
             self._deliberate_connect = deliberate    # read by _on_host_hello, where the block runs under a host
             self._reconnect = False
+            self._reconnect_switch_why = ""
             self._ping_feeding = False   # a reconnect restarts the feed — a stale hold must not wedge it
             # the abandoned client's live subagents and background tasks died with it — retire them on
             # the teardown event itself (and tell the session what it lost, as a CLI death does)
@@ -6964,7 +7008,15 @@ class SdkSession:
                     recv = asyncio.ensure_future(self._drain(client, AssistantMessage, ResultMessage, SystemMessage))
                     waker = asyncio.ensure_future(self._wake.wait())
                     try:
-                        await asyncio.wait({recv, waker}, return_when=asyncio.FIRST_COMPLETED)
+                        while True:
+                            await asyncio.wait({recv, waker}, return_when=asyncio.FIRST_COMPLETED)
+                            if waker.done() and not recv.done() and self._switch_teardown_check():
+                                # a Model switch's reconnect found the CLI at work at the last moment (a turn it opened
+                                # itself since the quiet read): this client stays up, the ask waits for quiet again
+                                self._wake.clear()
+                                waker = asyncio.ensure_future(self._wake.wait())
+                                continue
+                            break
                     finally:
                         for tk in (feeder, recv, waker):
                             tk.cancel()

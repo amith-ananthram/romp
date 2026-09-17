@@ -244,9 +244,54 @@ class TheAskWaitsForAQuietSession(unittest.TestCase):
         be.retry_model_upgrades(time.time())
         self.assertEqual(len(s._asks), 1, "quiet at the tick: carried")
         # the loop-side re-check of the immediate form dropped it (work registered meanwhile): the ask stands again
-        s._last_switch_why = "always fast"; s._switch_wanted = ""
+        s._switch_ask_pending = "always fast"; s._switch_wanted = ""
         s._re_raise_switch_ask()
-        self.assertEqual(s._switch_wanted, "always fast")
+        self.assertEqual((s._switch_wanted, s._switch_ask_pending), ("always fast", ""))
+
+    def test_a_turn_the_cli_opened_itself_holds_the_ask(self):
+        # 2026-09-17: inflight counts FED turns only; a background task's notification opens a turn the feeder never saw,
+        # so three sessions read as quiet while running dozens of tool calls a minute and the host's end grace killed them
+        be, s = self._armed(_cli_working=True)
+        self.assertEqual(s._asks, [], "the CLI is producing on a turn of its own: no reconnect")
+        self.assertIn("a turn the CLI opened itself", [m for m in be._logs if "waiting" in m][-1])
+        s._cli_working = False           # the Result's settle marks 'waiting' (the settle then tries the ask)
+        self.assertTrue(s._try_switch_reconnect())
+        self.assertEqual(len(s._asks), 1)
+
+    def test_the_immediate_re_check_refuses_the_clis_own_turn_and_re_raises_the_ask(self):
+        be = _backend(); _switch(be, sb.ALWAYS_FAST_STORE, "on")
+        s = _sess(be, liveModel="Opus 5", liveModelId="claude-opus-5")
+        s._wake_set = lambda: None
+        s._switch_ask_pending = "retry upgrade"; s._cli_working = True
+        s._do_request_reconnect(defer=False)
+        self.assertFalse(s._reconnect, "not armed: the CLI is at work")
+        self.assertEqual((s._switch_wanted, s._switch_ask_pending), ("retry upgrade", ""), "the ask stands again for the next quiet moment")
+        self.assertTrue(any("not reconnected" in m for m in be._logs), be._logs)
+        s._cli_working = False; s._switch_wanted = ""; s._switch_ask_pending = "retry upgrade"
+        s._do_request_reconnect(defer=False)
+        self.assertTrue(s._reconnect, "quiet: armed")
+        self.assertEqual((s._reconnect_switch_why, s._switch_ask_pending), ("retry upgrade", ""), "the armed reconnect remembers it is a switch's")
+
+    def test_the_wakers_last_look_stands_a_switch_reconnect_down_or_lengthens_the_end_grace(self):
+        import types
+        be = _backend(); _switch(be, sb.ALWAYS_FAST_STORE, "on")
+        s = _sess(be, liveModel="Opus 5", liveModelId="claude-opus-5")
+        s._host = types.SimpleNamespace(end_grace=120.0)
+        # the CLI started work between the arm and the teardown: vetoed, the ask stands, the client stays
+        s._reconnect = True; s._reconnect_switch_why = "always fast"; s._cli_working = True
+        self.assertTrue(s._switch_teardown_check())
+        self.assertEqual((s._reconnect, s._reconnect_switch_why, s._switch_wanted), (False, "", "always fast"))
+        self.assertEqual(s._host.end_grace, 120.0, "no teardown: the grace is untouched")
+        self.assertTrue(any("stands down" in m and "a turn the CLI opened itself" in m for m in be._logs), be._logs)
+        # quiet: proceeding, with the long grace so a turn that starts in the last instant is finished, not killed
+        s._reconnect = True; s._reconnect_switch_why = "retry upgrade"; s._cli_working = False; s._switch_wanted = ""
+        self.assertFalse(s._switch_teardown_check())
+        self.assertEqual(s._host.end_grace, sb.SWITCH_END_GRACE_S)
+        self.assertTrue(s._reconnect)
+        # a user's own reconnect (no switch why) is never vetoed nor re-graced
+        s._host.end_grace = 120.0; s._reconnect_switch_why = ""; s._cli_working = True
+        self.assertFalse(s._switch_teardown_check())
+        self.assertEqual((s._reconnect, s._host.end_grace), (True, 120.0))
 
 
 class TheCliSaysWhichConnectionsHaveNoFlag(unittest.TestCase):
