@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Retry upgrades after downgrades (the user 2026-09-17): a kernel-side switch (Settings, Chat, Model; STATE/retry-upgrade)
+"""Retry upgrades after downgrades (the user 2026-09-17): a kernel-side switch (Settings, Automation, Model; STATE/retry-upgrade)
 under which a session whose model fell to a lower tier without a pick asks for its pick again every RETRY_UPGRADE_S at a
 quiet moment — a reconnect (want_switch_reconnect: now if nothing runs, else at the event that ends the last of it) whose connect re-asserts the pick —
 until a parent turn is SERVED on the pick's tier again (the AssistantMessage learn, never the init's report or a context

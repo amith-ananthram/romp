@@ -6344,7 +6344,7 @@ class SdkSession:
     def fast_effective(self) -> bool:
         """Whether the NEXT connect carries the fastMode opt-in (the flag-settings key the CLI needs before it runs fast
         mode for a non-interactive client): this session's own ask (fast_opt, the badge's On), or the machine's
-        Always fast switch (the gear, Settings, Chat, Model; the user 2026-09-17) when this session's model can run
+        Always fast switch (the gear, Settings, Automation, Model; the user 2026-09-17) when this session's model can run
         fast mode — the Opus family, on the id the CLI last reported, else its pretty name, else the pick. Two things
         beat the switch: the user put THIS session on Slow (fast_off), and the CLI refused fast mode for it with a
         reason (fast_reason, the persisted liveFastReason — an org gate, extra usage off): re-arming the flag would

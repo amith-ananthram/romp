@@ -292,7 +292,7 @@ the control never silently disappears.
 
 ### Always fast, and retrying an upgrade after a downgrade
 
-Two switches under **Settings**, **Chat**, **Model**, both off by default, both
+Two switches under **Settings**, **Automation**, **Model**, both off by default, both
 kernel-side (stored on the kernel like the judges' Fast mode boxes, stamped, and
 following to every connected machine's kernel):
 

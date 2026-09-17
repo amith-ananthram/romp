@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The kernel side of the Chat pane's two Model switches (the user 2026-09-17): Always fast (STATE/always-fast) and Retry
+"""The kernel side of the Automation pane's two Model switches (the user 2026-09-17): Always fast (STATE/always-fast) and Retry
 upgrades after downgrades (STATE/retry-upgrade), bare "on"/"off" stores on the judge-knob machinery — validated, stamped,
 propagated to every linked kernel, reported RAW by /version at the top level (this gear's fill) and in the cross-machine
 settings dict (the mixed marks), members of _GT_STORES and of the /judge-settings field table — plus the "back on" card the

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Always fast (the user 2026-09-17): a kernel-side switch (Settings, Chat, Model; STATE/always-fast, "on"/"off") that runs
+"""Always fast (the user 2026-09-17): a kernel-side switch (Settings, Automation, Model; STATE/always-fast, "on"/"off") that runs
 every session in Claude Code's fast mode whenever its model can — the Opus family. The SDK backend reads the store by path
 at connect and on a model change (fast_effective), arms only the fastMode flag-settings opt-in (never the literal '/fast
 on', which on a non-Opus session makes the CLI switch model), respects a session the user put on Slow (the reg's fastOff)

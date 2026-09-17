@@ -198,19 +198,6 @@ var GEAR_HTML =
   '<span><b>Thinking summaries</b>' +
   '<span class=rs-sub>For every new Claude Code session, ask the API for reasoning summaries and show them in the chat, folded to two lines (click to expand). The summaries are output tokens the session pays for, which is why this row sits under Chat and not Display. Compact transcript still hides them. If thinking was turned off for this install, this turns adaptive thinking on as well. A running session picks the change up at its next reconnect: an effort or billing switch, the first fast-mode opt-in, or a kernel restart. Switching the model applies live and does not reconnect. Off by default; this kernel keeps its own copy.</span>' +
   '</span></label>' +
-  // MODEL (the user 2026-09-17): two switches about which model a session runs on and how — both cost decisions (fast
-  // mode bills Opus at a premium; an upgrade asked for again is a fresh CLI on the pick), which is why they sit in Chat.
-  // Kernel-side, like the judges' Fast mode boxes: stored on/off, stamped, propagated to every linked kernel; the SDK
-  // backend reads them at connect, on a model change and from its retry tick. Off by default.
-  "<div class='rs-sec'>Model</div>" +
-  "<label class='rs-row'><input type=checkbox id=rs-alwaysfast>" +
-  '<span><b>Always fast</b><span class=rs-mixed hidden></span>' +
-  "<span class=rs-sub>Every session runs in Claude Code's fast mode whenever its model allows it (Opus-only, billed at a premium): a session on Opus starts fast, and one that lands on Opus later turns fast once it is quiet (no turn, subagent or background task running, so nothing is cut); a running session picks the change up the same way. A session you set to Slow from its statusline stays slow. Off by default. Follows to every connected machine's kernel.</span>" +
-  '</span></label>' +
-  "<label class='rs-row'><input type=checkbox id=rs-retryupgrade>" +
-  '<span><b>Retry upgrades after downgrades</b><span class=rs-mixed hidden></span>' +
-  "<span class=rs-sub>When a session's model changes to a lower tier without a pick (the automatic fallback the Completed card reports), ask for the picked model again every ten minutes, once the session is quiet (no turn, subagent or background task running, so nothing is cut), until a turn is served on it; a card says when it is back. A session that already fell back is taken up when you turn this on. Off by default. Follows to every connected machine's kernel.</span>" +
-  '</span></label>' +
   // CHAT HISTORY (2026-09-15): every chat loaded from its first message for every page, instead of from the saved document's
   // cut with the history above it loading as the user scrolls; the lever for a page that cannot fill the region above the cut.
   // Per-install, like Thinking summaries: the floor is this kernel's build decision; the kernel reads it live at every push.
@@ -283,6 +270,22 @@ var GEAR_HTML =
   '<span><b>Suggest /compact</b><span class=rs-mixed hidden></span>' +
   '<span class=rs-line>When a session has sat idle for an hour with a lot of context built up, suggest one /compact at a natural point, once per fill-up, on every connected machine.</span>' +
   '<span class=rs-note id=rs-suggestcompact-tt hidden>Task tracking off changes nothing here: the suggestion reads the context size, not the judges.</span>' +
+  '</span></label>' +
+  // MODEL (the user 2026-09-17; under Automation by the maintainer's decision, 2026-09-17): two switches about which
+  // model a session runs on and how. Both are kernel policies applied to every session on the kernel's own initiative,
+  // like the Nudges above, which is why they sit in Automation and not in Chat. Kernel-side, like the judges' Fast mode
+  // boxes: stored on/off, stamped, propagated to every linked kernel; the SDK backend reads them at connect, on a model
+  // change and from its retry tick. Off by default. The rows take the tab's own shape (T408): a permanent one-sentence
+  // line (rs-line) under the label in place of a hover popover, since a popup under the pane's last rows runs past the
+  // card and scrolls it; the fuller account of each switch is docs/reference.md's.
+  "<div class='rs-sec'>Model</div>" +
+  "<label class='rs-row'><input type=checkbox id=rs-alwaysfast>" +
+  '<span><b>Always fast</b><span class=rs-mixed hidden></span>' +
+  "<span class=rs-line>Every Opus session runs Claude Code's fast mode, billed at a premium; a session you set to Slow stays slow.</span>" +
+  '</span></label>' +
+  "<label class='rs-row'><input type=checkbox id=rs-retryupgrade>" +
+  '<span><b>Retry upgrades after downgrades</b><span class=rs-mixed hidden></span>' +
+  '<span class=rs-line>A session whose model fell back without a pick asks for its picked model again every ten minutes, once quiet, until it is back.</span>' +
   '</span></label>' +
   '</div>' +
   '<div class=rs-pane data-pane=tasks hidden>' +
@@ -398,7 +401,7 @@ function initGear(post, opts) {
     pn = { timeline: document.getElementById('rs-pane-timeline'), fleet: document.getElementById('rs-pane-fleet'), feed: document.getElementById('rs-pane-feed') },
     ths = document.getElementById('rs-thinksum'),
     wcf = document.getElementById('rs-wholechat'),
-    afb = document.getElementById('rs-alwaysfast'), rub = document.getElementById('rs-retryupgrade'),   // the Chat pane's model switches (2026-09-17)
+    afb = document.getElementById('rs-alwaysfast'), rub = document.getElementById('rs-retryupgrade'),   // the Automation pane's model switches (2026-09-17)
     tk = document.getElementById('rs-tasktrack'),
     ans = document.getElementById('rs-autonudge-split'), asub = document.getElementById('rs-autonudge-sub');
   // No default for tabWidgets (round one, HIGH): an injected empty object won over a pre-widgets store's tabCtx, so the
@@ -1398,7 +1401,7 @@ function initGear(post, opts) {
   if (jf) jf.addEventListener('change', function () { post({ type: 'setJudgeFast', enabled: jf.checked, gt: gclock.stamp('judge-fast') }); judgeFastGate(); });   // the hint follows the box (a refusal reads only on a checked box)
   if (df) df.addEventListener('change', function () { post({ type: 'setDistillFast', enabled: df.checked, gt: gclock.stamp('distill-fast') }); judgeFastGate(); });   // the hint follows the box (a refusal reads only on a checked box)
   if (xf) xf.addEventListener('change', function () { post({ type: 'setIndexFast', enabled: xf.checked, gt: gclock.stamp('index-fast') }); judgeFastGate(); });   // the hint follows the box (a refusal reads only on a checked box)
-  // the Chat pane's model switches (the user 2026-09-17): kernel settings like the judge boxes (stamped, propagated); the
+  // the Automation pane's model switches (the user 2026-09-17): kernel settings like the judge boxes (stamped, propagated); the
   // SDK backend reads Always fast at connect and on a model change, Retry upgrades from its tick — no gate: the kernel
   // decides per session whether the model can run fast, and the switch is a standing wish, not a per-model verdict
   if (afb) afb.addEventListener('change', function () { post({ type: 'setAlwaysFast', enabled: afb.checked, gt: gclock.stamp('always-fast') }); });

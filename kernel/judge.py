@@ -16249,7 +16249,7 @@ def mint_restored_card(sid, from_model, to_model, ev_t=None):
         gid = "%s:g%d" % (sid, n)
         t = int(ev_t or time.time())
         why = ("The session is back on %s: after the automatic change to %s, romp asked for the picked model again "
-               "(Settings, Chat, Retry upgrades after downgrades) and a turn was served on it."
+               "(Settings, Automation, Retry upgrades after downgrades) and a turn was served on it."
                % (to_model, from_model or "the fallback"))
         nd = GuardedNode({"id": gid, "text": text, "swap": {"from": from_model or "?", "to": to_model or "?"},
                           "parentId": None, "nodeComplete": False, "blocked": False, "cleared": False,
